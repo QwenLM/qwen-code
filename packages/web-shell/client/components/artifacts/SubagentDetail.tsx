@@ -3,12 +3,12 @@ import {
   DaemonSessionProvider,
   useConnection,
   useWorkspace,
-  useWorkspaceActions,
-  type DaemonWorkspaceActions,
-} from '@qwen-code/webui/daemon-react-sdk';
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
-import { useMessages } from '../../hooks/useMessages';
+import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../../constants/sessions';
+import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFrameTranscriptBlocks';
+import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
 import { useI18n } from '../../i18n';
 import { MessageList } from '../MessageList';
@@ -95,17 +95,6 @@ export function findSubagentRootTool(
   return undefined;
 }
 
-export function getSubagentPrompt(
-  messages: readonly Message[],
-  rootTool: ACPToolCall,
-): string {
-  const firstUserMessage = messages.find((message) => message.role === 'user');
-  return (
-    (firstUserMessage?.role === 'user' ? firstUserMessage.content : '') ||
-    (typeof rootTool.args?.prompt === 'string' ? rootTool.args.prompt : '')
-  );
-}
-
 function statusLabel(status: string, t: ReturnType<typeof useI18n>['t']) {
   switch (status) {
     case 'completed':
@@ -130,6 +119,7 @@ function SubagentDetailContent({
   onStop,
   onRightPanelOpen,
   onArtifactsChange,
+  onError,
 }: {
   rootTool: ACPToolCall;
   resolution: SubagentResolution;
@@ -138,13 +128,13 @@ function SubagentDetailContent({
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
+  onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
   const connection = useConnection();
-  const workspaceActions = useWorkspaceActions();
-  const messages = useMessages(t);
+  const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
+  const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const { artifacts } = useSessionArtifacts();
   const artifactsByTurn = useMemo(
     () =>
@@ -161,7 +151,6 @@ function SubagentDetailContent({
     [artifactsByTurn, connection.workspaceCwd, messages],
   );
   const description = getAgentDescription(rootTool);
-  const prompt = getSubagentPrompt(messages, rootTool);
   const metrics = useMemo(
     () => getSubagentMetrics(rootTool, resolution),
     [resolution, rootTool],
@@ -174,23 +163,15 @@ function SubagentDetailContent({
   useEffect(() => {
     const sessionId = connection.sessionId;
     if (!sessionId) return;
-    onArtifactsChange?.(sessionId, artifacts, workspaceActions);
+    onArtifactsChange?.(sessionId, artifacts);
     return () => {
-      onArtifactsChange?.(sessionId, [], workspaceActions);
+      onArtifactsChange?.(sessionId, []);
     };
-  }, [artifacts, connection.sessionId, onArtifactsChange, workspaceActions]);
+  }, [artifacts, connection.sessionId, onArtifactsChange]);
 
   const handleRightPanelOpen = (request: TurnOutputOpenRequest) => {
-    if (request.kind === 'subagent') {
-      onRightPanelOpen?.({
-        ...request,
-        sourceSessionId: connection.sessionId,
-      });
-      return;
-    }
     onRightPanelOpen?.({
       ...request,
-      workspaceActions,
       sourceSessionId: connection.sessionId,
     });
   };
@@ -244,22 +225,23 @@ function SubagentDetailContent({
           </div>
         </div>
         {stopError && <div className={styles.stopError}>{stopError}</div>}
-        {prompt && <pre className={styles.prompt}>{prompt}</pre>}
       </div>
       <div className={styles.transcript}>
         <MessageList
           messages={messages}
           pendingApproval={null}
           loadingTranscript={connection.loadingTranscript}
+          catchingUp={connection.catchingUp}
           isResponding={isRunning}
+          activeTurnStartedAt={isRunning ? rootTool.startTime : undefined}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline
-          hideFirstUserMessage
           firstTurnMetrics={metrics}
           includeSubagentToolUsageInMetrics={false}
           turnFileChanges={fileChangesByTurn}
           turnArtifacts={artifactsByTurn}
           onTurnOutputOpen={handleRightPanelOpen}
+          onError={onError}
         />
       </div>
     </div>
@@ -273,6 +255,7 @@ export function SubagentDetail({
   workspaceCwd,
   onRightPanelOpen,
   onArtifactsChange,
+  onError,
 }: {
   sessionId: string;
   rootToolCallId: string;
@@ -282,13 +265,19 @@ export function SubagentDetail({
   onArtifactsChange?: (
     sessionId: string,
     artifacts: readonly DaemonSessionArtifact[],
-    workspaceActions: DaemonWorkspaceActions,
   ) => void;
+  onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
   const workspace = useWorkspace();
   const parentConnection = useConnection();
-  const parentMessages = useMessages(t);
+  const { blocks: parentBlocks, blockChangeSummary: parentBlockChangeSummary } =
+    useAnimationFrameTranscriptSnapshot();
+  const parentMessages = useMessagesFromBlocks(
+    t,
+    parentBlocks,
+    parentBlockChangeSummary,
+  );
   const rootTool =
     (parentConnection.sessionId === sessionId
       ? findSubagentRootTool(parentMessages, rootToolCallId)
@@ -368,6 +357,7 @@ export function SubagentDetail({
       workspaceCwd={workspaceCwd}
       clientId={instance.clientId}
       maxQueued={256}
+      maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
       subagentTranscriptMode="full"
       suppressOwnUserEcho
     >
@@ -376,6 +366,7 @@ export function SubagentDetail({
         resolution={resolution}
         onRightPanelOpen={onRightPanelOpen}
         onArtifactsChange={onArtifactsChange}
+        onError={onError}
         onStop={() =>
           workspace.client.cancelSubagentSession(sessionId, rootToolCallId)
         }

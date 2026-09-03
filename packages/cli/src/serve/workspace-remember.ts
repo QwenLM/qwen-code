@@ -13,6 +13,7 @@ import type {
   BridgeWorkspaceMemoryDreamResult,
   BridgeWorkspaceMemoryForgetResult,
   BridgeWorkspaceMemoryRememberContextMode,
+  BridgeWorkspaceMemoryRememberTargetScope,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
 import { WorkspaceDrainingError } from './acp-session-bridge.js';
@@ -21,12 +22,12 @@ import {
   shouldSuppressRememberErrorDetails,
   workspaceMemoryFailureCode,
   workspaceMemoryFailureDiagnostics,
-} from './workspace-remember-errors.js';
-import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
+} from '../runtime/workspace-remember-errors.js';
+import { MAX_REMEMBER_CONTENT_BYTES } from '../runtime/workspace-memory-remember-constants.js';
 import {
   formatWorkspaceMemoryDreamSummary,
   formatWorkspaceMemoryForgetSummary,
-} from './workspace-memory-summaries.js';
+} from '../runtime/workspace-memory-summaries.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_REMEMBER');
 
@@ -56,11 +57,13 @@ interface WorkspaceMemoryTaskBaseSnapshot {
 export interface WorkspaceMemoryRememberTaskSnapshot
   extends WorkspaceMemoryTaskBaseSnapshot {
   contextMode: BridgeWorkspaceMemoryRememberContextMode;
+  scope?: BridgeWorkspaceMemoryRememberTargetScope;
   result?: BridgeWorkspaceMemoryRememberResult;
 }
 
 export interface WorkspaceMemoryForgetTaskSnapshot
   extends WorkspaceMemoryTaskBaseSnapshot {
+  scope?: BridgeWorkspaceMemoryRememberTargetScope;
   result?: BridgeWorkspaceMemoryForgetResult;
 }
 
@@ -156,6 +159,7 @@ function cloneTask(
     return {
       ...base,
       contextMode: task.contextMode,
+      ...(task.scope ? { scope: task.scope } : {}),
       result: task.result
         ? {
             ...task.result,
@@ -168,6 +172,7 @@ function cloneTask(
   if (task.kind === 'forget') {
     return {
       ...base,
+      ...(task.scope ? { scope: task.scope } : {}),
       result: task.result
         ? {
             ...task.result,
@@ -200,6 +205,12 @@ export function publicErrorMessage(
   }
   if (code === 'remember_path_escape') {
     return 'Remember agent touched a path outside managed memory.';
+  }
+  if (code === 'remember_scope_mismatch') {
+    return 'Remember agent wrote outside the requested memory scope.';
+  }
+  if (code === 'remember_no_update') {
+    return 'Remember agent did not update any memory.';
   }
   if (code === 'remember_queue_full') {
     return kind === 'remember'
@@ -416,6 +427,7 @@ export class WorkspaceRememberTaskLane {
   enqueue(params: {
     content: string;
     contextMode: BridgeWorkspaceMemoryRememberContextMode;
+    scope?: BridgeWorkspaceMemoryRememberTargetScope;
     originatorClientId?: string;
     assertGenerationOpen?: () => void;
   }): WorkspaceMemoryRememberTaskSnapshot {
@@ -425,6 +437,7 @@ export class WorkspaceRememberTaskLane {
       taskId: createMemoryTaskId('remember'),
       status: 'queued',
       contextMode: params.contextMode,
+      ...(params.scope ? { scope: params.scope } : {}),
       createdAt: nowIso(),
       updatedAt: nowIso(),
       ...(params.originatorClientId
@@ -439,15 +452,19 @@ export class WorkspaceRememberTaskLane {
         const result = await this.bridge.runWorkspaceMemoryRemember({
           content: params.content,
           contextMode: params.contextMode,
+          ...(params.scope ? { scope: params.scope } : {}),
         });
         params.assertGenerationOpen?.();
+        if (result.filesTouched.length === 0) {
+          throw Object.assign(
+            new Error('Remember agent did not update any memory'),
+            { code: 'remember_no_update' },
+          );
+        }
         if (!this.disposed) {
           task.status = 'completed';
           task.result = {
-            summary:
-              result.filesTouched.length > 0
-                ? 'Memory update completed.'
-                : 'No memory files updated.',
+            summary: 'Memory update completed.',
             filesTouched: result.filesTouched,
             touchedScopes: result.touchedScopes,
           };
@@ -495,6 +512,7 @@ export class WorkspaceRememberTaskLane {
 
   enqueueForget(params: {
     query: string;
+    scope?: BridgeWorkspaceMemoryRememberTargetScope;
     originatorClientId?: string;
     assertGenerationOpen?: () => void;
   }): WorkspaceMemoryForgetTaskSnapshot {
@@ -503,6 +521,7 @@ export class WorkspaceRememberTaskLane {
       kind: 'forget',
       taskId: createMemoryTaskId('forget'),
       status: 'queued',
+      ...(params.scope ? { scope: params.scope } : {}),
       createdAt: nowIso(),
       updatedAt: nowIso(),
       ...(params.originatorClientId
@@ -517,6 +536,7 @@ export class WorkspaceRememberTaskLane {
         params.assertGenerationOpen?.();
         const result = await this.bridge.runWorkspaceMemoryForget({
           query: params.query,
+          ...(params.scope ? { scope: params.scope } : {}),
         });
         params.assertGenerationOpen?.();
         if (!this.disposed) {
@@ -773,6 +793,19 @@ function mountWorkspaceMemoryRememberRoutesAt(
         return;
       }
 
+      const scopeRaw = body['scope'];
+      if (
+        scopeRaw !== undefined &&
+        scopeRaw !== 'project' &&
+        scopeRaw !== 'user'
+      ) {
+        res.status(400).json({
+          error: '`scope` must be "project", "user", or omitted',
+          code: 'invalid_scope',
+        });
+        return;
+      }
+
       const originatorClientId = validateOriginatorClientId(deps, req, res);
       if (originatorClientId === null) return;
 
@@ -793,6 +826,7 @@ function mountWorkspaceMemoryRememberRoutesAt(
         task = deps.lane.enqueue({
           content: trimmedContent,
           contextMode: contextModeRaw,
+          ...(scopeRaw ? { scope: scopeRaw } : {}),
           ...(originatorClientId ? { originatorClientId } : {}),
           ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
         });
@@ -868,6 +902,18 @@ function mountWorkspaceMemoryRememberRoutesAt(
       });
       return;
     }
+    const scopeRaw = body['scope'];
+    if (
+      scopeRaw !== undefined &&
+      scopeRaw !== 'project' &&
+      scopeRaw !== 'user'
+    ) {
+      res.status(400).json({
+        error: '`scope` must be "project", "user", or omitted',
+        code: 'invalid_scope',
+      });
+      return;
+    }
 
     const originatorClientId = validateOriginatorClientId(deps, req, res);
     if (originatorClientId === null) return;
@@ -885,6 +931,7 @@ function mountWorkspaceMemoryRememberRoutesAt(
     try {
       const task = deps.lane.enqueueForget({
         query: trimmedQuery,
+        ...(scopeRaw ? { scope: scopeRaw } : {}),
         ...(originatorClientId ? { originatorClientId } : {}),
         ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
       });

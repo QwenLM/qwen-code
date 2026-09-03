@@ -31,6 +31,7 @@ export interface IControlContext {
   readonly streamJson: StreamJsonOutputAdapter;
   readonly sessionId: string;
   readonly abortSignal: AbortSignal;
+  readonly getActiveTurnAbortSignal?: () => AbortSignal | undefined;
   readonly debugMode: boolean;
   readonly settings: LoadedSettings;
 
@@ -57,6 +58,7 @@ export class ControlContext implements IControlContext {
   readonly streamJson: StreamJsonOutputAdapter;
   readonly sessionId: string;
   readonly abortSignal: AbortSignal;
+  readonly getActiveTurnAbortSignal?: () => AbortSignal | undefined;
   readonly debugMode: boolean;
   readonly settings: LoadedSettings;
 
@@ -74,6 +76,7 @@ export class ControlContext implements IControlContext {
     streamJson: StreamJsonOutputAdapter;
     sessionId: string;
     abortSignal: AbortSignal;
+    getActiveTurnAbortSignal?: () => AbortSignal | undefined;
     settings: LoadedSettings;
     permissionMode?: PermissionMode;
     onInterrupt?: () => void;
@@ -83,6 +86,7 @@ export class ControlContext implements IControlContext {
     this.streamJson = options.streamJson;
     this.sessionId = options.sessionId;
     this.abortSignal = options.abortSignal;
+    this.getActiveTurnAbortSignal = options.getActiveTurnAbortSignal;
     this.debugMode = options.config.getDebugMode();
     this.settings = options.settings;
     this.permissionMode = options.permissionMode || 'default';

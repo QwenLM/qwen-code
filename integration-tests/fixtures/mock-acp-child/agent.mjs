@@ -24,6 +24,12 @@ import {
   PROTOCOL_VERSION,
   RequestError,
 } from '@agentclientprotocol/sdk';
+import {
+  EXTERNAL_TOOL_GUARD_READY_META_KEY,
+  EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+  PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
+} from '@qwen-code/acp-bridge/externalToolGuard';
 import { Writable, Readable } from 'node:stream';
 
 // Protect the stdout NDJSON pipe — any console method that writes to
@@ -40,14 +46,43 @@ const delayMs = parseInt(process.env.MOCK_ACP_PROMPT_DELAY_MS || '100', 10);
 const emitChunks = parseInt(process.env.MOCK_ACP_EMIT_CHUNKS || '3', 10);
 let sessionCounter = 0;
 
+// Mirror the real child (acpAgent.ts): `qwen serve` requires the guard ack
+// in the initialize response, and the markers are consumed + deleted before
+// anything else can inherit them.
+const externalToolGuardMarker = process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
+const externalToolGuardRequired =
+  externalToolGuardMarker === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE;
+
+// SERVE_CONTROL_EXT_METHODS.sessionClose from @qwen-code/acp-bridge/status,
+// hardcoded because that module runtime-imports @qwen-code/qwen-code-core
+// and would pull core's whole barrel into this lightweight fixture. Drift
+// fails loudly: the daemon's session close errors when this stops matching.
+const SESSION_CLOSE_EXT_METHOD = 'qwen/control/session/close';
+
 new AgentSideConnection(
   (connection) => ({
     async initialize() {
+      // Build ONE meta record and attach `_meta` once, exactly like the
+      // real child (acpAgent.ts), so a future conditional meta source
+      // merges instead of clobbering the guard ack via duplicate keys.
+      const responseMeta = {
+        ...(externalToolGuardRequired
+          ? {
+              [EXTERNAL_TOOL_GUARD_READY_META_KEY]:
+                EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+            }
+          : {}),
+      };
       return {
         protocolVersion: PROTOCOL_VERSION,
         agentInfo: { name: 'mock-acp', version: '0.0.1' },
         authMethods: [],
         agentCapabilities: {},
+        ...(Object.keys(responseMeta).length > 0
+          ? { _meta: responseMeta }
+          : {}),
       };
     },
 
@@ -90,6 +125,17 @@ new AgentSideConnection(
     },
 
     async cancel() {},
+
+    async extMethod(method, params) {
+      if (method === SESSION_CLOSE_EXT_METHOD) {
+        // The daemon's DELETE /session/:id forwards this ext method down the
+        // ACP channel; ack with the production success shape so teardown
+        // completes. The mock keeps no per-session state to drain.
+        const { sessionId } = params;
+        return { sessionId, closed: true };
+      }
+      throw RequestError.methodNotFound(method);
+    },
   }),
   ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin)),
 );

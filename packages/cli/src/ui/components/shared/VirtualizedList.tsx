@@ -39,6 +39,7 @@ export type VirtualizedListProps<T> = {
   width?: number | string;
   containerHeight?: number;
   showScrollbar?: boolean;
+  measureAtFullHeight?: boolean;
 };
 
 export type VirtualizedListRef<T> = {
@@ -91,6 +92,19 @@ function findLastLE(arr: number[], target: number): number {
   return upperBound(arr, target) - 1;
 }
 
+// First index of the run of coincident offsets containing `index`.
+// Cached zero heights make adjacent offsets equal, and findLastLE resolves
+// such a run to its LAST item; the scroll anchor and the render window
+// start must both resolve to the run's FIRST item, or they desynchronize
+// when the cached zeros heal (blank gap / scroll jump on re-expand).
+function firstIndexOfOffsetRun(offsets: number[], index: number): number {
+  let i = index;
+  while (i > 0 && offsets[i - 1] === offsets[i]) {
+    i--;
+  }
+  return i;
+}
+
 const VirtualizedListItem = memo(
   ({
     content,
@@ -117,10 +131,18 @@ const VirtualizedListItem = memo(
     onHeightChangeRef.current = onHeightChange;
 
     useLayoutEffect(() => {
-      if (hasMeasured && height > 0) {
-        onHeightChangeRef.current(itemKey, height);
+      // Report zero heights too: a collapsed thought continuation renders
+      // nothing (height 0), and skipping the report would leave the cached
+      // expanded height in `heights`, inflating totalHeight with a blank gap.
+      // Only mounted (in-window) items report, so collapse-all leaves
+      // off-screen items' cached heights stale until they scroll back into
+      // the window (same as the grow direction).
+      const measuredHeight =
+        itemRef.current?.yogaNode?.getComputedHeight() ?? height;
+      if (hasMeasured) {
+        onHeightChangeRef.current(itemKey, measuredHeight);
       }
-    }, [itemKey, height, hasMeasured]);
+    }, [itemKey, height, hasMeasured, content]);
 
     return (
       <Box width="100%" flexDirection="column" flexShrink={0} ref={itemRef}>
@@ -211,6 +233,27 @@ function VirtualizedList<T>(
   const containerWidth = measuredContainerWidth;
 
   const [heights, setHeights] = useState<Record<string, number>>({});
+  const measureAtFullHeight = props.measureAtFullHeight === true;
+  const [fullHeightMeasurementPending, setFullHeightMeasurementPending] =
+    useState(measureAtFullHeight);
+  const [previousMeasurementInputs, setPreviousMeasurementInputs] = useState({
+    enabled: measureAtFullHeight,
+    data,
+    renderItem,
+  });
+  if (
+    previousMeasurementInputs.enabled !== measureAtFullHeight ||
+    (measureAtFullHeight &&
+      (previousMeasurementInputs.data !== data ||
+        previousMeasurementInputs.renderItem !== renderItem))
+  ) {
+    setPreviousMeasurementInputs({
+      enabled: measureAtFullHeight,
+      data,
+      renderItem,
+    });
+    setFullHeightMeasurementPending(measureAtFullHeight);
+  }
   const isInitialScrollSet = useRef(false);
 
   const onHeightChange = useCallback((key: string, height: number) => {
@@ -218,6 +261,7 @@ function VirtualizedList<T>(
       if (prev[key] === height) return prev;
       return { ...prev, [key]: height };
     });
+    setFullHeightMeasurementPending(false);
   }, []);
 
   // Prune stale height entries when the data set shrinks (`/clear`, history
@@ -279,10 +323,11 @@ function VirtualizedList<T>(
       scrollTop: number,
       offsets: number[],
     ): { index: number; offset: number } => {
-      const index = findLastLE(offsets, scrollTop);
-      if (index === -1) {
+      const found = findLastLE(offsets, scrollTop);
+      if (found === -1) {
         return { index: 0, offset: 0 };
       }
+      const index = firstIndexOfOffsetRun(offsets, found);
       return { index, offset: scrollTop - offsets[index] };
     },
     [],
@@ -291,7 +336,11 @@ function VirtualizedList<T>(
   const [prevTargetScrollIndex, setPrevTargetScrollIndex] = useState(
     props.targetScrollIndex,
   );
-  const prevOffsetsLength = useRef(offsets.length);
+  // Seeded unusable so the first render with usable offsets re-walks the
+  // mount-time targetScrollIndex anchor like every other anchor path;
+  // seeding with offsets.length would leave an initial anchor inside a
+  // coincident-offset run uncorrected.
+  const prevOffsetsLength = useRef(1);
 
   // Render-phase state update — React-endorsed pattern for adjusting state
   // based on previous-render information (see React docs: "Adjusting state
@@ -311,8 +360,16 @@ function VirtualizedList<T>(
       if (isStickingToBottom) {
         setIsStickingToBottom(false);
       }
-      if (scrollAnchor.index !== target || scrollAnchor.offset !== 0) {
-        setScrollAnchor({ index: target, offset: 0 });
+      // Clamp before the walk-back: for an out-of-range index both sides
+      // of the comparison read undefined (undefined === undefined), so the
+      // walk would decrement through the whole hole — a render-phase
+      // freeze when target is the SCROLL_TO_ITEM_END sentinel.
+      const anchoredIndex = firstIndexOfOffsetRun(
+        offsets,
+        Math.max(0, Math.min(data.length - 1, target)),
+      );
+      if (scrollAnchor.index !== anchoredIndex || scrollAnchor.offset !== 0) {
+        setScrollAnchor({ index: anchoredIndex, offset: 0 });
       }
     }
   }
@@ -479,12 +536,29 @@ function VirtualizedList<T>(
     props.targetScrollIndex,
   ]);
 
-  const startIndex = Math.max(0, findLastLE(offsets, actualScrollTop) - 1);
+  // Clamp for marginTop: can't be negative or exceed total - container
+  const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
+  const clampedScrollTop = Math.min(
+    Math.max(0, isStickingToBottom ? maxScroll : actualScrollTop),
+    maxScroll,
+  );
+
+  // The render window must cover what the viewport actually paints, so
+  // it is computed from clampedScrollTop, not the anchor-based
+  // actualScrollTop. While bottom-stuck the viewport pins to maxScroll,
+  // but the anchor can sit far above it (e.g. {0, 0} after a collapse
+  // cascade shrank the content and re-engaged sticking); windowing
+  // around the anchor then leaves the visible bottom rows unmounted and
+  // paints a fully blank frame that only a scroll heals.
+  const startIndex = firstIndexOfOffsetRun(
+    offsets,
+    Math.max(0, findLastLE(offsets, clampedScrollTop) - 1),
+  );
   const viewHeightForEndIndex =
     scrollableContainerHeight > 0 ? scrollableContainerHeight : 50;
   const endIndexOffsetRaw = upperBound(
     offsets,
-    actualScrollTop + viewHeightForEndIndex,
+    clampedScrollTop + viewHeightForEndIndex,
   );
   const endIndex =
     endIndexOffsetRaw >= offsets.length
@@ -581,13 +655,6 @@ function VirtualizedList<T>(
   ]);
 
   const { getScrollTop, setPendingScrollTop } = useBatchedScroll(scrollTop);
-
-  // Clamp for marginTop: can't be negative or exceed total - container
-  const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
-  const clampedScrollTop = Math.min(
-    Math.max(0, isStickingToBottom ? maxScroll : actualScrollTop),
-    maxScroll,
-  );
 
   const getScrollbarGeometry = useCallback(() => {
     const shouldShowScrollbar = (props.showScrollbar ?? true) && maxScroll > 0;
@@ -877,13 +944,18 @@ function VirtualizedList<T>(
   // to that height unconditionally left a tall empty gap below short content
   // and pushed the composer far down the screen — the legacy <Static> path
   // instead grows with its content. Collapse to `totalHeight` whenever the
-  // content fits so the composer sits right beneath the conversation; only
-  // when the content overflows do we clamp to `containerHeight` and let the
-  // viewport scroll. `scrollableContainerHeight` (the scroll math) still uses
-  // the full `containerHeight`, so scrolling is unaffected.
+  // content fits so the composer sits right beneath the conversation. A
+  // caller can request one full-height measurement pass while content changes
+  // shape under a stable item key; otherwise a stale cached total can clip
+  // the new content before it is measured. The root collapses again after the
+  // measurement so short content does not leave a gap above the composer.
+  // `scrollableContainerHeight` (the scroll math) still uses the full
+  // `containerHeight`, so scrolling is unaffected.
   const rootHeight =
     props.containerHeight !== undefined
-      ? Math.min(props.containerHeight, totalHeight)
+      ? fullHeightMeasurementPending
+        ? props.containerHeight
+        : Math.min(props.containerHeight, totalHeight)
       : '100%';
 
   return (

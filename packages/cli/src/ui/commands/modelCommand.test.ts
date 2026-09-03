@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { modelCommand } from './modelCommand.js';
+import { modelCommand, isPickerOnlyModelInvocation } from './modelCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { SettingScope } from '../../config/settings.js';
@@ -46,30 +46,111 @@ describe('modelCommand', () => {
   it('should have the correct name and description', () => {
     expect(modelCommand.name).toBe('model');
     expect(modelCommand.description).toBe(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   });
 
-  it('should complete image models across providers', async () => {
+  it('should complete dual-role models in main and image modes', async () => {
     mockContext.services.config = {
       getAvailableModels: vi.fn().mockReturnValue([
         {
-          id: 'current-chat-model',
-          authType: AuthType.QWEN_OAUTH,
+          id: 'qwen-dual-role',
+          authType: AuthType.USE_OPENAI,
+          supportsImageGeneration: true,
         },
       ]),
       getAllConfiguredModels: vi.fn().mockReturnValue([
         {
-          id: 'qwen-image-2.0',
+          id: 'qwen-dual-role',
           authType: AuthType.USE_OPENAI,
+          supportsImageGeneration: true,
+        },
+        {
+          id: 'qwen-image-2.0',
+          authType: AuthType.USE_ANTHROPIC,
           imageOnly: true,
+        },
+        {
+          id: 'qwen-vision-only',
+          authType: AuthType.USE_OPENAI,
+          visionOnly: true,
+          supportsImageGeneration: true,
         },
       ]),
     } as unknown as Config;
 
-    const result = await modelCommand.completion!(mockContext, '--image q');
+    const mainResult = await modelCommand.completion!(mockContext, 'q');
+    const imageResult = await modelCommand.completion!(
+      mockContext,
+      '--image q',
+    );
 
-    expect(result).toEqual(['qwen-image-2.0']);
+    expect(mainResult).toEqual(['qwen-dual-role']);
+    expect(imageResult).toEqual([
+      'qwen-dual-role',
+      'qwen-image-2.0',
+      'qwen-vision-only',
+    ]);
+  });
+
+  it.each(['fast', 'voice', 'vision', 'compaction'] as const)(
+    'should keep dual-role models eligible for --%s completion',
+    async (mode) => {
+      mockContext.services.config = {
+        getAvailableModels: vi.fn().mockReturnValue([
+          {
+            id: 'qwen-dual-role',
+            authType: AuthType.USE_OPENAI,
+            supportsImageGeneration: true,
+          },
+        ]),
+      } as unknown as Config;
+
+      const result = await modelCommand.completion!(
+        mockContext,
+        `--${mode} qwen`,
+      );
+
+      expect(result).toEqual(['qwen-dual-role']);
+    },
+  );
+
+  it('should complete compaction-eligible models for --compaction flag', async () => {
+    mockContext.services.config = {
+      getAvailableModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-max',
+          authType: AuthType.USE_OPENAI,
+        },
+        {
+          id: 'qw-voice-model',
+          authType: AuthType.USE_OPENAI,
+          voiceOnly: true,
+        },
+        {
+          id: 'qw-image-model',
+          authType: AuthType.USE_OPENAI,
+          imageOnly: true,
+        },
+        {
+          id: 'qw-vision-model',
+          authType: AuthType.USE_OPENAI,
+          visionOnly: true,
+        },
+        {
+          id: 'qw-fast-model',
+          authType: AuthType.USE_OPENAI,
+          fastOnly: true,
+        },
+      ]),
+    } as unknown as Config;
+
+    const result = await modelCommand.completion!(
+      mockContext,
+      '--compaction qw',
+    );
+
+    expect(result).toEqual(['qwen-max']);
   });
 
   it('should return error when config is not available', async () => {
@@ -174,9 +255,10 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should switch the main model directly in interactive mode when args are provided', async () => {
+  it('should switch a dual-role model directly in interactive mode', async () => {
     const setValue = vi.fn();
     const switchModel = vi.fn().mockResolvedValue(undefined);
+    const recordSessionModel = vi.fn().mockResolvedValue(true);
     mockContext = createMockCommandContext({
       invocation: { raw: '/model qwen-max', name: 'model', args: 'qwen-max' },
       services: {
@@ -185,10 +267,17 @@ describe('modelCommand', () => {
             model: 'qwen-plus',
             authType: AuthType.QWEN_OAUTH,
           }),
-          getAvailableModelsForAuthType: vi
-            .fn()
-            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-max',
+              label: 'Qwen Max',
+              supportsImageGeneration: true,
+            },
+          ]),
           switchModel,
+          getChatRecordingService: vi.fn().mockReturnValue({
+            recordSessionModel,
+          }),
         },
         settings: createMockSettings(setValue),
       },
@@ -219,6 +308,130 @@ describe('modelCommand', () => {
       messageType: 'info',
       content: 'Model: qwen-max',
     });
+    expect(recordSessionModel).not.toHaveBeenCalled();
+  });
+
+  it('records the session model in ACP mode after switching', async () => {
+    const setValue = vi.fn();
+    let currentModel = 'old-model';
+    const switchModel = vi.fn().mockImplementation(async () => {
+      currentModel = 'qwen-max';
+    });
+    const recordSessionModel = vi.fn().mockResolvedValue(true);
+    mockContext = createMockCommandContext({
+      executionMode: 'acp',
+      invocation: { raw: '/model qwen-max', name: 'model', args: 'qwen-max' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-max',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+          getModel: vi.fn(() => currentModel),
+          getAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
+          getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+          getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+          getChatRecordingService: vi.fn().mockReturnValue({
+            recordSessionModel,
+          }),
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    await modelCommand.action!(mockContext, 'qwen-max');
+
+    expect(switchModel.mock.invocationCallOrder[0]).toBeLessThan(
+      recordSessionModel.mock.invocationCallOrder[0],
+    );
+    expect(recordSessionModel).toHaveBeenCalledWith({
+      modelId: 'qwen-max',
+      authType: AuthType.QWEN_OAUTH,
+    });
+  });
+
+  it('switches the standalone session model without persisting defaults', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      executionMode: 'acp',
+      executionPolicy: {
+        allowSessionReset: false,
+        allowWorkspaceSettingsWrite: false,
+        persistModelSelection: false,
+        blockedBuiltinCommandNames: [],
+      },
+      invocation: { raw: '/model qwen-max', name: 'model', args: 'qwen-max' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+          getModel: vi.fn().mockReturnValue('qwen-max'),
+          getAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
+          getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+          getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+          getChatRecordingService: vi.fn().mockReturnValue({
+            recordSessionModel: vi.fn().mockResolvedValue(true),
+          }),
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    await modelCommand.action!(mockContext, 'qwen-max');
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_OAUTH,
+      'qwen-max',
+      undefined,
+    );
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('rejects standalone model scope and auxiliary selectors before mutation', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn();
+    const setFastModel = vi.fn();
+    mockContext = createMockCommandContext({
+      executionMode: 'acp',
+      executionPolicy: {
+        allowSessionReset: false,
+        allowWorkspaceSettingsWrite: false,
+        persistModelSelection: false,
+        blockedBuiltinCommandNames: [],
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+          setFastModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    await expect(
+      modelCommand.action!(mockContext, '--project qwen-max'),
+    ).resolves.toMatchObject({ type: 'message', messageType: 'error' });
+    await expect(
+      modelCommand.action!(mockContext, '--fast qwen-flash'),
+    ).resolves.toMatchObject({ type: 'message', messageType: 'error' });
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setFastModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
   });
 
   it('runs a trailing prompt on the given model inline without switching or persisting', async () => {
@@ -1370,34 +1583,87 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should set an imageOnly model and hot-register its tool', async () => {
+  it.each([
+    ['dual-role', { supportsImageGeneration: true }],
+    ['legacy image-only', { imageOnly: true }],
+    [
+      'vision-only dual-role',
+      { visionOnly: true, supportsImageGeneration: true },
+    ],
+    ['legacy image-and-vision-only', { imageOnly: true, visionOnly: true }],
+  ] as const)(
+    'should set a %s image model and hot-register its tool',
+    async (_kind, modelFlags) => {
+      const setValue = vi.fn();
+      const setImageModel = vi.fn().mockResolvedValue(undefined);
+      const baseUrl = 'https://images.example.com/api/v1';
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --image qwen-image-2.0',
+          name: 'model',
+          args: '--image qwen-image-2.0',
+        },
+        services: {
+          config: {
+            getAllConfiguredModels: vi.fn().mockReturnValue([
+              {
+                id: 'qwen-image-2.0',
+                label: 'Qwen Image 2.0',
+                authType: AuthType.USE_OPENAI,
+                baseUrl,
+                registryBaseUrl: baseUrl,
+                envKey: 'IMAGE_API_KEY',
+                ...modelFlags,
+              },
+            ]),
+            resolveImageGenerationModel: vi.fn().mockReturnValue({
+              model: 'qwen-image-2.0',
+              baseUrl,
+              apiKeyEnv: 'IMAGE_API_KEY',
+            }),
+            setImageModel,
+          },
+          settings: createMockSettings(setValue),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--image qwen-image-2.0',
+      );
+
+      const persisted = `openai:qwen-image-2.0\0${baseUrl}`;
+      expect(setValue).toHaveBeenCalledWith(
+        expect.any(String),
+        'imageModel',
+        persisted,
+      );
+      expect(setImageModel).toHaveBeenCalledWith(persisted);
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Image Model: qwen-image-2.0',
+      });
+    },
+  );
+
+  it('should reject an image model without valid endpoint credentials', async () => {
     const setValue = vi.fn();
-    const setImageModel = vi.fn().mockResolvedValue(undefined);
+    const setImageModel = vi.fn();
+    const resolveImageGenerationModel = vi.fn().mockReturnValue(undefined);
     const baseUrl = 'https://images.example.com/api/v1';
     mockContext = createMockCommandContext({
-      invocation: {
-        raw: '/model --image qwen-image-2.0',
-        name: 'model',
-        args: '--image qwen-image-2.0',
-      },
       services: {
         config: {
           getAllConfiguredModels: vi.fn().mockReturnValue([
             {
-              id: 'qwen-image-2.0',
-              label: 'Qwen Image 2.0',
+              id: 'dual-role-model',
               authType: AuthType.USE_OPENAI,
               baseUrl,
-              registryBaseUrl: baseUrl,
-              envKey: 'IMAGE_API_KEY',
-              imageOnly: true,
+              supportsImageGeneration: true,
             },
           ]),
-          resolveImageGenerationModel: vi.fn().mockReturnValue({
-            model: 'qwen-image-2.0',
-            baseUrl,
-            apiKeyEnv: 'IMAGE_API_KEY',
-          }),
+          resolveImageGenerationModel,
           setImageModel,
         },
         settings: createMockSettings(setValue),
@@ -1406,21 +1672,20 @@ describe('modelCommand', () => {
 
     const result = await modelCommand.action!(
       mockContext,
-      '--image qwen-image-2.0',
+      '--image dual-role-model',
     );
 
-    const persisted = `openai:qwen-image-2.0\0${baseUrl}`;
-    expect(setValue).toHaveBeenCalledWith(
-      expect.any(String),
-      'imageModel',
-      persisted,
+    expect(resolveImageGenerationModel).toHaveBeenCalledWith(
+      `openai:dual-role-model\0${baseUrl}`,
     );
-    expect(setImageModel).toHaveBeenCalledWith(persisted);
     expect(result).toEqual({
       type: 'message',
-      messageType: 'info',
-      content: 'Image Model: qwen-image-2.0',
+      messageType: 'error',
+      content:
+        "Image model 'dual-role-model' must declare a valid HTTPS baseUrl and credential environment variable.",
     });
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setImageModel).not.toHaveBeenCalled();
   });
 
   it('should reject a chat model from /model --image', async () => {
@@ -1800,6 +2065,189 @@ describe('modelCommand', () => {
       type: 'message',
       messageType: 'info',
       content: 'Model: --fast-model',
+    });
+  });
+
+  describe('--compaction handler', () => {
+    it('should set compaction model', async () => {
+      const setValue = vi.fn();
+      const setCompactionModel = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --compaction compaction-model',
+          name: 'model',
+          args: '--compaction compaction-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi.fn().mockReturnValue([
+              {
+                id: 'compaction-model',
+                label: 'Compaction Model',
+                authType: AuthType.USE_OPENAI,
+              },
+              {
+                id: 'gpt-4',
+                label: 'GPT-4',
+                authType: AuthType.USE_OPENAI,
+              },
+            ]),
+            setCompactionModel,
+          },
+          settings: createMockSettings(setValue),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--compaction compaction-model',
+      );
+
+      expect(setValue).toHaveBeenCalledWith(
+        expect.any(String),
+        'compactionModel',
+        'compaction-model',
+      );
+      expect(setCompactionModel).toHaveBeenCalledWith('compaction-model');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Compaction Model: compaction-model',
+      });
+    });
+
+    it('should reject unavailable compaction models', async () => {
+      const setCompactionModel = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --compaction missing-model',
+          name: 'model',
+          args: '--compaction missing-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi
+              .fn()
+              .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+            setCompactionModel,
+          },
+          settings: createMockSettings(),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--compaction missing-model',
+      );
+
+      expect(setCompactionModel).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('missing-model'),
+      });
+    });
+
+    it('should show compaction model info in non-interactive mode', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--compaction' },
+        services: {
+          config: createMockConfig({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          settings: {
+            merged: {
+              compactionModel: 'compaction-model',
+            } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--compaction');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'Current compaction model: compaction-model\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+      });
+    });
+
+    it('should show fallback info when compaction model is not set', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--compaction' },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getFastModel: vi.fn().mockReturnValue('fast-model'),
+            getModel: vi.fn().mockReturnValue('gpt-4'),
+          } as unknown as Partial<Config>,
+          settings: {
+            merged: {} as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--compaction');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'Current compaction model: not set (falls back to the main model)\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+      });
+    });
+
+    it('should clear compaction model override with --compaction clear', async () => {
+      const setValue = vi.fn();
+      const setCompactionModel = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --compaction clear',
+          name: 'model',
+          args: '--compaction clear',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            setCompactionModel,
+          },
+          settings: createMockSettings(setValue),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--compaction clear',
+      );
+
+      expect(setValue).toHaveBeenCalledWith(
+        expect.any(String),
+        'compactionModel',
+        undefined,
+      );
+      expect(setCompactionModel).toHaveBeenCalledWith(undefined);
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'info',
+      });
     });
   });
 
@@ -2420,5 +2868,37 @@ describe('modelCommand', () => {
         dialog: 'model',
       });
     });
+  });
+});
+
+describe('isPickerOnlyModelInvocation', () => {
+  it.each([
+    '',
+    '   ',
+    '--fast',
+    '--voice',
+    '--vision',
+    '--compaction',
+    '--image',
+    '--project',
+    '--global',
+    '--fast --project',
+    '--vision --global',
+    '  --fast   --voice  ',
+  ])('treats %j as picker-only', (args) => {
+    expect(isPickerOnlyModelInvocation(args)).toBe(true);
+  });
+
+  it.each([
+    '--fast qwen3-coder-flash',
+    '--vision qwen-vl-max',
+    '--project qwen-max',
+    '--fast --global qwen-max',
+    '--invalid-flag',
+    '--fastx',
+    'qwen-max',
+    'qwen-max write a one-off prompt',
+  ])('treats %j as not picker-only', (args) => {
+    expect(isPickerOnlyModelInvocation(args)).toBe(false);
   });
 });

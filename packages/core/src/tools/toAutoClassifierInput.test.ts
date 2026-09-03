@@ -230,4 +230,24 @@ describe('AgentTool.toAutoClassifierInput', () => {
     expect(result['working_dir']).toBe('.qwen/tmp/review-pr-1');
     expect(result['subagent_type']).toBe('file-search');
   });
+
+  it('includes fork_profile when no resolved launch snapshot is available', () => {
+    const result = (
+      AgentTool.prototype.toAutoClassifierInput as (
+        p: unknown,
+      ) => Record<string, unknown>
+    ).call(
+      {},
+      {
+        description: 'research',
+        prompt: 'inspect the implementation',
+        subagent_type: 'fork',
+        fork_profile: 'ro-research',
+      },
+    );
+    expect(result['fork_profile']).toBe('ro-research');
+    expect(result['fork_tools']).toBeUndefined();
+    expect(result['fork_profile_tools']).toBeUndefined();
+    expect(result['fork_profile_prompt_hint']).toBeUndefined();
+  });
 });

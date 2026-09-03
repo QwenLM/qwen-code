@@ -26,7 +26,7 @@ import { Mutex } from 'async-mutex';
 import { isNodeError } from '../../utils/errors.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
-import { getTasksDir } from './teamHelpers.js';
+import { getTasksDir, sanitizeName } from './teamHelpers.js';
 import type { SwarmTask, SwarmTaskStatus } from './types.js';
 
 const debug = createDebugLogger('AGENTS_TEAM_TASKS');
@@ -79,7 +79,7 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
   },
   stale: 5000,
   onCompromised: (err) => {
-    debug.warn('task lock compromised:', err?.message ?? err);
+    debug.warn('task lock compromised:', err);
   },
 };
 
@@ -132,7 +132,11 @@ async function withTaskFileLock<T>(
     try {
       return await fn();
     } finally {
-      await release();
+      try {
+        await release();
+      } catch (error) {
+        debug.warn('Failed to release task lock:', error);
+      }
     }
   });
 }
@@ -181,6 +185,19 @@ export function assertValidTaskId(taskId: string): void {
       `Invalid task ID "${taskId}". Task IDs must be positive integers.`,
     );
   }
+}
+
+/**
+ * Normalize a model-supplied task-ID reference: trim surrounding
+ * whitespace and strip one leading `#` (the rendered display form,
+ * e.g. `#1`). Returns `undefined` when nothing remains, so callers
+ * can treat blank references as absent instead of forwarding `''`
+ * to filters that activate on `!== undefined`. The result must
+ * still pass `assertValidTaskId` before use.
+ */
+export function normalizeTaskId(raw: string): string | undefined {
+  const id = raw.trim().replace(/^#/, '');
+  return id === '' ? undefined : id;
 }
 
 /** Path to a single task file. */
@@ -732,7 +749,13 @@ export async function listTasks(
     if (filters.status !== undefined && t.status !== filters.status) {
       return false;
     }
-    if (filters.owner !== undefined && t.owner !== filters.owner) {
+    if (
+      filters.owner !== undefined &&
+      // Match on canonical identities both ways: owners persisted
+      // before the sanitization landed (#9282) keep their raw spelling
+      // on disk and would otherwise never match any filter.
+      sanitizeName(t.owner ?? '') !== sanitizeName(filters.owner)
+    ) {
       return false;
     }
     if (

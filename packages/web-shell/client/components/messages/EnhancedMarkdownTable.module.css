@@ -592,6 +592,21 @@ tr:hover .frozenCell.selectedCell {
   }
 }
 
+@container table-toolbar (max-width: 500px) {
+  .compactToolbarLabel,
+  .selectionMetric:not(:first-child) {
+    display: none;
+  }
+
+  .compactToolbarControl,
+  .densityTrigger {
+    width: 28px;
+    justify-content: center;
+    gap: 0;
+    padding-inline: 0;
+  }
+}
+
 @container table-scroller (max-width: 320px) {
   .detailPanel {
     grid-template-columns: minmax(0, 1fr);

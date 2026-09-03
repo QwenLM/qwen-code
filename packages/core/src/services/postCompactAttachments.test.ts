@@ -215,7 +215,7 @@ function modelCallScreenshot(app: string): Content {
     parts: [
       {
         functionCall: {
-          name: 'computer_use__get_app_state',
+          name: 'mcp__node-repl__node_repl',
           args: { app },
         },
       },
@@ -234,7 +234,7 @@ function userToolResultWithImage(mimeType: string, data: string): Content {
     parts: [
       {
         functionResponse: {
-          name: 'computer_use__get_app_state',
+          name: 'mcp__node-repl__node_repl',
           response: { output: 'screenshot returned' },
           parts: [{ inlineData: { mimeType, data } }],
         } as unknown as NonNullable<
@@ -284,7 +284,7 @@ describe('extractRecentImages', () => {
     ];
     const result = extractRecentImages(history, 3);
     expect(result).toHaveLength(1);
-    expect(result[0].sourceToolName).toBe('computer_use__get_app_state');
+    expect(result[0].sourceToolName).toBe('mcp__node-repl__node_repl');
     expect(result[0].sourceToolArgs).toEqual({ app: 'Safari' });
     expect(result[0].turnIndex).toBe(1); // user+fr is at index 1
   });
@@ -328,7 +328,7 @@ describe('extractRecentImages', () => {
     const result = extractRecentImages(history, 3);
     expect(result).toHaveLength(1);
     expect(result[0].part.inlineData?.data).toBe('nestedshot');
-    expect(result[0].sourceToolName).toBe('computer_use__get_app_state');
+    expect(result[0].sourceToolName).toBe('mcp__node-repl__node_repl');
   });
 
   it('collects both nested tool images and top-level user pastes', () => {
@@ -379,7 +379,7 @@ describe('countToolResponseImages', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: '' },
               parts: [
                 { inlineData: { mimeType: 'image/png', data: 'x' } },
@@ -658,13 +658,13 @@ describe('buildImageRestorationBlock', () => {
       {
         part: { inlineData: { mimeType: 'image/png', data: 'aaaa' } },
         turnIndex: 5,
-        sourceToolName: 'computer_use__get_app_state',
+        sourceToolName: 'mcp__node-repl__node_repl',
         sourceToolArgs: { app: 'Safari' },
       },
       {
         part: { inlineData: { mimeType: 'image/png', data: 'bbbb' } },
         turnIndex: 11,
-        sourceToolName: 'computer_use__get_app_state',
+        sourceToolName: 'mcp__node-repl__node_repl',
         sourceToolArgs: { app: 'Mail' },
       },
     ];
@@ -682,7 +682,7 @@ describe('buildImageRestorationBlock', () => {
       `- Image #${imagePartToStoredPayload(images[1].part).id}, turn 11: computer_use__get_app_state args={"app":"Mail"}`,
     );
     expect(header).toContain('turn 5');
-    expect(header).toContain('computer_use__get_app_state');
+    expect(header).toContain('mcp__node-repl__node_repl');
     expect(header).toContain('"app":"Safari"');
     expect(header).toContain('turn 11');
     expect(header).toContain('"app":"Mail"');
@@ -758,7 +758,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionCall: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               args: { app: 'Safari' },
             },
           },
@@ -769,7 +769,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: 'screenshot' },
             },
           },
@@ -811,7 +811,7 @@ describe('composePostCompactHistory', () => {
   it('emits role-alternating history with multiple file/image attachments merged into a single user Content (Finding 2)', async () => {
     // Regression: prior implementation pushed each file restoration block
     // as its own user Content, producing consecutive user roles which
-    // violates geminiChat.test.ts:6289 strict-alternation assertion and
+    // violates llm-chat.test.ts:6289 strict-alternation assertion and
     // is rejected by Gemini API with "consecutive same-role content".
     const small = join(tmpDir, 'a.ts');
     writeFileSync(small, 'export const a = 1;');
@@ -1080,7 +1080,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: '' },
               parts: [
                 { inlineData: { mimeType: 'image/png', data: 'img1' } },
@@ -1132,7 +1132,7 @@ describe('composePostCompactHistory', () => {
         parts: [
           {
             functionResponse: {
-              name: 'computer_use__get_app_state',
+              name: 'mcp__node-repl__node_repl',
               response: { output: '' },
               parts: [{ inlineData: { mimeType: 'image/png', data: 'i' } }],
             } as unknown as NonNullable<

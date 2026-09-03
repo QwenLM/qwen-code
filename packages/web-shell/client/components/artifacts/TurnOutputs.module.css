@@ -105,10 +105,18 @@
   padding: 4px 10px;
   font-size: 14px;
   font-weight: 400;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .reviewButton:hover {
   background: var(--accent);
+}
+
+.reviewButton:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .list {

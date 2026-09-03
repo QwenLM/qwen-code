@@ -3,10 +3,18 @@ import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   ACP_PERMISSION_RESPONSE_TIMEOUT_MS,
+  ACP_START_TIMEOUT_MS,
   AcpBridge,
 } from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
-import type { ChannelLoopToolHandler } from './ChannelAgentBridge.js';
+import {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_BTW_METHOD,
+  CHANNEL_PROMPT_META_KEY,
+  type ChannelLoopToolHandler,
+  type ChannelPromptImage,
+} from './ChannelAgentBridge.js';
 
 const child = vi.hoisted(() => {
   class MockEmitter {
@@ -47,6 +55,7 @@ const child = vi.hoisted(() => {
     });
   }
 
+  let initializeImplementation: () => Promise<void> = () => Promise.resolve();
   return {
     instances: [] as MockChild[],
     clients: [] as Array<{
@@ -57,6 +66,13 @@ const child = vi.hoisted(() => {
       cancel: ReturnType<typeof vi.fn>;
     }>,
     MockChild,
+    initializeImplementation: () => initializeImplementation(),
+    resetInitializeImplementation: () => {
+      initializeImplementation = () => Promise.resolve();
+    },
+    setInitializeImplementation: (implementation: () => Promise<void>) => {
+      initializeImplementation = implementation;
+    },
     spawn: vi.fn(() => {
       const instance = new MockChild();
       child.instances.push(instance);
@@ -80,7 +96,7 @@ vi.mock('@agentclientprotocol/sdk', () => ({
   ClientSideConnection: vi.fn().mockImplementation((createClient) => {
     const client = createClient();
     const connection = {
-      initialize: vi.fn().mockResolvedValue(undefined),
+      initialize: vi.fn(() => child.initializeImplementation()),
       cancel: vi.fn().mockResolvedValue(undefined),
     };
     child.clients.push(client);
@@ -95,6 +111,8 @@ type TestableAcpBridge = AcpBridge & {
     extMethod: ReturnType<typeof vi.fn>;
     newSession?: ReturnType<typeof vi.fn>;
     loadSession?: ReturnType<typeof vi.fn>;
+    unstable_resumeSession?: ReturnType<typeof vi.fn>;
+    setSessionMode?: ReturnType<typeof vi.fn>;
     prompt?: ReturnType<typeof vi.fn>;
   };
   knownSessionIds: Set<string>;
@@ -131,6 +149,50 @@ describe('AcpBridge', () => {
     child.clients.length = 0;
     child.connections.length = 0;
     child.spawn.mockClear();
+    child.resetInitializeImplementation();
+  });
+
+  it('times out bridge initialization and stops the child', async () => {
+    vi.useFakeTimers();
+    try {
+      child.setInitializeImplementation(() => new Promise(() => {}));
+      const bridge = new AcpBridge({
+        cliEntryPath: '/tmp/qwen',
+        cwd: '/tmp',
+      });
+
+      const start = bridge.start();
+      const rejection = expect(start).rejects.toThrow(
+        `ACP initialization timed out after ${ACP_START_TIMEOUT_MS}ms`,
+      );
+      await vi.advanceTimersByTimeAsync(1000 + ACP_START_TIMEOUT_MS);
+
+      await rejection;
+      expect(child.instances[0]!.kill).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('performs the private-parent capability handshake with the spawned child', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+
+    const spawnOptions = child.spawn.mock.calls[0]![2] as {
+      env?: Record<string, string | undefined>;
+    };
+    const capability = spawnOptions.env?.[ACP_PRIVATE_PARENT_CAPABILITY_ENV];
+    expect(typeof capability).toBe('string');
+    expect(capability!.length).toBeGreaterThan(0);
+    const initializeParams = child.connections[0]!.initialize.mock
+      .calls[0]![0] as { _meta?: Record<string, unknown> };
+    expect(
+      initializeParams._meta?.[ACP_PRIVATE_PARENT_CAPABILITY_META_KEY],
+    ).toBe(capability);
   });
 
   it('registers the channel loop MCP server once across concurrent calls', async () => {
@@ -295,6 +357,89 @@ describe('AcpBridge', () => {
     });
   });
 
+  it('forwards BTW through the ACP extension method for an owned session', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const extMethod = vi.fn().mockResolvedValue({
+      sessionId: 's-1',
+      answer: 'side answer',
+    });
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod };
+    bridge.knownSessionIds.add('s-1');
+
+    await expect(bridge.btw('s-1', 'what changed?')).resolves.toEqual({
+      sessionId: 's-1',
+      answer: 'side answer',
+    });
+    expect(extMethod).toHaveBeenCalledWith(CHANNEL_BTW_METHOD, {
+      sessionId: 's-1',
+      question: 'what changed?',
+    });
+  });
+
+  it('rejects BTW for unowned sessions and mismatched responses', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const extMethod = vi.fn().mockResolvedValue({
+      sessionId: 'other',
+      answer: null,
+    });
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod };
+
+    await expect(bridge.btw('s-1', 'question')).rejects.toThrow(
+      'Unknown ACP session',
+    );
+    bridge.knownSessionIds.add('s-1');
+    await expect(bridge.btw('s-1', 'question')).rejects.toThrow(
+      'Invalid BTW response',
+    );
+  });
+
+  it('accepts null BTW answers and rejects invalid answer types', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const extMethod = vi
+      .fn()
+      .mockResolvedValueOnce({ sessionId: 's-1', answer: null })
+      .mockResolvedValueOnce({ sessionId: 's-1', answer: 42 });
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod };
+    bridge.knownSessionIds.add('s-1');
+
+    await expect(bridge.btw('s-1', 'question')).resolves.toEqual({
+      sessionId: 's-1',
+      answer: null,
+    });
+    await expect(bridge.btw('s-1', 'question')).rejects.toThrow(
+      'Invalid BTW response',
+    );
+  });
+
+  it('stops waiting for an ACP BTW response when aborted', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const extMethod = vi.fn(() => new Promise(() => {}));
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod };
+    bridge.knownSessionIds.add('s-1');
+    const controller = new AbortController();
+
+    const result = bridge.btw('s-1', 'question', controller.signal);
+    controller.abort();
+
+    await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
   it('keeps a cancelled session claimable but rejects it after discard', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
@@ -360,6 +505,156 @@ describe('AcpBridge', () => {
     expect(extMethod).toHaveBeenCalledOnce();
   });
 
+  it('applies approval mode when creating a session', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
+    const setSessionMode = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      newSession,
+      setSessionMode,
+    } as TestableAcpBridge['connection'];
+
+    await expect(
+      bridge.newSession('/tmp', { approvalMode: 'yolo' }),
+    ).resolves.toBe('s-1');
+
+    expect(setSessionMode).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      modeId: 'yolo',
+    });
+    expect(newSession.mock.invocationCallOrder[0]).toBeLessThan(
+      setSessionMode.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('closes a new session when applying its approval mode fails', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const modeError = new Error('mode rejected');
+    const extMethod = vi.fn().mockRejectedValue(new Error('close failed'));
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod,
+      newSession: vi.fn().mockResolvedValue({ sessionId: 's-1' }),
+      setSessionMode: vi.fn().mockRejectedValue(modeError),
+    } as TestableAcpBridge['connection'];
+
+    let output = '';
+    try {
+      await expect(
+        bridge.newSession('/tmp', { approvalMode: 'yolo' }),
+      ).rejects.toBe(modeError);
+      output = stderr.mock.calls.join('');
+    } finally {
+      stderr.mockRestore();
+    }
+
+    expect(extMethod).toHaveBeenCalledWith('qwen/control/session/close', {
+      sessionId: 's-1',
+    });
+    expect(output).toContain(
+      '[AcpBridge] Failed to close session s-1 after approval mode error: close failed',
+    );
+    expect(bridge.knownSessionIds.size).toBe(0);
+    expect(bridge.sessionBindingTokens.size).toBe(0);
+  });
+
+  it('restores channel sessions through resume without replaying history', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const resumeSession = vi.fn().mockResolvedValue({});
+    const setSessionMode = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      unstable_resumeSession: resumeSession,
+      setSessionMode,
+    } as TestableAcpBridge['connection'];
+    const bindingToken = {};
+
+    await expect(
+      bridge.loadSession(
+        'restored-session',
+        '/tmp',
+        { approvalMode: 'yolo' },
+        bindingToken,
+      ),
+    ).resolves.toBe('restored-session');
+
+    expect(resumeSession).toHaveBeenCalledWith({
+      sessionId: 'restored-session',
+      cwd: '/tmp',
+      mcpServers: [],
+    });
+    expect(setSessionMode).toHaveBeenCalledWith({
+      sessionId: 'restored-session',
+      modeId: 'yolo',
+    });
+    expect(bridge.knownSessionIds.has('restored-session')).toBe(true);
+    expect(bridge.sessionBindingTokens.get('restored-session')).toBe(
+      bindingToken,
+    );
+  });
+
+  it('closes a restored session when applying its approval mode fails', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const modeError = new Error('mode rejected');
+    const extMethod = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod,
+      unstable_resumeSession: vi.fn().mockResolvedValue({}),
+      setSessionMode: vi.fn().mockRejectedValue(modeError),
+    } as TestableAcpBridge['connection'];
+
+    await expect(
+      bridge.loadSession('restored-session', '/tmp', {
+        approvalMode: 'yolo',
+      }),
+    ).rejects.toBe(modeError);
+
+    expect(extMethod).toHaveBeenCalledWith('qwen/control/session/close', {
+      sessionId: 'restored-session',
+    });
+    expect(bridge.knownSessionIds.size).toBe(0);
+    expect(bridge.sessionBindingTokens.size).toBe(0);
+  });
+
+  it('inherits the agent approval mode when no channel override is set', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const setSessionMode = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      newSession: vi.fn().mockResolvedValue({ sessionId: 'new-session' }),
+      unstable_resumeSession: vi.fn().mockResolvedValue({}),
+      setSessionMode,
+    } as TestableAcpBridge['connection'];
+
+    await bridge.newSession('/tmp');
+    await bridge.loadSession('restored-session', '/tmp');
+
+    expect(setSessionMode).not.toHaveBeenCalled();
+  });
+
   it('returns only the final turn text after tool calls', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
@@ -398,6 +693,113 @@ describe('AcpBridge', () => {
     await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
       'Final answer.',
     );
+    expect(bridge.connection.prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [{ type: 'text', text: 'question' }],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+  });
+
+  it('forwards the user-facing prompt projection to the daemon', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'hidden context\n\nhello', {
+      displayText: 'hello',
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [{ type: 'text', text: 'hidden context\n\nhello' }],
+      _meta: {
+        [CHANNEL_PROMPT_META_KEY]: true,
+        'qwen.daemon.promptDisplayText': 'hello',
+      },
+    });
+  });
+
+  it('sends multiple images before the text prompt', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'describe both', {
+      images: [
+        { data: 'first', mimeType: 'image/png' },
+        { data: 'second', mimeType: 'image/jpeg' },
+      ],
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [
+        { type: 'image', data: 'first', mimeType: 'image/png' },
+        { type: 'image', data: 'second', mimeType: 'image/jpeg' },
+        { type: 'text', text: 'describe both' },
+      ],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+  });
+
+  it('sends a legacy-only image pair as one inline image block', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'describe', {
+      imageBase64: 'base64-image',
+      imageMimeType: 'image/png',
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [
+        { type: 'image', data: 'base64-image', mimeType: 'image/png' },
+        { type: 'text', text: 'describe' },
+      ],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
+  });
+
+  it('drops malformed prompt image entries before the text prompt', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const prompt = vi.fn().mockResolvedValue({});
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod: vi.fn(), prompt };
+
+    await bridge.prompt('s-1', 'describe', {
+      images: [
+        { data: 'AQID', mimeType: 'image/png' },
+        { data: '', mimeType: 'image/webp' },
+        { data: 'BAUG', mimeType: '' },
+        null as unknown as ChannelPromptImage,
+      ],
+    });
+
+    expect(prompt).toHaveBeenCalledWith({
+      sessionId: 's-1',
+      prompt: [
+        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        { type: 'text', text: 'describe' },
+      ],
+      _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+    });
   });
 
   it('excludes nested subagent text from the final response', async () => {
@@ -471,6 +873,31 @@ describe('AcpBridge', () => {
     await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
       'Final answer.',
     );
+  });
+
+  it('emits discrete vision bridge notices as text chunks', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const textChunks: Array<[string, string]> = [];
+    bridge.on('textChunk', (sessionId, text) => {
+      textChunks.push([sessionId, text]);
+    });
+
+    bridge.handleSessionUpdate({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Vision bridge cancelled.' },
+        _meta: {
+          source: 'vision_bridge_notice',
+          qwenDiscreteMessage: true,
+        },
+      },
+    });
+
+    expect(textChunks).toEqual([['s-1', 'Vision bridge cancelled.']]);
   });
 
   it('emits a completed background response separately from the active turn', () => {

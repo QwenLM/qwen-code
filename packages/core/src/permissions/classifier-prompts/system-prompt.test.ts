@@ -15,6 +15,7 @@ import {
   STAGE1_SUFFIX,
   STAGE2_SUFFIX,
 } from './system-prompt.js';
+import { ANNOTATION_KEYS } from '../../tools/mcp-classifier-input.js';
 import type { Config } from '../../config/config.js';
 import type { AutoModeSettings } from '../../config/config.js';
 
@@ -151,6 +152,7 @@ describe('buildClassifierSystemPrompt', () => {
     expect(prompt).toContain('.qwen/settings');
     expect(prompt).toContain('QWEN.local.md');
     expect(prompt).toContain('.qwen/rules/');
+    expect(prompt).toContain('.qwen/fork-profiles/');
     expect(prompt).toContain('.mcp.json');
     // Keep wildcard allow-rule widening in the protected self-edit category.
     expect(prompt).toContain('adding or widening permission allow rules');
@@ -291,5 +293,31 @@ describe('stage suffixes', () => {
   it('STAGE2_SUFFIX references stage 1 and asks for review', () => {
     expect(STAGE2_SUFFIX).toMatch(/[Ss]tage 1/);
     expect(STAGE2_SUFFIX).toMatch(/review/i);
+  });
+});
+
+describe('MCP guidance', () => {
+  it('tells the classifier how to read a projected MCP call', () => {
+    const prompt = buildClassifierSystemPrompt(makeConfig({}));
+    expect(prompt).toContain('mcp__');
+    expect(prompt).toMatch(/third-party MCP server/);
+    // Arguments are the evidence; annotations are untrusted; truncation is
+    // never a reason to relax.
+    expect(prompt).toMatch(/`arguments`/);
+    expect(prompt).toMatch(/self-reported by the server/);
+    // Every annotation key the projection forwards must be named here, or
+    // the classifier sees a key the prompt never marked as unverified.
+    // Iterating the exported list guards both directions: a key added to
+    // the projection without a prompt mention turns this red.
+    for (const key of ANNOTATION_KEYS) {
+      expect(prompt).toContain(key);
+    }
+    // Every marker form the projection emits must be announced.
+    expect(prompt).toContain('`…[truncated N chars]`');
+    expect(prompt).toContain('`[omitted: …]`');
+    expect(prompt).toMatch(/arguments_truncated/);
+    expect(prompt).toMatch(/name_truncated/);
+    expect(prompt).toMatch(/Prior action/);
+    expect(prompt).toMatch(/never evidence of safety/);
   });
 });

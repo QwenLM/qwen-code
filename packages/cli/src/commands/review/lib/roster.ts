@@ -24,8 +24,14 @@
 // Nothing here is supplied by the caller. A roster the caller could shrink is a
 // roster that gets shrunk.
 
-import type { RoleId } from './agent-briefs.js';
+import type { RepositoryContextRoleId, RoleId } from './agent-briefs.js';
+import { repositoryContextOf } from './repository-context.js';
 import { pathTool } from '../script-lint.js';
+// The topology gate lives in `budget.ts` — it is a size ruling, and the round
+// cap needs the same one. Re-exported here because this file was its home and
+// the roster is where a reader looks for "which fan-out was owed".
+export { isTerritoryFanOut } from './budget.js';
+import { isTerritoryFanOut } from './budget.js';
 
 /**
  * How this review's diff was captured — which decides what can be asked of it.
@@ -63,15 +69,22 @@ export interface RosterPlan {
   prNumber?: unknown;
   untrackedFiles?: unknown;
   /**
+   * The wrapper-vocabulary signal the capturing command computed from the diff
+   * (diff-plan.ts). Gates Agent 1e; the gate fails safe (see `hasWrapperTypes`).
+   */
+  wrapperSignal?: unknown;
+  /**
    * The review's effort, as the capturing command recorded it (`--effort`).
-   * `'medium'` is the balanced tier and drops the adversarial personas; anything
-   * else — including absent — keeps the full roster. It lives in the plan, not in
+   * `'medium'` is the balanced tier and drops the adversarial personas
+   * (6a/6b/6c) and the language-pitfall and wrapper/proxy specialists (1d/1e);
+   * anything else — including absent — keeps the full roster. It lives in the plan, not in
    * a caller argument, on purpose: the roster this file computes must not be
    * shrinkable by whoever calls `requiredAgents`, or the shrink is what gets
    * called. `check-coverage`, `agent-prompt --roster` and `compose-review`'s
    * recomputation then all read the same value and cannot disagree.
    */
   effort?: unknown;
+  repositoryContext?: unknown;
 }
 
 /** One agent this review must launch. */
@@ -94,20 +107,6 @@ export function reviewMode(plan: RosterPlan): ReviewMode {
   return 'diff-only';
 }
 
-/**
- * The topology gate, in code.
- *
- * The same two numbers the skill's prose turns on. It is here so the roster and
- * the reader cannot disagree about which fan-out was owed — a disagreement that
- * would show up as a review being told it forgot eleven agents it was never
- * supposed to launch.
- */
-export function isTerritoryFanOut(plan: RosterPlan): boolean {
-  const src = Number(plan.srcDiffLines ?? 0);
-  const total = Number(plan.diffLines ?? 0);
-  return !(src <= 500 && total <= 3200);
-}
-
 /** Does the diff remove or replace anything? If not, 1b has nothing to audit. */
 function hasDeletions(plan: RosterPlan): boolean {
   const files = Array.isArray(plan.files) ? plan.files : [];
@@ -116,6 +115,23 @@ function hasDeletions(plan: RosterPlan): boolean {
   // one return; a removed guard nobody looked for costs whatever it was guarding.
   if (files.length === 0) return true;
   return files.some((f) => Number(f?.removedLines ?? 0) > 0);
+}
+
+/**
+ * Does the diff signal a wrapping type — the gate for Agent 1e.
+ *
+ * Only an EXPLICIT `wrapperSignal: false` answers no. The signal is a cheap
+ * vocabulary heuristic computed at capture time (diff-plan.ts) with imperfect
+ * recall, and since this change also removes the wrapper-routing clause from
+ * Agent 1a, a miss here would leave the class owned by nobody — so everything
+ * but the one value a current capture command writes is "run the check": an
+ * absent field (a plan an older CLI wrote — the version skew this skill has
+ * already measured once), `true`, or junk. Same asymmetry as `hasDeletions`:
+ * an agent with nothing to find costs one return; a wrapper that re-enters
+ * itself costs whatever it wraps.
+ */
+function hasWrapperTypes(plan: RosterPlan): boolean {
+  return plan.wrapperSignal !== false;
 }
 
 /** A PR number the plan actually resolved: a positive integer, as a number or the
@@ -218,7 +234,13 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
     // Step 3A: every dimension, each walking the whole diff.
     add('1a');
     add('2');
-    add('3');
+    // Code quality is three checklist slices, not one agent (see agent-briefs).
+    // All three are required at every effort: the split exists because a single
+    // agent holding the whole list finishes one item, so dropping two slices at
+    // medium would not save a lens — it would restore the failure the split fixed.
+    add('3a');
+    add('3b');
+    add('3c');
     add('4');
     add('5');
     // The three adversarial personas are a high-effort dimension. A `medium`
@@ -231,6 +253,13 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
       add('6a');
       add('6b');
       add('6c');
+      // The two checks promoted out of Agent 1a's line-by-line brief (#9788):
+      // a checklist pattern-match and a structural routing expectation are
+      // different attention modes from the walk, and folded into it they were
+      // diluted by its rhythm. 1d always runs at high; 1e runs when the diff
+      // signals a wrapping type — fail-safe, see `hasWrapperTypes`.
+      add('1d');
+      if (hasWrapperTypes(plan)) add('1e');
     }
   }
 
@@ -259,6 +288,24 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   // them. Requiring them there demanded agents the review was never meant to launch,
   // and `check-coverage` then exit-3'd an otherwise-complete small PR. Gate the loop
   // on the topology that actually runs them.
+  // A heavy INTERACTION file keeps its invariant agents, even though its
+  // chunk agent is briefed for the seam only.
+  //
+  // Skipping them was tempting and wrong. The premise was that an interaction
+  // file's full-range slice is code the previous round already cleared — true
+  // only while the MERGE BASE holds still between rounds, and nothing
+  // enforces that. The anchor gate validates `--since` against head history;
+  // neither the round cache nor the posted ledger carries a base identity, so
+  // a BACKWARD base move — the author retargets the PR to an older base, an
+  // ordinary GitHub operation — is accepted. `newBase..anchor` then carries
+  // hunks no round has read, they arrive inside a heavy interaction file's
+  // full-range slice, and these three agents are the only ones that would
+  // have walked them. A clean verdict re-anchors past them for good.
+  //
+  // So the skip is off until the anchor can prove base continuity. It costs
+  // three agents on a rare shape — heavy, unchanged since the anchor, and
+  // importing something that moved — and it buys back the one direction this
+  // whole design refuses to lose in.
   if (isTerritoryFanOut(plan)) {
     for (const file of heavyFiles(plan)) {
       add('invariant-a', file);
@@ -267,5 +314,47 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
     }
   }
 
+  const repositoryContext = repositoryContextOf(plan);
+  for (const role of repositoryContext?.requiredAgents ?? []) {
+    if (!contextRoleRunsInThisReview(role, plan, mode)) continue;
+    if (!out.some((agent) => agent.role === role && agent.file === undefined)) {
+      add(role);
+    }
+  }
+
   return out;
+}
+
+/**
+ * A repository context may REQUIRE an agent this review's policy already runs;
+ * it may not override the policy. The effort gate, the topology split, and the
+ * mode are cost and capability decisions the roster owns — a manifest naming a
+ * role they exclude would otherwise silently inflate a medium review with the
+ * adversarial personas, re-add whole-diff walkers to a chunked 3B fan-out, or
+ * demand a tree-grepping tracer from a review that has no tree.
+ */
+function contextRoleRunsInThisReview(
+  role: RepositoryContextRoleId,
+  plan: RosterPlan,
+  mode: ReviewMode,
+): boolean {
+  const fanOut = isTerritoryFanOut(plan);
+  switch (role) {
+    case '6a':
+    case '6b':
+    case '6c':
+      return !fanOut && plan.effort !== 'medium';
+    case 'test-matrix':
+      return fanOut;
+    case '1c':
+      return mode !== 'diff-only';
+    case '1b':
+      // Both topologies run the removed-behavior audit; whether it has work is
+      // the diff's business (hasDeletions), not the policy's.
+      return true;
+    default:
+      // Whole-diff dimension walkers exist only in Step 3A; a 3B chunk agent
+      // already owns every dimension for its own lines.
+      return !fanOut;
+  }
 }

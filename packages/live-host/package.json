@@ -1,0 +1,36 @@
+{
+  "name": "@qwen-code/live-host",
+  "version": "0.0.5",
+  "description": "Native macOS audio and global-shortcut host for Qwen Code Live Voice",
+  "main": "dist/main.cjs",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "npm run build && electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/main/__tests__/*.test.ts",
+    "bump-version": "tsx scripts/bump-live-host-version.ts",
+    "dist:mac": "npm run build && electron-builder --config electron-builder.yml --mac",
+    "dist:mac:no-publish": "npm run build && electron-builder --config electron-builder.yml --mac --publish never && node scripts/create-release-manifest.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@electron/asar": "3.4.1",
+    "@types/node": "^25.0.8",
+    "@types/semver": "^7.7.1",
+    "@types/ws": "^8.18.1",
+    "electron": "^39.2.7",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.0",
+    "semver": "^7.7.2",
+    "tsx": "^4.20.3",
+    "typescript": "^5.0.0",
+    "vite": "^6.2.4"
+  }
+}

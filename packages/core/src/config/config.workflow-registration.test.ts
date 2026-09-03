@@ -75,8 +75,8 @@ vi.mock('../ide/ide-client.js', () => ({
     }),
   },
 }));
-vi.mock('../memory/const.js', () => ({
-  setGeminiMdFilename: vi.fn(),
+vi.mock('../utils/memory-constants.js', () => ({
+  setMemoryFilename: vi.fn(),
 }));
 
 import * as fs from 'node:fs';
@@ -178,5 +178,12 @@ describe('Workflow anti-recursion guard', () => {
     expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.RECORD_ARTIFACT)).toBe(
       true,
     );
+  });
+
+  it('TodoWrite is in EXCLUDED_TOOLS_FOR_SUBAGENTS', async () => {
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.TODO_WRITE)).toBe(true);
   });
 });

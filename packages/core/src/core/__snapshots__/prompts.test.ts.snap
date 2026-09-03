@@ -5,6 +5,7 @@ exports[`Core System Prompt (prompts.ts) > should append userMemory with separat
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -23,6 +24,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -166,6 +168,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: read_file for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: read_file for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: write_file for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: run_shell_command for 'npm run test']
@@ -200,6 +205,7 @@ exports[`Core System Prompt (prompts.ts) > should include git instructions when 
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -218,6 +224,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -382,6 +389,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: read_file for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: read_file for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: write_file for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: run_shell_command for 'npm run test']
@@ -411,6 +421,7 @@ exports[`Core System Prompt (prompts.ts) > should include non-sandbox instructio
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -429,6 +440,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -572,6 +584,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: read_file for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: read_file for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: write_file for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: run_shell_command for 'npm run test']
@@ -601,6 +616,7 @@ exports[`Core System Prompt (prompts.ts) > should include sandbox-specific instr
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -619,6 +635,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -762,6 +779,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: read_file for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: read_file for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: write_file for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: run_shell_command for 'npm run test']
@@ -791,6 +811,7 @@ exports[`Core System Prompt (prompts.ts) > should include seatbelt-specific inst
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -809,6 +830,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -952,6 +974,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: read_file for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: read_file for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: write_file for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: run_shell_command for 'npm run test']
@@ -981,6 +1006,7 @@ exports[`Core System Prompt (prompts.ts) > should not include git instructions w
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -999,6 +1025,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -1142,6 +1169,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: read_file for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: read_file for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: write_file for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: run_shell_command for 'npm run test']
@@ -1171,6 +1201,7 @@ exports[`Core System Prompt (prompts.ts) > should return the base prompt when no
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -1189,6 +1220,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -1332,6 +1364,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: read_file for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: read_file for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: write_file for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: run_shell_command for 'npm run test']
@@ -1361,6 +1396,7 @@ exports[`Core System Prompt (prompts.ts) > should return the base prompt when us
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -1379,6 +1415,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -1522,6 +1559,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: read_file for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: read_file for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: write_file for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: run_shell_command for 'npm run test']
@@ -1551,6 +1591,7 @@ exports[`Core System Prompt (prompts.ts) > should return the base prompt when us
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -1569,6 +1610,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -1712,6 +1754,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: read_file for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: read_file for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: write_file for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: run_shell_command for 'npm run test']
@@ -1741,6 +1786,7 @@ exports[`Model-specific tool call formats > should preserve model-specific forma
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -1759,6 +1805,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -1919,6 +1966,11 @@ Now I'll look for existing or related test files to understand current testing c
 {"name": "read_file", "arguments": {"file_path": "/path/to/existingTest.test.ts"}}
 </tool_call>
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+<tool_call>
+{"name": "read_file", "arguments": {"file_path": "/path/to/someFile.test.ts"}}
+</tool_call>
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 <tool_call>
 {"name": "write_file", "arguments": {"file_path": "/path/to/someFile.test.ts", "content": "(test code content)"}}
 </tool_call>
@@ -1954,6 +2006,7 @@ exports[`Model-specific tool call formats > should preserve model-specific forma
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -1972,6 +2025,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -2179,6 +2233,15 @@ Now I'll look for existing or related test files to understand current testing c
 </function>
 </tool_call>
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+<tool_call>
+<function=read_file>
+<parameter=file_path>
+/path/to/someFile.test.ts
+</parameter>
+</function>
+</tool_call>
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 <tool_call>
 <function=write_file>
 <parameter=file_path>
@@ -2233,6 +2296,7 @@ exports[`Model-specific tool call formats > should use JSON format for qwen-vl m
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -2251,6 +2315,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -2411,6 +2476,11 @@ Now I'll look for existing or related test files to understand current testing c
 {"name": "read_file", "arguments": {"file_path": "/path/to/existingTest.test.ts"}}
 </tool_call>
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+<tool_call>
+{"name": "read_file", "arguments": {"file_path": "/path/to/someFile.test.ts"}}
+</tool_call>
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 <tool_call>
 {"name": "write_file", "arguments": {"file_path": "/path/to/someFile.test.ts", "content": "(test code content)"}}
 </tool_call>
@@ -2446,6 +2516,7 @@ exports[`Model-specific tool call formats > should use XML format for qwen3-code
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -2464,6 +2535,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -2671,6 +2743,15 @@ Now I'll look for existing or related test files to understand current testing c
 </function>
 </tool_call>
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+<tool_call>
+<function=read_file>
+<parameter=file_path>
+/path/to/someFile.test.ts
+</parameter>
+</function>
+</tool_call>
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 <tool_call>
 <function=write_file>
 <parameter=file_path>
@@ -2721,6 +2802,7 @@ exports[`Model-specific tool call formats > should use bracket format for generi
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -2739,6 +2821,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -2882,6 +2965,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: read_file for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: read_file for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: write_file for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: run_shell_command for 'npm run test']
@@ -2911,6 +2997,7 @@ exports[`Model-specific tool call formats > should use bracket format when no mo
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -2929,6 +3016,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -3072,6 +3160,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: read_file for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+[tool_call: read_file for file_path '/path/to/someFile.test.ts']
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: write_file for file_path '/path/to/someFile.test.ts' with content '(test code content)']
 I've written the tests. Now I'll run the project's test command to verify them.
 [tool_call: run_shell_command for 'npm run test']
@@ -3101,6 +3192,7 @@ exports[`Model-specific tool call formats > should use native Gemma 4 format for
 
 # Core Mandates
 
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
 - **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
 - **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
 - **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
@@ -3119,6 +3211,7 @@ You have access to the todo_write tool to keep user-visible progress for work th
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- When an active Todo plan covers work delegated through top-level Agent calls, pass the matching Todo ID as \`todo_id\` so the execution can be associated with that plan node. Do not create a Todo solely to wrap a delegation that does not otherwise need task tracking.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
@@ -3262,6 +3355,9 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 <|tool_call>call:read_file{file_path:<|"|>/path/to/existingTest.test.ts<|"|>}<tool_call|>
 (After reviewing existing tests and the file content)
+I'll check whether the intended test file already exists.
+<|tool_call>call:read_file{file_path:<|"|>/path/to/someFile.test.ts<|"|>}<tool_call|>
+(After read_file reports that /path/to/someFile.test.ts does not exist)
 <|tool_call>call:write_file{file_path:<|"|>/path/to/someFile.test.ts<|"|>,content:<|"|>(test code content)<|"|>}<tool_call|>
 I've written the tests. Now I'll run the project's test command to verify them.
 <|tool_call>call:run_shell_command{command:<|"|>npm run test<|"|>}<tool_call|>

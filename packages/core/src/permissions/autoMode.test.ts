@@ -29,7 +29,17 @@ import { ApprovalMode } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from './types.js';
-import { setGeminiMdFilename } from '../memory/const.js';
+import { setMemoryFilename } from '../utils/memory-constants.js';
+
+//Mock classifier to ensure in workspace protected writes still reach it
+vi.mock('./classifier.js', () => ({
+  classifyAction: vi.fn(async () => ({
+    shouldBlock: false,
+    reason: 'ok',
+    stage: 'fast',
+    durationMs: 1,
+  })),
+}));
 
 // ─── SAFE_TOOL_ALLOWLIST contents (frozen) ───────────────────────────────
 
@@ -155,6 +165,7 @@ describe('isAutoModeProtectedWritePath', () => {
       '/repo/.qwen/agents/reviewer.md',
       '/repo/.qwen/skills/skill-a/SKILL.md',
       '/repo/.qwen/hooks/pre-tool-use.json',
+      '/repo/.qwen/fork-profiles/ro-research.md',
       '/repo/.qwen/QWEN.local.md',
       '/repo/.qwen/rules/backend.md',
       '/repo/.mcp.json',
@@ -211,7 +222,7 @@ describe('isAutoModeProtectedWritePath', () => {
   });
 
   it('matches configured context filenames', () => {
-    setGeminiMdFilename(['CUSTOM_AGENTS.md', 'docs/TEAM_CONTEXT.md']);
+    setMemoryFilename(['CUSTOM_AGENTS.md', 'docs/TEAM_CONTEXT.md']);
     try {
       const protectedPaths = [
         '/repo/CUSTOM_AGENTS.md',
@@ -223,7 +234,7 @@ describe('isAutoModeProtectedWritePath', () => {
         expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
       }
     } finally {
-      setGeminiMdFilename(['QWEN.md', 'AGENTS.md']);
+      setMemoryFilename(['QWEN.md', 'AGENTS.md']);
     }
   });
 
@@ -240,6 +251,7 @@ describe('isAutoModeProtectedWritePath', () => {
         '/tmp/custom-qwen-home/agents/reviewer.md',
         '/tmp/custom-qwen-home/skills/review/SKILL.md',
         '/tmp/custom-qwen-home/hooks/pre-tool-use.json',
+        '/tmp/custom-qwen-home/fork-profiles/ro-research.md',
         '/tmp/custom-qwen-home/rules/backend.md',
         '/tmp/custom-qwen-home/.mcp.json',
       ];
@@ -360,18 +372,18 @@ describe('passesAcceptEditsFastPath', () => {
       `${cwd}/.qwen/agents/reviewer.md`,
       `${cwd}/.qwen/skills/review/SKILL.md`,
       `${cwd}/.qwen/hooks/pre-tool-use.json`,
+      `${cwd}/.qwen/fork-profiles/ro-research.md`,
       `${cwd}/.qwen/QWEN.local.md`,
       `${cwd}/.qwen/rules/backend.md`,
       `${cwd}/.mcp.json`,
     ];
 
-    for (const filePath of protectedPaths) {
-      expect(
-        passesAcceptEditsFastPath(
-          ctx({ toolName: ToolNames.WRITE_FILE, filePath }),
-          config,
-        ),
-      ).toBe(false);
+    for (const toolName of [ToolNames.EDIT, ToolNames.WRITE_FILE]) {
+      for (const filePath of protectedPaths) {
+        expect(
+          passesAcceptEditsFastPath(ctx({ toolName, filePath }), config),
+        ).toBe(false);
+      }
     }
   });
 
@@ -1105,6 +1117,67 @@ describe('evaluateAutoMode — fast-path gating', () => {
       skipClassifierReason: 'total_denial',
     });
     expect(decision).toEqual({ via: 'fallback', reason: 'total_denial' });
+  });
+
+  // ─── New tests for external write fallback ───
+  it('routes external EDIT to manual fallback before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.EDIT,
+        filePath: '/Users/test/other-project/x.ts',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
+  });
+
+  it('routes external WRITE_FILE to manual fallback before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.WRITE_FILE,
+        filePath: '/etc/hosts',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
+  });
+
+  it('routes external NOTEBOOK_EDIT to manual fallback before classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.NOTEBOOK_EDIT,
+        filePath: '/users/test/other-project/nb.ipynb',
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
+  });
+
+  it('routes in-workspace protected writes to classifier', async () => {
+    const decision = await evaluateAutoMode({
+      ctx: {
+        toolName: ToolNames.EDIT,
+        filePath: `${cwd}/.qwen/settings.json`,
+      },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('classifier');
   });
 });
 

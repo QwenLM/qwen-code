@@ -894,7 +894,7 @@ describe('GrepTool', () => {
       },
     );
 
-    it.each([['-n'], ['-i'], ['--color']])(
+    it.skipIf(process.platform === 'win32').each([['-n'], ['-i'], ['--color']])(
       'introduces the pattern "%s" with -e for system grep',
       async (pattern) => {
         await grepTool.build({ pattern }).execute(abortSignal);

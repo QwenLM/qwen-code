@@ -25,6 +25,7 @@ import {
   mkdtempSync,
   mkdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
   utimesSync,
 } from 'node:fs';
@@ -49,6 +50,9 @@ const {
   exitCodeFor,
   killProcessGroup,
   runCommand,
+  classifyRunTarget,
+  composedPatternFor,
+  reportPatternFor,
 } = await import('./run.js');
 const { REVIEW_TMP_DIR, REVIEWS_DIR } = await import('./lib/paths.js');
 // The real cleanup, not a mock: the regression test below must prove the parent
@@ -72,6 +76,30 @@ describe('buildReviewPrompt', () => {
     );
   });
 
+  it('combines --resume with every other flag, in order', () => {
+    // The CI retry's documented shape is `--comment --resume`; without a
+    // combination case, an `if` → `else if` slip that binds the resume push
+    // to the comment branch ships green and silently drops the flag —
+    // re-running from scratch, the exact waste this series exists to stop.
+    expect(
+      buildReviewPrompt({
+        target: '7724',
+        effort: 'low',
+        comment: true,
+        resume: true,
+      }),
+    ).toBe('/review 7724 --effort low --comment --resume');
+  });
+
+  it('threads --resume through, after the other flags', () => {
+    expect(buildReviewPrompt({ target: '7724', resume: true })).toBe(
+      '/review 7724 --resume',
+    );
+    expect(buildReviewPrompt({ target: '7724', resume: false })).toBe(
+      '/review 7724',
+    );
+  });
+
   it('rejects a target that would re-tokenize into extra args', () => {
     // `123 --comment` would split into a target plus a flag the child
     // honours, silently authorising a post the run never asked for.
@@ -81,6 +109,36 @@ describe('buildReviewPrompt', () => {
     expect(() => buildReviewPrompt({ target: '--comment' })).toThrow(
       /Invalid review target/,
     );
+  });
+
+  it('rejects a separators-only or empty target', () => {
+    // `/` names no file: it survives basename extraction as the empty
+    // string, pinning the unmatchable `qwen-review--composed.json` — a whole
+    // child review burned before the parent reports "no composed verdict".
+    for (const target of ['/', '//', '\\']) {
+      expect(() => buildReviewPrompt({ target })).toThrow(
+        /Invalid review target/,
+      );
+    }
+    // An empty target is a target the caller named and got wrong (an unset
+    // `"$TARGET"`); read as "no target given" it silently becomes a full
+    // local review at the 120-minute default, not an error.
+    for (const target of ['', '   ']) {
+      expect(() => buildReviewPrompt({ target })).toThrow(
+        /Invalid review target/,
+      );
+    }
+  });
+
+  it('keeps accepting separator-bearing paths — the guard is not over-broad', () => {
+    // The rejection cases alone leave over-rejection mutants green: dropping
+    // the `$` from `/^[\\/]+$/` kills every absolute path, dropping the `^`
+    // kills every tab-completed trailing slash. Both shapes are valid
+    // targets and reach the child unchanged.
+    expect(buildReviewPrompt({ target: '/repo/src/foo.ts' })).toBe(
+      '/review /repo/src/foo.ts',
+    );
+    expect(buildReviewPrompt({ target: 'src/' })).toBe('/review src/');
   });
 
   it('rejects a target carrying quote characters', () => {
@@ -123,21 +181,147 @@ describe('newestArtifactSince', () => {
     ).toBeNull();
   });
 
-  it('returns the newest matching artifact from this run', () => {
+  it('returns the newest matching artifact from this run, mtime attached', () => {
     const start = Date.now() - 10_000;
     file('qwen-review-local-composed.json', start + 1_000);
     const newer = file('qwen-review-pr-9-composed.json', start + 5_000);
     file('unrelated.json', start + 9_000);
 
-    expect(
-      newestArtifactSince(dir, /^qwen-review-.*composed\.json$/, start),
-    ).toBe(newer);
+    const best = newestArtifactSince(
+      dir,
+      /^qwen-review-.*composed\.json$/,
+      start,
+    );
+    expect(best?.path).toBe(newer);
+    // The mtime rides along so the capture poll never re-stats the path —
+    // a second stat races the child's Step 9 sweep.
+    expect(Math.abs((best?.mtime ?? 0) - (start + 5_000))).toBeLessThan(1_000);
   });
 
   it('returns null when the directory does not exist', () => {
     expect(
       newestArtifactSince(join(dir, 'absent'), /composed/, Date.now()),
     ).toBeNull();
+  });
+});
+
+describe('target-pinned artifact patterns', () => {
+  it('classifies exactly as the child parser does — no second classifier', () => {
+    // The child names its artifacts after parse-args' verdict; a narrower
+    // local regex pinned patterns the child never writes and reported a
+    // completed (and posted) review as "no verdict was produced".
+    expect(classifyRunTarget('9014')).toEqual({ kind: 'pr', number: '9014' });
+    expect(classifyRunTarget('https://github.com/o/r/pull/9014')).toEqual({
+      kind: 'pr',
+      number: '9014',
+    });
+    // GitHub's Files-changed tab hands out /pull/<n>/files URLs:
+    expect(classifyRunTarget('https://github.com/o/r/pull/9014/files')).toEqual(
+      { kind: 'pr', number: '9014' },
+    );
+    // The parser normalizes pure integers via Number(), and the child writes
+    // `pr-42-…`, so the pin must be '42', never '0042':
+    expect(classifyRunTarget('0042')).toEqual({ kind: 'pr', number: '42' });
+    // The scheme and path are case-insensitive to the parser:
+    expect(classifyRunTarget('HTTPS://github.com/o/r/PULL/9014')).toEqual({
+      kind: 'pr',
+      number: '9014',
+    });
+    // A path that merely contains /pull/<n> is a FILE target to the parser,
+    // and the file identity is the skill's `{target}` token: the
+    // repo-relative path put through the CLI's own `safeTarget`
+    // normalization, NOT the basename. (This suite mocks child_process, so
+    // the git-backed canonicalisation falls back to the token as typed —
+    // the canonical-spelling equivalence is pinned in
+    // `run-classify.integration.test.ts`, which uses real git.)
+    expect(classifyRunTarget('docs/pull/42')).toEqual({
+      kind: 'file',
+      base: 'docs_pull_42',
+    });
+    expect(classifyRunTarget('src/foo.ts')).toEqual({
+      kind: 'file',
+      base: 'src_foo.ts',
+    });
+    // Root-level targets are unchanged — which is why the drift went
+    // unnoticed: every fixture used one.
+    expect(classifyRunTarget('foo.ts')).toEqual({
+      kind: 'file',
+      base: 'foo.ts',
+    });
+    // A tab-completed trailing separator must not produce an empty basename
+    // (an empty base pins `qwen-review--composed.json`, which no child
+    // artifact can carry — every such run would report "no verdict").
+    expect(classifyRunTarget('src/')).toEqual({ kind: 'file', base: 'src' });
+    expect(classifyRunTarget(undefined)).toEqual({ kind: 'local' });
+  });
+
+  it('pins each target class to its exact composed filename', () => {
+    // Two concurrent `review run`s share `.qwen/tmp`; the generic
+    // newest-composed scan republished the OTHER run's verdict on two of
+    // three live parallel reviews. Exact names, not shape heuristics.
+    const pr = composedPatternFor({ kind: 'pr', number: '9014' });
+    expect(pr.test('qwen-review-pr-9014-composed.json')).toBe(true);
+    expect(pr.test('qwen-review-pr-9013-composed.json')).toBe(false);
+    expect(pr.test('qwen-review-local-composed.json')).toBe(false);
+
+    const local = composedPatternFor({ kind: 'local' });
+    expect(local.test('qwen-review-local-composed.json')).toBe(true);
+    expect(local.test('qwen-review-pr-9013-composed.json')).toBe(false);
+    // A concurrent FILE run's artifact is not the local run's either:
+    expect(local.test('qwen-review-b.ts-composed.json')).toBe(false);
+
+    const file = composedPatternFor({ kind: 'file', base: 'b.ts' });
+    expect(file.test('qwen-review-b.ts-composed.json')).toBe(true);
+    expect(file.test('qwen-review-local-composed.json')).toBe(false);
+    // The dot is a literal, not a wildcard:
+    expect(file.test('qwen-review-bxts-composed.json')).toBe(false);
+  });
+
+  it('a pr-<digits>-named FILE target is not confused with a PR run', () => {
+    // A name-shape pin broke both directions here: the `(?!pr-\d+-)`
+    // lookahead rejected this file run's OWN artifact, and the PR branch's
+    // `.*` wildcard claimed it for `review run 42`.
+    const file = composedPatternFor({ kind: 'file', base: 'pr-42-notes.ts' });
+    expect(file.test('qwen-review-pr-42-notes.ts-composed.json')).toBe(true);
+
+    const pr = composedPatternFor({ kind: 'pr', number: '42' });
+    expect(pr.test('qwen-review-pr-42-notes.ts-composed.json')).toBe(false);
+    expect(pr.test('qwen-review-pr-42-composed.json')).toBe(true);
+  });
+
+  it('pins the saved report as far as its naming allows', () => {
+    const pr = reportPatternFor({ kind: 'pr', number: '9014' });
+    expect(pr.test('2026-08-13-071500-pr-9014.md')).toBe(true);
+    expect(pr.test('2026-08-13-162336-pr-9013.md')).toBe(false);
+    const local = reportPatternFor({ kind: 'local' });
+    expect(local.test('review.md')).toBe(true);
+    expect(local.test('2026-08-13-1622-pr-9045.md')).toBe(false);
+
+    // File reports carry the target token in the report stem's trailing
+    // slot — Step 8 names them from the capture's `target` field now, the
+    // same derivation this pattern builds from.
+    const file = reportPatternFor({ kind: 'file', base: 'foo.ts' });
+    expect(file.test('2026-08-13-101010-foo.ts.md')).toBe(true);
+    expect(file.test('2026-08-13-101010-bar.ts.md')).toBe(false);
+    // A subdirectory target: the pin and the instructed name must agree PAST
+    // the repo root — exactly where the pre-PR basename convention lost the
+    // Report: line for every file review of a nested path.
+    const nested = reportPatternFor({ kind: 'file', base: 'src_foo.ts' });
+    expect(nested.test('2026-08-22-120000-src_foo.ts.md')).toBe(true);
+    expect(nested.test('2026-08-22-120000-foo.ts.md')).toBe(false);
+    // A file literally named `pr-1234.md` claims its OWN report — the shape
+    // the local branch's PR exclusion would self-reject (`.md` not doubled).
+    const prNamed = reportPatternFor({ kind: 'file', base: 'pr-1234.md' });
+    expect(prNamed.test('2026-08-13-101010-pr-1234.md')).toBe(true);
+  });
+});
+
+describe('a decided stop counts as completed', () => {
+  it('exits 0 when the capture said there was nothing to review', () => {
+    // `compose-review` runs only in Step 6; both stops fire in Step 1, so no
+    // composed verdict exists. Polling for the verdict alone reported
+    // "Review did not complete" over a round whose own output was decided.
+    expect(exitCodeFor(true, null, 'none')).toBe(0);
   });
 });
 
@@ -151,6 +335,17 @@ describe('exitCodeFor', () => {
     // An incomplete run is 1 even under --fail-on: "the tool broke" must never
     // read as "the review blocked".
     expect(exitCodeFor(false, 'REQUEST_CHANGES', 'request-changes')).toBe(1);
+  });
+
+  it('exits 0 on a decided stop round, whatever the ledger still holds', () => {
+    // A stop completes with `event: null` and no synthesised verdict: the
+    // ledger a stop renders is rewritten only by a cache-writing round, so a
+    // blocker fixed and committed stays `open` there — an exit code keyed on
+    // it was a failure no action cleared. The rendered list still names the
+    // entries; the gate waits for a composed verdict.
+    expect(exitCodeFor(true, null, 'request-changes')).toBe(0);
+    expect(exitCodeFor(true, null, 'none')).toBe(0);
+    expect(exitCodeFor(false, null, 'request-changes')).toBe(1);
   });
 });
 
@@ -202,6 +397,11 @@ describe('review run (handler)', () => {
   }
 
   beforeEach(() => {
+    // Pin POSIX semantics for the whole suite (restored in afterEach): these
+    // tests assert the process-group kill and POSIX paths, so pinning the
+    // platform keeps them green on a Windows runner without pretending to cover
+    // win32 — that path has its own test in killProcessGroup above.
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     dir = mkdtempSync(join(tmpdir(), 'run-handler-'));
     cwd = process.cwd();
     process.chdir(dir);
@@ -240,25 +440,44 @@ describe('review run (handler)', () => {
     });
   }
 
-  /** Child that "completes", writing (or not) a composed verdict first. */
+  /**
+   * The run id the handler under test published to its (mock) child — for
+   * fixture writes that happen OUTSIDE the spawn mock, after spawn ran.
+   * `readComposed` fences on it exactly as `readStopSidecar` always has.
+   */
+  function spawnedRunId(): string {
+    const opts = spawnMock.mock.calls.at(-1)?.[2] as
+      | { env: NodeJS.ProcessEnv }
+      | undefined;
+    return String(opts?.env['QWEN_REVIEW_RUN_ID']);
+  }
+
+  /**
+   * Child that "completes", writing (or not) a composed verdict first —
+   * stamped with the run id the parent published into its env, exactly as
+   * compose-review stamps the artifact (readComposed fences on it).
+   */
   function armChild(exit: number, composed?: Record<string, unknown>): void {
-    spawnMock.mockImplementation(() => {
-      const child = new FakeChild();
-      setImmediate(() => {
-        if (composed) {
-          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-          mkdirSync(REVIEWS_DIR, { recursive: true });
-          writeFileSync(
-            join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
-            JSON.stringify(composed),
-            'utf8',
-          );
-          writeFileSync(join(REVIEWS_DIR, 'review.md'), '# report', 'utf8');
-        }
-        child.emit('close', exit);
-      });
-      return child;
-    });
+    spawnMock.mockImplementation(
+      (...args: [unknown, unknown, { env: NodeJS.ProcessEnv }]) => {
+        const runId = args[2].env['QWEN_REVIEW_RUN_ID'];
+        const child = new FakeChild();
+        setImmediate(() => {
+          if (composed) {
+            mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+            mkdirSync(REVIEWS_DIR, { recursive: true });
+            writeFileSync(
+              join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+              JSON.stringify({ runId, ...composed }),
+              'utf8',
+            );
+            writeFileSync(join(REVIEWS_DIR, 'review.md'), '# report', 'utf8');
+          }
+          child.emit('close', exit);
+        });
+        return child;
+      },
+    );
   }
 
   it('republishes the composed verdict and exits 0', async () => {
@@ -318,17 +537,23 @@ describe('review run (handler)', () => {
     // the verdict while the child still runs.
     vi.useFakeTimers();
     let child!: FakeChild;
-    spawnMock.mockImplementation(() => {
-      // Step 6: compose-review writes the composed verdict.
-      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-      writeFileSync(
-        join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
-        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
-        'utf8',
-      );
-      child = new FakeChild();
-      return child;
-    });
+    spawnMock.mockImplementation(
+      (...args: [unknown, unknown, { env: NodeJS.ProcessEnv }]) => {
+        // Step 6: compose-review writes the composed verdict.
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+          JSON.stringify({
+            runId: args[2].env['QWEN_REVIEW_RUN_ID'],
+            event: 'APPROVE',
+            verdictLine: 'Verdict: Approve',
+          }),
+          'utf8',
+        );
+        child = new FakeChild();
+        return child;
+      },
+    );
 
     const done = runHandler();
     // The capture poll snapshots the verdict while the child still runs...
@@ -345,6 +570,147 @@ describe('review run (handler)', () => {
     expect(result.event).toBe('APPROVE');
     expect(result.composedPath).toContain('qwen-review-local-composed.json');
     expect(process.exitCode).toBe(0);
+  });
+
+  it('ignores a concurrent run’s other-PR verdict and captures its own', async () => {
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(() => {
+      // A NEIGHBOUR review composes first — the shape that made two of three
+      // live parallel runs republish the wrong PR's verdict.
+      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      writeFileSync(
+        join(REVIEW_TMP_DIR, 'qwen-review-pr-9013-composed.json'),
+        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
+        'utf8',
+      );
+      // Strictly NEWER than this run's own verdict, written below: with the
+      // neighbour older, an unpinned newest-composed scan would land on the
+      // right file anyway and the regression would pass this test.
+      utimesSync(
+        join(REVIEW_TMP_DIR, 'qwen-review-pr-9013-composed.json'),
+        Date.now() / 1000 + 60,
+        Date.now() / 1000 + 60,
+      );
+      // The neighbour's saved report exists too — and is newer than this
+      // run's own by the time the scan runs.
+      mkdirSync(REVIEWS_DIR, { recursive: true });
+      writeFileSync(
+        join(REVIEWS_DIR, '2026-08-13-071500-pr-9014.md'),
+        '# own report',
+        'utf8',
+      );
+      writeFileSync(
+        join(REVIEWS_DIR, '2026-08-13-162336-pr-9013.md'),
+        '# neighbour report',
+        'utf8',
+      );
+      // Force the neighbour's report strictly newer, so an unpinned
+      // newest-.md scan would deterministically pick the wrong one.
+      utimesSync(
+        join(REVIEWS_DIR, '2026-08-13-162336-pr-9013.md'),
+        Date.now() / 1000 + 60,
+        Date.now() / 1000 + 60,
+      );
+      child = new FakeChild();
+      return child;
+    });
+
+    const done = runHandler({ target: '9014' });
+    await vi.advanceTimersByTimeAsync(1_000);
+    // This run's own verdict lands later.
+    writeFileSync(
+      join(REVIEW_TMP_DIR, 'qwen-review-pr-9014-composed.json'),
+      JSON.stringify({
+        runId: spawnedRunId(),
+        event: 'COMMENT',
+        verdictLine: 'Verdict: Comment',
+      }),
+      'utf8',
+    );
+    await vi.advanceTimersByTimeAsync(1_000);
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBe('COMMENT');
+    expect(result.composedPath).toContain('qwen-review-pr-9014-composed.json');
+    // The report scan is pinned the same way — the neighbour's newer report
+    // must not become this run's reportPath.
+    expect(result.reportPath).toContain('pr-9014.md');
+  });
+
+  it('republishes the newest recompose, not the first snapshot', async () => {
+    // A coverage re-check can recompose the verdict minutes after the first
+    // write (measured live); the first snapshot would republish a superseded
+    // verdict.
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(
+      (...args: [unknown, unknown, { env: NodeJS.ProcessEnv }]) => {
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        const path = join(REVIEW_TMP_DIR, 'qwen-review-pr-7-composed.json');
+        writeFileSync(
+          path,
+          JSON.stringify({
+            runId: args[2].env['QWEN_REVIEW_RUN_ID'],
+            event: 'APPROVE',
+            verdictLine: 'Verdict: Approve',
+          }),
+          'utf8',
+        );
+        utimesSync(path, Date.now() / 1000, Date.now() / 1000);
+        child = new FakeChild();
+        return child;
+      },
+    );
+
+    const done = runHandler({ target: '7' });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const path = join(REVIEW_TMP_DIR, 'qwen-review-pr-7-composed.json');
+    writeFileSync(
+      path,
+      JSON.stringify({
+        runId: spawnedRunId(),
+        event: 'REQUEST_CHANGES',
+        verdictLine: 'Verdict: Request changes',
+      }),
+      'utf8',
+    );
+    // A strictly newer mtime, independent of filesystem clock granularity.
+    utimesSync(path, Date.now() / 1000 + 60, Date.now() / 1000 + 60);
+    await vi.advanceTimersByTimeAsync(1_000);
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('names the artifact it waited for when no verdict appears', async () => {
+    // The pin is an exact-filename contract with the skill's naming
+    // template. When the two drift, Step 9 has already swept `.qwen/tmp` by
+    // the time anyone investigates — so the expectation has to be in the
+    // failure report itself, in both output modes.
+    armChild(0);
+    await runHandler({ target: '9014', json: false });
+
+    expect(outs.join('')).toContain(
+      'no composed verdict was produced (expected',
+    );
+    expect(outs.join('')).toContain('qwen-review-pr-9014-composed.json');
+    expect(process.exitCode).toBe(1);
+
+    outs.length = 0;
+    armChild(0);
+    await runHandler({ target: '9014' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.expectedComposedName).toBe(
+      'qwen-review-pr-9014-composed.json',
+    );
   });
 
   it('closes the child stdin so piped input cannot defeat slash detection', async () => {
@@ -374,6 +740,230 @@ describe('review run (handler)', () => {
     const i = argvUsed.indexOf('--approval-mode');
     expect(i).toBeGreaterThan(-1);
     expect(argvUsed[i + 1]).toBe('default');
+  });
+
+  it('passes --resume through to the child prompt', async () => {
+    // The argv→runReview mapping, at the handler level: buildReviewPrompt's
+    // own unit tests cannot see a dropped `resume: Boolean(argv['resume'])`
+    // line, and a run invoked with --resume that spawns a plain /review
+    // silently starts the review from scratch.
+    armChild(0, { event: 'APPROVE', verdictLine: 'Verdict: Approve' });
+    await runHandler({ target: '7724', resume: true });
+
+    const [, argvUsed] = spawnMock.mock.calls[0] as [string, string[]];
+    const prompt = argvUsed[argvUsed.indexOf('--prompt') + 1];
+    expect(prompt).toBe('/review 7724 --resume');
+  });
+
+  it('passes --resume through with no target — the child owns the gating', async () => {
+    // A guard like `args.resume && args.target` would ship the whole suite
+    // green while silently dropping the flag before the child can emit the
+    // documented "ignored because the target is not a PR" warning.
+    armChild(0, { event: 'APPROVE', verdictLine: 'Verdict: Approve' });
+    await runHandler({ resume: true });
+
+    const [, argvUsed] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(argvUsed[argvUsed.indexOf('--prompt') + 1]).toBe('/review --resume');
+  });
+
+  it('omits --resume from the child prompt when not asked', async () => {
+    armChild(0, { event: 'APPROVE', verdictLine: 'Verdict: Approve' });
+    await runHandler({ target: '7724', resume: false });
+
+    const [, argvUsed] = spawnMock.mock.calls[0] as [string, string[]];
+    const prompt = argvUsed[argvUsed.indexOf('--prompt') + 1];
+    expect(prompt).toBe('/review 7724');
+  });
+
+  describe('child env: QWEN_CODE_CLI version skew', () => {
+    let saved: string | undefined;
+
+    beforeEach(() => {
+      saved = process.env['QWEN_CODE_CLI'];
+    });
+
+    afterEach(() => {
+      if (saved === undefined) {
+        delete process.env['QWEN_CODE_CLI'];
+      } else {
+        process.env['QWEN_CODE_CLI'] = saved;
+      }
+    });
+
+    function childEnvValue(): string | undefined {
+      const [, , opts] = spawnMock.mock.calls[0] as [
+        string,
+        string[],
+        { env: NodeJS.ProcessEnv },
+      ];
+      return opts.env['QWEN_CODE_CLI'];
+    }
+
+    /** Pin argv[1] to a controlled entry — the value the child gets stamped. */
+    function asEntry(name: string, contents: string, mode: number): string {
+      const entry = join(dir, name);
+      writeFileSync(entry, contents, { mode });
+      return entry;
+    }
+
+    it('replaces an inherited entry that points at a DIFFERENT build', async () => {
+      // The dogfooded failure: a review launched from inside a parent Qwen
+      // session ran the parent's install for every skill subcommand.
+      const bundle = asEntry('cli.js', '#!/usr/bin/env node\n', 0o755);
+      const origArgv1 = process.argv[1];
+      process.argv[1] = bundle;
+      try {
+        process.env['QWEN_CODE_CLI'] = process.execPath; // real file, ≠ argv[1]
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
+
+        // Not '': the child cannot be relied on to re-stamp (see the bundle
+        // case below), so name the entry this command is about to re-enter.
+        expect(childEnvValue()).toBe(bundle);
+      } finally {
+        process.argv[1] = origArgv1;
+      }
+    });
+
+    it("stamps this build's entry when NOTHING was inherited", async () => {
+      // `node dist/cli.js review run <pr>`: cli.ts stamps a derived
+      // `../index.js`, which does not exist beside the bundle, so the slot
+      // arrives unset and the child — itself a bundle launch — does not stamp
+      // it either. Measured on PR #9113: `"${QWEN_CODE_CLI:-qwen}" review
+      // match-remote` reached an older global install off PATH and came back
+      // `Unknown arguments: owner, repo, host, match-remote`.
+      const bundle = asEntry('cli.js', '#!/usr/bin/env node\n', 0o755);
+      const origArgv1 = process.argv[1];
+      process.argv[1] = bundle;
+      try {
+        delete process.env['QWEN_CODE_CLI'];
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
+
+        expect(childEnvValue()).toBe(bundle);
+      } finally {
+        process.argv[1] = origArgv1;
+      }
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'keeps the bare-`qwen` fallback when a shell could not exec this build',
+      async () => {
+        // A stamp the consumer's spawn filter would blank is worse than none:
+        // `${QWEN_CODE_CLI:-qwen}` falls back on empty, but a set-and-unusable
+        // path dies on exit 126 for every subcommand in the review.
+        const bundle = asEntry('cli.js', 'const x = 1;\n', 0o644);
+        const origArgv1 = process.argv[1];
+        process.argv[1] = bundle;
+        try {
+          delete process.env['QWEN_CODE_CLI'];
+          armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+          await runHandler();
+
+          expect(childEnvValue()).toBe('');
+        } finally {
+          process.argv[1] = origArgv1;
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'writes the fallback for a tsx dev entry — a 0644 .ts is not execable',
+      async () => {
+        // `npm run dev -- review run <pr>`: under tsx, argv[1] is the
+        // source `index.ts` (mode 0644, shebang and all). An extension
+        // allowlist answered "usable" for it — every skill subcommand then
+        // died on exit 126 — where the positive-evidence gate sees a file a
+        // shell cannot exec and preserves the bare-`qwen` fallback.
+        const entry = asEntry('index.ts', '#!/usr/bin/env node\n', 0o644);
+        const origArgv1 = process.argv[1];
+        process.argv[1] = entry;
+        try {
+          delete process.env['QWEN_CODE_CLI'];
+          armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+          await runHandler();
+
+          expect(childEnvValue()).toBe('');
+        } finally {
+          process.argv[1] = origArgv1;
+        }
+      },
+    );
+
+    it('writes the fallback when argv[1] is a DIRECTORY', async () => {
+      // `node packages/cli` resolves argv[1] to the package DIRECTORY. A
+      // directory passes an X_OK probe (search permission) and carries no
+      // script extension, so only the regular-file check can refuse it —
+      // exec'ing it dies on exit 126 on every subcommand.
+      const pkgDir = join(dir, 'pkgdir');
+      mkdirSync(pkgDir);
+      const origArgv1 = process.argv[1];
+      process.argv[1] = pkgDir;
+      try {
+        delete process.env['QWEN_CODE_CLI'];
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
+
+        expect(childEnvValue()).toBe('');
+      } finally {
+        process.argv[1] = origArgv1;
+      }
+    });
+
+    it('preserves an inherited entry that IS this build', async () => {
+      // The outer-launcher case first-writer-wins exists for: an npm bin shim,
+      // cli-entry.js, or the desktop bundle stamping this same install.
+      process.env['QWEN_CODE_CLI'] = process.argv[1] as string;
+      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+      await runHandler();
+
+      expect(childEnvValue()).toBe(process.argv[1]);
+    });
+
+    it('replaces an inherited entry that does not resolve', async () => {
+      const bundle = asEntry('cli.js', '#!/usr/bin/env node\n', 0o755);
+      const origArgv1 = process.argv[1];
+      process.argv[1] = bundle;
+      try {
+        process.env['QWEN_CODE_CLI'] = join(dir, 'no-such-qwen');
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
+
+        expect(childEnvValue()).toBe(bundle);
+      } finally {
+        process.argv[1] = origArgv1;
+      }
+    });
+
+    it('preserves a sibling entry in the same package root (npm layout)', async () => {
+      // cli-entry.js stamps itself but spawns cli.js: different files, same
+      // directory. An exact-file comparison would blank this valid stamp.
+      const bundle = join(dir, 'cli.js');
+      const wrapper = join(dir, 'cli-entry.js');
+      writeFileSync(bundle, '');
+      writeFileSync(wrapper, '');
+      const origArgv1 = process.argv[1];
+      process.argv[1] = bundle;
+      try {
+        process.env['QWEN_CODE_CLI'] = wrapper;
+        armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+        await runHandler();
+
+        expect(childEnvValue()).toBe(wrapper);
+      } finally {
+        process.argv[1] = origArgv1;
+      }
+    });
+
+    it('preserves an inherited entry that is a symlink to this build', async () => {
+      const shim = join(dir, 'qwen-shim');
+      symlinkSync(process.argv[1] as string, shim);
+      process.env['QWEN_CODE_CLI'] = shim;
+      armChild(0, { event: 'COMMENT', verdictLine: 'Verdict: Comment' });
+      await runHandler();
+
+      expect(childEnvValue()).toBe(shim);
+    });
   });
 
   it('treats a composed verdict without a string event as no verdict', async () => {
@@ -453,16 +1043,22 @@ describe('review run (handler)', () => {
     // records that the timer fired.
     vi.useFakeTimers();
     let child!: FakeChild;
-    spawnMock.mockImplementation(() => {
-      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-      writeFileSync(
-        join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
-        JSON.stringify({ event: 'APPROVE', verdictLine: 'Verdict: Approve' }),
-        'utf8',
-      );
-      child = new FakeChild();
-      return child;
-    });
+    spawnMock.mockImplementation(
+      (...args: [unknown, unknown, { env: NodeJS.ProcessEnv }]) => {
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+          JSON.stringify({
+            runId: args[2].env['QWEN_REVIEW_RUN_ID'],
+            event: 'APPROVE',
+            verdictLine: 'Verdict: Approve',
+          }),
+          'utf8',
+        );
+        child = new FakeChild();
+        return child;
+      },
+    );
 
     const done = runHandler({ 'timeout-minutes': 1 });
     // The capture poll snapshots the verdict while the child still runs...
@@ -612,5 +1208,430 @@ describe('review run (handler)', () => {
     const result = JSON.parse(outs.join(''));
     expect(result.timedOut).toBe(true);
     expect(process.exitCode).toBe(1);
+  });
+
+  it('keeps a stop verdict a concurrent run overwrote before the child exited', async () => {
+    // The stop sidecar is the shared per-target name, written with plain
+    // `writeFileSync` — no per-run component, no O_EXCL. A concurrent run of
+    // the same target truncated-overwrites it with its own runId stamp while
+    // this run's child still lives, and the single post-close read then saw
+    // the foreign stamp: the runId fence correctly refused it as THIS run's
+    // verdict but turned a round the capture decided into "Review did not
+    // complete" (exit 1). The window spans the whole child session, so no
+    // micro-timing is needed. The capture poll snapshots the sidecar in-run,
+    // the same protection the composed verdict gets.
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        // Step 1: the capture decides nothing to review and writes the stop
+        // sidecar, stamped by THIS run; the nothing-open ledger composes a
+        // no-event Comment.
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+          JSON.stringify({
+            reason: 'clean-tree',
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+          }),
+          'utf8',
+        );
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+          JSON.stringify({
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            event: 'COMMENT',
+            verdictLine: 'Verdict: Comment',
+          }),
+          'utf8',
+        );
+        child = new FakeChild();
+        return child;
+      },
+    );
+
+    const done = runHandler();
+    // The capture poll snapshots the sidecar while the child still runs...
+    await vi.advanceTimersByTimeAsync(1_000);
+    // ...then a concurrent run of the same target stamps the shared sidecar
+    // its own before the child exits.
+    writeFileSync(
+      join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+      JSON.stringify({
+        reason: 'scope-emptied',
+        runId: 'another-run',
+      }),
+      'utf8',
+    );
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBe('COMMENT');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('keeps a stop verdict a same-stem cleanup swept before the child exited', async () => {
+    // The sibling shape of the overwrite race: the sidecar sits under the
+    // same `qwen-review-<target>-` prefix the Step 9 cleanup sweep unlinks,
+    // and a same-stem full round can sweep it while the stop round's child
+    // is still alive. The in-run snapshot holds the verdict either way.
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+          JSON.stringify({
+            reason: 'clean-tree',
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+          }),
+          'utf8',
+        );
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+          JSON.stringify({
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            event: 'COMMENT',
+            verdictLine: 'Verdict: Comment',
+          }),
+          'utf8',
+        );
+        child = new FakeChild();
+        return child;
+      },
+    );
+
+    const done = runHandler();
+    await vi.advanceTimersByTimeAsync(1_000);
+    rmSync(join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'));
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBe('COMMENT');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('reads a stop written and closed BEFORE the first poll tick', async () => {
+    // The cleanup-before-first-poll window (human review on #9659): the PR
+    // stop path writes the sidecar and runs cleanup in the same breath, and
+    // the parent's first in-run poll is up to 250 ms away. cleanup now
+    // SPARES the current run's sidecar (pinned in cleanup.test), so the
+    // post-close fallback must be able to read the decision with ZERO timer
+    // advance — the existing race arms all advance 1000 ms first, which is
+    // exactly how this window went unpinned.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+          JSON.stringify({
+            reason: 'clean-tree',
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+          }),
+          'utf8',
+        );
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+          JSON.stringify({
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            event: 'COMMENT',
+            verdictLine: 'Verdict: Comment',
+          }),
+          'utf8',
+        );
+        // Close synchronously on the next microtask — before ANY timer.
+        queueMicrotask(() => child.emit('close', 0));
+        return child;
+      },
+    );
+
+    await runHandler();
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('gates a stop round through its COMPOSED verdict — the #9908 path', async () => {
+    // Step 1's stop branches now compose a real verdict when the ledger
+    // holds open Criticals (deduced dispositions on the incremental stops,
+    // judged on clean-tree). The parent needs no new plumbing: the composed
+    // artifact rides the same name a full round writes, so a standing
+    // blocker exits 3 under --fail-on and a cleared one comments to exit 0.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+            JSON.stringify({
+              reason: 'unchanged-since-last-round',
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+            JSON.stringify({
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+              event: 'REQUEST_CHANGES',
+              verdictLine: 'Verdict: Request changes — R1-1 still stands',
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBe('REQUEST_CHANGES');
+    expect(process.exitCode).toBe(3);
+  });
+
+  it('exits 0 under --fail-on for a nothing-open stop round that composed', async () => {
+    // Every decided stop composes a verdict now — a nothing-open ledger
+    // composes a no-event Comment (SKILL Step 1's stop branches) — so the
+    // composed artifact, not the sidecar alone, completes the round. The
+    // gate still fires only on a composed REQUEST_CHANGES.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+            JSON.stringify({
+              reason: 'clean-tree',
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+            JSON.stringify({
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+              event: 'COMMENT',
+              verdictLine: 'Verdict: Comment',
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBe('COMMENT');
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('exits 1 when a decided stop never composed a verdict — the refused re-rule', async () => {
+    // The consumption gap: a re-rule the compose gate refused leaves a stop
+    // sidecar with NO composed artifact while the cache ledger still holds
+    // its open Criticals. That shape must read as "no verdict" (exit 1),
+    // never exit 0 under --fail-on like a clean stop.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+            JSON.stringify({
+              reason: 'unchanged-since-last-round',
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.event).toBeNull();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('a PR stop exits 0 over the PR cache’s open Criticals — disclosed residual', async () => {
+    // The PR stops (up-to-date, empty-diff) write ONLY the stop sidecar —
+    // they consume no plan, so compose-review's stopReRule grant is
+    // unreachable there and no verdict composes: a gate-only re-run exits 0
+    // even when the PR cache still holds open Criticals. The capture stops
+    // compose a re-rule; this test pins the residual the exit-contract
+    // comment discloses (#9908 tracks the capture stops only).
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-pr-9014-stop.json'),
+            JSON.stringify({
+              reason: 'up-to-date',
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ target: '9014', 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBeNull();
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('refuses the sidecar-alone completion on a LOCAL target wearing a PR reason', async () => {
+    // The exemption above is keyed on the TARGET CLASS beside the reason
+    // string: capture-local stamps only the three decided reasons, so a
+    // local sidecar wearing `up-to-date` is a forged or drifted stamp —
+    // completing on it would let the local cache's open Criticals slip an
+    // exit 0 with no composed artifact at all.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+            JSON.stringify({
+              reason: 'up-to-date',
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.event).toBeNull();
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('reads an unstamped composed artifact as no verdict — the fence the sidecar has', async () => {
+    // A file at the composed name without this run's stamp is not this
+    // run's verdict: a child that skipped compose-review and wrote the
+    // artifact by hand — or a concurrent same-stem run's leftover inside
+    // the mtime window — must not decide this run's exit code.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+            JSON.stringify({
+              reason: 'unchanged-since-last-round',
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          // No runId stamp: the hand-written shape the fence exists for.
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-composed.json'),
+            JSON.stringify({
+              event: 'COMMENT',
+              verdictLine: 'Verdict: Comment',
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(false);
+    expect(result.event).toBeNull();
+    expect(process.exitCode).toBe(1);
+  });
+});
+
+describe('classifyRunTarget — a trailing backslash is a POSIX filename character', () => {
+  it('keeps the backslash: the child derivation never strips it', () => {
+    // The trim used to strip trailing backslashes too, but the child's
+    // `sourcePath` derivation (`repoRelativeOf` → `safeTarget`) never does,
+    // and on POSIX a backslash is an ordinary filename character: for a file
+    // literally named `notes\` the parent pinned `qwen-review-notes-…` while
+    // every child artifact carried `notes_` — the review ran (and with
+    // --comment posted) while the parent reported no verdict, every run, for
+    // that target. Only forward slashes are separators both sides strip.
+    expect(classifyRunTarget('notes\\')).toEqual({
+      kind: 'file',
+      base: 'notes_',
+    });
+    // A tab-completed trailing separator still classifies:
+    expect(classifyRunTarget('src/')).toEqual({ kind: 'file', base: 'src' });
   });
 });

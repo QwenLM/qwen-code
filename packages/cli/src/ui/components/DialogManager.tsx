@@ -31,6 +31,7 @@ import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
 import { ArenaStatusDialog } from './arena/ArenaStatusDialog.js';
 import { ApprovalModeDialog } from './ApprovalModeDialog.js';
 import { EffortDialog } from './EffortDialog.js';
+import { OutputStyleDialog } from './OutputStyleDialog.js';
 import { theme } from '../semantic-colors.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
@@ -272,6 +273,7 @@ export const DialogManager = ({
         isFastModelMode={uiState.isFastModelMode}
         isVoiceModelMode={uiState.isVoiceModelMode}
         isVisionModelMode={uiState.isVisionModelMode}
+        isCompactionModelMode={uiState.isCompactionModelMode}
         isImageModelMode={uiState.isImageModelMode}
         persistScope={uiState.modelDialogPersistScope}
         availableTerminalHeight={listDialogHeight}
@@ -357,6 +359,16 @@ export const DialogManager = ({
         <EffortDialog
           currentEffort={config.getReasoningEffort()}
           onSelect={uiActions.handleEffortSelect}
+        />
+      </Box>
+    );
+  }
+  if (uiState.isOutputStyleDialogOpen) {
+    return (
+      <Box flexDirection="column">
+        <OutputStyleDialog
+          currentStyleName={config.getOutputStyle()?.name}
+          onSelect={uiActions.handleOutputStyleSelect}
         />
       </Box>
     );

@@ -7,21 +7,26 @@
 import type { Content } from '@google/genai';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { Config } from '../config/config.js';
-import type { PermissionManager } from '../permissions/permission-manager.js';
+import { deriveConfig, type Config } from '../config/config.js';
+import type {
+  PermissionManager,
+  ToolRegistrationStatus,
+} from '../permissions/permission-manager.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
 } from '../permissions/types.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   assertRealProjectSkillPath,
+  getArchivedSkillsRoot,
   getProjectSkillsRoot,
   isProjectSkillPath,
   SKILL_FILE_NAME,
 } from '../skills/skill-paths.js';
+import { SKILL_NAME_PATTERN } from '../skills/types.js';
 
 export const SKILL_REVIEW_AGENT_NAME = 'managed-skill-extractor' as const;
 export const DEFAULT_AUTO_SKILL_MAX_TURNS = 8;
@@ -47,8 +52,10 @@ type SkillScopedPermissionManager = Pick<
   PermissionManager,
   | 'evaluate'
   | 'findMatchingDenyRule'
+  | 'getToolRegistrationStatus'
   | 'hasMatchingAskRule'
   | 'hasRelevantRules'
+  | 'isToolDisabledByCoreToolsAllowList'
   | 'isToolEnabled'
 >;
 
@@ -77,6 +84,21 @@ async function hasAutoSkillSource(filePath: string): Promise<boolean | null> {
   );
   if (!match) return false;
   return /^source:\s*auto-skill\s*$/m.test(match[1]);
+}
+
+async function isArchivedSkillDirectoryReserved(
+  filePath: string,
+  projectRoot: string,
+): Promise<boolean> {
+  const directoryName = path.basename(path.dirname(filePath));
+  try {
+    await fs.lstat(
+      path.join(getArchivedSkillsRoot(projectRoot), directoryName),
+    );
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
 }
 
 function isScopedTool(toolName: string): boolean {
@@ -137,7 +159,10 @@ async function evaluateScopedDecision(
       // For existing files, verify source: auto-skill is present.
       const sourceFlag = await hasAutoSkillSource(ctx.filePath);
       if (sourceFlag === null) {
-        // File does not exist yet — allow creation (path already validated above).
+        if (await isArchivedSkillDirectoryReserved(ctx.filePath, projectRoot)) {
+          return 'deny';
+        }
+        // File does not exist yet and the directory name is not archived.
         return 'allow';
       }
       return sourceFlag ? 'allow' : 'deny';
@@ -166,6 +191,9 @@ async function evaluateScopedDecision(
       try {
         await assertRealProjectSkillPath(ctx.filePath, projectRoot);
       } catch {
+        return 'deny';
+      }
+      if (await isArchivedSkillDirectoryReserved(ctx.filePath, projectRoot)) {
         return 'deny';
       }
       // ENOENT → file does not exist → allow creation.
@@ -231,12 +259,29 @@ export function createSkillScopedAgentConfig(
       if (basePm) return basePm.isToolEnabled(toolName);
       return true;
     },
+    async getToolRegistrationStatus(
+      toolName: string,
+    ): Promise<ToolRegistrationStatus> {
+      if (isScopedTool(toolName)) return 'registered';
+      if (basePm) {
+        return typeof basePm.getToolRegistrationStatus === 'function'
+          ? basePm.getToolRegistrationStatus(toolName)
+          : Promise.resolve('registered' as ToolRegistrationStatus);
+      }
+      return 'registered';
+    },
+    isToolDisabledByCoreToolsAllowList(toolName: string): boolean {
+      return (
+        (typeof basePm?.isToolDisabledByCoreToolsAllowList === 'function' &&
+          basePm.isToolDisabledByCoreToolsAllowList(toolName)) ||
+        false
+      );
+    },
   };
 
-  const scopedConfig = Object.create(config) as Config;
-  scopedConfig.getPermissionManager = () =>
-    scopedPm as unknown as PermissionManager;
-  return scopedConfig;
+  return deriveConfig(config, {
+    getPermissionManager: () => scopedPm as unknown as PermissionManager,
+  });
 }
 
 // Exported for tests so the `auto-skill-` prefix instruction stays asserted
@@ -282,13 +327,11 @@ function buildAgentHistory(history: Content[]): Content[] {
 }
 
 /**
- * Enumerate directories under the project skills root that contain a
- * SKILL.md. Returned names are the directory basenames (the same identifier
- * the agent uses when picking `.qwen/skills/<name>/SKILL.md`).
+ * Enumerate active project skill directory names.
  *
- * Best-effort: any read error (ENOENT, EACCES, ...) returns `[]` so a
- * temporarily-unreadable skills dir downgrades to "no enumeration" rather
- * than aborting the task. Exported for tests.
+ * Best-effort: an unreadable root contributes no names, so a temporary read
+ * failure downgrades enumeration rather than aborting the task. Exported for
+ * tests.
  */
 export async function listExistingSkillDirNames(
   projectRoot: string,
@@ -315,8 +358,32 @@ export async function listExistingSkillDirNames(
       // shouldn't reserve a name.
     }
   }
-  names.sort();
-  return names;
+  return names.sort();
+}
+
+async function listArchivedSkillDirNames(
+  projectRoot: string,
+): Promise<string[]> {
+  const names: string[] = [];
+  try {
+    const entries = await fs.readdir(getArchivedSkillsRoot(projectRoot), {
+      withFileTypes: true,
+    });
+    for (const entry of entries) {
+      // Apply the same charset guard the curator uses everywhere else so a
+      // crafted archived directory name carrying ANSI/control bytes cannot
+      // reach the task prompt verbatim.
+      if (
+        (entry.isDirectory() || entry.isSymbolicLink()) &&
+        SKILL_NAME_PATTERN.test(entry.name)
+      ) {
+        names.push(entry.name);
+      }
+    }
+  } catch {
+    // An unavailable archive contributes no reserved names.
+  }
+  return names.sort();
 }
 
 /**
@@ -330,17 +397,29 @@ export async function listExistingSkillDirNames(
  */
 export async function buildTaskPrompt(projectRoot: string): Promise<string> {
   const skillsRoot = getProjectSkillsRoot(projectRoot);
-  const existing = await listExistingSkillDirNames(projectRoot);
+  const [active, archived] = await Promise.all([
+    listExistingSkillDirNames(projectRoot),
+    listArchivedSkillDirNames(projectRoot),
+  ]);
   const existingLine =
-    existing.length === 0
+    active.length === 0 && archived.length === 0
       ? '(no skills exist yet — any name is available)'
-      : `Existing skill names (do NOT reuse for write_file; use \`edit\` if you want to update one of these): ${existing.join(', ')}`;
+      : [
+          active.length > 0
+            ? `Active skill directory names (use \`edit\` to update): ${active.join(', ')}`
+            : undefined,
+          archived.length > 0
+            ? `Archived skill directory names (do NOT reuse for write_file): ${archived.join(', ')}`
+            : undefined,
+        ]
+          .filter(Boolean)
+          .join('\n');
   return [
     `Project skills directory: \`${skillsRoot}\``,
     '',
     existingLine,
     '',
-    'Use `ls` and `read_file` to inspect existing skills before writing.',
+    'Use `read_file` to inspect the existing skill files listed above before writing.',
     'Use `write_file` to create a new skill, `edit` to update an existing auto-skill.',
     `New skills you create MUST live at \`.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/SKILL.md\` — the \`${AUTO_SKILL_DIR_PREFIX}\` directory prefix is mandatory so the project's .gitignore keeps auto-generated skills out of version control. Keep the frontmatter \`name:\` as the natural \`<name>\` (no prefix). The frontmatter MUST include 'source: auto-skill':`,
     '',
@@ -359,7 +438,9 @@ export async function runSkillReviewByAgent(params: {
   config: Config;
   projectRoot: string;
   history: Content[];
+  /** Per-call turn override; the shared memory setting is used otherwise. */
   maxTurns?: number;
+  /** Per-call timeout override; the shared memory setting is used otherwise. */
   timeoutMs?: number;
 }): Promise<SkillReviewExecutionResult> {
   const scopedConfig = createSkillScopedAgentConfig(
@@ -371,18 +452,16 @@ export async function runSkillReviewByAgent(params: {
     config: scopedConfig,
     taskPrompt: await buildTaskPrompt(params.projectRoot),
     systemPrompt: SKILL_REVIEW_SYSTEM_PROMPT,
-    maxTurns: params.maxTurns ?? DEFAULT_AUTO_SKILL_MAX_TURNS,
+    maxTurns:
+      params.maxTurns ??
+      params.config.getMemoryAgentMaxTurns() ??
+      DEFAULT_AUTO_SKILL_MAX_TURNS,
     maxTimeMinutes:
       params.timeoutMs !== undefined
         ? params.timeoutMs / 60_000
         : (params.config.getMemoryAgentTimeoutMinutes() ??
           DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000),
-    tools: [
-      ToolNames.READ_FILE,
-      ToolNames.LS,
-      ToolNames.WRITE_FILE,
-      ToolNames.EDIT,
-    ],
+    tools: [ToolNames.READ_FILE, ToolNames.WRITE_FILE, ToolNames.EDIT],
     extraHistory: buildAgentHistory(params.history),
   });
 

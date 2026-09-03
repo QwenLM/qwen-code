@@ -17,7 +17,8 @@ import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
 
 // Config
-import { ApprovalMode, type Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
 import { Storage } from '../config/storage.js';
@@ -48,16 +49,21 @@ import {
   getStopHookContinuationReason,
   GOAL_HOOK_ID_OUTPUT_KEY,
 } from '../goals/goalHook.js';
+import { applyPendingGoalProposal } from '../goals/goal-tools.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
-import { wrapUserPromptSubmitContext } from '../hooks/user-prompt-submit-context.js';
 import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
 import { createSessionStartProfiler } from './session-start-profiler.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
-import { GeminiChat } from './geminiChat.js';
+import {
+  LlmChat,
+  type RepairOrphanedToolUseOptions,
+  userContentPushSnapshotKey,
+} from './llm-chat.js';
+import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   assembleSystemPrompt,
@@ -66,24 +72,27 @@ import {
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
   resolveInteractionMode,
+  resolveMainSessionOutputStyle,
 } from './prompts.js';
+import { getOutputStyleTurnReminder } from './output-styles.js';
 import {
   CompressionStatus,
-  GeminiEventType,
+  LlmEventType,
   Turn,
   type ChatCompressionInfo,
-  type ServerGeminiStreamEvent,
+  type ServerLlmStreamEvent,
 } from './turn.js';
 
 // Services
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
-import { DEFAULT_AUTO_SKILL_MAX_TURNS } from '../memory/skillReviewAgentPlanner.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
 
@@ -95,7 +104,10 @@ import {
   startInteractionSpan,
   endInteractionSpan,
   getActiveInteractionSpan,
+  recordInteractionActivity,
+  addAgentInputMessageAttributes,
   addUserPromptAttributes,
+  AgentOutputMessageCapture,
   MemoryRecallDeliveryEvent,
 } from '../telemetry/index.js';
 import type {
@@ -103,12 +115,13 @@ import type {
   MemoryRecallDiscardReason,
 } from '../telemetry/types.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import type { UiTelemetryReplaySnapshot } from '../telemetry/uiTelemetry.js';
 
 // Forked agent cache
 import {
   saveCacheSafeParams,
   clearCacheSafeParams,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 
 // Utilities
 import {
@@ -116,11 +129,13 @@ import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
+  buildMcpServerInstructionsReminderFromEntries,
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  wrapSystemReminder,
   type AgentAvailabilityEntry,
-} from '../utils/environmentContext.js';
+} from './environmentContext.js';
 import {
   collectAvailableSkillEntries,
   type AvailableSkillEntry,
@@ -131,7 +146,11 @@ import {
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
-import { getErrorMessage } from '../utils/errors.js';
+import {
+  getErrorMessage,
+  getErrorType,
+  UnauthorizedError,
+} from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import {
   flatMapTextParts,
@@ -144,6 +163,7 @@ import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 
 // Hook types and utilities
 import {
@@ -163,6 +183,7 @@ import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
 const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
+const INITIAL_MEMORY_RECALL_WAIT_MS = 100;
 
 export enum SendMessageType {
   UserQuery = 'userQuery',
@@ -190,6 +211,8 @@ export interface SendMessageOptions {
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
+  /** A UserQuery running beside an active turn, without replacing its state. */
+  isConcurrentSideQuery?: boolean;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -249,16 +272,13 @@ function sameGoalPermit(
 }
 
 type ActiveGoalEventValue = Exclude<
-  Extract<
-    ServerGeminiStreamEvent,
-    { type: GeminiEventType.ActiveGoal }
-  >['value'],
+  Extract<ServerLlmStreamEvent, { type: LlmEventType.ActiveGoal }>['value'],
   null
 >;
 
 type GoalStateStreamEvent = Extract<
-  ServerGeminiStreamEvent,
-  { type: GeminiEventType.GoalState }
+  ServerLlmStreamEvent,
+  { type: LlmEventType.GoalState }
 >;
 
 function projectActiveGoal(
@@ -289,12 +309,21 @@ function sameActiveGoalProjection(
  * Lifecycle:
  *  1. Created on UserQuery/Cron — the recall promise fires immediately,
  *     `pendingMemoryPrefetch` is set to this handle.
- *  2. Consumed at either of two opportunistic points: a zero-wait
- *     `settledAt !== null` poll just before the UserQuery main request,
- *     or — if recall hadn't settled yet — on the first ToolResult turn.
+ *  2. Consumed at either of two points: a bounded wait just before the
+ *     UserQuery main request, or — if recall remains pending — on the first
+ *     ToolResult turn.
  *  3. Aborted-and-discarded by every cleanup path (resetChat,
  *     MaxSessionTurns, etc.) or replaced when a new UserQuery arrives.
  */
+/**
+ * Publication slot for recall's deterministic result, plus a one-shot
+ * listener for its arrival.
+ */
+type MemoryFastResultBox = {
+  current: RelevantAutoMemoryPromptResult | null;
+  onArrive?: () => void;
+};
+
 type MemoryPrefetchHandle = {
   promise: Promise<RelevantAutoMemoryPromptResult>;
   /** Set by promise.finally(). null until the promise settles. */
@@ -307,6 +336,19 @@ type MemoryPrefetchHandle = {
   terminalLogged: boolean;
   firedAt: number;
   controller: AbortController;
+  /**
+   * Deterministic result published by recall before it blocks on the model
+   * selector. A box rather than a plain field because recall can invoke the
+   * callback before this handle object exists.
+   *
+   * `onArrive` lets the bounded initial wait stop as soon as there is
+   * something to deliver, instead of always spending the whole budget.
+   */
+  fastResultRef: MemoryFastResultBox;
+  /** True after the fast result was injected — prevents double-inject and double-log. */
+  fastDelivered: boolean;
+  /** Paths injected by the fast phase, excluded from the later refined delivery. */
+  fastDeliveredPaths: Set<string>;
 };
 
 /** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
@@ -315,9 +357,55 @@ const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
   ToolNames.EDIT,
 ]);
 
-export class GeminiClient {
-  private chat?: GeminiChat;
+type MainSessionPromptConfig = Pick<
+  Config,
+  | 'getSystemPrompt'
+  | 'getModel'
+  | 'getOutputStyle'
+  | 'getExperimentalZedIntegration'
+  | 'getInputFormat'
+  | 'isInteractive'
+>;
+
+export function getMainSessionBaseSystemPrompt(
+  config: MainSessionPromptConfig,
+): string {
+  const overrideSystemPrompt = config.getSystemPrompt();
+  return overrideSystemPrompt
+    ? getCustomSystemPrompt(overrideSystemPrompt)
+    : getCoreSystemPrompt(
+        undefined,
+        config.getModel(),
+        undefined,
+        resolveInteractionMode(config),
+        // The prompt and the per-turn reminder must agree on which style is
+        // in force, so both read it from the same resolver rather than from
+        // `getOutputStyle()` directly — a prompt override carries no style
+        // section, and a session must not be reminded of one it lacks.
+        resolveMainSessionOutputStyle(config),
+      );
+}
+
+export class LlmClient {
+  private chat?: LlmChat;
   private initializedSessionId: string | undefined;
+  /**
+   * Open session-swap telemetry transaction, if any. See
+   * {@link beginTelemetrySwap} for the lifetime contract. Holds the undo for
+   * the replay the current swap's `initialize()` performed, armed by
+   * {@link armTelemetrySwapUndo} inside the replay branches.
+   */
+  private telemetrySwap?: {
+    /**
+     * The session the process was on when the transaction opened — the one
+     * a failed swap rolls back to. Captured at open time because
+     * `initializedSessionId` is unreliable by arm time: an earlier failed
+     * swap's abort clears it, and the next swap would then snapshot no
+     * outgoing bucket at all (#9844 review).
+     */
+    outgoingHint: string;
+    undo?: { sessionId: string; snapshot: UiTelemetryReplaySnapshot };
+  };
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
@@ -325,6 +413,10 @@ export class GeminiClient {
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
   private readonly settledSteerInputs = new WeakSet<SteerInput>();
+  private readonly interactionStartTypeByOwner = new WeakMap<
+    object,
+    SendMessageType
+  >();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -343,6 +435,9 @@ export class GeminiClient {
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
+  private announcedMcpServerInstructions = new Map<string, string>();
+  private pendingMcpServerInstructions = new Map<string, string>();
+  private warnedAboutUnreachableEagerTools = false;
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
   // set is seeded on the first drain from the current skills (the startup
@@ -370,7 +465,7 @@ export class GeminiClient {
     snapshotEntries: AvailableSkillEntry[],
   ): void {
     this.announcedSkillReminderKeys = new Set(
-      snapshotEntries.map(GeminiClient.skillEntryKey),
+      snapshotEntries.map(LlmClient.skillEntryKey),
     );
     this.skillRemindersInitialized = true;
   }
@@ -418,7 +513,11 @@ export class GeminiClient {
     this.loopDetector = new LoopDetectionService(config);
   }
 
-  async initialize(sessionStartSource?: SessionStartSource) {
+  async initialize(
+    sessionStartSource?: SessionStartSource,
+    signal?: AbortSignal,
+  ) {
+    signal?.throwIfAborted();
     const sessionId = this.config.getSessionId();
     this.lastPromptId = sessionId;
 
@@ -428,7 +527,36 @@ export class GeminiClient {
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
-    if (resumedSessionData) {
+    const restoreRuntime = this.config.getSessionRestoreRuntime?.();
+    if (restoreRuntime) {
+      this.armTelemetrySwapUndo(sessionId);
+      uiTelemetryService.resetSession(sessionId);
+      for (const event of restoreRuntime.uiTelemetryEvents) {
+        uiTelemetryService.addEvent(event, sessionId);
+      }
+      this.seedRecentCompletedToolNamesFromHistory(restoreRuntime.apiHistory);
+      await this.startChat(
+        restoreRuntime.apiHistory,
+        sessionStartSource ?? SessionStartSource.Resume,
+        signal,
+      );
+      this.restoreLoadedSkillsFromHistory(restoreRuntime.apiHistory);
+      const chat = this.getChat();
+      if (restoreRuntime.resumeTokenCounts) {
+        const counts = restoreRuntime.resumeTokenCounts;
+        uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
+        chat.seedResumeTokenCounts(
+          counts.promptTokenCount,
+          counts.outputTokenCount,
+          counts.isEstimated,
+        );
+      } else {
+        chat.setLastPromptTokenCount(
+          uiTelemetryService.getLastPromptTokenCount(),
+        );
+      }
+    } else if (resumedSessionData) {
+      this.armTelemetrySwapUndo(sessionId);
       const resumeTokenCounts = replayUiTelemetryFromConversation(
         resumedSessionData.conversation,
         this.config.getSessionId(),
@@ -442,7 +570,9 @@ export class GeminiClient {
       await this.startChat(
         resumedHistory,
         sessionStartSource ?? SessionStartSource.Resume,
+        signal,
       );
+      this.restoreLoadedSkillsFromHistory(resumedHistory);
       const chat = this.getChat();
       chat.rememberImagePayloads(
         resumedSessionData.conversation.messages.flatMap((record) =>
@@ -454,6 +584,7 @@ export class GeminiClient {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
           resumeTokenCounts.outputTokenCount,
+          resumeTokenCounts.isEstimated,
         );
       } else {
         chat.setLastPromptTokenCount(
@@ -465,12 +596,13 @@ export class GeminiClient {
       this.restoreAttributionFromSession(resumedSessionData.conversation);
     } else {
       if (sessionStartSource !== undefined) {
-        await this.startChat(undefined, sessionStartSource);
+        await this.startChat(undefined, sessionStartSource, signal);
       } else {
-        await this.startChat();
+        await this.startChat(undefined, undefined, signal);
       }
     }
 
+    signal?.throwIfAborted();
     this.initializedSessionId = sessionId;
 
     // Clean up stale tool result files from previous sessions (fire-and-forget)
@@ -507,11 +639,18 @@ export class GeminiClient {
     }
   }
 
+  private restoreLoadedSkillsFromHistory(history: Content[]): void {
+    const skillTool = this.config.getToolRegistry().getTool(ToolNames.SKILL) as
+      | { restoreLoadedSkillsFromHistory?: (history: Content[]) => void }
+      | undefined;
+    skillTool?.restoreLoadedSkillsFromHistory?.(history);
+  }
+
   async addHistory(content: Content) {
     this.getChat().addHistory(content);
   }
 
-  getChat(): GeminiChat {
+  getChat(): LlmChat {
     if (!this.chat) {
       throw new Error('Chat not initialized');
     }
@@ -524,6 +663,156 @@ export class GeminiClient {
 
   isInitialized(): boolean {
     return this.chat !== undefined;
+  }
+
+  /**
+   * Opens a session-swap telemetry transaction for the `/resume` / `/branch`
+   * hooks (#9833).
+   *
+   * Lifetime contract: one call per swap attempt, closed by exactly one
+   * {@link commitTelemetrySwap} (the UI swap committed — the replayed history
+   * now belongs to the session the user is on) or
+   * {@link abortTelemetrySwap} (the swap failed and core rolled back — put
+   * the usage aggregate back). The undo is armed lazily by
+   * {@link armTelemetrySwapUndo} inside `initialize()`'s replay branches, so
+   * it is scoped to the ONE replay this swap performs:
+   *
+   * - A replay outside any transaction (process-startup `Config.initialize()`,
+   *   ACP) arms nothing — there is no owning swap to settle it, and a
+   *   process-lived undo would let a much later failed swap restore a
+   *   process-start snapshot and wipe everything accrued since.
+   * - `initialize()` only replays when its private `initializedSessionId`
+   *   differs from the config session id. The hooks cannot see that fact, so
+   *   the snapshot is taken here, inside the replay decision, never keyed on
+   *   a caller's guess.
+   *
+   * Serialization: returns false WITHOUT opening when a transaction is
+   * already open. Callers MUST abort the swap attempt on a false return
+   * (the hooks surface "a session switch is already in progress"). Two
+   * concurrent swaps cannot share this single slot: the second open would
+   * no-op while both replays mutate the same aggregate, so the first swap's
+   * stale settlement would either no-op or restore its snapshot over the
+   * second swap's committed state — the double-count / split-brain this
+   * transaction exists to close. Nothing else serializes the swaps: the
+   * session picker fires them fire-and-forget and no input gate covers
+   * them, so this slot is the latch.
+   */
+  beginTelemetrySwap(): boolean {
+    if (this.telemetrySwap) {
+      if (debugLogger.isEnabled()) {
+        debugLogger.debug(
+          '[TELEMETRY_SWAP_BEGIN] rejected: a swap is already in progress',
+        );
+      }
+      return false;
+    }
+    // The hooks call this BEFORE config.startNewSession, so the config
+    // session id still names the session the process is on — capture it as
+    // the outgoing session now; initializedSessionId may already be stale
+    // or cleared by the time the undo arms.
+    this.telemetrySwap = { outgoingHint: this.config.getSessionId() };
+    return true;
+  }
+
+  /**
+   * The swap committed: drop the armed undo without restoring. The replayed
+   * history legitimately belongs to the session the user is now on, and a
+   * later failed swap must restore ITS OWN pre-swap snapshot, never this one.
+   * Safe to call with no transaction open (no-op).
+   */
+  commitTelemetrySwap(): void {
+    const undo = this.telemetrySwap?.undo;
+    this.telemetrySwap = undefined;
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_COMMIT] undo=${undo ? 'dropped' : 'none'} ` +
+          `incoming=${undo?.sessionId ?? 'n/a'}`,
+      );
+    }
+  }
+
+  /**
+   * The swap failed and core rolled back: restore the usage aggregate (and
+   * the two affected session buckets) to the state captured before this
+   * swap's replay. Overwrites rather than subtracts, so it stays correct
+   * when the rollback's own re-`initialize()` (the `/branch` and `/resume`
+   * paths) has already replayed something else on top.
+   *
+   * Also forgets `initializedSessionId` when it still names the abandoned
+   * INCOMING session: undoing the replay without forgetting it would make a
+   * retry early-return and never replay, permanently under-counting the
+   * session. The clear is an identity check, not the assumption that the
+   * undo always names the incoming session — when the swap's forward
+   * `initialize()` never ran (e.g. `/branch` fails between
+   * `startNewSession(fork)` and `initialize()`), the rollback's own
+   * re-initialize arms the undo with the PARENT's id and sets
+   * `initializedSessionId` to it. That session is live and correctly
+   * initialized; clearing it would make the next `initialize()` of the
+   * session the user is already on skip the early return and re-replay its
+   * stored telemetry on top of the live aggregate — a permanent
+   * double-count. The undo belongs to the outgoing session's own
+   * re-initialize exactly when `undo.sessionId` matches the begin-time
+   * `outgoingHint` (#9844 review).
+   *
+   * Safe to call with no transaction open or nothing armed (no-op). Returns
+   * whether an undo was applied.
+   */
+  abortTelemetrySwap(): boolean {
+    const swap = this.telemetrySwap;
+    this.telemetrySwap = undefined;
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_ABORT] undo=${swap?.undo ? 'applied' : 'none'} ` +
+          `incoming=${swap?.undo?.sessionId ?? 'n/a'} ` +
+          `outgoing=${swap?.undo?.snapshot.outgoingSessionId ?? 'n/a'}`,
+      );
+    }
+    if (!swap?.undo) return false;
+    uiTelemetryService.restoreFromReplaySnapshot(swap.undo.snapshot);
+    if (
+      swap.undo.sessionId !== swap.outgoingHint &&
+      this.initializedSessionId === swap.undo.sessionId
+    ) {
+      this.initializedSessionId = undefined;
+    }
+    return true;
+  }
+
+  /**
+   * Arms the undo for the replay the current `initialize()` call is about to
+   * perform. Called only by the replay branches; a fresh-start `initialize()`
+   * replays nothing, and an undo armed there would outlive the transaction.
+   *
+   * `??=` on the undo: within one swap only the FIRST replay's pre-state is
+   * the correct restore point — on the `/branch` rollback the re-initialize
+   * of the parent runs while the failed swap's undo is still outstanding.
+   * No-ops when no transaction is open (replay outside a swap).
+   *
+   * The snapshot also covers the session the process is currently on — the
+   * one a failed swap rolls back to. That is the transaction's
+   * `outgoingHint`, captured at open time, NOT `initializedSessionId`: an
+   * earlier failed swap's abort clears `initializedSessionId`, so keying on
+   * it would snapshot no outgoing bucket and the rollback's re-initialize
+   * would wipe the live session's never-persisted state. The `/branch`
+   * rollback re-initializes that session, and the re-initialize's
+   * `resetSession` wipes its live bucket — only what the transcript persists
+   * comes back (skill invocations never do), so the undo must put the
+   * captured bucket back.
+   */
+  private armTelemetrySwapUndo(sessionId: string): void {
+    if (!this.telemetrySwap || this.telemetrySwap.undo) return;
+    const outgoing =
+      this.telemetrySwap.outgoingHint ?? this.initializedSessionId;
+    this.telemetrySwap.undo = {
+      sessionId,
+      snapshot: uiTelemetryService.snapshotForReplay(sessionId, outgoing),
+    };
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_ARM] incoming=${sessionId} ` +
+          `outgoing=${outgoing ?? 'n/a'}`,
+      );
+    }
   }
 
   getHistory(curated: boolean = false): Content[] {
@@ -565,6 +854,58 @@ export class GeminiClient {
     return chat.getHistoryLength?.() ?? chat.getHistory().length;
   }
 
+  /**
+   * Applies a `propose_goal` approval at the true end of the turn that made it.
+   *
+   * Only when the model has stopped calling tools, and only in the turn
+   * that parked it (matched by prompt id): a proposal made mid-turn stays
+   * parked through the tool-result continuations, because creating the Goal
+   * earlier would leave those continuations without a permit. Tail
+   * continuations keep the proposal parked until their final boundary. An
+   * aborted turn drops the approval instead of starting a loop the user just
+   * cancelled; an abort during dispatch pauses the new Goal.
+   */
+  private async settlePendingGoalProposal(
+    turnEnded: boolean,
+    signal: AbortSignal,
+    loadGoalRuntime: (required: boolean) => Promise<GoalRuntime | undefined>,
+    turnKey: string,
+  ): Promise<void> {
+    const take = this.config.takePendingGoalProposal;
+    if (typeof take !== 'function') return;
+    if (!turnEnded && !signal.aborted) return;
+    const proposal = take.call(this.config, turnKey);
+    if (!proposal) return;
+    if (signal.aborted) return;
+    const runtime = await loadGoalRuntime(false);
+    if (!runtime) {
+      debugLogger.debug(
+        'Dropping an approved Goal proposal: the Goal runtime is unavailable',
+      );
+      return;
+    }
+    if (signal.aborted) return;
+    const result = await applyPendingGoalProposal(runtime, proposal);
+    if (signal.aborted && result.applied) {
+      try {
+        await runtime.dispatch({
+          action: 'pause',
+          expectedGoalId: result.goal.goalId,
+          expectedRevision: result.goal.revision,
+        });
+      } catch (error) {
+        debugLogger.warn(
+          'Failed to pause a Goal applied during cancellation',
+          error,
+        );
+      }
+      return;
+    }
+    if (!result.applied) {
+      debugLogger.debug(`Dropping an approved Goal proposal: ${result.reason}`);
+    }
+  }
+
   private getLastModelMessageText(): string | undefined {
     const chat = this.getChat();
     if (chat.getLastModelMessageText) {
@@ -590,7 +931,7 @@ export class GeminiClient {
   /**
    * Fire-and-forget StopFailure hook for loop-detection early returns.
    * Matches the detached pattern used by the CLI's API-error path
-   * (useGeminiStream.ts) — output and errors are ignored.
+   * (use-llm-stream.ts) — output and errors are ignored.
    */
   private fireLoopDetectedStopFailure(loopType: string | null): void {
     if (this.config.getDisableAllHooks()) return;
@@ -606,16 +947,26 @@ export class GeminiClient {
   /**
    * Walk-only accessor for the set of `functionResponse.id` strings in
    * raw history. Callers that only need the dedup id set (notably
-   * `useGeminiStream.handleCompletedTools`) MUST prefer this over
+   * `useLlmStream.handleCompletedTools`) MUST prefer this over
    * {@link getHistory}, which deep-clones the entire conversation via
    * `structuredClone` on every call. On long sessions with sizable
    * tool outputs the clone is a multi-millisecond hit on the React UI
    * thread; running it on every tool-completion batch caused visible
    * frame drops during streaming. See
-   * `GeminiChat.getHistoryFunctionResponseIds` for the implementation.
+   * `LlmChat.getHistoryFunctionResponseIds` for the implementation.
    */
   getHistoryFunctionResponseIds(): Set<string> {
     return this.getChat().getHistoryFunctionResponseIds();
+  }
+
+  /**
+   * Walk-only accessor for the handled tool-call id → (name, args)
+   * fingerprint map used by duplicate provider-id replay detection. Same
+   * no-clone rationale as {@link getHistoryFunctionResponseIds}. See
+   * `LlmChat.getHistoryToolCallFingerprints` for the implementation.
+   */
+  getHistoryToolCallFingerprints(): Map<string, string> {
+    return this.getChat().getHistoryToolCallFingerprints();
   }
 
   /**
@@ -664,7 +1015,7 @@ export class GeminiClient {
    * {@link stripOrphanedUserEntriesFromHistory}, which only handles trailing
    * `user` entries.
    *
-   * This `GeminiClient` method is the resume-path entry point — called once
+   * This `LlmClient` method is the resume-path entry point — called once
    * from {@link startChat} after the transcript loads, covering `--resume`
    * of a session that crashed between a partial-tool_use push and the
    * tool's eventual completion.
@@ -672,23 +1023,26 @@ export class GeminiClient {
    * The other two coverage points (Retry submit path after
    * `stripOrphanedUserEntriesFromHistory`, and the defensive pass at the
    * start of every UserQuery / Cron send) live one layer down inside
-   * `GeminiChat.sendMessageStream` and call the standalone
+   * `LlmChat.sendMessageStream` and call the standalone
    * `repairOrphanedToolUseTurns(history)` function directly — they don't
    * route through this wrapper. Anyone tracing the repair-pass coupling
    * between the client and chat layers should follow that path
    * separately rather than expect everything to funnel through here.
    *
    * Synthesizes an `error` `functionResponse`. The React tool scheduler
-   * (`useGeminiStream.handleCompletedTools`) MUST dedupe by `callId` against
+   * (`useLlmStream.handleCompletedTools`) MUST dedupe by `callId` against
    * the live history before submitting its own `tool_result` — otherwise a
    * late real result lands as a second `user[tool_result]` block (orphan
    * because the synthetic already consumed the matching `tool_use`).
    */
-  repairOrphanedToolUseTurnsInHistory(reason?: string): {
+  repairOrphanedToolUseTurnsInHistory(
+    reason?: string,
+    options?: RepairOrphanedToolUseOptions,
+  ): {
     injected: Array<{ callId: string; name: string }>;
     droppedDuplicates: Array<{ callId: string; name: string }>;
   } {
-    const result = this.getChat().repairOrphanedToolUseTurns(reason);
+    const result = this.getChat().repairOrphanedToolUseTurns(reason, options);
     if (result.injected.length > 0) {
       debugLogger.warn(
         `[REPAIR] Synthesized ${result.injected.length} functionResponse(s) ` +
@@ -749,18 +1103,31 @@ export class GeminiClient {
     this.forceFullIdeContext = true;
   }
 
-  async setTools(): Promise<void> {
+  async setTools(options: { skipHistoryReveal?: boolean } = {}): Promise<void> {
     if (!this.isInitialized()) {
       return;
     }
 
     const toolRegistry = this.config.getToolRegistry();
     await toolRegistry.warmAll();
-    const deferredTools = this.resolveDeferredToolsForReminder();
+    const deferredSummary = toolRegistry.getDeferredToolSummary();
+    // Progressive MCP discovery registers tools after a resumed chat has
+    // already been constructed. Re-scan the live history here so historical
+    // MCP calls reveal their newly registered schemas before declarations are
+    // refreshed. setTools() is shared by interactive and headless refreshes.
+    if (!options.skipHistoryReveal) {
+      this.revealDeferredToolsReferencedInHistory(deferredSummary, () =>
+        this.getHistoryShallow(),
+      );
+    }
+    const deferredTools = this.resolveDeferredToolsForReminder(deferredSummary);
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
     this.queueAddedMcpToolsReminder(deferredTools ?? []);
+    this.queueMcpServerInstructionsReminder(
+      toolRegistry.getMcpServerInstructions(),
+    );
     recordStartupEvent('gemini_tools_updated', {
       toolCount: toolDeclarations.length,
       deferredCount: deferredTools?.length ?? 0,
@@ -812,12 +1179,118 @@ export class GeminiClient {
     handle: MemoryPrefetchHandle,
     discardReason: MemoryRecallDiscardReason,
   ): void {
+    const result = handle.result ?? EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+    // A settled result whose every document the fast phase already injected
+    // was not lost, whatever ended the turn — most often a tool-free turn
+    // reaching `no_safe_delivery_point`. Reporting those under the
+    // cancellation reason would inflate the "memory never reached the model"
+    // bucket with turns that did get it, so apply the same rule the
+    // ToolResult consume point uses. A partial overlap still reports the
+    // cancellation reason: the documents outside `fastDeliveredPaths`
+    // genuinely had no delivery point.
+    const everyDocAlreadyDelivered =
+      result.selectedDocs.length > 0 &&
+      result.selectedDocs.every((doc) =>
+        handle.fastDeliveredPaths.has(doc.filePath),
+      );
     this.logMemoryPrefetchDelivery(
       handle,
       'discarded',
-      handle.result ?? EMPTY_RELEVANT_AUTO_MEMORY_RESULT,
-      discardReason,
+      result,
+      everyDocAlreadyDelivered ? 'already_delivered' : discardReason,
     );
+  }
+
+  /** @internal */
+  beginManagedAutoMemoryRecall(query: string, signal: AbortSignal): void {
+    if (
+      !this.config.isManagedMemoryAvailable() ||
+      !this.config.getManagedAutoMemoryEnabled()
+    ) {
+      return;
+    }
+
+    // A previous recall may still be pending (slow side-query, new user turn
+    // arrived before it settled). Abort it before installing the new handle so
+    // the orphan doesn't keep running indefinitely.
+    this.cancelPendingMemoryPrefetch('new_query');
+    const controller = new AbortController();
+    // Bridge the caller's signal into the prefetch controller so a user abort
+    // on the parent turn also terminates the recall side-query.
+    let prefetchAbortReason: MemoryRecallDiscardReason | null = null;
+    const onParentAbort = () => {
+      prefetchAbortReason = 'abort';
+      controller.abort();
+      this.cancelPendingMemoryPrefetch('abort');
+    };
+    if (signal.aborted) {
+      prefetchAbortReason = 'abort';
+      controller.abort();
+    } else {
+      signal.addEventListener('abort', onParentAbort, { once: true });
+    }
+    const fastResultRef: MemoryFastResultBox = { current: null };
+    const promise = this.config
+      .getMemoryManager()
+      .recall(this.config.getProjectRoot(), query, {
+        config: this.config,
+        excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+        recentTools: [...this.recentCompletedToolNames],
+        abortSignal: controller.signal,
+        onFastResult: (result) => {
+          fastResultRef.current = result;
+          fastResultRef.onArrive?.();
+        },
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          debugLogger.debug('Managed auto-memory recall prefetch aborted.');
+        } else {
+          debugLogger.warn(
+            'Managed auto-memory recall prefetch failed.',
+            error,
+          );
+        }
+        return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+      });
+    const handle: MemoryPrefetchHandle = {
+      promise,
+      settledAt: null,
+      result: null,
+      consumed: false,
+      terminalLogged: false,
+      firedAt: Date.now(),
+      controller,
+      fastResultRef,
+      fastDelivered: false,
+      fastDeliveredPaths: new Set<string>(),
+    };
+    void promise.then((result) => {
+      handle.result = result;
+    });
+    void promise.finally(() => {
+      handle.settledAt = Date.now();
+      signal.removeEventListener('abort', onParentAbort);
+    });
+    this.pendingMemoryPrefetch = handle;
+    if (prefetchAbortReason) {
+      this.cancelPendingMemoryPrefetch(prefetchAbortReason);
+    }
+  }
+
+  /** @internal */
+  consumeManagedAutoMemoryRecall(
+    deliveryPoint: 'initial' | 'tool_result',
+  ): Promise<RelevantAutoMemoryPromptResult | null> {
+    return this.tryConsumeMemoryPrefetch(
+      deliveryPoint,
+      deliveryPoint === 'initial' ? INITIAL_MEMORY_RECALL_WAIT_MS : 0,
+    );
+  }
+
+  /** @internal */
+  finishManagedAutoMemoryRecall(): void {
+    this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
   }
 
   private cancelPendingMemoryPrefetch(
@@ -834,37 +1307,146 @@ export class GeminiClient {
   }
 
   /**
-   * Atomically consume the pending prefetch if it has already settled.
-   * Returns the recall result (caller decides where to inject it in
-   * `requestToSend`), or `null` if there's nothing to consume yet.
+   * Atomically consume the pending prefetch, optionally waiting for a bounded
+   * initial-turn budget. Budget expiry leaves the recall running for the next
+   * safe delivery point.
    *
    * Centralises the consume-and-mark dance so the UserQuery and ToolResult
    * inject sites can't drift on the guard logic.
    */
   private async tryConsumeMemoryPrefetch(
     deliveryPoint: Exclude<MemoryRecallDeliveryPoint, 'discarded'>,
+    waitMs = 0,
   ): Promise<RelevantAutoMemoryPromptResult | null> {
     const handle = this.pendingMemoryPrefetch;
-    if (!handle || handle.settledAt === null || handle.consumed) {
+    if (!handle || handle.consumed) {
       return null;
     }
+
+    // `waitMs` is a ceiling, not a fixed cost. The wait ends on whichever
+    // comes first: recall settling, the deterministic result being published,
+    // cancellation, or the budget expiring.
+    //
+    // Ending on the fast result matters more than it looks. That result is
+    // published once recall has scanned the memory tree, which is milliseconds
+    // for an ordinary tree — while the model selector is a network round trip
+    // that this design already assumes will miss the budget. Spending the rest
+    // of the budget after the fast result is in hand therefore buys an
+    // outcome that almost never arrives, and charges every user turn for it.
+    // See `recall-scan-latency.test.ts` for the scan measurements.
+    //
+    // Consequence worth stating plainly, because the branch below reads as
+    // if it still arbitrated: on the initial turn, once the deterministic
+    // scorer matches anything, the fast result wins — the selector's speed is
+    // irrelevant. `onFastResult` is published before recall even issues the
+    // selector request, so `settledAt` is necessarily null when the wait ends
+    // on it. The settled-recall branch is reached at this point only when no
+    // fast result exists at all: no `Config`, or nothing matched
+    // lexically. That is deliberate, not incidental — a model side query does
+    // not complete inside this ceiling, so arbitrating between them would
+    // cost every turn the remainder of the budget to win a race that does not
+    // happen. The selector's judgement reaches the model at the ToolResult
+    // delivery point instead. Pinned by "delivers the fast result even when
+    // the selector settles inside the budget".
+    if (
+      handle.settledAt === null &&
+      handle.fastResultRef.current === null &&
+      waitMs > 0
+    ) {
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          handle.controller.signal.removeEventListener('abort', finish);
+          if (handle.fastResultRef.onArrive === finish) {
+            handle.fastResultRef.onArrive = undefined;
+          }
+          resolve();
+        };
+
+        const timer = setTimeout(finish, waitMs);
+        if (handle.controller.signal.aborted) {
+          finish();
+        } else {
+          handle.controller.signal.addEventListener('abort', finish, {
+            once: true,
+          });
+          handle.fastResultRef.onArrive = finish;
+          void handle.promise.then(finish, finish);
+        }
+      });
+    }
+
+    if (this.pendingMemoryPrefetch !== handle || handle.consumed) {
+      return null;
+    }
+
+    // Budget expired with the selector still in flight. Inject the
+    // deterministic result now rather than gambling on a later tool call:
+    // a turn that makes none has no safe delivery point at all. The handle
+    // stays pending so the model-selected result can still land later.
+    if (handle.settledAt === null) {
+      if (deliveryPoint !== 'initial' || handle.fastDelivered) {
+        return null;
+      }
+      const fast = handle.fastResultRef.current;
+      if (!fast?.prompt) {
+        return null;
+      }
+      handle.fastDelivered = true;
+      for (const doc of fast.selectedDocs) {
+        this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        handle.fastDeliveredPaths.add(doc.filePath);
+      }
+      logMemoryRecallDelivery(
+        this.config,
+        new MemoryRecallDeliveryEvent({
+          phase: 'fast',
+          delivery_point: 'initial',
+          strategy: fast.strategy,
+          docs_selected: fast.selectedDocs.length,
+          latency_ms: Date.now() - handle.firedAt,
+        }),
+      );
+      return fast;
+    }
+
     handle.consumed = true;
     this.pendingMemoryPrefetch = undefined;
     const result = await handle.promise; // already settled, returns immediately
-    if (result.prompt) {
-      for (const doc of result.selectedDocs) {
+    // Drop anything the fast phase already put in front of the model. Both
+    // results come from the same scan, so the selector never saw the fast
+    // documents as excluded and can legitimately re-select them.
+    const remainingDocs = result.selectedDocs.filter(
+      (doc) => !handle.fastDeliveredPaths.has(doc.filePath),
+    );
+    const deduped =
+      remainingDocs.length === result.selectedDocs.length
+        ? result
+        : {
+            ...result,
+            selectedDocs: remainingDocs,
+            prompt:
+              remainingDocs.length > 0
+                ? buildRelevantAutoMemoryPrompt(remainingDocs)
+                : '',
+          };
+
+    if (deduped.prompt) {
+      for (const doc of deduped.selectedDocs) {
         this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
       }
-      this.logMemoryPrefetchDelivery(handle, deliveryPoint, result);
+      this.logMemoryPrefetchDelivery(handle, deliveryPoint, deduped);
     } else {
       this.logMemoryPrefetchDelivery(
         handle,
         'discarded',
         result,
-        'no_relevant_results',
+        result.selectedDocs.length > 0
+          ? 'already_delivered'
+          : 'no_relevant_results',
       );
     }
-    return result;
+    return deduped;
   }
 
   async resetChat(): Promise<void> {
@@ -969,15 +1551,7 @@ export class GeminiClient {
   }
 
   private getMainSessionSystemInstruction(): string {
-    const overrideSystemPrompt = this.config.getSystemPrompt();
-    const base = overrideSystemPrompt
-      ? getCustomSystemPrompt(overrideSystemPrompt)
-      : getCoreSystemPrompt(
-          undefined,
-          this.config.getModel(),
-          undefined,
-          resolveInteractionMode(this.config),
-        );
+    const base = getMainSessionBaseSystemPrompt(this.config);
     const stableLayers = {
       base,
       contextFiles: this.config.getUserMemory(),
@@ -1028,7 +1602,7 @@ export class GeminiClient {
   /**
    * Re-prepend a fresh startup-context prelude after auto-compaction.
    *
-   * Auto-compaction runs in-place inside `GeminiChat.sendMessageStream`
+   * Auto-compaction runs in-place inside `LlmChat.sendMessageStream`
    * (`setHistory([summary, ack, ...kept])`) and does NOT route through
    * `tryCompressChat` → `startChat`, so — unlike manual `/compress` — the
    * startup prelude at history[0] is consumed into the summary and never
@@ -1128,6 +1702,54 @@ export class GeminiClient {
   }
 
   /**
+   * Reveals deferred tools referenced by function calls in existing history.
+   *
+   * On resume this runs once before startup reminders are built. It also runs
+   * from setTools() because progressive MCP discovery can register deferred
+   * tools only after the resumed chat and its initial declarations exist.
+   */
+  private revealDeferredToolsReferencedInHistory(
+    deferredSummary: readonly DeferredToolSummary[],
+    getHistory: () => readonly Content[] | undefined,
+  ): void {
+    const toolRegistry = this.config.getToolRegistry();
+    const deferredNames = new Set(
+      deferredSummary
+        .filter((tool) => !toolRegistry.isDeferredToolRevealed(tool.name))
+        .map((tool) => tool.name),
+    );
+    if (deferredNames.size === 0) {
+      return;
+    }
+
+    // Reading live history is O(history), so defer it until the registry proves
+    // there is at least one hidden deferred tool that could be matched.
+    const history = getHistory();
+    if (!history || history.length === 0) {
+      return;
+    }
+
+    const revealedNames: string[] = [];
+    for (const entry of history) {
+      for (const part of entry.parts ?? []) {
+        const callName = part.functionCall?.name;
+        if (callName && deferredNames.delete(callName)) {
+          toolRegistry.revealDeferredTool(callName);
+          revealedNames.push(callName);
+        }
+      }
+      if (deferredNames.size === 0) {
+        break;
+      }
+    }
+    if (revealedNames.length > 0) {
+      debugLogger.debug(
+        `[DEFERRED_TOOLS] revealed from history: ${revealedNames.join(', ')}`,
+      );
+    }
+  }
+
+  /**
    * Computes the deferred-tools list that should be announced through
    * user-role system reminders.
    *
@@ -1136,23 +1758,50 @@ export class GeminiClient {
    * backed deferred tools.
    *
    * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
-   * tool_search` or a deny rule), every deferred tool is eagerly revealed
-   * here so it lands in the declaration list. Skipping this would leave the
-   * tool both off the declarations AND off the deferred-summary list (since
-   * `undefined` is returned in that branch) — a silent disappearance that's
-   * harder to diagnose than seeing the tool name absent from `/mcp` output.
+   * tool_search` or a deny rule), deferred tools are eagerly revealed here so
+   * they land in the declaration list. Tools explicitly demoted by
+   * `tools.eager` stay hidden unless the history-reveal pass above already
+   * re-exposed one for a resumed session — that schema stays in the
+   * declarations, so it is not counted unreachable below. Skipping this for
+   * ordinary deferred tools would leave them both off the declarations AND
+   * off the deferred-summary list
+   * (since `undefined` is returned in that branch) — a silent disappearance.
    *
    * Returns `undefined` when ToolSearch is unavailable: reminders must not
-   * advertise tools the model has no way to load on demand.
+   * advertise tools the model has no way to load on demand. Tools held back
+   * by `tools.eager` in that state are unreachable for the session, which is
+   * warned about once per session.
    */
-  private resolveDeferredToolsForReminder(): DeferredToolSummary[] | undefined {
+  private resolveDeferredToolsForReminder(
+    deferredSummary: readonly DeferredToolSummary[],
+  ): DeferredToolSummary[] | undefined {
     const toolRegistry = this.config.getToolRegistry();
-    const deferredSummary = toolRegistry.getDeferredToolSummary();
     const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
     if (!toolSearchAvailable) {
       if (deferredSummary.length > 0) {
+        const withheld: string[] = [];
         for (const t of deferredSummary) {
+          if (toolRegistry.isPermissionDeferred(t.name)) {
+            // The history-reveal pass runs first at both call sites and
+            // re-exposes resume-referenced tools regardless of why they
+            // are deferred. Such a tool's schema IS in the declarations,
+            // so calling it unreachable would be false for this session.
+            if (!toolRegistry.isDeferredToolRevealed(t.name)) {
+              withheld.push(t.name);
+            }
+            continue;
+          }
           toolRegistry.revealDeferredTool(t.name);
+        }
+        if (withheld.length > 0 && !this.warnedAboutUnreachableEagerTools) {
+          this.warnedAboutUnreachableEagerTools = true;
+          // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
+          console.warn(
+            `tools.eager is holding back ${withheld.length} tool(s) in a session with no tool_search, ` +
+              `so nothing can load them on demand and they are unreachable until restart: ${withheld.join(', ')}. ` +
+              `Enable tools.toolSearch.enabled (and drop any tool_search deny rule) to keep them loadable, ` +
+              `list them in tools.eager to send their schemas upfront, or use permissions.deny if removal was the intent.`,
+          );
         }
       }
       return undefined;
@@ -1177,9 +1826,56 @@ export class GeminiClient {
     this.pendingRemovedMcpToolNames.clear();
   }
 
+  private rememberAnnouncedMcpServerInstructions(
+    instructions: ReadonlyMap<string, string>,
+  ): void {
+    this.announcedMcpServerInstructions = new Map(instructions);
+    this.pendingMcpServerInstructions.clear();
+  }
+
+  private queueMcpServerInstructionsReminder(
+    instructions: ReadonlyMap<string, string>,
+  ): void {
+    this.pendingMcpServerInstructions.clear();
+    for (const serverName of this.announcedMcpServerInstructions.keys()) {
+      if (!instructions.has(serverName)) {
+        this.announcedMcpServerInstructions.delete(serverName);
+      }
+    }
+    for (const [serverName, text] of instructions) {
+      if (
+        text.trim().length > 0 &&
+        this.announcedMcpServerInstructions.get(serverName) !== text
+      ) {
+        this.pendingMcpServerInstructions.set(serverName, text);
+      }
+    }
+  }
+
+  private drainPendingMcpServerInstructionsReminder(): void {
+    if (this.pendingMcpServerInstructions.size === 0) {
+      return;
+    }
+    const reminder = buildMcpServerInstructionsReminderFromEntries(
+      this.pendingMcpServerInstructions,
+    );
+    if (!reminder) {
+      return;
+    }
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [{ text: reminder }],
+    });
+    for (const [serverName, text] of this.pendingMcpServerInstructions) {
+      this.announcedMcpServerInstructions.set(serverName, text);
+    }
+    this.pendingMcpServerInstructions.clear();
+  }
+
   private queueAddedMcpToolsReminder(
     deferredTools: readonly DeferredToolSummary[],
   ): void {
+    const toolRegistry = this.config.getToolRegistry();
     const currentDeferredNames = new Set(
       deferredTools.map((tool) => tool.name),
     );
@@ -1192,7 +1888,7 @@ export class GeminiClient {
       }
     }
     for (const name of this.pendingRemovedMcpToolNames) {
-      if (currentMcpToolNames.has(name)) {
+      if (currentMcpToolNames.has(name) || toolRegistry.getTool(name)) {
         this.pendingRemovedMcpToolNames.delete(name);
       }
     }
@@ -1208,7 +1904,14 @@ export class GeminiClient {
       }
     }
     for (const name of this.announcedMcpToolNames) {
-      if (!currentMcpToolNames.has(name)) {
+      if (currentMcpToolNames.has(name)) {
+        continue;
+      }
+      // A revealed or newly-visible tool is absent from the deferred reminder
+      // summary but still present in the registry. Keep tracking it as
+      // model-visible so a later real disconnect can still be announced; only
+      // a tool actually removed from the registry is unavailable now.
+      if (!toolRegistry.getTool(name)) {
         this.pendingRemovedMcpToolNames.add(name);
       }
     }
@@ -1296,7 +1999,7 @@ export class GeminiClient {
       return;
     }
 
-    const currentKeys = new Set(entries.map(GeminiClient.skillEntryKey));
+    const currentKeys = new Set(entries.map(LlmClient.skillEntryKey));
     const wasInitialized = this.skillRemindersInitialized;
     const removedNames: string[] = [];
 
@@ -1338,7 +2041,7 @@ export class GeminiClient {
     // by coreToolScheduler above.
     const newEntries: AvailableSkillEntry[] = [];
     for (const entry of entries) {
-      const key = GeminiClient.skillEntryKey(entry);
+      const key = LlmClient.skillEntryKey(entry);
       if (this.announcedSkillReminderKeys.has(key)) {
         continue;
       }
@@ -1434,6 +2137,7 @@ export class GeminiClient {
 
   private async fireSessionStartHook(
     source: SessionStartSource,
+    signal?: AbortSignal,
   ): Promise<string | undefined> {
     const hookSystem = this.config.getHookSystem();
     if (
@@ -1445,13 +2149,23 @@ export class GeminiClient {
     }
 
     try {
-      const output = await hookSystem.fireSessionStartEvent(
-        source,
-        this.config.getModel() ?? '',
-        this.toPermissionMode(this.config.getApprovalMode()),
-      );
+      const output = signal
+        ? await hookSystem.fireSessionStartEvent(
+            source,
+            this.config.getModel() ?? '',
+            this.toPermissionMode(this.config.getApprovalMode()),
+            undefined,
+            signal,
+          )
+        : await hookSystem.fireSessionStartEvent(
+            source,
+            this.config.getModel() ?? '',
+            this.toPermissionMode(this.config.getApprovalMode()),
+          );
+      signal?.throwIfAborted();
       return output?.getAdditionalContext()?.trim() || undefined;
     } catch (err) {
+      signal?.throwIfAborted();
       this.config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
       return undefined;
     }
@@ -1462,7 +2176,9 @@ export class GeminiClient {
     sessionStartSource = extraHistory
       ? SessionStartSource.Resume
       : SessionStartSource.Startup,
-  ): Promise<GeminiChat> {
+    signal?: AbortSignal,
+  ): Promise<LlmChat> {
+    signal?.throwIfAborted();
     this.forceFullIdeContext = true;
     this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
@@ -1492,6 +2208,7 @@ export class GeminiClient {
       // calling us.
       const toolRegistry = this.config.getToolRegistry();
       await profiler.time('tool_registry_warm', () => toolRegistry.warmAll());
+      const deferredSummary = toolRegistry.getDeferredToolSummary();
       // Resume support: when a transcript contains prior calls to a deferred
       // tool, re-reveal that tool so `setTools()` below sends its schema in
       // the declaration list. Without this, the model sees history like
@@ -1500,21 +2217,10 @@ export class GeminiClient {
       // BEFORE `resolveDeferredToolsForReminder()` runs so the resumed tools
       // are correctly filtered out of the startup reminder built below.
       profiler.timeSync('resume_deferred_tool_reveal', () => {
-        if (extraHistory && extraHistory.length > 0) {
-          const deferredNames = new Set(
-            toolRegistry.getDeferredToolSummary().map((t) => t.name),
-          );
-          if (deferredNames.size > 0) {
-            for (const entry of extraHistory) {
-              for (const part of entry.parts ?? []) {
-                const callName = part.functionCall?.name;
-                if (callName && deferredNames.has(callName)) {
-                  toolRegistry.revealDeferredTool(callName);
-                }
-              }
-            }
-          }
-        }
+        this.revealDeferredToolsReferencedInHistory(
+          deferredSummary,
+          () => extraHistory,
+        );
       });
       // Budget-based deferred-tool preload runs BEFORE the deferred
       // reminder is resolved so preloaded tools are filtered out of the
@@ -1523,8 +2229,11 @@ export class GeminiClient {
         this.preloadDeferredToolsWithinBudget();
       });
       const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
-        const resolved = this.resolveDeferredToolsForReminder();
+        const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
         this.rememberAnnouncedDeferredTools(resolved);
+        this.rememberAnnouncedMcpServerInstructions(
+          toolRegistry.getMcpServerInstructions(),
+        );
         return resolved;
       });
       deferredReminderCount = deferredTools?.length ?? 0;
@@ -1545,7 +2254,7 @@ export class GeminiClient {
       const chat = profiler.timeSync(
         'gemini_chat_construct',
         () =>
-          new GeminiChat(
+          new LlmChat(
             this.config,
             {
               systemInstruction,
@@ -1572,12 +2281,20 @@ export class GeminiClient {
       // any pre-send code reading `chat.history` from seeing a malformed
       // shape.)
       profiler.timeSync('orphan_tool_use_repair', () => {
-        this.repairOrphanedToolUseTurnsInHistory();
+        const preserveCallIds =
+          (this.config.getPreserveRestorableAskUserQuestion?.() ??
+          this.config.getRestoreAskUserQuestion?.())
+            ? restorableAskUserQuestionCallIds(chat.peekLastHistoryEntry())
+            : undefined;
+        this.repairOrphanedToolUseTurnsInHistory(
+          undefined,
+          preserveCallIds ? { preserveCallIds } : undefined,
+        );
       });
 
       const sessionStartAdditionalContext = await profiler.time(
         'session_start_hook',
-        () => this.fireSessionStartHook(sessionStartSource),
+        () => this.fireSessionStartHook(sessionStartSource, signal),
       );
       this.lastSessionStartContext = sessionStartAdditionalContext;
       this.lastSessionStartSource = sessionStartAdditionalContext
@@ -1595,12 +2312,16 @@ export class GeminiClient {
 
       // setTools() intentionally keeps its own warmAll() guard, so this stage
       // overlaps with tool_registry_warm while preserving the startup path.
-      await profiler.time('set_tools', () => this.setTools());
+      await profiler.time('set_tools', () =>
+        this.setTools({ skipHistoryReveal: true }),
+      );
+      signal?.throwIfAborted();
 
       finishProfile(true);
       return this.chat;
     } catch (error) {
       finishProfile(false);
+      signal?.throwIfAborted();
       await reportError(
         error,
         'Error initializing chat session.',
@@ -1837,7 +2558,6 @@ export class GeminiClient {
           skillsModified: this.skillsModifiedInSession,
           enabled: autoSkillEnabled,
           threshold: AUTO_SKILL_THRESHOLD,
-          maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
@@ -2030,6 +2750,7 @@ export class GeminiClient {
       const m = mcResult.meta;
       const changed = m.tokensSaved > 0;
       if (changed) {
+        // setHistory conservatively clears loaded-skill tracking.
         const chat = this.getChat();
         chat.setHistory(mcResult.history);
         chat.reconcileImagePayloads?.(mcResult.history);
@@ -2040,12 +2761,21 @@ export class GeminiClient {
           m.pendingToolResultChars && m.pendingToolResultChars > 0
             ? ` (+${m.pendingToolResultChars} pending)`
             : '';
+        const virtualAfter =
+          (m.toolResultCharsAfter ?? 0) + (m.pendingToolResultChars ?? 0);
+        const targetNote =
+          m.toolResultsLowWatermark !== undefined
+            ? `, target ${m.toolResultsLowWatermark}` +
+              (virtualAfter > m.toolResultsLowWatermark
+                ? ' (soft-exceeded)'
+                : '')
+            : '';
         debugLogger.info(
           `[TOOL-RESULT MC] tool result chars ${m.toolResultCharsBefore} > ` +
             `${m.toolResultsTotalCharsThreshold}, cleared ${m.toolsCleared} ` +
             `tool result(s) (~${m.tokensSaved} tokens), history now ` +
-            `${m.toolResultCharsAfter}${pendingNote}, kept ${m.toolsKept} ` +
-            `tool result(s)`,
+            `${m.toolResultCharsAfter}${pendingNote}${targetNote}, kept ` +
+            `${m.toolsKept} tool result(s)`,
         );
       } else {
         debugLogger.info(
@@ -2069,8 +2799,59 @@ export class GeminiClient {
     prompt_id: string,
     options?: SendMessageOptions,
     turns: number = MAX_TURNS,
-  ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
+  ): AsyncGenerator<ServerLlmStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    const startsInteraction =
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Retry ||
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Notification ||
+      messageType === SendMessageType.Teammate ||
+      messageType === SendMessageType.Goal;
+    let interactionOwner = startsInteraction
+      ? undefined
+      : getActiveInteractionSpan(prompt_id);
+    if (interactionOwner) {
+      recordInteractionActivity(prompt_id, interactionOwner);
+    }
+    const agentOutput = new AgentOutputMessageCapture(this.config);
+    const endCurrentInteraction = (
+      status: 'ok' | 'error' | 'cancelled',
+      errorMessage?: string,
+      errorType?: string,
+    ) => {
+      if (
+        !interactionOwner ||
+        getActiveInteractionSpan(prompt_id) !== interactionOwner
+      ) {
+        return;
+      }
+      const interactionStartType =
+        this.interactionStartTypeByOwner.get(interactionOwner);
+      const ownsStructuredOutputContract =
+        interactionStartType === SendMessageType.UserQuery ||
+        interactionStartType === SendMessageType.Retry;
+      if (
+        status === 'ok' &&
+        ownsStructuredOutputContract &&
+        this.config.getJsonSchema?.()
+      ) {
+        endInteractionSpan('error', {
+          promptId: prompt_id,
+          errorMessage: 'model did not produce structured output',
+          errorType: 'structured_output_missing',
+        });
+        return;
+      }
+      if (status === 'ok') {
+        agentOutput.writeToSpan(interactionOwner);
+      }
+      endInteractionSpan(status, {
+        promptId: prompt_id,
+        ...(errorMessage ? { errorMessage } : {}),
+        ...(errorType ? { errorType } : {}),
+      });
+    };
     if (
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
@@ -2102,18 +2883,18 @@ export class GeminiClient {
       if (unsubscribeGoalState) return;
       unsubscribeGoalState = runtime.subscribe((value, cause) => {
         pendingGoalStateEvents.push({
-          type: GeminiEventType.GoalState,
+          type: LlmEventType.GoalState,
           value,
           ...(cause !== undefined ? { cause } : {}),
         });
       });
       pendingGoalStateEvents.push({
-        type: GeminiEventType.GoalState,
+        type: LlmEventType.GoalState,
         value: runtime.getSnapshot(),
       });
     };
-    const takePendingGoalEvents = (): ServerGeminiStreamEvent[] => {
-      const events: ServerGeminiStreamEvent[] = [];
+    const takePendingGoalEvents = (): ServerLlmStreamEvent[] => {
+      const events: ServerLlmStreamEvent[] = [];
       for (const stateEvent of pendingGoalStateEvents.splice(
         0,
         pendingGoalStateEvents.length,
@@ -2125,7 +2906,7 @@ export class GeminiClient {
           lastEmittedActiveGoal = nextActiveGoal;
           if (nextActiveGoal) {
             events.push({
-              type: GeminiEventType.ActiveGoal,
+              type: LlmEventType.ActiveGoal,
               value: nextActiveGoal,
             });
           }
@@ -2134,7 +2915,7 @@ export class GeminiClient {
         ) {
           lastEmittedActiveGoal = nextActiveGoal;
           events.push({
-            type: GeminiEventType.ActiveGoal,
+            type: LlmEventType.ActiveGoal,
             value: nextActiveGoal ?? null,
           });
         }
@@ -2214,21 +2995,32 @@ export class GeminiClient {
       return takePendingGoalEvents();
     };
     let strippedRetryEntries: Content[] = [];
-    // Snapshot of GeminiChat's user-content push counter, taken right after the
-    // strip. The Retry's re-submitted content is the first thing the send
-    // pushes, so if the counter advances at all that content landed.
-    let pushCountAfterStrip = 0;
     const currentPushCount = () =>
       this.getChat().getUserContentPushCount?.() ?? 0;
 
+    // Settle a carrier exactly once. With `pushCountBefore`, acceptance
+    // compares the user-content push counter against that snapshot — for
+    // the attached carrier the snapshot published by `GeminiChat`
+    // immediately before this send's own push, for the recursive
+    // continuations below the snapshot taken immediately before their
+    // send. Without it (`undefined`), the send provably never pushed its
+    // user content — blocked by a UserPromptSubmit hook, or any exit
+    // before the push site — so restore unconditionally instead of
+    // comparing the push counter: the counter is global, and a concurrent
+    // submission admitted in the meantime pushes its own content into the
+    // same counter, which would read as "accepted" for content THIS send
+    // never pushed.
     const settleSteerInput = (
       steerInput: SteerInput | undefined,
-      pushCountBefore: number,
+      pushCountBefore?: number,
     ) => {
       if (!steerInput || this.settledSteerInputs.has(steerInput)) return;
       this.settledSteerInputs.add(steerInput);
       try {
-        if (currentPushCount() > pushCountBefore) {
+        if (
+          pushCountBefore !== undefined &&
+          currentPushCount() > pushCountBefore
+        ) {
           steerInput.accept();
         } else {
           steerInput.restore();
@@ -2239,7 +3031,29 @@ export class GeminiClient {
     };
 
     const attachedSteerInput = options?.steerInput;
-    const attachedSteerPushCount = currentPushCount();
+    // Acceptance snapshot for the attached carrier: `GeminiChat` publishes
+    // the user-content push counter on the request array immediately
+    // before this send's history push (see `userContentPushSnapshotKey`
+    // in geminiChat.ts), so the comparison window around the push is
+    // empty. A client-side snapshot — even one retaken immediately before
+    // `turn.run` — would still cover the send-lock and `tryCompress`
+    // awaits inside `chat.sendMessageStream`, where a concurrently
+    // admitted send (e.g. /btw) can push and supply the observed counter
+    // growth for a send that then exits before its own push.
+    // `attachedSnapshotSource` is the array handed to `turn.run`; a send
+    // that exits before the publish never pushed, so it settles by
+    // unconditional restore. `pushInitiated` tracks whether the send ever
+    // reached `turn.run`; exits before it settle the same way.
+    let attachedSnapshotSource: readonly unknown[] | undefined;
+    const attachedPushSnapshot = (): number | undefined => {
+      const published = attachedSnapshotSource
+        ? (attachedSnapshotSource as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ]
+        : undefined;
+      return typeof published === 'number' ? published : undefined;
+    };
+    let pushInitiated = false;
 
     const restoreStrippedRetryEntries = () => {
       if (strippedRetryEntries.length === 0) {
@@ -2256,26 +3070,39 @@ export class GeminiClient {
       // grow" even after a successful push and duplicate the prompt. The counter
       // only advances on a push that survived (it's decremented if the push is
       // rolled back), so it is invariant under compression.
+      const pushCountBefore = attachedPushSnapshot();
       const pushCountNow = currentPushCount();
-      if (pushCountNow <= pushCountAfterStrip) {
+      if (pushCountBefore === undefined || pushCountNow <= pushCountBefore) {
         // Diagnostic: restoring means the send never pushed the re-submitted
         // content. If the counter were ever wrong, this line is the anchor for
         // a silent duplicate/loss.
         debugLogger.info('[Retry] restoring stripped orphan entries', {
           entries: strippedRetryEntries.length,
-          pushCountAfterStrip,
+          pushCountBefore,
           pushCountNow,
         });
         for (const entry of strippedRetryEntries) {
           this.getChat().addHistory(entry);
         }
       }
+      // Loaded-skill tracking was conservatively cleared by the strip
+      // above; restored bodies simply re-inject on their next invoke.
       strippedRetryEntries = [];
     };
 
+    if (
+      (messageType === SendMessageType.UserQuery &&
+        !options?.isConcurrentSideQuery) ||
+      messageType === SendMessageType.Retry
+    ) {
+      // A propose_goal approval is applied when its own turn ends. One still
+      // parked when a new user/retry chain starts belongs to a turn that ended
+      // without settling, so clear it before the replacement chain can exit.
+      this.config.takePendingGoalProposal?.();
+    }
+
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
-      pushCountAfterStrip = currentPushCount();
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -2285,14 +3112,42 @@ export class GeminiClient {
       // content's own pairing.
     }
 
-    // Set when the UserPromptSubmit hook injects additional context: the
-    // pre-injection prompt projection. Telemetry, memory recall, and chat
-    // recording must see the user's own text, not the augmented request.
-    let preInjectionPromptText: string | undefined;
-
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
+    const preHookUserPromptText =
+      messageType === SendMessageType.UserQuery
+        ? partToString(request)
+        : undefined;
+    if (startsInteraction) {
+      this.loopDetector.reset(prompt_id);
+      this.lastPromptId = prompt_id;
+      startInteractionSpan(this.config, {
+        promptId: prompt_id,
+        model: options?.modelOverride ?? this.config.getModel(),
+        messageType,
+      });
+      interactionOwner = getActiveInteractionSpan(prompt_id);
+      if (
+        interactionOwner &&
+        !this.interactionStartTypeByOwner.has(interactionOwner)
+      ) {
+        this.interactionStartTypeByOwner.set(interactionOwner, messageType);
+      }
+      if (
+        interactionOwner &&
+        messageType === SendMessageType.UserQuery &&
+        typeof options?.submittedPrompt === 'string'
+      ) {
+        addAgentInputMessageAttributes(
+          this.config,
+          interactionOwner,
+          options.submittedPrompt,
+        );
+      }
+    }
+    let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     let hooksEnabled: boolean;
     let messageBus: ReturnType<Config['getMessageBus']>;
+    let userPromptSubmitFailureMessage = 'UserPromptSubmit hook failed';
     try {
       hooksEnabled = !this.config.getDisableAllHooks();
       messageBus = this.config.getMessageBus();
@@ -2311,7 +3166,7 @@ export class GeminiClient {
         messageBus &&
         this.config.hasHooksForEvent('UserPromptSubmit')
       ) {
-        const promptText = partToString(request);
+        const promptText = preHookUserPromptText ?? partToString(request);
         const submittedPrompt =
           messageType === SendMessageType.UserQuery &&
           typeof options?.submittedPrompt === 'string' &&
@@ -2343,6 +3198,7 @@ export class GeminiClient {
           hookOutput?.shouldStopExecution()
         ) {
           if (goalPermit) {
+            userPromptSubmitFailureMessage = 'Goal turn finalization failed';
             const runtime = await loadGoalRuntime(true);
             if (!runtime || !goalTurnKey) {
               throw new Error('Goal turn admission is unavailable');
@@ -2356,18 +3212,38 @@ export class GeminiClient {
             await runtime.finishTurn(goalPermit);
             goalPermitReleased = true;
             closeGoalStateEvents();
+            endCurrentInteraction('cancelled');
             for (const goalEvent of takePendingGoalEvents()) {
               yield goalEvent;
             }
+          } else {
+            endCurrentInteraction('cancelled');
+          }
+          await this.settlePendingGoalProposal(
+            true,
+            signal,
+            async (required) => {
+              const runtime = await loadGoalRuntime(required);
+              if (runtime) bindGoalStateEvents(runtime);
+              return runtime;
+            },
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
           }
           yield {
-            type: GeminiEventType.UserPromptSubmitBlocked,
+            type: LlmEventType.UserPromptSubmitBlocked,
             value: {
               reason: hookOutput.getEffectiveReason(),
               originalPrompt: promptText,
             },
           };
-          settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+          // A blocked send never reaches the history push: settle the
+          // attached carrier by unconditional restore, never by the push
+          // counter (a concurrent push inside the hook window above would
+          // otherwise masquerade as this send's acceptance).
+          settleSteerInput(attachedSteerInput);
           return new Turn(this.getChat(), prompt_id);
         }
 
@@ -2385,13 +3261,34 @@ export class GeminiClient {
             ...requestArray,
             { text: wrapUserPromptSubmitContext(additionalContext) },
           ];
-          preInjectionPromptText = promptText;
+          if (messageType === SendMessageType.UserQuery) {
+            userPromptRecordPayload = {
+              displayText: submittedPrompt ?? promptText,
+              hookContext: additionalContext,
+            };
+          }
         }
       }
     } catch (error) {
+      endCurrentInteraction(
+        signal.aborted ? 'cancelled' : 'error',
+        signal.aborted ? undefined : userPromptSubmitFailureMessage,
+        signal.aborted ? undefined : getErrorType(error),
+      );
+      this.config.takePendingGoalProposal?.(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
+      // A hook failure (including an abort during the hook await) exits
+      // before the settlement try/finally below, and this send provably
+      // never pushed: settle the attached carrier here by unconditional
+      // restore instead of leaving it to caller-side failure handling.
+      // Symmetric with the Goal-admission catch below: re-add any Retry
+      // orphan entries popped above (a no-op today — hooks never fire for
+      // Retry, the only type that populates the entries — but keeps this
+      // exit safe under future hook-scope changes).
+      restoreStrippedRetryEntries();
+      settleSteerInput(attachedSteerInput);
       throw error;
     }
 
@@ -2452,9 +3349,27 @@ export class GeminiClient {
       }
       if (goalRuntime) bindGoalStateEvents(goalRuntime);
     } catch (error) {
+      endCurrentInteraction(
+        signal.aborted ? 'cancelled' : 'error',
+        signal.aborted ? undefined : 'Goal turn admission failed',
+        signal.aborted ? undefined : getErrorType(error),
+      );
+      this.config.takePendingGoalProposal?.(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
+      // A Goal admission failure rethrows before the settlement
+      // try/finally below, and this send provably never pushed: settle the
+      // attached carrier here by unconditional restore, the same contract
+      // as the hook-failure catch above. Idempotently safe via the
+      // `settledSteerInputs` guard when the caller side settles too.
+      // Re-add the Retry orphan entries popped above first: this catch
+      // exits before the settlement try/finally holding the only other
+      // `restoreStrippedRetryEntries` call site, so without this the
+      // popped entries stay dropped from history while the restored
+      // carrier re-records debt against entries that no longer exist.
+      restoreStrippedRetryEntries();
+      settleSteerInput(attachedSteerInput);
       throw error;
     }
     const isGoalRuntimeTurn = goalOrigin === 'runtime';
@@ -2505,24 +3420,12 @@ export class GeminiClient {
       );
       this.activeAutomaticTodoWorkChainPromptIds.add(prompt_id);
     }
-    const isTopLevelInteraction =
-      messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.Cron ||
-      messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate;
     if (messageType === SendMessageType.Goal) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
     }
-    if (isTopLevelInteraction) {
-      this.loopDetector.reset(prompt_id);
-      this.lastPromptId = prompt_id;
-      startInteractionSpan(this.config, {
-        promptId: prompt_id,
-        model: options?.modelOverride ?? this.config.getModel(),
-        messageType,
-      });
-      const interactionSpan = getActiveInteractionSpan();
+    if (startsInteraction) {
+      const interactionSpan = interactionOwner;
       if (
         interactionSpan &&
         this.config.getTelemetryIncludeSensitiveSpanAttributes?.()
@@ -2532,11 +3435,10 @@ export class GeminiClient {
         addUserPromptAttributes(
           this.config,
           interactionSpan,
-          preInjectionPromptText ?? partToString(request),
+          preHookUserPromptText ?? partToString(request),
         );
       }
     }
-
     // Tracks whether the generator reached its natural end (the bottom-of-try
     // `return turn`). Only on that path do we want to preserve the pending
     // memory prefetch so the next ToolResult turn can consume it. Any other
@@ -2558,86 +3460,10 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        if (
-          this.config.isManagedMemoryAvailable() &&
-          this.config.getManagedAutoMemoryEnabled()
-        ) {
-          // A previous recall may still be pending (slow side-query, new user
-          // turn arrived before it settled). Abort it before installing the
-          // new handle so the orphan doesn't keep running indefinitely.
-          this.cancelPendingMemoryPrefetch('new_query');
-          const controller = new AbortController();
-          // Bridge the caller's signal into the prefetch controller so a user
-          // abort (Ctrl-C / Esc) on the parent turn also terminates the
-          // recall side-query. `{ once: true }` lets the listener clean itself
-          // up after firing; we still call removeEventListener on the promise's
-          // finally to cover the normal-completion case so a long-lived parent
-          // signal doesn't accumulate listeners across many turns.
-          let prefetchAbortReason: MemoryRecallDiscardReason | null = null;
-          const onParentAbort = () => {
-            prefetchAbortReason = 'abort';
-            controller.abort();
-            this.cancelPendingMemoryPrefetch('abort');
-          };
-          if (signal.aborted) {
-            prefetchAbortReason = 'abort';
-            controller.abort();
-          } else {
-            signal.addEventListener('abort', onParentAbort, { once: true });
-          }
-          const promise = this.config
-            .getMemoryManager()
-            .recall(
-              this.config.getProjectRoot(),
-              preInjectionPromptText ?? partToString(request),
-              {
-                config: this.config,
-                excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-                recentTools: [...this.recentCompletedToolNames],
-                abortSignal: controller.signal,
-              },
-            )
-            .catch((error: unknown) => {
-              // Abort sources are now numerous (caller signal, new UserQuery,
-              // cleanup paths, safety-net timeout). Keep a debug trace so
-              // operators can diagnose missing-memory scenarios without
-              // raising noise on the common abort path.
-              if (
-                error instanceof DOMException &&
-                error.name === 'AbortError'
-              ) {
-                debugLogger.debug(
-                  'Managed auto-memory recall prefetch aborted.',
-                );
-              } else {
-                debugLogger.warn(
-                  'Managed auto-memory recall prefetch failed.',
-                  error,
-                );
-              }
-              return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
-            });
-          const handle: MemoryPrefetchHandle = {
-            promise,
-            settledAt: null,
-            result: null,
-            consumed: false,
-            terminalLogged: false,
-            firedAt: Date.now(),
-            controller,
-          };
-          void promise.then((result) => {
-            handle.result = result;
-          });
-          void promise.finally(() => {
-            handle.settledAt = Date.now();
-            signal.removeEventListener('abort', onParentAbort);
-          });
-          this.pendingMemoryPrefetch = handle;
-          if (prefetchAbortReason) {
-            this.cancelPendingMemoryPrefetch(prefetchAbortReason);
-          }
-        }
+        this.beginManagedAutoMemoryRecall(
+          preHookUserPromptText ?? partToString(request),
+          signal,
+        );
 
         // Track prompt count for commit attribution. Only the user typing a
         // fresh prompt should bump the counter — `ToolResult` (tool-call
@@ -2661,16 +3487,15 @@ export class GeminiClient {
               goalPermit,
             );
         } else {
-          // Only pass the payload when a hook actually injected; omitting
-          // the third argument keeps existing two-arg spies/call sites
-          // exact (passing `undefined` would still count as a third arg).
-          const recordingService = this.config.getChatRecordingService();
-          if (recordingService && preInjectionPromptText !== undefined) {
-            recordingService.recordUserMessage(request, goalPermit, {
-              displayText: preInjectionPromptText,
-            });
-          } else if (recordingService) {
-            recordingService.recordUserMessage(request, goalPermit);
+          const recorder = this.config.getChatRecordingService();
+          if (userPromptRecordPayload) {
+            recorder?.recordUserMessage(
+              request,
+              goalPermit,
+              userPromptRecordPayload,
+            );
+          } else {
+            recorder?.recordUserMessage(request, goalPermit);
           }
         }
       }
@@ -2698,6 +3523,15 @@ export class GeminiClient {
         }
       }
 
+      // A runtime-scheduled Goal turn is not a session turn. `maxSessionTurns`
+      // counts every model call the user's own prompts drive, tool
+      // continuations included; a Goal that reads a few files per
+      // continuation would spend a user-set cap of N in N/4 continuations
+      // and die mid-run with no resume path in headless. Autonomous Goal
+      // spend is bounded by the Goal's own token budget instead (armed at
+      // creation, re-armed only by an explicit resume or edit), and the
+      // headless host excludes runtime Goal turns from the same cap for the
+      // same reason, so counting them here would split the two ceilings.
       if (messageType !== SendMessageType.Retry && !isGoalRuntimeTurn) {
         // Attribution snapshots are recorded on every non-retry turn. File
         // history snapshots are created only at UserQuery boundaries; later
@@ -2736,24 +3570,25 @@ export class GeminiClient {
           this.sessionTurnCount > this.config.getMaxSessionTurns()
         ) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-          yield { type: GeminiEventType.MaxSessionTurns };
-          if (isTopLevelInteraction)
-            endInteractionSpan('error', {
-              errorMessage: 'max session turns exceeded',
-            });
+          yield { type: LlmEventType.MaxSessionTurns };
+          endCurrentInteraction(
+            'error',
+            'max session turns exceeded',
+            'max_session_turns',
+          );
           return new Turn(this.getChat(), prompt_id);
         }
       }
 
-      // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
-      const boundedTurns =
-        messageType === SendMessageType.Goal
-          ? MAX_TURNS
-          : Math.min(turns, MAX_TURNS);
+      // Ensure turns never exceeds MAX_TURNS to prevent infinite loops. A
+      // runtime Goal turn honours the caller's budget like every other
+      // message type: each continuation is a fresh top-level send that
+      // starts from MAX_TURNS on its own, so nothing about a Goal needs to
+      // outlive one turn's recursion allowance.
+      const boundedTurns = Math.min(turns, MAX_TURNS);
       if (!boundedTurns) {
         this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-        if (isTopLevelInteraction)
-          endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
+        endCurrentInteraction('error', 'max turns exhausted', 'max_turns');
         return new Turn(this.getChat(), prompt_id);
       }
 
@@ -2768,6 +3603,9 @@ export class GeminiClient {
         ) {
           return undefined;
         }
+        // Same ceiling as the session-turn check above, same exclusion: a
+        // runtime Goal turn does not count toward `maxSessionTurns`, so it
+        // must not be refused steer input on that count either.
         const maxSessionTurns = this.config.getMaxSessionTurns();
         if (
           !isGoalRuntimeTurn &&
@@ -2787,18 +3625,33 @@ export class GeminiClient {
         return steerInput;
       };
 
-      // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
+      // Auto-compaction happens inside LlmChat.sendMessageStream and surfaces
       // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
       // still calls tryCompressChat directly for the full reset (env refresh +
       // forceFullIdeContext flip).
+      const model = options?.modelOverride ?? this.config.getModel();
       const sessionTokenLimit = this.config.getSessionTokenLimit();
       if (sessionTokenLimit > 0) {
+        // An exact `\0` full-turn route selector resolves to its route before
+        // LlmChat.sendMessageStream stamps counts under it, so the gate
+        // must key the resolved route too — the raw selector key can never
+        // match a stamped count. Mirrors the resolution at the top of
+        // LlmChat.sendMessageStream (#9454).
+        const exactRoute = model.endsWith('\0')
+          ? await this.config
+              .getBaseLlmClient()
+              .resolveForModel(model.slice(0, -1), { failClosed: true })
+          : undefined;
+        const requestRouteKey = this.config.getModelRouteIdentity(
+          exactRoute ? exactRoute.model : model,
+          exactRoute?.contentGeneratorConfig,
+        );
         const lastPromptTokenCount =
-          uiTelemetryService.getLastPromptTokenCount();
+          this.getChat().getLastPromptTokenCount(requestRouteKey);
         if (lastPromptTokenCount > sessionTokenLimit) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield {
-            type: GeminiEventType.SessionTokenLimitExceeded,
+            type: LlmEventType.SessionTokenLimitExceeded,
             value: {
               currentTokens: lastPromptTokenCount,
               limit: sessionTokenLimit,
@@ -2807,10 +3660,11 @@ export class GeminiClient {
                 'Please start a new session or increase the sessionTokenLimit in your settings.json.',
             },
           };
-          if (isTopLevelInteraction)
-            endInteractionSpan('error', {
-              errorMessage: 'session token limit exceeded',
-            });
+          endCurrentInteraction(
+            'error',
+            'session token limit exceeded',
+            'session_token_limit',
+          );
           return new Turn(this.getChat(), prompt_id);
         }
       }
@@ -2856,7 +3710,7 @@ export class GeminiClient {
           );
           await arenaAgentClient.reportCancelled();
           this.cancelPendingMemoryPrefetch('abort');
-          if (isTopLevelInteraction) endInteractionSpan('cancelled');
+          endCurrentInteraction('cancelled');
           return new Turn(this.getChat(), prompt_id);
         }
       }
@@ -2866,6 +3720,14 @@ export class GeminiClient {
         (messageType === SendMessageType.UserQuery ||
           messageType === SendMessageType.Cron)
       ) {
+        try {
+          this.drainPendingMcpServerInstructionsReminder();
+        } catch (error) {
+          debugLogger.warn(
+            'drainPendingMcpServerInstructionsReminder failed',
+            error,
+          );
+        }
         try {
           this.drainPendingAddedMcpToolsReminder();
         } catch (error) {
@@ -2884,9 +3746,6 @@ export class GeminiClient {
       }
 
       const turn = new Turn(this.getChat(), prompt_id, goalPermit);
-
-      // Determine the model to use for this turn
-      const model = options?.modelOverride ?? this.config.getModel();
 
       // Assemble the outgoing request. IDE context is merged into the
       // user prompt's first text part, then on UserQuery / Cron turns
@@ -2952,14 +3811,20 @@ export class GeminiClient {
           }
         }
 
-        // Zero-wait poll: consume only if the prefetch has already settled.
-        // Done AFTER the async reminder setup above so recall settling during
-        // those awaits still gets caught here. (settledAt is set in
-        // promise.finally(); microtask ordering guarantees it's visible
-        // after any await prior to this point — flatMapTextParts above is
-        // the natural drain.) If still not settled, skip — the ToolResult
-        // inject point will retry on the next turn.
-        const userQueryMemory = await this.tryConsumeMemoryPrefetch('initial');
+        // Remind the model of the style its system prompt carries: the
+        // section sits in the cached prompt and fades over a long
+        // conversation without a nudge next to the newest user text.
+        const outputStyle = resolveMainSessionOutputStyle(this.config);
+        if (outputStyle) {
+          systemReminders.push(
+            wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),
+          );
+        }
+
+        const userQueryMemory =
+          messageType === SendMessageType.UserQuery
+            ? await this.consumeManagedAutoMemoryRecall('initial')
+            : await this.tryConsumeMemoryPrefetch('initial');
         if (userQueryMemory?.prompt) {
           // Unshift to the front of systemReminders: on a UserQuery turn
           // requestToSend leads with user text, so positioning memory at
@@ -3006,8 +3871,45 @@ export class GeminiClient {
       }
 
       if (messageType === SendMessageType.ToolResult) {
+        // Record executed tool results for stateful read tools (task_list)
+        // so the loop guards can distinguish productive re-polling — the
+        // shared task board changed between identical calls — from a stuck
+        // loop (issue #9450). A detection here (the result-aware global
+        // duplicate count) halts the turn exactly like the event-loop
+        // guards below.
+        for (const part of requestToSend) {
+          if (
+            typeof part !== 'object' ||
+            part === null ||
+            !('functionResponse' in part)
+          ) {
+            continue;
+          }
+          const functionResponseId = (part as Part).functionResponse?.id;
+          if (!functionResponseId) continue;
+          if (
+            this.loopDetector.recordToolResultByCallId(functionResponseId, [
+              part as Part,
+            ])
+          ) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
+            }
+            const loopType = this.loopDetector.getLastLoopType();
+            yield {
+              type: LlmEventType.LoopDetected,
+              ...(loopType && { value: { loopType } }),
+            };
+            await arenaAgentClient?.reportError('Loop detected');
+            this.lastApiCompletionTimestamp = Date.now();
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
+            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
+            return turn;
+          }
+        }
         const toolResultMemory =
-          await this.tryConsumeMemoryPrefetch('tool_result');
+          await this.consumeManagedAutoMemoryRecall('tool_result');
         if (toolResultMemory?.prompt) {
           // Append (not prepend): on a ToolResult turn, requestToSend leads
           // with functionResponse parts that must immediately follow the
@@ -3049,7 +3951,7 @@ export class GeminiClient {
         : getActiveGoal(this.config.getSessionId());
       if (activeGoalAtTurnStart) {
         yield {
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: activeGoalAtTurnStart,
         };
       }
@@ -3058,13 +3960,13 @@ export class GeminiClient {
       // Mutates `lastEmittedActiveGoal` when an event is returned.
       const maybeEmitActiveGoalChange = (
         nextActiveGoal: ActiveGoal | undefined,
-      ): ServerGeminiStreamEvent | undefined => {
+      ): ServerLlmStreamEvent | undefined => {
         if (activeGoalEquals(lastEmittedActiveGoal, nextActiveGoal)) {
           return undefined;
         }
         lastEmittedActiveGoal = nextActiveGoal;
         return {
-          type: GeminiEventType.ActiveGoal,
+          type: LlmEventType.ActiveGoal,
           value: nextActiveGoal ?? null,
         };
       };
@@ -3093,9 +3995,26 @@ export class GeminiClient {
             )
           : null;
 
+      // The acceptance snapshot for the attached carrier is published by
+      // `chat.sendMessageStream` on `requestToSend` immediately before the
+      // actual history push (see `userContentPushSnapshotKey`); a
+      // client-side snapshot taken here would still cover the send-lock
+      // and compression awaits between `turn.run` and that push.
+      attachedSnapshotSource = requestToSend;
+      pushInitiated = true;
+      agentOutput.beginResponse();
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       let steerInputSettled = false;
+      // callIds already fed to the loop guards this attempt. Mirrors the
+      // execution-side dedup (coreToolScheduler.dedupeRequestsByCallId / the
+      // interactive duplicate-call-id suppression), which collapses
+      // provider-duplicate emissions into one executed call and one result:
+      // feeding the guards once per call id keeps request counts and result
+      // evidence on the same population (main-session twin of the agent-core
+      // fix, issue #9450). Id-less requests are never deduped. Cleared on
+      // retry/fallback alongside the attempt's accumulated state.
+      const loopGuardFedCallIds = new Set<string>();
       try {
         for await (const event of resultStream) {
           if (!steerInputSettled) {
@@ -3105,18 +4024,28 @@ export class GeminiClient {
             // UI history) ensures the queued user message renders above the
             // model's reply.  The outer finally re-runs settleSteerInput
             // as a no-op thanks to the settledSteerInputs guard.
-            settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+            settleSteerInput(attachedSteerInput, attachedPushSnapshot());
             steerInputSettled = true;
           }
-          if (event.type === GeminiEventType.ToolCallRequest) {
+          if (event.type === LlmEventType.ToolCallRequest) {
             hasToolCalls = true;
           } else if (
-            event.type === GeminiEventType.Retry ||
-            event.type === GeminiEventType.ModelFallback
+            event.type === LlmEventType.Retry ||
+            event.type === LlmEventType.ModelFallback
           ) {
             hasToolCalls = false;
+            loopGuardFedCallIds.clear();
+            agentOutput.restartAttempt(
+              event.type === LlmEventType.Retry &&
+                event.isContinuation === true,
+            );
           }
-          if (messageDisplay && event.type === GeminiEventType.Content) {
+          if (event.type === LlmEventType.Content) {
+            agentOutput.appendText(event.value);
+          } else if (event.type === LlmEventType.Finished) {
+            agentOutput.observeFinishReason(event.value?.reason);
+          }
+          if (messageDisplay && event.type === LlmEventType.Content) {
             messageDisplay.addChunk(event.value);
           }
           if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
@@ -3125,11 +4054,28 @@ export class GeminiClient {
             didUpdateIdeContextState = true;
           }
 
+          // A provider-duplicate emission of an already-fed call id executes
+          // once (the schedulers collapse it), so feed the loop guards once —
+          // counting both emissions would leave the request counters one ahead
+          // of the executed result evidence and fail-safe-halt a productive
+          // stateful poller (issue #9450). The event itself still flows to
+          // consumers below; only the guard feed is deduped.
+          let duplicateLoopGuardRequest = false;
+          if (event.type === LlmEventType.ToolCallRequest) {
+            const fedCallId = event.value.callId;
+            if (fedCallId) {
+              duplicateLoopGuardRequest = loopGuardFedCallIds.has(fedCallId);
+              loopGuardFedCallIds.add(fedCallId);
+            }
+          }
+
           // Always-on safety checks (consecutive-identical tool-call guard,
           // shell inspection stagnation, and per-turn tool-call cap). These fire
           // before the skipLoopDetection gate so they cannot be bypassed by
           // configuration.
-          const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
+          const alwaysOnLoop =
+            !duplicateLoopGuardRequest &&
+            this.loopDetector.checkAlwaysOnSafeties(event);
           if (alwaysOnLoop) {
             // Drop every tool call collected before the guard fired so the run
             // halts here instead of spawning a continuation that re-trips it.
@@ -3143,15 +4089,14 @@ export class GeminiClient {
             }
             const loopType = this.loopDetector.getLastLoopType();
             yield {
-              type: GeminiEventType.LoopDetected,
+              type: LlmEventType.LoopDetected,
               ...(loopType && { value: { loopType } }),
             };
             if (arenaAgentClient) {
               await arenaAgentClient.reportError('Loop detected');
             }
             this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction)
-              endInteractionSpan('error', { errorMessage: 'loop detected' });
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
             this.fireLoopDetectedStopFailure(loopType);
             return turn;
@@ -3168,6 +4113,7 @@ export class GeminiClient {
           // relaxes the heuristics (see nonInteractiveCli.ts).
           const skipLoopDetection = this.config.getSkipLoopDetection();
           const heuristicLoop =
+            !duplicateLoopGuardRequest &&
             !skipLoopDetection &&
             this.loopDetector.addAndCheckHeuristicLoops(event);
           if (heuristicLoop) {
@@ -3176,15 +4122,14 @@ export class GeminiClient {
             }
             const loopType = this.loopDetector.getLastLoopType();
             yield {
-              type: GeminiEventType.LoopDetected,
+              type: LlmEventType.LoopDetected,
               ...(loopType && { value: { loopType } }),
             };
             if (arenaAgentClient) {
               await arenaAgentClient.reportError('Loop detected');
             }
             this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction)
-              endInteractionSpan('error', { errorMessage: 'loop detected' });
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
@@ -3193,14 +4138,14 @@ export class GeminiClient {
           }
           // Update arena status on Finished events — stats are derived
           // automatically from uiTelemetryService by the reporter.
-          if (arenaAgentClient && event.type === GeminiEventType.Finished) {
+          if (arenaAgentClient && event.type === LlmEventType.Finished) {
             await arenaAgentClient.updateStatus();
           }
 
           // Re-send a full IDE context blob on the next regular message — auto
           // compaction inside chat.sendMessageStream may have summarized away
           // the previous merged IDE context.
-          if (event.type === GeminiEventType.ChatCompressed) {
+          if (event.type === LlmEventType.ChatCompressed) {
             this.forceFullIdeContext = true;
             // Auto-compaction summarized away the startup prelude. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
@@ -3237,30 +4182,39 @@ export class GeminiClient {
             yield goalEvent;
           }
           if (
-            (event.type === GeminiEventType.UserCancelled && signal.aborted) ||
-            event.type === GeminiEventType.Error
+            (event.type === LlmEventType.UserCancelled && signal.aborted) ||
+            event.type === LlmEventType.Error
           ) {
             for (const goalEvent of await finalizeInterruptedGoalTurn()) {
               yield goalEvent;
             }
           }
           yield event;
-          if (event.type === GeminiEventType.Error) {
+          if (event.type === LlmEventType.Error) {
             this.forceFullIdeContext = true;
             if (arenaAgentClient) {
-              const errorMsg =
-                event.value instanceof Error
-                  ? event.value.message
-                  : 'Unknown error';
-              await arenaAgentClient.reportError(errorMsg);
+              const status = event.value.error?.status;
+              const arenaError =
+                status === 401 || status === 403
+                  ? 'Authentication failed'
+                  : status === 429
+                    ? 'Rate limit exceeded'
+                    : status !== undefined && status >= 500
+                      ? 'Provider service unavailable'
+                      : status !== undefined
+                        ? `API request failed (${status})`
+                        : 'Provider request failed';
+              try {
+                await arenaAgentClient.reportError(arenaError);
+              } catch {
+                this.config
+                  .getDebugLogger()
+                  .warn('Failed to report Arena provider error');
+              }
             }
             this.lastApiCompletionTimestamp = Date.now();
-            if (isTopLevelInteraction) {
-              // Sanitize: do not pass raw API error messages to span status
-              const errMsg =
-                event.value instanceof Error ? '[API error]' : 'unknown error';
-              endInteractionSpan('error', { errorMessage: errMsg });
-            }
+            // Sanitize: do not pass raw API error messages to span status.
+            endCurrentInteraction('error', 'unknown error', 'api_error');
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
@@ -3278,6 +4232,9 @@ export class GeminiClient {
         // a no-op.
         await messageDisplay?.finish();
       }
+      agentOutput.commitResponse(
+        hasToolCalls || turn.pendingToolCalls.length > 0,
+      );
       for (const goalEvent of signal.aborted
         ? await finalizeInterruptedGoalTurn()
         : takePendingGoalEvents()) {
@@ -3309,9 +4266,10 @@ export class GeminiClient {
           } finally {
             settleSteerInput(steerInput, pushCountBefore);
           }
-          if (isTopLevelInteraction)
-            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           hasToolCalls = steeredTurn.pendingToolCalls.length > 0;
+          if (!hasToolCalls) {
+            endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
           normalCompletion = true;
           return steeredTurn;
         }
@@ -3373,7 +4331,7 @@ export class GeminiClient {
           if (activeGoalEvent) {
             yield activeGoalEvent;
           }
-          if (isTopLevelInteraction) endInteractionSpan('cancelled');
+          endCurrentInteraction('cancelled');
           return turn;
         }
 
@@ -3386,7 +4344,7 @@ export class GeminiClient {
         // This should happen regardless of the hook's decision
         if (stopOutput?.systemMessage) {
           yield {
-            type: GeminiEventType.HookSystemMessage,
+            type: LlmEventType.HookSystemMessage,
             value: stopOutput.systemMessage,
           };
         }
@@ -3411,21 +4369,21 @@ export class GeminiClient {
               stopHookBlockingCap,
             );
             yield {
-              type: GeminiEventType.HookSystemMessage,
+              type: LlmEventType.HookSystemMessage,
               value: warning,
             };
             debugLogger.warn(warning);
             for (const goalEvent of await finalizeInterruptedGoalTurn()) {
               yield goalEvent;
             }
-            if (isTopLevelInteraction) endInteractionSpan('ok');
+            endCurrentInteraction('ok');
             return turn;
           } else {
             for (const goalEvent of takePendingGoalEvents()) {
               yield goalEvent;
             }
             yield {
-              type: GeminiEventType.StopHookLoop,
+              type: LlmEventType.StopHookLoop,
               value: {
                 iterationCount: currentIterationCount,
                 reasons: currentReasons,
@@ -3443,7 +4401,7 @@ export class GeminiClient {
               for (const goalEvent of await finalizeInterruptedGoalTurn()) {
                 yield goalEvent;
               }
-              if (isTopLevelInteraction) endInteractionSpan('cancelled');
+              endCurrentInteraction('cancelled');
               return turn;
             }
             const continueRequest: Part[] = [{ text: continueReason }];
@@ -3472,8 +4430,9 @@ export class GeminiClient {
             } finally {
               settleSteerInput(pendingSteer, pushCountBefore);
             }
-            if (isTopLevelInteraction) {
-              endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+            hasToolCalls = hookTurn.pendingToolCalls.length > 0;
+            if (!hasToolCalls) {
+              endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
             }
             normalCompletion = true;
             return hookTurn;
@@ -3494,7 +4453,7 @@ export class GeminiClient {
             if (activeGoalEvent) {
               yield activeGoalEvent;
             }
-            if (isTopLevelInteraction) endInteractionSpan('cancelled');
+            endCurrentInteraction('cancelled');
             return turn;
           }
 
@@ -3532,11 +4491,20 @@ export class GeminiClient {
               yield activeGoalEvent;
             }
             yield {
-              type: GeminiEventType.HookSystemMessage,
+              type: LlmEventType.HookSystemMessage,
               value: warning,
             };
             debugLogger.warn(warning);
-            if (isTopLevelInteraction) endInteractionSpan('ok');
+            await this.settlePendingGoalProposal(
+              true,
+              signal,
+              loadGoalRuntime,
+              prompt_id,
+            );
+            for (const goalEvent of takePendingGoalEvents()) {
+              yield goalEvent;
+            }
+            endCurrentInteraction('ok');
             return turn;
           }
 
@@ -3548,7 +4516,7 @@ export class GeminiClient {
           }
 
           yield {
-            type: GeminiEventType.StopHookLoop,
+            type: LlmEventType.StopHookLoop,
             value: {
               iterationCount: currentIterationCount,
               reasons: currentReasons,
@@ -3565,7 +4533,16 @@ export class GeminiClient {
           // these semantics (fresh DaemonToolLoopState per continuation).
           // Runaway protection is preserved: the cap still bounds each
           // iteration, and the chain itself is bounded by
-          // stopHookBlockingCap / MAX_GOAL_ITERATIONS.
+          // stopHookBlockingCap / MAX_GOAL_ITERATIONS. Those are the only
+          // Goal-specific bounds on this path (a user-set maxSessionTurns
+          // still cuts the chain: each hook hop is a plain send with no
+          // Goal permit, so it counts as a session turn): the legacy hook
+          // Goal recurses inside one sendMessageStream call, so the
+          // runtime's token budget (which meters continuations the Goal
+          // runtime schedules) never sees it, and the recursion budget is
+          // not decremented below because a 50-iteration chain with steer
+          // and next-speaker continues would otherwise exhaust MAX_TURNS
+          // before its own iteration cap.
           this.loopDetector.reset(prompt_id);
 
           const activeGoal = getActiveGoal(this.config.getSessionId());
@@ -3598,7 +4575,16 @@ export class GeminiClient {
               ? response.nonGoalBlockingStopReason || 'No reason provided'
               : continueReason;
           if (!continuationReasonAfterSteer && !pendingSteer) {
-            if (isTopLevelInteraction) endInteractionSpan('ok');
+            await this.settlePendingGoalProposal(
+              true,
+              signal,
+              loadGoalRuntime,
+              prompt_id,
+            );
+            for (const goalEvent of takePendingGoalEvents()) {
+              yield goalEvent;
+            }
+            endCurrentInteraction('ok');
             normalCompletion = true;
             return turn;
           }
@@ -3642,9 +4628,19 @@ export class GeminiClient {
           } finally {
             settleSteerInput(pendingSteer, pushCountBefore);
           }
-          if (isTopLevelInteraction)
-            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           hasToolCalls = hookTurn.pendingToolCalls.length > 0;
+          if (!hasToolCalls) {
+            endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
+          await this.settlePendingGoalProposal(
+            !hasToolCalls,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           // Preserve the pending prefetch: the inner Hook turn we just
           // yielded may have produced tool calls, and the caller's next
           // ToolResult turn still needs to consume the recall result.
@@ -3679,14 +4675,15 @@ export class GeminiClient {
         for (const goalEvent of takePendingGoalEvents()) {
           yield goalEvent;
         }
+        endCurrentInteraction('ok');
         normalCompletion = true;
         return turn;
       }
 
       if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
         // Save cache-safe params here — before any early return — so that
-        // background extract/dream agents calling getCacheSafeParams() always
-        // see the current turn's history regardless of which path exits below.
+        // background readers calling getCacheSafeParams(sessionId) can see the
+        // current turn's history regardless of which path exits below.
         try {
           const chat = this.getChat();
           const maxHistoryForCache = 40;
@@ -3702,6 +4699,7 @@ export class GeminiClient {
             chat.getGenerationConfig(),
             cachedHistory,
             this.config.getModel(),
+            this.config.getSessionId(),
           );
         } catch {
           // Best-effort — don't block the main flow
@@ -3714,7 +4712,16 @@ export class GeminiClient {
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
           }
-          if (isTopLevelInteraction) endInteractionSpan('ok');
+          await this.settlePendingGoalProposal(
+            true,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
+          endCurrentInteraction('ok');
           return turn;
         }
 
@@ -3758,9 +4765,19 @@ export class GeminiClient {
           } finally {
             settleSteerInput(pendingSteer, pushCountBefore);
           }
-          if (isTopLevelInteraction)
-            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           hasToolCalls = continueTurn.pendingToolCalls.length > 0;
+          if (!hasToolCalls) {
+            endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
+          await this.settlePendingGoalProposal(
+            !hasToolCalls,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           // Preserve the pending prefetch: same reasoning as the
           // `return hookTurn` site above — the recursive Hook turn may
           // have produced tool calls whose ToolResult turn still needs
@@ -3784,8 +4801,8 @@ export class GeminiClient {
         await arenaAgentClient.reportCancelled();
       }
 
-      if (isTopLevelInteraction) {
-        endInteractionSpan(signal?.aborted ? 'cancelled' : 'ok');
+      if (!hasToolCalls) {
+        endCurrentInteraction(signal?.aborted ? 'cancelled' : 'ok');
       }
       // Reached the bottom of the try — this turn ended cleanly. If the
       // model did not request tool calls, no future ToolResult will arrive
@@ -3793,8 +4810,14 @@ export class GeminiClient {
       // pending, preserve the handle so the next ToolResult turn can
       // consume it (the fire-and-forget design).
       if (!hasToolCalls) {
-        this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+        this.finishManagedAutoMemoryRecall();
       }
+      await this.settlePendingGoalProposal(
+        turn.pendingToolCalls.length === 0,
+        signal,
+        loadGoalRuntime,
+        prompt_id,
+      );
       for (const goalEvent of takePendingGoalEvents()) {
         yield goalEvent;
       }
@@ -3803,6 +4826,21 @@ export class GeminiClient {
     } catch (error) {
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
+      }
+      if (
+        error instanceof UnauthorizedError &&
+        messageType !== SendMessageType.Hook &&
+        messageType !== SendMessageType.Steer
+      ) {
+        try {
+          await this.config
+            .getArenaAgentClient()
+            ?.reportError('Authentication failed');
+        } catch {
+          this.config
+            .getDebugLogger()
+            .warn('Failed to report Arena authentication error');
+        }
       }
       throw error;
     } finally {
@@ -3817,7 +4855,17 @@ export class GeminiClient {
         await releaseGoalPermitOnInterruptedExit();
       }
       closeGoalStateEvents();
-      settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+      if (pushInitiated) {
+        // Snapshot published by the chat ⇒ compare against it; no snapshot
+        // ⇒ the send exited before its push site (no await between the
+        // publish and the push) and restores unconditionally.
+        settleSteerInput(attachedSteerInput, attachedPushSnapshot());
+      } else {
+        // Exited before `turn.run` (cancelled during the hook await, setup
+        // failure, ...): this send never pushed, so any counter comparison
+        // could be fooled by concurrent pushes.
+        settleSteerInput(attachedSteerInput);
+      }
       restoreStrippedRetryEntries();
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
       // exit the explicit finish() sites above didn't cover (an uncaught
@@ -3829,14 +4877,17 @@ export class GeminiClient {
       // `return turn`. Catches uncaught exceptions and guards against
       // future early-return sites that forget to call cancel.
       if (!normalCompletion) {
+        this.config.takePendingGoalProposal?.(prompt_id);
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );
       }
-      if (isTopLevelInteraction) {
-        endInteractionSpan(signal?.aborted ? 'cancelled' : 'error', {
-          errorMessage: 'unexpected exit',
-        });
+      if (!normalCompletion) {
+        endCurrentInteraction(
+          signal?.aborted ? 'cancelled' : 'error',
+          signal?.aborted ? undefined : 'unexpected exit',
+          signal?.aborted ? undefined : 'unexpected_exit',
+        );
       }
     }
   }
@@ -3949,7 +5000,7 @@ export class GeminiClient {
   }
 
   /**
-   * Wrapper around {@link GeminiChat.tryCompress} that restores main-session
+   * Wrapper around {@link LlmChat.tryCompress} that restores main-session
    * startup context after successful compaction and flips the IDE full-context
    * flag for the next regular message.
    */
@@ -3959,19 +5010,18 @@ export class GeminiClient {
     signal?: AbortSignal,
     customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
-    const model = this.config.getModel();
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
-    const info = await this.getChat().tryCompress(
+    const previousChat = this.getChat();
+    const info = await previousChat.tryCompress(
       prompt_id,
-      model,
       force,
       signal,
       customInstructions ? { customInstructions } : undefined,
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
-      const chat = this.getChat();
-      const compressedHistory = chat.getHistoryShallow?.() ?? chat.getHistory();
+      const compressedHistory =
+        previousChat.getHistoryShallow?.() ?? previousChat.getHistory();
       await this.startChat(compressedHistory, SessionStartSource.Compact);
       chat.copyImagePayloadsTo(this.getChat());
       if (
@@ -3986,13 +5036,16 @@ export class GeminiClient {
           previousSessionStartSource,
         );
       }
-      // startChat() creates a new GeminiChat without touching FileReadCache,
+      // startChat() creates a new LlmChat without touching FileReadCache,
       // so prior read_file results that were summarised away would still
       // resolve to the file_unchanged placeholder. Clear so post-compaction
       // Reads re-emit bytes the model can no longer see in history.
       debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
       this.config.getFileReadCache().clear();
-      this.getChat().setLastPromptTokenCount(info.newTokenCount);
+      this.getChat().setLastPromptTokenCount(
+        info.newTokenCount,
+        info.newTokenCountIsEstimated ?? true,
+      );
       // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context
       // that lived inside the previous user prompt.
@@ -4057,7 +5110,7 @@ export class GeminiClient {
 
   /**
    * Fast, rule-based compression without any LLM side-query.
-   * Delegates to {@link GeminiChat.compressFast} and handles post-compression
+   * Delegates to {@link LlmChat.compressFast} and handles post-compression
    * FileReadCache disarming.
    */
   async tryCompressChatFast(): Promise<ChatCompressionInfo> {
@@ -4078,3 +5131,6 @@ export class GeminiClient {
     return info;
   }
 }
+
+/** @deprecated Use `LlmClient`; retained until a future major release. */
+export { LlmClient as GeminiClient };

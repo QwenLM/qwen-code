@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as ClientLib from '@modelcontextprotocol/sdk/client/index.js';
-import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
+import * as ClientLib from '@modelcontextprotocol/client';
+import * as SdkClientStdioLib from '@modelcontextprotocol/client/stdio';
 import * as GenAiLib from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MCPServerConfig, type Config } from '../config/config.js';
@@ -21,8 +21,12 @@ import {
 import { SessionMcpView } from './session-mcp-view.js';
 import type { ToolRegistry } from './tool-registry.js';
 
-vi.mock('@modelcontextprotocol/sdk/client/index.js');
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js');
+vi.mock('@modelcontextprotocol/client', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@modelcontextprotocol/client')>();
+  return { ...actual, Client: vi.fn() };
+});
+vi.mock('@modelcontextprotocol/client/stdio');
 vi.mock('@google/genai');
 
 // F2 (#4175 follow-up — W134): mocked so per-test overrides can make
@@ -202,6 +206,345 @@ describe('McpTransportPool', () => {
       const snap = pool.getSnapshot();
       expect(snap.byName['srv'].entryCount).toBe(1);
       expect(snap.byName['srv'].entrySummary[0].refs).toBe(3);
+    });
+
+    it('refreshes one session metadata in place without mutating the shared snapshot', async () => {
+      const mocked = mockMcpSuccess({
+        toolNames: ['alpha', 'beta'],
+        promptNames: ['alpha', 'beta'],
+        resourceNames: ['file:///metadata'],
+      });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const initialConfig = {
+        command: 'node',
+        includeTools: ['alpha'],
+        trust: false,
+        alwaysLoadTools: false,
+      } as MCPServerConfig;
+      const registries = mkSessionRegistries();
+      const connection = await pool.acquire(
+        'srv',
+        initialConfig,
+        's1',
+        registries.tools,
+        registries.prompts,
+        registries.resources,
+      );
+      const registerTool = registries.tools.registerTool as ReturnType<
+        typeof vi.fn
+      >;
+      const removeTools = registries.tools.removeMcpToolsByServer as ReturnType<
+        typeof vi.fn
+      >;
+      const registerPrompt = registries.prompts.registerPrompt as ReturnType<
+        typeof vi.fn
+      >;
+      const removePrompts = registries.prompts
+        .removePromptsByServer as ReturnType<typeof vi.fn>;
+      const registerResource = registries.resources
+        .registerResource as ReturnType<typeof vi.fn>;
+      const removeResources = registries.resources
+        .removeResourcesByServer as ReturnType<typeof vi.fn>;
+      expect(registerTool).toHaveBeenCalledOnce();
+      expect(registerTool.mock.calls[0][0]).toMatchObject({
+        serverToolName: 'alpha',
+        trust: false,
+        alwaysLoad: false,
+      });
+      expect(connection.toolsSnapshot).toHaveLength(2);
+      expect(connection.toolsSnapshot.every((tool) => !tool.alwaysLoad)).toBe(
+        true,
+      );
+      expect(registerPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'alpha' }),
+      );
+      expect(registerResource).toHaveBeenCalledWith(
+        expect.objectContaining({ uri: 'file:///metadata' }),
+      );
+
+      registerTool.mockClear();
+      removeTools.mockClear();
+      registerPrompt.mockClear();
+      removePrompts.mockClear();
+      registerResource.mockClear();
+      removeResources.mockClear();
+      connection.updateConfig({
+        command: 'node',
+        includeTools: ['beta'],
+        trust: true,
+        alwaysLoadTools: true,
+      } as MCPServerConfig);
+
+      expect(mocked.connect).toHaveBeenCalledOnce();
+      expect(removeTools).toHaveBeenCalledOnce();
+      expect(registerTool).toHaveBeenCalledOnce();
+      expect(registerTool.mock.calls[0][0]).toMatchObject({
+        serverToolName: 'beta',
+        trust: true,
+        alwaysLoad: true,
+      });
+      expect(removePrompts).toHaveBeenCalledOnce();
+      expect(registerPrompt).toHaveBeenCalledOnce();
+      expect(registerPrompt).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'beta' }),
+      );
+      expect(removeResources).toHaveBeenCalledOnce();
+      expect(registerResource).toHaveBeenCalledOnce();
+      expect(connection.toolsSnapshot.every((tool) => !tool.alwaysLoad)).toBe(
+        true,
+      );
+
+      registerTool.mockClear();
+      removeTools.mockClear();
+      registerPrompt.mockClear();
+      removePrompts.mockClear();
+      registerResource.mockClear();
+      removeResources.mockClear();
+      connection.updateConfig({
+        command: 'node',
+        includeTools: ['beta(args)', 'beta'],
+        trust: true,
+        alwaysLoadTools: true,
+        excludeTools: [],
+      } as MCPServerConfig);
+      expect(removeTools).not.toHaveBeenCalled();
+      expect(registerTool).not.toHaveBeenCalled();
+      expect(removePrompts).not.toHaveBeenCalled();
+      expect(registerPrompt).not.toHaveBeenCalled();
+      expect(removeResources).not.toHaveBeenCalled();
+      expect(registerResource).not.toHaveBeenCalled();
+    });
+
+    it('projects different metadata for sessions sharing one transport', async () => {
+      const mocked = mockMcpSuccess({ toolNames: ['alpha', 'beta'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const firstRegistries = mkSessionRegistries();
+      const secondRegistries = mkSessionRegistries();
+      const first = await pool.acquire(
+        'srv',
+        {
+          command: 'node',
+          includeTools: ['alpha'],
+          trust: false,
+          alwaysLoadTools: false,
+        } as MCPServerConfig,
+        's1',
+        firstRegistries.tools,
+        firstRegistries.prompts,
+        firstRegistries.resources,
+      );
+      const second = await pool.acquire(
+        'srv',
+        {
+          command: 'node',
+          includeTools: ['beta'],
+          trust: true,
+          alwaysLoadTools: true,
+        } as MCPServerConfig,
+        's2',
+        secondRegistries.tools,
+        secondRegistries.prompts,
+        secondRegistries.resources,
+      );
+
+      expect(mocked.connect).toHaveBeenCalledOnce();
+      expect(first.id).toBe(second.id);
+      expect(firstRegistries.tools.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({
+          serverToolName: 'alpha',
+          trust: false,
+          alwaysLoad: false,
+        }),
+      );
+      expect(secondRegistries.tools.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({
+          serverToolName: 'beta',
+          trust: true,
+          alwaysLoad: true,
+        }),
+      );
+      expect(first.toolsSnapshot).toBe(second.toolsSnapshot);
+      expect(first.toolsSnapshot.every((tool) => !tool.alwaysLoad)).toBe(true);
+    });
+
+    it('refreshes only the targeted session on a shared transport', async () => {
+      mockMcpSuccess({ toolNames: ['alpha', 'beta'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const firstRegistries = mkSessionRegistries();
+      const secondRegistries = mkSessionRegistries();
+      const first = await pool.acquire(
+        'srv',
+        {
+          command: 'node',
+          includeTools: ['alpha'],
+          trust: false,
+          alwaysLoadTools: false,
+        } as MCPServerConfig,
+        's1',
+        firstRegistries.tools,
+        firstRegistries.prompts,
+        firstRegistries.resources,
+      );
+      await pool.acquire(
+        'srv',
+        {
+          command: 'node',
+          includeTools: ['beta'],
+          trust: false,
+          alwaysLoadTools: false,
+        } as MCPServerConfig,
+        's2',
+        secondRegistries.tools,
+        secondRegistries.prompts,
+        secondRegistries.resources,
+      );
+
+      const registrySpiesOf = (reg: ReturnType<typeof mkSessionRegistries>) => [
+        reg.tools.registerTool,
+        reg.tools.removeMcpToolsByServer,
+        reg.prompts.registerPrompt,
+        reg.prompts.removePromptsByServer,
+        reg.resources.registerResource,
+        reg.resources.removeResourcesByServer,
+      ];
+      for (const reg of [firstRegistries, secondRegistries]) {
+        for (const registrySpy of registrySpiesOf(reg)) {
+          (registrySpy as ReturnType<typeof vi.fn>).mockClear();
+        }
+      }
+
+      first.updateConfig({
+        command: 'node',
+        includeTools: ['beta'],
+        trust: true,
+        alwaysLoadTools: true,
+      } as MCPServerConfig);
+
+      // Session 1 reprojects with its new metadata.
+      expect(firstRegistries.tools.registerTool).toHaveBeenCalledOnce();
+      expect(firstRegistries.tools.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({
+          serverToolName: 'beta',
+          trust: true,
+          alwaysLoad: true,
+        }),
+      );
+
+      // Session 2 must see zero registry traffic: a refresh for one
+      // subscriber must not broadcast to siblings (tool loss + trust bleed).
+      for (const registrySpy of registrySpiesOf(secondRegistries)) {
+        expect(registrySpy as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+      }
+    });
+
+    it('rejects updateConfig on terminated entries and detached sessions', async () => {
+      const { updateMCPServerStatus, MCPServerStatus } = await import(
+        './mcp-client.js'
+      );
+      mockMcpSuccess({ toolNames: ['t1'] });
+      const pool = new McpTransportPool(cliConfig, mkPoolOptions());
+      const cfg = new MCPServerConfig('node');
+      const registries = mkSessionRegistries();
+      const connection = await pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        registries.tools,
+        registries.prompts,
+        registries.resources,
+      );
+
+      const targetId = connectionIdOf('srv', cfg);
+      const entry = (
+        pool as unknown as { entries: Map<string, PoolEntry> }
+      ).entries.get(targetId)!;
+
+      // Detached-session guard: no subscriber is attached under this id.
+      expect(() => entry.updateSessionConfig('never-attached', cfg)).toThrow(
+        /detached session/,
+      );
+
+      // Terminated-entry guard: a silent transport drop flips the active
+      // entry to 'failed' (W120), after which refreshes must fail closed.
+      const mockClient = (entry as unknown as { client: { status: unknown } })
+        .client;
+      mockClient.status = MCPServerStatus.DISCONNECTED;
+      updateMCPServerStatus('srv', MCPServerStatus.DISCONNECTED);
+      expect(entry.currentState).toBe('failed');
+      expect(() => connection.updateConfig(cfg)).toThrow(/in state failed/);
+    });
+
+    it('refreshes unpooled metadata while keeping transport identity stable', async () => {
+      const mocked = mockMcpSuccess({ toolNames: ['alpha', 'beta'] });
+      const pool = new McpTransportPool(
+        cliConfig,
+        mkPoolOptions({
+          pooledTransports: new Set() as ReadonlySet<
+            'stdio' | 'websocket' | 'http' | 'sse' | 'sdk' | 'unknown'
+          >,
+        }),
+      );
+      const cfg = {
+        command: 'node',
+        includeTools: ['alpha'],
+        trust: false,
+        alwaysLoadTools: false,
+      } as MCPServerConfig;
+      const registries = mkSessionRegistries();
+
+      const connection = await pool.acquire(
+        'srv',
+        cfg,
+        's1',
+        registries.tools,
+        registries.prompts,
+        registries.resources,
+      );
+
+      expect(connection.id).toBe('srv::unpooled-0');
+      expect(connection.transportId).toBe(connectionIdOf('srv', cfg));
+      const capturedTransportId = connection.transportId;
+      const registerTool = registries.tools.registerTool as ReturnType<
+        typeof vi.fn
+      >;
+      const removeTools = registries.tools.removeMcpToolsByServer as ReturnType<
+        typeof vi.fn
+      >;
+      expect(registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({
+          serverToolName: 'alpha',
+          trust: false,
+          alwaysLoad: false,
+        }),
+      );
+
+      registerTool.mockClear();
+      removeTools.mockClear();
+      connection.updateConfig({
+        command: 'node',
+        includeTools: ['beta'],
+        trust: true,
+        alwaysLoadTools: true,
+      } as MCPServerConfig);
+
+      expect(mocked.connect).toHaveBeenCalledOnce();
+      expect(removeTools).toHaveBeenCalledOnce();
+      expect(registerTool).toHaveBeenCalledOnce();
+      expect(registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({
+          serverToolName: 'beta',
+          trust: true,
+          alwaysLoad: true,
+        }),
+      );
+
+      (cfg as { command?: string }).command = 'different-command';
+      expect(connection.transportId).toBe(capturedTransportId);
+
+      connection.release();
+      expect(() =>
+        connection.updateConfig({ command: 'node' } as MCPServerConfig),
+      ).toThrow(/released MCP connection/);
     });
 
     it('resources discovered via the pool reach the session resource registry', async () => {

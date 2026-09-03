@@ -95,6 +95,7 @@ async function makeHarness(
     runtimeEnv?: Readonly<NodeJS.ProcessEnv>;
     daemonEnv?: Readonly<NodeJS.ProcessEnv>;
     hotReload?: boolean;
+    hostname?: string;
   } = {},
 ): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
@@ -129,7 +130,12 @@ async function makeHarness(
     },
   } as unknown as AcpSessionBridge;
   const app = createServeApp(
-    { ...baseOpts, workspace, token: opts.token },
+    {
+      ...baseOpts,
+      workspace,
+      token: opts.token,
+      hostname: opts.hostname ?? baseOpts.hostname,
+    },
     undefined,
     {
       bridge,
@@ -137,6 +143,7 @@ async function makeHarness(
       ...(opts.hotReload
         ? {
             workspaceTrustHotReloadAvailable: true,
+            getSessionBridges: () => [bridge],
             primaryWorkspaceTrusted: true,
           }
         : {}),
@@ -211,12 +218,25 @@ describe('POST /workspace/setup-github', () => {
     await teardown(h);
   });
 
-  it('requires strict mutation auth', async () => {
+  it('runs on trusted loopback without a token', async () => {
     await teardown(h);
     h = await makeHarness();
+    setupGithubMocks.setupGithub.mockResolvedValueOnce(setupResult());
     const res = await request(h.app)
       .post('/workspace/setup-github')
       .set('Host', loopbackHost())
+      .send({ consent: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.releaseTag).toBe('v1.2.3');
+    expect(setupGithubMocks.setupGithub).toHaveBeenCalledOnce();
+  });
+
+  it('denies a non-trusted tokenless embed before setup', async () => {
+    await teardown(h);
+    h = await makeHarness({ hostname: '192.0.2.1' });
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
       .send({ consent: true });
 
     expect(res.status).toBe(401);

@@ -234,7 +234,7 @@ export function extractRecentImages(
  * Count images RETURNED BY TOOLS across the whole history — inlineData
  * image parts nested inside `functionResponse.parts`. User-pasted
  * top-level images are intentionally excluded: this drives the
- * computer-use screenshot-overflow auto-compact trigger, whose concern
+ * tool screenshot-overflow auto-compact trigger, whose concern
  * is screenshot accumulation from tool results, not occasional pastes.
  */
 export function countToolResponseImages(history: Content[]): number {
@@ -799,7 +799,7 @@ export async function composePostCompactHistory(
   // Merge every file restoration block AND the image block into a
   // single user Content (Finding 2). Pushing them as separate user
   // Contents produces consecutive same-role entries, which
-  // geminiChat.test.ts:6289 enforces against and which Gemini
+  // llm-chat.test.ts:6289 enforces against and which Gemini
   // providers reject as 400 "consecutive same-role content".
   //
   // Order within the merged user Content:

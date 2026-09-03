@@ -158,6 +158,24 @@ export function generateAgentWorktreeSlug(): string {
   return `${AGENT_WORKTREE_PREFIX}-${hex}`;
 }
 
+/**
+ * Attribute lines a `git worktree list --porcelain` record can carry after
+ * its `worktree <path>` line. Anything else on those lines means the path
+ * above contained a newline and the entry was truncated.
+ */
+function isWorktreeListPorcelainAttribute(line: string): boolean {
+  return (
+    line === 'bare' ||
+    line === 'detached' ||
+    line === 'locked' ||
+    line === 'prunable' ||
+    line.startsWith('HEAD ') ||
+    line.startsWith('branch ') ||
+    line.startsWith('locked ') ||
+    line.startsWith('prunable ')
+  );
+}
+
 export interface WorktreeInfo {
   /** Unique identifier for this worktree */
   id: string;
@@ -300,8 +318,15 @@ export class GitWorktreeService {
    */
   async getRepoTopLevel(): Promise<string | null> {
     try {
-      const out = await (await this.getGit()).revparse(['--show-toplevel']);
-      const top = out.trim();
+      // `raw` rather than `revparse`: the latter trims the output, silently
+      // mutating a path that legitimately carries leading/trailing whitespace
+      // into a different anchor. Strip only the LF terminator — git's stdout
+      // is LF-terminated on every platform, so a trailing CR is path data,
+      // not part of the terminator.
+      const out = await (
+        await this.getGit()
+      ).raw(['rev-parse', '--show-toplevel']);
+      const top = out.replace(/\n$/, '');
       return top.length > 0 ? top : null;
     } catch (error) {
       // Caller falls back to its cwd via `?? cwd`. Log so a corrupt
@@ -310,6 +335,81 @@ export class GitWorktreeService {
       // where worktrees live, and the sweep would never find them.
       debugLogger.warn(
         `getRepoTopLevel failed at ${this.sourceRepoPath}: ${error}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Returns the repository's primary working tree path, or `null` when it
+   * cannot be determined. Unlike `getRepoTopLevel()` — which answers
+   * "which worktree is this cwd in" and so names a linked worktree's OWN
+   * root when run inside one — this always resolves the MAIN tree:
+   * `git worktree list --porcelain` lists the primary working tree first
+   * regardless of where in the repository it runs. Callers anchoring a
+   * check at the repository itself (not the current worktree) use this.
+   *
+   * The porcelain format is newline-delimited, so a main-tree path that
+   * itself contains a newline splits across lines and the first entry
+   * truncates. The remainder then appears where a record attribute belongs
+   * — it is not one, which detects most truncations. Not all: a remainder
+   * that is itself attribute-shaped (`detached`, `HEAD …`, …) — or a path
+   * ending right at a newline, whose blank remainder ends the record — still
+   * parses. The parsed anchor is therefore round-trip-validated below:
+   * `rev-parse --git-common-dir` run AT the anchor must agree with this
+   * repository's own common dir, otherwise this method returns `null` and
+   * callers fall back to `getRepoTopLevel()`, whose single-value
+   * `--show-toplevel` answer keeps interior newlines intact. (`--porcelain
+   * -z` would be immune but needs Git >= 2.36.) A truncated anchor is not
+   * merely wrong: it can resolve inside a DIFFERENT repository whose
+   * worktree registry the caller's gate would then consult.
+   */
+  async getMainWorktreePath(): Promise<string | null> {
+    try {
+      const out = await (
+        await this.getGit()
+      ).raw(['worktree', 'list', '--porcelain']);
+      const lines = out.split('\n');
+      // git preserves a path's leading/trailing whitespace verbatim, and a
+      // trim would silently mutate it into a different, wrong anchor. A
+      // trailing CR is path data, not a terminator: git's stdout is
+      // LF-terminated on every platform.
+      const firstLine = lines[0] ?? '';
+      if (!firstLine.startsWith('worktree ')) return null;
+      for (const line of lines.slice(1)) {
+        const attr = line.trim();
+        if (attr === '') break; // blank line ends the first record
+        if (!isWorktreeListPorcelainAttribute(attr)) return null;
+      }
+      const mainPath = firstLine.slice('worktree '.length);
+      if (mainPath.length === 0) return null;
+      // Round-trip validation (see the doc block): `--git-common-dir` answers
+      // `.git` (relative) from a main tree and an absolute path from a linked
+      // worktree, so resolve both sides. realpath both so a symlinked
+      // ancestor on either side (macOS /tmp -> /private/tmp) cannot
+      // manufacture a mismatch. A probe failure at the anchor fails closed.
+      const realpathOr = async (p: string): Promise<string> => {
+        try {
+          return await fs.realpath(p);
+        } catch {
+          return p;
+        }
+      };
+      const { simpleGit } = await loadSimpleGit();
+      const [ourRaw, anchorRaw] = await Promise.all([
+        (await this.getGit()).raw(['rev-parse', '--git-common-dir']),
+        simpleGit(mainPath).raw(['rev-parse', '--git-common-dir']),
+      ]);
+      const ourCommonDir = await realpathOr(
+        path.resolve(this.sourceRepoPath, ourRaw.trim()),
+      );
+      const anchorCommonDir = await realpathOr(
+        path.resolve(mainPath, anchorRaw.trim()),
+      );
+      return ourCommonDir === anchorCommonDir ? mainPath : null;
+    } catch (error) {
+      debugLogger.warn(
+        `getMainWorktreePath failed at ${this.sourceRepoPath}: ${error}`,
       );
       return null;
     }
@@ -1488,7 +1588,10 @@ export class GitWorktreeService {
    *   `agent-1234567` would be silently deleted after 30 days along
    *   with any work it contained.
    */
-  static validateUserWorktreeSlug(slug: string): string | null {
+  static validateUserWorktreeSlug(
+    slug: string,
+    options?: { allowPrBackedShape?: boolean },
+  ): string | null {
     if (typeof slug !== 'string' || slug.length === 0) {
       return 'Worktree name must be a non-empty string.';
     }
@@ -1500,6 +1603,18 @@ export class GitWorktreeService {
     }
     if (slug.includes('..') || slug.startsWith('.') || slug.startsWith('-')) {
       return 'Worktree name must not start with "." or "-" or contain "..".';
+    }
+    if (
+      /^pr-[1-9]\d{0,8}$/.test(slug) &&
+      options?.allowPrBackedShape !== true
+    ) {
+      // `--worktree=#<N>` launches own this shape; a user-chosen slug with
+      // it would bind the session to PR N (and take the sweep's state
+      // stamps) although the session never touched that PR.
+      return (
+        'Worktree name must not look like "pr-<number>": that shape is ' +
+        'reserved for PR-backed worktrees.'
+      );
     }
     if (slug.startsWith(`${AGENT_WORKTREE_PREFIX}-`)) {
       // The exact `agent-<7hex>` slugs that `generateAgentWorktreeSlug`
@@ -1534,9 +1649,16 @@ export class GitWorktreeService {
   async createUserWorktree(
     slug: string,
     baseBranch?: string,
-    options?: { symlinkDirectories?: readonly string[] },
+    options?: {
+      symlinkDirectories?: readonly string[];
+      /** The caller owns the pr-<N> shape (PR-backed startup). */
+      prBacked?: boolean;
+    },
   ): Promise<CreateWorktreeResult> {
-    const validationError = GitWorktreeService.validateUserWorktreeSlug(slug);
+    const validationError = GitWorktreeService.validateUserWorktreeSlug(
+      slug,
+      options?.prBacked === true ? { allowPrBackedShape: true } : undefined,
+    );
     if (validationError) {
       debugLogger.warn(
         `createUserWorktree: invalid slug ${slug}: ${validationError}`,

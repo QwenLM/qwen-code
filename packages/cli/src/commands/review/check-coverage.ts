@@ -131,6 +131,20 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
         `unedited — copy it, do not retype it.`,
     );
   }
+  // Near-verbatim delivery with the payload proven to arrive: the transcript
+  // shows the brief opened and, where the role reads the diff, the diff read.
+  // A NOTE, not a failure, and no relaunch — the last run to treat this as a
+  // failure relaunched twelve agents to redeliver text they had already acted
+  // on, the most expensive repair in the pipeline spent repairing nothing.
+  if (report.driftedLaunches.length > 0) {
+    writeStderrLine(
+      `NOTE: ${report.driftedLaunches.length} agent(s) launched with a ` +
+        `near-verbatim prompt — ${report.driftedLaunches.join('; ')}. Their ` +
+        `briefs were opened and the work is on record, so the delivery ` +
+        `stands and NO relaunch is owed. Copy future blocks exactly — one ` +
+        `edited word is what turns a clean pass into this note.`,
+    );
+  }
   // The one failure no other check in this file can see. Every other question is
   // asked of an agent whose transcript exists; a brief that never arrived leaves
   // nothing to ask it of.
@@ -196,9 +210,14 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
     writeStderrLine(
       'NOTE: a chunk counts as read when an agent was pointed at its lines AND ' +
         'the harness recorded that agent opening the diff. An agent handed the ' +
-        'diff with no line ranges covers nothing. Build every whole-diff ' +
-        'agent\'s prompt with `"${QWEN_CODE_CLI:-qwen}" review agent-prompt ' +
-        `--plan ${shellQuotePath(args.plan)} --whole-diff\` and paste it verbatim ahead of its brief.`,
+        "diff with no line ranges covers nothing. Every rostered agent's " +
+        'launch block — its diff reads included — comes from ' +
+        `\`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${shellQuotePath(args.plan)} --roster\` ` +
+        '(or `--role <r>` for one, `--chunk <id>` for a chunk agent — the ' +
+        'usual reader of a missing chunk, which `--role` cannot rebuild); ' +
+        'pass each verbatim. `--whole-diff` builds ' +
+        'the reading block for an Agent 8 specialist alone — prepending it to ' +
+        'a rostered brief double-budgets the agent.',
     );
   }
   if (report.idleAgents.length > 0) {
@@ -222,6 +241,27 @@ function runCheckCoverage(args: CheckCoverageArgs): void {
       `ERROR: ${report.missingChunks.length} chunk(s) were not reviewed — ` +
         `${report.missingChunks.join(', ')}. Nobody read those lines. Do not ` +
         `aggregate findings over a diff that was not read.`,
+    );
+  }
+  // A NOTE, never an error, and never a relaunch: a disclosed gap is the soft
+  // tool budget working as designed, and failing the gate on it would teach
+  // agents not to disclose. The ruling belongs to the orchestrator — a gap
+  // naming an incomplete REQUIRED trace joins unreviewedDimensions; optional
+  // depth goes to the report's "Not reviewed" section.
+  if (report.budgetGaps.length > 0) {
+    const total = report.budgetGaps.reduce((n, g) => n + g.gaps.length, 0);
+    // The directives come FIRST: everything after the dash is agent-authored
+    // text (parser-sanitized and length-capped, but still the agents'), and
+    // instructions that follow quoted material can be impersonated by it.
+    writeStderrLine(
+      `NOTE: ${total} budget-gap disclosure(s) from ` +
+        `${report.budgetGaps.length} agent(s). Do not relaunch over these; ` +
+        `rule on each: a gap naming an incomplete required trace goes in ` +
+        `unreviewedDimensions, optional depth is disclosed in the report's ` +
+        `"Not reviewed" section. The disclosures — ` +
+        report.budgetGaps
+          .map((g) => `${g.agent}: ${g.gaps.join('; ')}`)
+          .join(' | '),
     );
   }
 

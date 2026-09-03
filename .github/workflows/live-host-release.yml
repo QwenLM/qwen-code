@@ -1,0 +1,432 @@
+name: 'Qwen Live Host Release'
+
+run-name: "Qwen Live Host release ${{ inputs.version || format('PR #{0} dry run', github.event.pull_request.number) }}"
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/live-host-release.yml'
+      - 'packages/live-host/**'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Live Host version, for example 0.1.0 or v0.1.0.'
+        required: true
+        type: 'string'
+      dry_run:
+        description: 'Build unsigned packages without publishing.'
+        required: true
+        default: true
+        type: 'boolean'
+      draft:
+        description: 'Create a draft GitHub release.'
+        required: true
+        default: true
+        type: 'boolean'
+      prerelease:
+        description: 'Mark the release as a prerelease.'
+        required: true
+        default: false
+        type: 'boolean'
+      clobber:
+        description: 'Replace same-named assets in an existing release.'
+        required: true
+        default: false
+        type: 'boolean'
+
+permissions:
+  actions: 'read'
+  contents: 'read'
+
+concurrency:
+  group: "${{ github.event_name == 'workflow_dispatch' && 'live-host-release' || format('live-host-release-pr-{0}', github.event.pull_request.number) }}"
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22.20.0'
+  LIVE_HOST_FEED_TAG: 'live-host-latest'
+
+jobs:
+  prepare:
+    name: 'Prepare Live Host release'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    outputs:
+      tag: '${{ steps.version.outputs.tag }}'
+      version: '${{ steps.version.outputs.version }}'
+    steps:
+      - name: 'Resolve version'
+        id: 'version'
+        shell: 'bash'
+        env:
+          INPUT_VERSION: '${{ inputs.version }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" = 'pull_request' ]; then
+            version="0.0.$PR_NUMBER"
+          else
+            version="${INPUT_VERSION#v}"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Live Host version must be valid SemVer: $INPUT_VERSION"
+            exit 1
+          fi
+          if [[ "$version" == *+* ]]; then
+            echo '::error::Live Host releases do not support SemVer build metadata.'
+            exit 1
+          fi
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ]; then
+            if [[ "$version" == *-* ]]; then
+              version_is_prerelease=true
+            else
+              version_is_prerelease=false
+            fi
+            if [ "$version_is_prerelease" != "${{ inputs.prerelease }}" ]; then
+              echo '::error::The prerelease input must match the Live Host version.'
+              exit 1
+            fi
+          fi
+          if [ "$GITHUB_EVENT_NAME" = 'workflow_dispatch' ] && [ "${{ inputs.dry_run }}" = 'false' ] && [ "$GITHUB_REF_NAME" != 'main' ]; then
+            echo '::error::Published Live Host releases must run from main.'
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=live-host-v$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: 'Build Qwen Live Host'
+    needs: 'prepare'
+    runs-on: 'macos-latest'
+    timeout-minutes: 60
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '${{ env.NODE_VERSION }}'
+
+      - name: 'Install dependencies'
+        working-directory: 'packages/live-host'
+        run: 'npm ci'
+
+      - name: 'Set Live Host version'
+        working-directory: 'packages/live-host'
+        run: 'npm run bump-version -- "${{ needs.prepare.outputs.version }}"'
+
+      - name: 'Test Live Host'
+        working-directory: 'packages/live-host'
+        run: 'npm run typecheck && npm test'
+
+      - name: 'Import macOS certificate'
+        if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}"
+        shell: 'bash'
+        env:
+          APPLE_CERTIFICATE: '${{ secrets.APPLE_CERTIFICATE }}'
+          APPLE_CERTIFICATE_PASSWORD: '${{ secrets.APPLE_CERTIFICATE_PASSWORD }}'
+          LEGACY_APPLE_CERTIFICATE: '${{ secrets.MAC_CSC_LINK }}'
+          LEGACY_APPLE_CERTIFICATE_PASSWORD: '${{ secrets.MAC_CSC_KEY_PASSWORD }}'
+          KEYCHAIN_PASSWORD: '${{ secrets.APPLE_KEYCHAIN_PASSWORD }}'
+        run: |
+          set -euo pipefail
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            certificate_data="$APPLE_CERTIFICATE"
+            certificate_password="$APPLE_CERTIFICATE_PASSWORD"
+          elif [ -n "$LEGACY_APPLE_CERTIFICATE" ] && [ -n "$LEGACY_APPLE_CERTIFICATE_PASSWORD" ]; then
+            certificate_data="$LEGACY_APPLE_CERTIFICATE"
+            certificate_password="$LEGACY_APPLE_CERTIFICATE_PASSWORD"
+          else
+            echo '::error::A complete APPLE_CERTIFICATE pair or MAC_CSC pair is required for published Qwen Live Host releases.'
+            exit 1
+          fi
+          keychain_password="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 32)}"
+          certificate="$RUNNER_TEMP/qwen-live-host.p12"
+          keychain="$RUNNER_TEMP/qwen-live-host.keychain-db"
+          certificate_data="${certificate_data#*base64,}"
+          printf '%s' "$certificate_data" | base64 --decode > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$certificate" -P "$certificate_password" -A -t cert -f pkcs12 -k "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
+          if [ -z "$identity" ]; then echo '::error::Developer ID Application identity was not found.'; exit 1; fi
+          identity_name="${identity#Developer ID Application: }"
+          {
+            echo "CSC_NAME=$identity_name"
+            echo 'CSC_IDENTITY_AUTO_DISCOVERY=true'
+          } >> "$GITHUB_ENV"
+
+      - name: 'Configure notarization'
+        if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}"
+        shell: 'bash'
+        env:
+          APPLE_API_ISSUER: '${{ secrets.APPLE_API_ISSUER }}'
+          APPLE_API_KEY_ID: '${{ secrets.APPLE_API_KEY }}'
+          APPLE_API_KEY_P8: '${{ secrets.APPLE_API_KEY_P8 }}'
+          LEGACY_APPLE_API_ISSUER: '${{ secrets.APPLE_NOTARY_ISSUER_ID }}'
+          LEGACY_APPLE_API_KEY_ID: '${{ secrets.APPLE_NOTARY_KEY_ID }}'
+          LEGACY_APPLE_API_KEY_P8: '${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}'
+          APPLE_TEAM_ID: '${{ secrets.APPLE_TEAM_ID }}'
+        run: |
+          set -euo pipefail
+          if [ -n "$APPLE_API_ISSUER" ] && [ -n "$APPLE_API_KEY_ID" ] && [ -n "$APPLE_API_KEY_P8" ]; then
+            api_issuer="$APPLE_API_ISSUER"
+            api_key_id="$APPLE_API_KEY_ID"
+            key_path="$RUNNER_TEMP/AuthKey_${api_key_id}.p8"
+            printf '%s' "$APPLE_API_KEY_P8" > "$key_path"
+          elif [ -n "$LEGACY_APPLE_API_ISSUER" ] && [ -n "$LEGACY_APPLE_API_KEY_ID" ] && [ -n "$LEGACY_APPLE_API_KEY_P8" ]; then
+            api_issuer="$LEGACY_APPLE_API_ISSUER"
+            api_key_id="$LEGACY_APPLE_API_KEY_ID"
+            key_path="$RUNNER_TEMP/AuthKey_${api_key_id}.p8"
+            printf '%s' "$LEGACY_APPLE_API_KEY_P8" | base64 --decode > "$key_path"
+          else
+            echo '::error::A complete APPLE_API notarization set or APPLE_NOTARY set is required for Qwen Live Host notarization.'
+            exit 1
+          fi
+          if [ -z "$APPLE_TEAM_ID" ]; then echo '::error::APPLE_TEAM_ID is required for Qwen Live Host notarization.'; exit 1; fi
+          {
+            echo "APPLE_API_KEY=$key_path"
+            echo "APPLE_API_KEY_ID=$api_key_id"
+            echo "APPLE_API_ISSUER=$api_issuer"
+            echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: 'Build packages'
+        working-directory: 'packages/live-host'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}"
+        run: 'npm run dist:mac:no-publish'
+
+      - name: 'Verify release assets'
+        working-directory: 'packages/live-host'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
+        shell: 'bash'
+        run: |
+          set -euo pipefail
+          for asset in \
+            Qwen-Live-Host-arm64.dmg \
+            Qwen-Live-Host-x64.dmg \
+            Qwen-Live-Host-arm64.zip \
+            Qwen-Live-Host-x64.zip \
+            Qwen-Live-Host-manifest.json; do
+            test -f "release/$asset"
+          done
+          node --input-type=module -e '
+            import { createHash } from "node:crypto";
+            import { readFileSync, statSync } from "node:fs";
+            const manifest = JSON.parse(readFileSync("release/Qwen-Live-Host-manifest.json", "utf8"));
+            if (manifest.version !== process.env.RELEASE_VERSION) {
+              throw new Error("Manifest version " + manifest.version + " does not match " + process.env.RELEASE_VERSION + ".");
+            }
+            for (const architecture of ["arm64", "x64"]) {
+              const name = "Qwen-Live-Host-" + architecture + ".zip";
+              const path = "release/" + name;
+              const bytes = readFileSync(path);
+              const asset = manifest.assets?.[architecture];
+              if (asset?.name !== name || asset.size !== statSync(path).size || asset.sha256 !== createHash("sha256").update(bytes).digest("hex")) {
+                throw new Error("Manifest asset verification failed for " + architecture + ".");
+              }
+            }
+          '
+
+      - name: 'Verify signing and notarization'
+        if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false }}"
+        working-directory: 'packages/live-host'
+        shell: 'bash'
+        run: |
+          set -euo pipefail
+          app_count=0
+          while IFS= read -r -d '' app; do
+            app_count=$((app_count + 1))
+            codesign --verify --deep --strict --verbose=2 "$app"
+            signature="$(codesign -dv --verbose=4 "$app" 2>&1)"
+            if ! grep -q '^Authority=Developer ID Application:' <<<"$signature" || ! grep -qx 'TeamIdentifier=NF4574S59H' <<<"$signature"; then
+              echo '::error::Qwen Live Host was not signed by the expected Developer ID team.'
+              exit 1
+            fi
+            spctl -a -vv -t exec "$app"
+            xcrun stapler validate "$app"
+          done < <(find release -mindepth 2 -maxdepth 2 -type d -name '*.app' -print0)
+          if [ "$app_count" -eq 0 ]; then echo '::error::No packaged Qwen Live Host application was found.'; exit 1; fi
+          dmg_count=0
+          while IFS= read -r -d '' dmg; do
+            dmg_count=$((dmg_count + 1))
+            hdiutil verify "$dmg"
+          done < <(find release -type f -name '*.dmg' -print0)
+          if [ "$dmg_count" -eq 0 ]; then echo '::error::No Qwen Live Host disk image was found.'; exit 1; fi
+
+      - uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'qwen-live-host-macos'
+          path: |
+            packages/live-host/release/*.dmg
+            packages/live-host/release/*-manifest.json
+            packages/live-host/release/*.zip
+          if-no-files-found: 'error'
+          retention-days: 14
+
+  publish:
+    name: 'Publish Qwen Live Host release'
+    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && github.repository == 'QwenLM/qwen-code' }}"
+    needs:
+      - 'prepare'
+      - 'build'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 20
+    permissions:
+      contents: 'write'
+      id-token: 'write'
+    env:
+      GH_REPO: '${{ github.repository }}'
+    steps:
+      - uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          path: 'release-assets'
+          merge-multiple: true
+
+      - name: 'Generate checksums'
+        working-directory: 'release-assets'
+        run: 'sha256sum -- * > SHA256SUMS.txt'
+
+      - name: 'Create GitHub release'
+        id: 'release'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.tag }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
+          RELEASE_DRAFT: '${{ inputs.draft }}'
+          RELEASE_PRERELEASE: '${{ inputs.prerelease }}'
+          RELEASE_CLOBBER: '${{ inputs.clobber }}'
+        run: |
+          set -euo pipefail
+          args=("$RELEASE_TAG" release-assets/* --target "$GITHUB_SHA" --title "Qwen Live Host v$RELEASE_VERSION" --generate-notes --latest=false)
+          if [ "$RELEASE_DRAFT" = 'true' ]; then args+=(--draft); fi
+          if [ "$RELEASE_PRERELEASE" = 'true' ]; then args+=(--prerelease); fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            if [ "$RELEASE_CLOBBER" != 'true' ]; then
+              echo "::error::Release $RELEASE_TAG already exists. Re-run with clobber=true to replace its assets."
+              exit 1
+            fi
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+            edit_args=()
+            if [ "$RELEASE_DRAFT" = 'true' ]; then edit_args+=(--draft); else edit_args+=(--draft=false); fi
+            if [ "$RELEASE_PRERELEASE" = 'true' ]; then edit_args+=(--prerelease); else edit_args+=(--prerelease=false); fi
+            gh release edit "$RELEASE_TAG" "${edit_args[@]}"
+            release_url="$(gh release view "$RELEASE_TAG" --json url --jq '.url')"
+          else
+            release_url="$(gh release create "${args[@]}")"
+          fi
+          echo "url=$release_url" >> "$GITHUB_OUTPUT"
+
+      - name: 'Update stable Live Host feed'
+        if: '${{ inputs.draft == false && inputs.prerelease == false }}'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          FEED_TAG: '${{ env.LIVE_HOST_FEED_TAG }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
+        run: |
+          set -euo pipefail
+          stable_assets=(
+            release-assets/Qwen-Live-Host-manifest.json
+            release-assets/Qwen-Live-Host-arm64.zip
+            release-assets/Qwen-Live-Host-x64.zip
+          )
+          if gh release view "$FEED_TAG" >/dev/null 2>&1; then
+            current_feed="$(mktemp -d)"
+            gh release download "$FEED_TAG" --pattern 'Qwen-Live-Host-manifest.json' --dir "$current_feed" --clobber
+            current_version="$(node --input-type=module -e 'import { readFileSync } from "node:fs"; console.log(JSON.parse(readFileSync(process.argv[1], "utf8")).version)' "$current_feed/Qwen-Live-Host-manifest.json")"
+            if [ "$(printf '%s\n%s\n' "$current_version" "$RELEASE_VERSION" | sort -V | tail -n 1)" != "$RELEASE_VERSION" ]; then
+              echo "::error::Refusing to replace Live Host feed v$current_version with older v$RELEASE_VERSION."
+              exit 1
+            fi
+            gh release upload "$FEED_TAG" "${stable_assets[@]}" --clobber
+          else
+            gh release create "$FEED_TAG" "${stable_assets[@]}" --title 'Qwen Live Host latest' --notes 'Stable Qwen Live Host installer feed.' --latest=false
+          fi
+
+      - name: 'Checkout source for qwen-live npm publish'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 'Install dependencies'
+        run: 'npm install --ignore-scripts'
+
+      - name: 'Build dependency chain (core → acp-bridge → sdk → qwen-live)'
+        run: |-
+          npm run build --workspace @qwen-code/qwen-code-core
+          npm run build --workspace @qwen-code/acp-bridge
+          npm run build --workspace @qwen-code/sdk
+          npm run build --workspace @qwen-code/qwen-live
+
+      - name: 'Publish @qwen-code/qwen-live'
+        working-directory: 'packages/qwen-live'
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
+          NPM_TAG: "${{ inputs.prerelease == true && 'preview' || 'latest' }}"
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          # Align the package version with the Host release version.
+          npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
+          # Rewrite the file: dependency on @qwen-code/sdk to a versioned
+          # specifier — npm publish ships package.json verbatim, and
+          # "file:../sdk-typescript" is a monorepo-local link that does
+          # not exist for consumers. Use ^0.1.8 (the sdk's current
+          # published version range).
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            if (pkg.dependencies && pkg.dependencies['@qwen-code/sdk']) {
+              pkg.dependencies['@qwen-code/sdk'] = '^0.1.8';
+              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+              console.log('Rewrote @qwen-code/sdk dependency to ^0.1.8');
+            }
+          "
+          if npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          # Check if the package exists at all — provenance requires an
+          # existing package, so the first publish omits it.
+          if npm view "${PACKAGE_NAME}" version >/dev/null 2>&1; then
+            npm publish --access public --provenance --tag "$NPM_TAG"
+          else
+            echo "::notice::First publish of ${PACKAGE_NAME}; omitting --provenance"
+            npm publish --access public --tag "$NPM_TAG"
+          fi
+
+      - name: 'Publish release summary'
+        env:
+          RELEASE_URL: '${{ steps.release.outputs.url }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
+        run: |
+          {
+            echo '## Qwen Live Host release'
+            echo
+            echo "Version: $RELEASE_VERSION"
+            echo "Release: $RELEASE_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  sync-oss:
+    name: 'Mirror stable Qwen Live Host release to Aliyun OSS'
+    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.draft == false && inputs.prerelease == false && github.repository == 'QwenLM/qwen-code' }}"
+    needs:
+      - 'prepare'
+      - 'build'
+      - 'publish'
+    uses: './.github/workflows/sync-live-host-to-oss.yml'
+    with:
+      version: '${{ needs.prepare.outputs.version }}'
+      source: 'artifact'
+    secrets:
+      ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+      ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'

@@ -94,7 +94,7 @@ export type CacheRetentionByBlock = Partial<
   Record<'system' | 'tool' | 'user.last', CacheRetention>
 >;
 
-export interface ConvertGeminiRequestToAnthropicOptions {
+export interface ConvertLlmRequestToAnthropicOptions {
   /**
    * On every assistant turn, fill in `signature: ''` on any `thinking` block
    * that lacks the required `signature` field. Preserves the original
@@ -221,7 +221,7 @@ export class AnthropicContentConverter {
    * Per-request tool ID sanitization state (see {@link resolveToolUseId}).
    * The converter instance is long-lived across requests (constructed once
    * per generator), so this state is reset at the top of every
-   * `convertGeminiRequestToAnthropic` call rather than at construction.
+   * `convertLlmRequestToAnthropic` call rather than at construction.
    */
   private readonly toolIdMap = new Map<string, string>();
   private readonly usedToolIds = new Set<string>();
@@ -236,9 +236,9 @@ export class AnthropicContentConverter {
     this.enableCacheControl = enableCacheControl;
   }
 
-  convertGeminiRequestToAnthropic(
+  convertLlmRequestToAnthropic(
     request: GenerateContentParameters,
-    options: ConvertGeminiRequestToAnthropicOptions = {},
+    options: ConvertLlmRequestToAnthropicOptions = {},
   ): {
     system?: AnthropicTextBlockParam[] | string;
     messages: AnthropicMessageParam[];
@@ -276,8 +276,32 @@ export class AnthropicContentConverter {
     messages = mergeConsecutiveAssistantMessages(messages);
     messages = cleanOrphanedToolCalls(messages);
     messages = mergeConsecutiveAssistantMessages(messages);
+    // Must run BEFORE dropEmptyTextThinkingBlocks: dropUnsignedThinking...
+    // throws when an unsigned thinking block belongs to a turn that's part
+    // of an unbroken, still-active tool_use/tool_result chain reaching the
+    // end of history -- a real proxy bug that should fail loudly rather
+    // than silently continue. An empty-text thinking block with no
+    // signature is unsigned by this same definition; if the empty-text
+    // guard ran first it would delete the block outright before this
+    // check ever saw it, silently swallowing exactly the proxy bug this
+    // throw exists to surface (the same pass-ordering hazard raised
+    // against the removed PATCH-B heuristic, which retyped instead of
+    // deleted but had the identical effect of hiding the block from this
+    // check).
     if (options.dropUnsignedAssistantThinking) {
       messages = this.dropUnsignedThinkingFromAssistantMessages(messages);
+    }
+    // Defense-in-depth against an empty-text thinking block surviving into
+    // a non-latest turn (see dropEmptyTextThinkingBlocks's doc) -- e.g. one
+    // that DOES carry a signature, so dropUnsignedThinkingFromAssistant...
+    // above leaves it alone. Skipped for DeepSeek's injectThinkingOnToolUseTurns
+    // path: DeepSeek's synthetic thinking placeholder (injected above) is
+    // deliberately `{type:'thinking', thinking:'', signature:''}` on every
+    // tool-use turn, and DeepSeek doesn't validate a signature the way
+    // Anthropic does, so this guard would strip the very placeholder
+    // DeepSeek needs.
+    if (!options.injectThinkingOnToolUseTurns) {
+      messages = dropEmptyTextThinkingBlocks(messages);
     }
     if (options.stripAssistantThinking) {
       this.stripThinkingFromAssistantMessages(messages);
@@ -330,8 +354,8 @@ export class AnthropicContentConverter {
     };
   }
 
-  async convertGeminiToolsToAnthropic(
-    geminiTools: ToolListUnion,
+  async convertLlmToolsToAnthropic(
+    llmTools: ToolListUnion,
     options: {
       enableCacheControl?: boolean;
       useGlobalCacheScope?: boolean;
@@ -341,7 +365,7 @@ export class AnthropicContentConverter {
   ): Promise<AnthropicToolParam[]> {
     const tools: AnthropicToolParam[] = [];
 
-    for (const tool of geminiTools) {
+    for (const tool of llmTools) {
       let actualTool: Tool;
 
       if ('tool' in tool) {
@@ -393,7 +417,7 @@ export class AnthropicContentConverter {
     // ship the standard per-session shape so they don't see a scope
     // extension they may not recognize.
     // Per-call overrides mirror the request-shape gates in
-    // `convertGeminiRequestToAnthropic` so a qwen-oauth-style hot flip of
+    // `convertLlmRequestToAnthropic` so a qwen-oauth-style hot flip of
     // `enableCacheControl` (the only field `Config.handleModelChange()`
     // mutates in place without recreating the generator) doesn't leave
     // the tool body and the beta header out of sync. `baseUrl` isn't
@@ -422,10 +446,10 @@ export class AnthropicContentConverter {
     return tools;
   }
 
-  convertAnthropicResponseToGemini(
+  convertAnthropicResponseToLlm(
     response: Anthropic.Message,
   ): GenerateContentResponse {
-    const geminiResponse = new GenerateContentResponse();
+    const llmResponse = new GenerateContentResponse();
     const parts: Part[] = [];
 
     for (const block of response.content || []) {
@@ -482,21 +506,21 @@ export class AnthropicContentConverter {
       safetyRatings: [],
     };
 
-    const finishReason = this.mapAnthropicFinishReasonToGemini(
+    const finishReason = this.mapAnthropicFinishReasonToLlm(
       response.stop_reason,
     );
     if (finishReason) {
       candidate.finishReason = finishReason;
     }
 
-    geminiResponse.candidates = [candidate];
-    geminiResponse.responseId = response.id;
-    geminiResponse.createTime = Date.now().toString();
-    geminiResponse.modelVersion = response.model || undefined;
-    geminiResponse.promptFeedback = { safetyRatings: [] };
+    llmResponse.candidates = [candidate];
+    llmResponse.responseId = response.id;
+    llmResponse.createTime = Date.now().toString();
+    llmResponse.modelVersion = response.model || undefined;
+    llmResponse.promptFeedback = { safetyRatings: [] };
 
     if (response.usage) {
-      geminiResponse.usageMetadata = buildAnthropicUsageMetadata({
+      llmResponse.usageMetadata = buildAnthropicUsageMetadata({
         inputTokens: response.usage.input_tokens || 0,
         cacheReadTokens: response.usage.cache_read_input_tokens || 0,
         cacheCreationTokens: response.usage.cache_creation_input_tokens || 0,
@@ -508,7 +532,7 @@ export class AnthropicContentConverter {
       });
     }
 
-    return geminiResponse;
+    return llmResponse;
   }
 
   private processContents(
@@ -673,7 +697,7 @@ export class AnthropicContentConverter {
    * The same source ID always resolves to the same wire ID within a
    * request (memoized in `toolIdMap`), so a `tool_use`/`tool_result` pair
    * that shares a source ID still links up correctly after sanitization.
-   * State is scoped to a single `convertGeminiRequestToAnthropic` call
+   * State is scoped to a single `convertLlmRequestToAnthropic` call
    * (reset via {@link resetToolIdState}), since the converter instance
    * itself is long-lived across requests.
    */
@@ -880,7 +904,7 @@ export class AnthropicContentConverter {
     return {};
   }
 
-  mapAnthropicFinishReasonToGemini(
+  mapAnthropicFinishReasonToLlm(
     reason?: string | null,
   ): FinishReason | undefined {
     if (!reason) return undefined;
@@ -890,6 +914,11 @@ export class AnthropicContentConverter {
       tool_use: FinishReason.STOP,
       max_tokens: FinishReason.MAX_TOKENS,
       content_filter: FinishReason.SAFETY,
+      // Anthropic's refusal stop_reason is a provider safety decision; it
+      // must land in the content-filter family so downstream gates (e.g.
+      // the quiet post-tool-result acceptance in llmChat, #9026) keep
+      // it fatal instead of masking it with an "(empty content)" turn.
+      refusal: FinishReason.SAFETY,
     };
     return mapping[reason] || FinishReason.FINISH_REASON_UNSPECIFIED;
   }
@@ -1226,7 +1255,7 @@ export class AnthropicContentConverter {
    * synthetic user turn to satisfy Anthropic's "must end with a user
    * message" requirement (Opus/Sonnet 4.6+, every 5.x family) when the
    * conversation would otherwise end on a non-empty assistant message.
-   * See {@link ConvertGeminiRequestToAnthropicOptions.stripTrailingAssistantPrefill}.
+   * See {@link ConvertLlmRequestToAnthropicOptions.stripTrailingAssistantPrefill}.
    */
   private stripTrailingAssistantPrefill(
     messages: AnthropicMessageParam[],
@@ -1397,9 +1426,49 @@ function mergeConsecutiveAssistantMessages(
 }
 
 /**
+ * Builds a first-wins predicate for deduplicating tool_result blocks by
+ * tool_use_id. Anthropic rejects a message with more than one tool_result
+ * for the same tool_use_id ("each `tool_use` block must have a single
+ * result" -- HTTP 400); a duplicate can happen when a tool call's result is
+ * recorded twice in history (a retried conversion pass, or a history source
+ * that double-appends a function response). In the cases observed so far
+ * the duplicate blocks are byte-identical, so first-wins vs. last-wins is
+ * indistinguishable in practice -- first-wins is chosen only because it
+ * requires no lookahead. id-less blocks always pass through unfiltered,
+ * preserving prior behavior for blocks Anthropic doesn't validate this way.
+ *
+ * Two independent call sites need this: `cleanOrphanedToolCalls` (the
+ * common case, a duplicate within one message) and
+ * `mergeConsecutiveUserMessages` (a duplicate that only becomes
+ * co-located after two originally-separate messages are combined).
+ */
+function makeToolResultDeduper(): (id: string | undefined) => boolean {
+  const seen = new Set<string>();
+  return (id) => {
+    if (!id) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  };
+}
+
+/**
  * Remove tool_use blocks that have no matching tool_result in the
  * immediately following user message, and remove tool_result blocks that
  * have no matching tool_use in the immediately preceding assistant message.
+ * Also cascade-strips `thinking`/`redacted_thinking` blocks from an
+ * assistant turn whenever a `tool_use` is removed from that same turn by
+ * this pass AND no other `tool_use` survives in it -- the signature on
+ * those blocks was computed over content that included the now-removed
+ * `tool_use`, so replaying it produces Anthropic 400 "thinking blocks in
+ * the latest assistant message cannot be modified". The model regenerates
+ * thinking on its next turn regardless. Scoped to "no surviving tool_use"
+ * rather than "any tool_use removed": a turn with `[thinking, tool_use A,
+ * tool_use B]` where only B is a genuine orphan still sends A on the wire,
+ * and per Anthropic's manual-mode extended-thinking contract the final
+ * assistant turn of a thinking-enabled request must begin with a thinking
+ * block when any `tool_use` remains in it -- stripping the thinking here
+ * would trade one 400 for another.
  *
  * A `tool_use` in the very last message (no message follows it at all) is
  * never condemned as orphaned here -- "no result yet" isn't the same as
@@ -1411,8 +1480,10 @@ function mergeConsecutiveAssistantMessages(
  * matching `tool_result` is a genuine orphan.
  *
  * Empty messages produced by the cleanup are dropped entirely. A subsequent
- * mergeConsecutiveAssistantMessages call fixes any alternation issues
- * created by dropped messages.
+ * mergeConsecutiveAssistantMessages call fixes alternation issues created
+ * by a dropped assistant message sandwiched between two other assistant
+ * messages; mergeConsecutiveUserMessages (later in the pipeline) does the
+ * same when the sandwiching messages are user turns instead.
  *
  * Mirrors the same-name function in the OpenAI converter.
  */
@@ -1498,21 +1569,48 @@ function cleanOrphanedToolCalls(
       continue;
     }
 
+    let toolUseRemoved = false;
+    const keepToolResult = makeToolResultDeduper();
+
     const filtered = blocks.filter((b) => {
       const t = (b as { type?: string }).type;
       if (t === 'tool_use') {
         const id = (b as { id?: string }).id;
-        return !id || validToolUseBlocks.has(b as object);
+        const keep = !id || validToolUseBlocks.has(b as object);
+        if (!keep) toolUseRemoved = true;
+        return keep;
       }
       if (t === 'tool_result') {
         const id = (b as { tool_use_id?: string }).tool_use_id;
-        return !id || validToolResultBlocks.has(b as object);
+        if (!id) return true;
+        if (!validToolResultBlocks.has(b as object)) return false;
+        return keepToolResult(id);
       }
       return true;
     });
 
-    if (filtered.length > 0) {
-      cleaned.push({ ...message, content: filtered });
+    // A tool_use was stripped from this turn and none survives -- any
+    // thinking/redacted_thinking sibling in the same turn is now
+    // untrustworthy (see function doc). If a tool_use survives, the
+    // thinking sibling is left in place: it's still needed to satisfy
+    // Anthropic's manual-mode "final turn must begin with thinking when a
+    // tool_use is present" rule, and only cascading on total removal keeps
+    // this narrower than a blanket "any removal" rule. tool_use/thinking
+    // only ever co-occur on assistant messages, but the role check is
+    // defensive.
+    const survivingToolUse = filtered.some(
+      (b) => (b as { type?: string }).type === 'tool_use',
+    );
+    const finalBlocks =
+      toolUseRemoved && !survivingToolUse && message.role === 'assistant'
+        ? filtered.filter((b) => {
+            const t = (b as { type?: string }).type;
+            return t !== 'thinking' && t !== 'redacted_thinking';
+          })
+        : filtered;
+
+    if (finalBlocks.length > 0) {
+      cleaned.push({ ...message, content: finalBlocks });
     } else {
       debugLogger.debug(
         'cleanOrphanedToolCalls: dropping message with only orphaned tool blocks',
@@ -1521,6 +1619,85 @@ function cleanOrphanedToolCalls(
   }
 
   return cleaned;
+}
+
+/**
+ * Drops any `thinking` block with empty text from a non-latest assistant
+ * turn (dropping the whole message if that empties it out). An Anthropic
+ * `thinking` block's signature is computed over its own text content; a
+ * block with no text at all cannot represent valid signed reasoning
+ * regardless of whether a signature is present. This arises when a
+ * `redacted_thinking` block -- whose opaque `data` doesn't survive the
+ * Gemini-`Part` round trip, see
+ * {@link AnthropicContentConverter.convertAnthropicResponseToLlm} --
+ * is replayed back through history construction as an empty-text
+ * `thinking` block.
+ *
+ * Scoped to non-latest assistant turns, matching Anthropic's contract that
+ * the latest assistant turn's signatures must replay byte-exact.
+ *
+ * This was originally one guard inside a larger `pruneUntrustworthyThinking`
+ * pass that also tried to detect and downgrade a non-latest, thinking-only
+ * turn whose `tool_use` had gone stale in an earlier trim (a cross-turn
+ * complement to {@link cleanOrphanedToolCalls}'s same-turn cascade). That
+ * broader heuristic was removed after review: it could not distinguish "this
+ * turn's tool_use was removed by an earlier trim" from "this turn was
+ * always thinking-only" (both are structurally identical by the time it
+ * ran), it ran before the passes that already handle unsigned thinking
+ * correctly (reordering caused them to stop recognizing thinking it had
+ * already re-typed as text), its DeepSeek exclusion only covered one of
+ * DeepSeek's two thinking modes, and live A/B verification against a real
+ * session showed it re-typing a thinking-only turn on the very next
+ * request just because a newer assistant turn had been appended --
+ * invalidating a cache breakpoint and adding token cost for content that
+ * was never actually invalid. Investigation into this codebase's actual
+ * compaction (`chatCompressionService` is full-history, not a partial
+ * trim that could strand a `tool_use`) and orphan-repair
+ * (`repairOrphanedToolUseTurns` already synthesizes an error
+ * `tool_result` for a genuine cross-turn orphan before it would reach this
+ * pass) did not reproduce the state the broader heuristic existed to
+ * clean up. This guard is the one part of that pass that is unconditionally
+ * correct regardless of that heuristic's premise, so it's kept on its own.
+ */
+function dropEmptyTextThinkingBlocks(
+  messages: AnthropicMessageParam[],
+): AnthropicMessageParam[] {
+  let latestAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === 'assistant') {
+      latestAssistantIdx = i;
+      break;
+    }
+  }
+
+  const out: AnthropicMessageParam[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) {
+      out.push(msg);
+      continue;
+    }
+    if (i === latestAssistantIdx) {
+      out.push(msg);
+      continue;
+    }
+
+    const blocks = msg.content as AnthropicContentBlockParam[];
+    const filtered = blocks.filter((raw) => {
+      const bType = (raw as { type?: string }).type;
+      const bThinkingRaw = (raw as { thinking?: unknown }).thinking;
+      const bThinking =
+        typeof bThinkingRaw === 'string' ? bThinkingRaw : undefined;
+      return !(
+        bType === 'thinking' &&
+        (bThinking === undefined || bThinking.length === 0)
+      );
+    });
+
+    if (filtered.length === 0) continue;
+    out.push({ role: msg.role, content: filtered });
+  }
+  return out;
 }
 
 function mergeConsecutiveUserMessages(
@@ -1540,10 +1717,20 @@ function mergeConsecutiveUserMessages(
         ...(lastMessage.content as AnthropicContentBlockParam[]),
         ...(message.content as AnthropicContentBlockParam[]),
       ];
+      // Two originally-separate user messages can each carry a valid
+      // tool_result for the same tool_use_id (cleanOrphanedToolCalls only
+      // dedupes within a single message, before this merge combines
+      // several into one). Re-apply the same first-wins dedup here so a
+      // cross-message duplicate can't survive the merge and reach the
+      // wire as two tool_result blocks for one tool_use_id.
+      const keepToolResult = makeToolResultDeduper();
+      const toolResults = combined.filter((b) => {
+        if ((b as { type?: string }).type !== 'tool_result') return false;
+        const id = (b as { tool_use_id?: string }).tool_use_id;
+        return keepToolResult(id);
+      });
       lastMessage.content = [
-        ...combined.filter(
-          (b) => (b as { type?: string }).type === 'tool_result',
-        ),
+        ...toolResults,
         ...combined.filter(
           (b) => (b as { type?: string }).type !== 'tool_result',
         ),

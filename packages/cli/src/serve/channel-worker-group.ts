@@ -19,7 +19,7 @@ import {
   type ClientMcpOverWsRuntimeConfig,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
-import { ChannelDeliveryError } from './channel-delivery-ipc.js';
+import { ChannelDeliveryError } from '../runtime/channel-delivery-ipc.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
@@ -88,7 +88,10 @@ export interface ChannelWorkerGroup {
   beginWorkspaceDrain(workspaceCwd: string): void;
   cancelWorkspaceDrain(workspaceCwd: string): void;
   workspaceActivity(workspaceCwd: string): number;
-  removeWorkspace(workspaceCwd: string): Promise<void>;
+  removeWorkspace(
+    workspaceCwd: string,
+    options?: { permanent?: boolean },
+  ): Promise<void>;
   restoreWorkspace(workspaceCwd: string): Promise<void>;
   deliverChannelMessage(
     request: Parameters<
@@ -103,6 +106,7 @@ export interface ChannelWorkerGroupSharedOptions {
   cliEntryPath: string;
   daemonUrl: string;
   daemonToken?: string;
+  workerTlsCaCertPath?: string;
   restartPolicy?: ChannelWorkerRestartPolicy;
   startupTimeoutMs?: number;
   heartbeatTimeoutMs?: number;
@@ -230,6 +234,9 @@ export function createChannelWorkerGroup(
       daemonUrl: opts.shared.daemonUrl,
       ...(opts.shared.daemonToken
         ? { daemonToken: opts.shared.daemonToken }
+        : {}),
+      ...(opts.shared.workerTlsCaCertPath
+        ? { tlsCaCertPath: opts.shared.workerTlsCaCertPath }
         : {}),
       workspace: runtime.workspaceCwd,
       selection: group.selection,
@@ -748,9 +755,13 @@ export function createChannelWorkerGroup(
         ? 1
         : 0;
     },
-    removeWorkspace(workspaceCwd) {
+    removeWorkspace(workspaceCwd, options) {
       const existing = removalPromises.get(workspaceCwd);
-      if (existing) return existing;
+      if (existing) {
+        return options?.permanent
+          ? existing.finally(() => groupsByWorkspace.delete(workspaceCwd))
+          : existing;
+      }
       drainingWorkspaces.add(workspaceCwd);
       const removal = (async () => {
         try {
@@ -772,6 +783,7 @@ export function createChannelWorkerGroup(
           if (killError) throw killError;
         } finally {
           drainingWorkspaces.delete(workspaceCwd);
+          if (options?.permanent) groupsByWorkspace.delete(workspaceCwd);
         }
       })();
       removalPromises.set(workspaceCwd, removal);

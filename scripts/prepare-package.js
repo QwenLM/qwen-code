@@ -14,12 +14,15 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import semver from 'semver';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultRootDir = path.resolve(__dirname, '..');
 const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
-const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 96 * 1024 * 1024;
+// The docker-sandbox E2E leg builds its image by running this script, so an
+// over-budget package turns main's E2E run red as well as blocking publishing.
+const DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES = 112 * 1024 * 1024;
 const PACKAGE_TEXT_FILE_RE =
   /\.(?:[cm]?[jt]sx?|json|md|html|css|txt|ya?ml|sh|svg|map)$/i;
 const PACKAGE_SCAN_FORBIDDEN_LITERALS = [
@@ -271,6 +274,31 @@ function writeDistPackageJson(rootDir, distDir) {
   const rootPackageJson = JSON.parse(
     fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'),
   );
+  let lockfile;
+  try {
+    lockfile = JSON.parse(
+      fs.readFileSync(path.join(rootDir, 'package-lock.json'), 'utf-8'),
+    );
+  } catch (error) {
+    throw new Error(`Cannot read package-lock.json: ${error.message}`);
+  }
+  const coreManifest = JSON.parse(
+    fs.readFileSync(
+      path.join(rootDir, 'packages', 'core', 'package.json'),
+      'utf-8',
+    ),
+  );
+  const sharpVersion =
+    lockfile.packages?.['packages/core/node_modules/sharp']?.version ??
+    lockfile.packages?.['node_modules/sharp']?.version;
+  const declared = coreManifest.dependencies?.sharp;
+  if (!sharpVersion || !declared || !semver.satisfies(sharpVersion, declared)) {
+    throw new Error(
+      `sharp version is not locked in package-lock.json ` +
+        `(resolved ${sharpVersion ?? 'none'}, ` +
+        `packages/core declares ${declared ?? 'none'})`,
+    );
+  }
 
   const distPackageJson = {
     name: rootPackageJson.name,
@@ -300,6 +328,17 @@ function writeDistPackageJson(rootDir, distDir) {
       'examples',
       'bundled',
       'web-shell',
+      // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
+      // web-tree-sitter wasm, native render library) are intentionally NOT
+      // published in the npm package — a multi-megabyte tree dominated by the
+      // native render library — against the unpacked-size budget. An npm
+      // install also has no @opentui/core dependency to resolve the assets
+      // against: below the runtime floor (Node < 26.4.0) the renderer gate
+      // never selects opentui, and at or above it, QWEN_TUI_RENDERER=opentui
+      // selects the renderer, the boot fails on the missing asset tree, and
+      // a stderr warning falls back to ink on every startup. The opt-in Bun
+      // standalone flavor (--runtime=bun) carries the assets via
+      // create-standalone-package.js instead.
     ],
     config: rootPackageJson.config,
     dependencies: {},
@@ -322,7 +361,12 @@ function writeDistPackageJson(rootDir, distDir) {
       // is sufficient: its own optionalDependencies pull in the matching @img
       // platform binary for every OS/arch npm installs onto, so the platform
       // packages are not pinned here (pinning them drifts on a sharp bump).
-      sharp: '0.34.5',
+      // The version is exact-pinned like all other native optional deps in this
+      // manifest — a project-wide convention that keeps the published tarball
+      // reproducible. Sharp's recurring CVE stream means users must wait for a
+      // CLI release to pick up libvips fixes; nightly releases keep the
+      // turnaround short.
+      sharp: sharpVersion,
     },
     engines: rootPackageJson.engines,
   };

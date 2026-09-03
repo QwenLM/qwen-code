@@ -74,6 +74,14 @@ function setup(
 describe('toolFor — dispatch by file type, not by GitHub', () => {
   it.each([
     ['.github/workflows/ci.yml', '', 'actionlint'],
+    // The long `.yaml` workflow spelling — GitHub accepts both.
+    ['.github/workflows/ci.yaml', '', 'actionlint'],
+    // The directory alone must not route: a non-YAML file under
+    // .github/workflows/ is not a workflow (pins the suffix conjunct).
+    ['.github/workflows/README.md', '', null],
+    // A stemless `.yml` dotfile in a NESTED workflows/ directory is
+    // deliberately unrouted — the pathTool comment names the divergence.
+    ['.github/workflows/nested/.yml', '', null],
     ['deploy.sh', '', 'shellcheck'],
     ['scripts/build.bash', '', 'shellcheck'],
     ['Dockerfile', '', 'hadolint'],
@@ -164,6 +172,18 @@ describe('runScriptLint — graceful degradation and scoping', () => {
     expect(r.deferred).toHaveLength(1);
     expect(r.deferred[0].tool).toBe('actionlint');
     expect(r.deferred[0].reason).toContain('not yet supported');
+    // The reason must not restate "not linted" — the body renders it under a
+    // wrapper that already opens with "Not linted:", and a tail here posted
+    // the phrase twice in one sentence (#10567's posted body).
+    expect(r.deferred[0].reason).not.toContain('not linted');
+    // The Chinese half of that wrapper sentence renders `reasonZh` — without
+    // it the 中文说明 block carried the English reason verbatim. Pinned to the
+    // literal: a `toContain('actionlint')` fragment was satisfied by the
+    // ENGLISH reason too, so the exact defect this field exists to fix — an
+    // English string posing as the Chinese half — shipped green under it.
+    expect(r.deferred[0].reasonZh).toBe(
+      'actionlint 对 workflow 内嵌 shell 的源映射尚未支持',
+    );
     expect(r.ok).toBe(true);
   });
 
@@ -183,6 +203,10 @@ describe('runScriptLint — graceful degradation and scoping', () => {
     expect(r.skipped).toHaveLength(1);
     expect(r.skipped[0].tool).toBe('shellcheck');
     expect(r.skipped[0].reason).toContain('not a regular file');
+    // The body renders this under "Not reviewed:" — a "not linted" tail here
+    // posted the phrase twice in one sentence (the deferred reason's pin
+    // above guards its own copy; this guards the skipped one).
+    expect(r.skipped[0].reason).not.toContain('not linted');
   });
 
   it('checks nothing when no executable file changed', () => {

@@ -1,6 +1,9 @@
 name: 'Update ECS Runner Qwen'
 
 on:
+  push:
+    branches: ['main']
+    paths: ['.github/workflows/update-ecs-runner-qwen.yml']
   workflow_dispatch:
     inputs:
       version:
@@ -15,12 +18,64 @@ permissions:
   contents: 'read'
 
 jobs:
+  # Resolving on a hosted runner, once, keeps the registry wait below off the
+  # ECS pools (which queue behind real review/triage work) and guarantees every
+  # pool installs the SAME version even when their jobs start hours apart.
+  resolve:
+    name: 'Resolve version'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 30
+    outputs:
+      version: '${{ steps.version.outputs.version }}'
+    steps:
+      - name: 'Resolve version'
+        id: 'version'
+        env:
+          INPUT_VERSION: '${{ inputs.version || github.event.client_payload.version }}'
+          # npm publishes asynchronously: `npm publish --provenance` returns
+          # "Your package is being processed and may take a few minutes to
+          # become available", and release.yml dispatches this workflow as soon
+          # as it returns. For v0.22.3 the gap was ~16 minutes (published
+          # 17:14Z, resolvable 17:30Z), so the single un-retried `npm view` this
+          # step used to run 404'd on 3 of the 4 pools and left the fleet split
+          # across two CLI versions until a maintainer noticed. Wait the
+          # registry out rather than losing the race.
+          RESOLVE_TIMEOUT_SECONDS: '1500'
+          RESOLVE_INTERVAL_SECONDS: '30'
+        run: |-
+          set -euo pipefail
+          specifier="@qwen-code/qwen-code@${INPUT_VERSION#v}"
+          if [[ "${specifier}" == '@qwen-code/qwen-code@' ]]; then
+            specifier='@qwen-code/qwen-code@latest'
+          fi
+          # Per-attempt stderr is held back so ~50 identical 404 blocks do not
+          # bury the log; the last one is replayed when the wait gives up.
+          err_log="$(mktemp)"
+          deadline=$(( SECONDS + RESOLVE_TIMEOUT_SECONDS ))
+          while :; do
+            version="$(npm view "${specifier}" version 2>"${err_log}" | tail -n 1)" || true
+            if [[ -n "${version}" ]]; then
+              break
+            fi
+            if (( SECONDS >= deadline )); then
+              cat "${err_log}" >&2
+              echo "::error::No published qwen version matches '${INPUT_VERSION:-latest}' after ${RESOLVE_TIMEOUT_SECONDS}s."
+              exit 1
+            fi
+            echo "'${specifier}' is not on the registry yet; retrying in ${RESOLVE_INTERVAL_SECONDS}s."
+            sleep "${RESOLVE_INTERVAL_SECONDS}"
+          done
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved qwen version: ${version}"
+
   update:
     name: 'Update Qwen on ${{ matrix.runner }}'
+    needs: 'resolve'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     strategy:
       matrix:
-        runner: ['ecs-update-sg', 'ecs-update-64c']
+        runner: ['ecs-update-hk-1', 'ecs-update-hk-2', 'ecs-update-hk-3', 'ecs-update-hk-4', 'ecs-update-hk-5']
       fail-fast: false
     runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
     concurrency:
@@ -28,39 +83,38 @@ jobs:
       cancel-in-progress: false
     timeout-minutes: 10
     steps:
-      - name: 'Resolve version'
-        id: 'version'
-        env:
-          INPUT_VERSION: '${{ inputs.version || github.event.client_payload.version }}'
-        run: |-
-          set -euo pipefail
-          specifier="@qwen-code/qwen-code@${INPUT_VERSION#v}"
-          if [[ "${specifier}" == '@qwen-code/qwen-code@' ]]; then
-            specifier='@qwen-code/qwen-code@latest'
-          fi
-          version="$(npm view "${specifier}" version | tail -n 1)" || true
-          if [[ -z "${version}" ]]; then
-            echo "::error::No published qwen version matches '${INPUT_VERSION:-latest}'."
-            exit 1
-          fi
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "Resolved qwen version: ${version}"
-
       - name: 'Update qwen'
         env:
-          VERSION: '${{ steps.version.outputs.version }}'
+          VERSION: '${{ needs.resolve.outputs.version }}'
         run: |-
           set -euo pipefail
           # The runner service resolves the system-wide qwen binary. Do not
           # carry a runner user's custom npm prefix into the sudo install.
           (
             cd "${RUNNER_TEMP:?}"
-            sudo env -u NPM_CONFIG_PREFIX npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"
+            # All runner processes of a region share one machine, so another
+            # job's concurrent `npm install -g` can race npm's rename of the
+            # package dir (ENOTEMPTY). Clear trash left by crashed installs
+            # and retry through the seconds-long race window.
+            PKG_DIR='/usr/local/lib/node_modules/@qwen-code'
+            for attempt in 1 2 3; do
+              sudo rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
+              if sudo env -u NPM_CONFIG_PREFIX npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+                exit 0
+              fi
+              if [[ "${attempt}" -lt 3 ]]; then
+                echo "::warning::npm install attempt ${attempt} failed; retrying"
+                sleep $((attempt * 10))
+              else
+                echo "::error::npm install of @qwen-code/qwen-code@${VERSION} failed after 3 attempts"
+              fi
+            done
+            exit 1
           )
 
       - name: 'Verify version'
         env:
-          VERSION: '${{ steps.version.outputs.version }}'
+          VERSION: '${{ needs.resolve.outputs.version }}'
         run: |-
           set -euo pipefail
           qwen_path="$(command -v qwen)"
@@ -68,3 +122,44 @@ jobs:
           echo "qwen path: ${qwen_path}"
           echo "qwen version: ${actual}"
           test "${actual}" = "${VERSION}"
+
+  # A failed fleet update is otherwise invisible. `qwen-code-pr-review.yml` and
+  # `qwen-triage.yml` install the CLI only when it is absent, and on a
+  # self-hosted runner it never is, so a pool that misses an update keeps
+  # serving PRs on the old version indefinitely with nothing to distinguish it
+  # from a healthy one — on v0.22.3 that went unnoticed for a full day.
+  # `main-ci-failure-issue.yml` cannot cover this: it watches test suites on
+  # `main`, and this workflow runs off `repository_dispatch`.
+  report_failure:
+    name: 'Report a stale fleet'
+    needs: ['resolve', 'update']
+    # `cancelled` is deliberately not a failure: a newer dispatch supersedes an
+    # older one's still-pending legs through the per-pool concurrency group,
+    # which is routine and says nothing about the fleet's state.
+    if: "${{ always() && github.repository == 'QwenLM/qwen-code' && (needs.resolve.result == 'failure' || needs.update.result == 'failure') }}"
+    # Hosted, not the ECS pool: this job reports that the pools are broken, and
+    # queueing the report behind them would be the same trap it documents.
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      # A job-level block replaces the workflow's, so checkout needs contents
+      # spelled out here even though the job only files an issue.
+      contents: 'read'
+      # Read this run's per-pool job conclusions.
+      actions: 'read'
+      issues: 'write'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: 'File or update the stale-fleet issue'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REPO: '${{ github.repository }}'
+          RUN_ID: '${{ github.run_id }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          VERSION: '${{ needs.resolve.outputs.version }}'
+          DEDUP_LABEL: 'scope/ci-cd'
+        run: 'bash .github/scripts/ecs-fleet-update-failure-issue.sh'

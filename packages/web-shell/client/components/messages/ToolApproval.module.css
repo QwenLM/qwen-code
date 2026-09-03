@@ -1,7 +1,7 @@
 .approval {
   margin: 0 auto;
   width: 100%;
-  max-width: min(800px, var(--chat-content-width, 800px));
+  max-width: min(100%, var(--chat-content-width, 1000px));
   box-sizing: border-box;
   padding: 16px;
   border: 1.5px solid var(--border);
@@ -26,6 +26,20 @@
     0 2px 4px -2px rgba(0, 0, 0, 0.1),
     0 4px 6px -1px rgba(0, 0, 0, 0.1);
   font-family: var(--font-sans, system-ui, sans-serif);
+}
+
+.floatingWorkflow {
+  display: flex;
+  flex-direction: column;
+  max-height: min(720px, 80vh);
+  overflow-y: hidden;
+}
+
+.workflow {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 12px;
+  overflow-y: auto;
 }
 
 .header {
@@ -102,6 +116,12 @@
   -webkit-box-orient: vertical;
 }
 
+.planContent {
+  display: block;
+  max-height: min(240px, 25vh);
+  -webkit-line-clamp: unset;
+}
+
 .code {
   margin: 10px 0 0;
   margin-left: 24px;
@@ -160,8 +180,8 @@
   align-items: center;
   justify-content: center;
   gap: 0;
-  height: 28px;
-  padding: 0 12px;
+  min-height: 36px;
+  padding: 6px 12px;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;

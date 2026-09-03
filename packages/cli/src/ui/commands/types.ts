@@ -8,6 +8,8 @@ import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
   Config,
+  GoalStateResponse,
+  GoalStateCause,
   Logger,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -25,6 +27,14 @@ import type {
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import type { PeerMessaging } from '../../peerMessaging/peer-messaging.js';
+
+export interface NonInteractiveSlashCommandPolicy {
+  readonly allowSessionReset: boolean;
+  readonly allowWorkspaceSettingsWrite: boolean;
+  readonly persistModelSelection: boolean;
+  readonly blockedBuiltinCommandNames: readonly string[];
+}
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
@@ -36,6 +46,7 @@ export interface CommandContext {
    * - acp: ACP/Zed integration mode
    */
   executionMode?: 'interactive' | 'non_interactive' | 'acp';
+  executionPolicy?: NonInteractiveSlashCommandPolicy;
   // Invocation properties for when commands are called.
   invocation?: {
     /** The raw, untrimmed input string from the user. */
@@ -52,6 +63,11 @@ export interface CommandContext {
     settings: LoadedSettings;
     logger: Logger | null;
     extensionRefreshState?: ExtensionRefreshState;
+    /**
+     * Present only when cross-session messaging is enabled and its socket
+     * bound; `/peers` treats null as "the feature is off".
+     */
+    peerMessaging?: PeerMessaging | null;
   };
   // UI state and history management
   ui: {
@@ -61,6 +77,8 @@ export interface CommandContext {
     addItem: UseHistoryManagerReturn['addItem'];
     /** Clears all history items and the console screen. */
     clear: () => void;
+    /** Clears transient assistant output before replacing conversation history. */
+    clearPendingState?: () => void;
     /**
      * Sets the transient debug message displayed in the application footer in debug mode.
      */
@@ -93,7 +111,7 @@ export interface CommandContext {
     /** Refreshes the static history display in Ink. */
     refreshStatic: () => void;
     toggleVimEnabled: () => Promise<boolean>;
-    setGeminiMdFileCount: (count: number) => void;
+    setMemoryFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;
     setSessionName: (name: string | null) => void;
     extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
@@ -137,6 +155,21 @@ export interface MessageActionReturn {
   type: 'message';
   messageType: 'info' | 'warning' | 'error';
   content: string;
+}
+
+export type GoalCommandOperation =
+  | { kind: 'status' }
+  | { kind: 'set'; objective: string }
+  | { kind: 'edit'; objective: string }
+  | { kind: 'pause' }
+  | { kind: 'resume' }
+  | { kind: 'clear' };
+
+export interface GoalControlActionReturn {
+  type: 'goal_control';
+  operation: GoalCommandOperation;
+  response: GoalStateResponse;
+  cause?: GoalStateCause;
 }
 
 /**
@@ -189,6 +222,7 @@ export interface OpenDialogActionReturn {
     | 'fast-model'
     | 'voice-model'
     | 'vision-model'
+    | 'compaction-model'
     | 'image-model'
     | 'subagent_create'
     | 'subagent_list'
@@ -197,6 +231,7 @@ export interface OpenDialogActionReturn {
     | 'permissions'
     | 'approval-mode'
     | 'effort'
+    | 'output-style'
     | 'resume'
     | 'delete'
     | 'branch'
@@ -220,13 +255,15 @@ export interface LoadHistoryActionReturn {
 
 /**
  * The return type for a command action that should immediately submit
- * content as a prompt to the Gemini model.
+ * content as a prompt to the model.
  */
 export interface SubmitPromptActionReturn {
   type: 'submit_prompt';
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /** Refresh context-file-backed instructions after this prompt writes them. */
+  refreshContextFilesOnWrite?: boolean;
   /**
    * Optional per-turn model id. When set, this prompt (and any tool-call
    * continuations it spawns) runs on the given model without changing the
@@ -268,6 +305,7 @@ export type SlashCommandActionReturn =
   | OpenDialogActionReturn
   | LoadHistoryActionReturn
   | SubmitPromptActionReturn
+  | GoalControlActionReturn
   | ConfirmShellCommandsActionReturn
   | ConfirmActionReturn;
 

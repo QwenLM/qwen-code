@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import {
   appendFileSync,
   chmodSync,
@@ -17,19 +18,132 @@ import type {
   ChannelAgentBridge,
   ChannelBaseOptions,
   ChannelConfig,
+  ChannelTaskLifecycleEvent,
   Envelope,
 } from '@qwen-code/channel-base';
 import {
   getGlobalQwenDir,
   getWorkspaceScopeDirName,
   PollingChannelBase,
+  sanitizeDisplayText,
   sanitizeLogText,
+  sanitizePromptText,
+  truncateCodePoints,
 } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
 
 interface GithubConfig extends ChannelConfig {
   baseUrl?: string;
   reasonFilter?: unknown;
+  useLocalGh?: boolean;
+}
+
+const GH_AUTH_TIMEOUT_MS = 10_000;
+const GH_AUTH_MAX_BUFFER = 64 * 1024;
+// Same allowlist as the sibling gh wrappers, plus a leading-dash rejection so
+// the value cannot be parsed as a gh option when passed to `gh auth token`.
+const GH_HOSTNAME_RE = /^[A-Za-z0-9.-]+$/;
+
+function ghHostname(channelName: string, baseUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl is not a valid URL: ${baseUrl}`,
+    );
+  }
+  if (!url.hostname) {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl is not a valid URL: ${baseUrl}`,
+    );
+  }
+  if (url.protocol !== 'https:') {
+    throw new Error(
+      `[Channel:${channelName}] local GitHub CLI authentication requires an HTTPS baseUrl.`,
+    );
+  }
+  const hostname =
+    url.hostname === 'api.github.com' ? 'github.com' : url.hostname;
+  if (hostname.startsWith('-') || !GH_HOSTNAME_RE.test(hostname)) {
+    throw new Error(
+      `[Channel:${channelName}] baseUrl hostname is invalid: ${hostname}`,
+    );
+  }
+  return hostname;
+}
+
+// Sibling gh subprocess wrappers: core/src/utils/github-prs.ts, cli/src/commands/review/lib/gh.ts
+function resolveGhAuthToken(
+  channelName: string,
+  hostname: string,
+): Promise<string> {
+  const env = { ...process.env };
+  delete env['GH_TOKEN'];
+  delete env['GITHUB_TOKEN'];
+  delete env['GH_ENTERPRISE_TOKEN'];
+  delete env['GITHUB_ENTERPRISE_TOKEN'];
+  return new Promise((resolve, reject) => {
+    execFile(
+      'gh',
+      ['auth', 'token', '--hostname', hostname],
+      {
+        timeout: GH_AUTH_TIMEOUT_MS,
+        maxBuffer: GH_AUTH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          let message: string;
+          if (code === 'ENOENT') {
+            message =
+              'GitHub CLI (gh) is not installed on the daemon host or is not on the daemon PATH.';
+          } else if ((error as { killed?: unknown }).killed === true) {
+            // Node sets killed=true even when the timed-out child also exited
+            // with a numeric code, so this must precede the exit-code branch.
+            message = `GitHub CLI authentication lookup for ${hostname} timed out after ${GH_AUTH_TIMEOUT_MS / 1000} seconds.`;
+          } else if (typeof code === 'number') {
+            // Matches go-gh's ConfigDir precedence: GH_CONFIG_DIR,
+            // XDG_CONFIG_HOME, %AppData%\GitHub CLI (Windows only), HOME.
+            message = `No GitHub CLI authentication is available for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host. gh config dir: ${
+              env['GH_CONFIG_DIR'] ||
+              (env['XDG_CONFIG_HOME']
+                ? `${env['XDG_CONFIG_HOME']}/gh`
+                : process.platform === 'win32' && env['APPDATA']
+                  ? `${env['APPDATA']}\\GitHub CLI`
+                  : env['HOME']
+                    ? `${env['HOME']}/.config/gh`
+                    : 'unknown')
+            }`;
+          } else {
+            message = `GitHub CLI authentication lookup for ${hostname} failed to execute.`;
+          }
+          const stderrHint = stderr ? sanitizeLogText(stderr, 256).trim() : '';
+          reject(
+            new Error(
+              `[Channel:${channelName}] ${message}${
+                stderrHint ? ` gh stderr: ${stderrHint}` : ''
+              }`,
+            ),
+          );
+          return;
+        }
+        const token = stdout.trim();
+        if (!token) {
+          reject(
+            new Error(
+              `[Channel:${channelName}] GitHub CLI returned an empty token for ${hostname}. Run \`gh auth login --hostname ${hostname}\` on the daemon host.`,
+            ),
+          );
+          return;
+        }
+        resolve(token);
+      },
+    );
+  });
 }
 
 const KNOWN_NOTIFICATION_REASONS = new Set([
@@ -158,7 +272,7 @@ interface PostedGithubComment {
 interface PublicationAuditRecord {
   at: string;
   type: 'github_publication';
-  outcome: 'posted' | 'suppressed' | 'failed';
+  outcome: 'posted' | 'suppressed' | 'failed' | 'posting';
   channel: string;
   triggerKind?: string;
   repository: string;
@@ -197,6 +311,116 @@ interface PendingFinalDelivery {
   sourceMessageId?: string;
   actor?: string;
   triggerKind?: string;
+  sourceLabel?: string;
+}
+
+type InboundTaskState =
+  | 'accepted'
+  | 'running'
+  | 'reply_pending'
+  | 'failed'
+  | 'cancelled';
+
+const MAX_INBOUND_TASK_ATTEMPTS = 3;
+
+interface InboundTaskDedupe {
+  dispatchedBodies?: string[];
+  dispatchedComments?: string[];
+  dispatchedEvents?: string[];
+}
+
+interface InboundTaskRecord {
+  version: 1;
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  state: InboundTaskState;
+  issueNumber: number;
+  source: {
+    chatId: string;
+    threadId?: string;
+    messageId?: string;
+  };
+  envelope?: Envelope;
+  dedupe: InboundTaskDedupe;
+  attempts?: number;
+  errorCommentPosted?: boolean;
+  error?: string;
+}
+
+function isOptionalStringArray(value: unknown): value is string[] | undefined {
+  return (
+    value === undefined ||
+    (Array.isArray(value) && value.every((item) => typeof item === 'string'))
+  );
+}
+
+function isInboundEnvelope(value: unknown): value is Envelope | undefined {
+  if (value === undefined) return true;
+  if (value === null || typeof value !== 'object') return false;
+  const envelope = value as Envelope;
+  return (
+    typeof envelope.channelName === 'string' &&
+    typeof envelope.senderId === 'string' &&
+    typeof envelope.senderName === 'string' &&
+    typeof envelope.chatId === 'string' &&
+    typeof envelope.text === 'string' &&
+    typeof envelope.isGroup === 'boolean' &&
+    typeof envelope.isMentioned === 'boolean' &&
+    typeof envelope.isReplyToBot === 'boolean' &&
+    (envelope.chatName === undefined ||
+      typeof envelope.chatName === 'string') &&
+    (envelope.threadId === undefined ||
+      typeof envelope.threadId === 'string') &&
+    (envelope.messageId === undefined ||
+      typeof envelope.messageId === 'string') &&
+    (envelope.referencedText === undefined ||
+      typeof envelope.referencedText === 'string') &&
+    isOptionalStringArray(envelope.mentionedMemberIds) &&
+    (envelope.imageBase64 === undefined ||
+      typeof envelope.imageBase64 === 'string') &&
+    (envelope.imageMimeType === undefined ||
+      typeof envelope.imageMimeType === 'string') &&
+    (envelope.attachments === undefined ||
+      Array.isArray(envelope.attachments)) &&
+    (envelope.metadata === undefined ||
+      typeof envelope.metadata === 'string') &&
+    (envelope.alreadyPrefixed === undefined ||
+      envelope.alreadyPrefixed === true)
+  );
+}
+
+function isInboundTaskRecord(value: unknown): value is InboundTaskRecord {
+  if (value === null || typeof value !== 'object') return false;
+  const record = value as InboundTaskRecord;
+  return (
+    record.version === 1 &&
+    typeof record.id === 'string' &&
+    typeof record.createdAt === 'string' &&
+    typeof record.updatedAt === 'string' &&
+    ['accepted', 'running', 'reply_pending', 'failed', 'cancelled'].includes(
+      record.state,
+    ) &&
+    Number.isSafeInteger(record.issueNumber) &&
+    record.source !== null &&
+    typeof record.source === 'object' &&
+    typeof record.source.chatId === 'string' &&
+    (record.source.threadId === undefined ||
+      typeof record.source.threadId === 'string') &&
+    (record.source.messageId === undefined ||
+      typeof record.source.messageId === 'string') &&
+    isInboundEnvelope(record.envelope) &&
+    record.dedupe !== null &&
+    typeof record.dedupe === 'object' &&
+    isOptionalStringArray(record.dedupe.dispatchedBodies) &&
+    isOptionalStringArray(record.dedupe.dispatchedComments) &&
+    isOptionalStringArray(record.dedupe.dispatchedEvents) &&
+    (record.attempts === undefined ||
+      (Number.isSafeInteger(record.attempts) && record.attempts >= 0)) &&
+    (record.errorCommentPosted === undefined ||
+      typeof record.errorCommentPosted === 'boolean') &&
+    (record.error === undefined || typeof record.error === 'string')
+  );
 }
 
 class FinalPublicationError extends Error {}
@@ -243,6 +467,23 @@ function buildTriggerGuidance(reason: string): string {
   return `For ${reason}, output exactly ${NO_REPLY_SENTINEL} when a public reply is unnecessary.`;
 }
 
+function isPersistedSourceLabel(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 3 ||
+    value.length > 256 ||
+    !value.startsWith('[') ||
+    !value.endsWith(']')
+  ) {
+    return false;
+  }
+  for (let index = 1; index < value.length - 1; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return false;
+  }
+  return true;
+}
+
 function isPendingFinalDelivery(value: unknown): value is PendingFinalDelivery {
   const item = value as PendingFinalDelivery;
   return (
@@ -253,7 +494,8 @@ function isPendingFinalDelivery(value: unknown): value is PendingFinalDelivery {
     typeof item.chatId === 'string' &&
     typeof item.threadId === 'string' &&
     typeof item.fullText === 'string' &&
-    typeof item.sessionId === 'string'
+    typeof item.sessionId === 'string' &&
+    (item.sourceLabel === undefined || isPersistedSourceLabel(item.sourceLabel))
   );
 }
 
@@ -268,6 +510,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private pendingFinalDeliveryRequestsActive = 0;
   private pendingFinalDeliveryRetryStopRequested = false;
   private reasonFilter: Set<string> | null = null;
+  private inboundRecoveryPending = true;
+  private recoverableInboundTasks = 0;
+  private activeInboundTaskIdsByMessage = new Map<string, string>();
+  private cancelledInboundTaskIds = new Set<string>();
+  private pendingCursorUpdatedAt: string | undefined;
+  private inboundPersistenceBlocked = false;
 
   constructor(
     name: string,
@@ -316,11 +564,28 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const cfg = this.config as GithubConfig;
     this.reasonFilter = normalizeReasonFilter(cfg, this.name);
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
+    const configuredToken = cfg.token?.trim() ?? '';
+    if (cfg.useLocalGh !== undefined && typeof cfg.useLocalGh !== 'boolean') {
+      throw new Error(`[Channel:${this.name}] useLocalGh must be a boolean.`);
+    }
+    if (!configuredToken && cfg.useLocalGh !== true) {
+      throw new Error(
+        `[Channel:${this.name}] configure a GitHub token or enable local GitHub CLI authentication.`,
+      );
+    }
+    let auth = configuredToken;
+    let credential = 'configured token';
+    if (!configuredToken) {
+      const hostname = ghHostname(this.name, baseUrl);
+      auth = await resolveGhAuthToken(this.name, hostname);
+      credential = `local gh credential for ${hostname}`;
+    }
+    process.stderr.write(`[Channel:${this.name}] using ${credential}\n`);
     this.webOrigin = baseUrl
       .replace(/\/api\/v3\/?$/, '')
       .replace(/^https:\/\/api\.github\.com/, 'https://github.com');
     this.octokit = new Octokit({
-      auth: cfg.token,
+      auth,
       baseUrl,
       ...(this.proxy
         ? { request: { agent: new HttpsProxyAgent(this.proxy) } }
@@ -329,6 +594,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     try {
       const { data } = await this.octokit.rest.users.getAuthenticated();
       this.botUsername = data.login;
+      process.stderr.write(
+        `[Channel:${this.name}] authenticated as "${sanitizeLogText(data.login, 64)}"\n`,
+      );
     } catch (err) {
       throw new Error(
         `[Channel:${this.name}] failed to resolve bot identity: ${err}`,
@@ -349,7 +617,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     ) {
       if (allowed.every((user) => user === botUsername)) {
         throw new Error(
-          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot-owned PAT and allowlist the operator account.`,
+          `[Channel:${this.name}] GitHub allowlist only contains the authenticated GitHub account "${this.botUsername}", which cannot trigger this channel because self-authored comments are ignored. Use a separate bot account (or a separate bot-owned PAT) and allowlist the operator account.`,
         );
       }
       process.stderr.write(
@@ -358,6 +626,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     this.gate.replaceAllowedUsers(allowed);
     this.migrateLegacyPublicationState();
+    this.inboundPersistenceBlocked = false;
+    this.inboundRecoveryPending = true;
+    try {
+      this.recoverableInboundTasks = this.readInboundTasks().filter((record) =>
+        this.isRecoverableInboundTask(record),
+      ).length;
+    } catch {
+      this.recoverableInboundTasks = 0;
+    }
     this.pendingFinalDeliveryRetryStopRequested = false;
     this.startPollLoop();
     if (this.pendingFinalDeliveryRetry) {
@@ -403,20 +680,27 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     chatId: string,
     threadId: string | undefined,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    await this.createIssueComment(chatId, threadId, text);
+    await this.createIssueComment(
+      chatId,
+      threadId,
+      this.formatMarkdownAttributedText(text, sourceLabel),
+    );
   }
 
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     await this.publishFinalResponse(
       chatId,
       this.getResponseThreadId(sessionId),
       text,
       sessionId,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
     );
   }
 
@@ -425,6 +709,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     threadId: string | undefined,
     fullText: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     const threadMatch = threadId?.match(/^(issue|pr):(\d+)$/);
     const metadata = this.getResponseMetadata(sessionId);
@@ -457,11 +742,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     }
 
+    this.recordPublicationAudit({
+      ...auditBase,
+      at: new Date().toISOString(),
+      type: 'github_publication',
+      outcome: 'posting',
+    });
     try {
       const comment = await this.createIssueComment(
         chatId,
         threadId,
-        fullText,
+        this.formatMarkdownAttributedText(fullText, sourceLabel),
         3,
         isDefiniteNoWriteGithubError,
       );
@@ -486,12 +777,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ),
       });
       if (threadId && isDefiniteNoWriteGithubError(err)) {
-        this.enqueuePendingFinalDelivery({
-          ...auditBase,
-          chatId,
-          threadId,
-          fullText,
-        });
+        try {
+          this.enqueuePendingFinalDelivery({
+            ...auditBase,
+            chatId,
+            threadId,
+            fullText,
+            sourceLabel,
+          });
+        } catch (persistError) {
+          throw new Error(
+            `[Channel:${this.name}] failed to persist pending GitHub delivery: ${sanitizeLogText(
+              persistError instanceof Error
+                ? persistError.message
+                : String(persistError),
+              200,
+            )}`,
+            { cause: persistError },
+          );
+        }
       }
       throw new FinalPublicationError(
         err instanceof Error ? err.message : String(err),
@@ -529,6 +833,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       chatId: string;
       threadId: string;
       fullText: string;
+      sourceLabel?: string;
     },
   ): void {
     const record: PendingFinalDelivery = {
@@ -551,20 +856,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       sourceMessageId: input.sourceMessageId,
       actor: input.actor,
       triggerKind: input.triggerKind,
+      sourceLabel: input.sourceLabel,
     };
-    try {
-      const pending = this.readPendingFinalDeliveries().filter(
-        (item) => item.id !== record.id,
-      );
-      this.writePendingFinalDeliveries([...pending, record]);
-    } catch (err) {
-      process.stderr.write(
-        `[Channel:${this.name}] failed to persist pending GitHub delivery: ${sanitizeLogText(
-          err instanceof Error ? err.message : String(err),
-          200,
-        )}\n`,
-      );
-    }
+    const pending = this.readPendingFinalDeliveries(true).filter(
+      (item) => item.id !== record.id,
+    );
+    this.writePendingFinalDeliveries([...pending, record]);
   }
 
   private async retryPendingFinalDeliveries(
@@ -591,16 +888,23 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             80,
           )}\n`,
         );
-        this.updatePendingFinalDeliveries((current) =>
-          current.filter((item) => item.id !== record.id),
-        );
+        if (
+          this.updatePendingFinalDeliveries((current) =>
+            current.filter((item) => item.id !== record.id),
+          )
+        ) {
+          this.removeReplyPendingInboundTask(record);
+        }
         continue;
       }
       try {
         const comment = await this.createIssueComment(
           record.chatId,
           record.threadId,
-          record.fullText,
+          this.formatMarkdownAttributedText(
+            record.fullText,
+            record.sourceLabel,
+          ),
           3,
           isDefiniteNoWriteGithubError,
           signal,
@@ -624,6 +928,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ) {
           continue;
         }
+        this.removeReplyPendingInboundTask(record);
       } catch (err) {
         if (signal?.aborted) return;
         if (isDefiniteNoWriteGithubError(err)) {
@@ -647,6 +952,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ) {
           continue;
         }
+        this.removeReplyPendingInboundTask(record);
       }
     }
   }
@@ -686,6 +992,29 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         )}\n`,
       );
       return false;
+    }
+  }
+
+  private removeReplyPendingInboundTask(delivery: PendingFinalDelivery): void {
+    try {
+      const tasks = this.readInboundTasks();
+      const matching = tasks.filter(
+        (task) =>
+          task.state === 'reply_pending' &&
+          task.source.chatId === delivery.chatId &&
+          task.source.threadId === delivery.threadId &&
+          task.source.messageId === delivery.sourceMessageId,
+      );
+      for (const task of matching) {
+        this.removeInboundTask(task.id);
+      }
+    } catch (cleanupErr) {
+      process.stderr.write(
+        `[Channel:${this.name}] failed to clean up inbound task: ${sanitizeLogText(
+          cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr),
+          200,
+        )}\n`,
+      );
     }
   }
 
@@ -874,6 +1203,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   protected async pollOnce(): Promise<void> {
+    this.inboundPersistenceBlocked = false;
+    if (this.inboundRecoveryPending) {
+      try {
+        await this.recoverInboundTasks();
+      } catch (err) {
+        process.stderr.write(
+          `[Channel:${this.name}] inbound task recovery failed, will retry next poll: ${err}\n`,
+        );
+      } finally {
+        this.inboundRecoveryPending = false;
+      }
+    }
+
     this.cursor.metaFloor ??= this.cursor.lastProcessedAt;
     const since = new Date(
       new Date(this.cursor.lastProcessedAt).getTime() - 1000,
@@ -901,12 +1243,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // PUT /notifications' async mark fails to mark the thread read.
     const windowSince = this.cursor.lastProcessedAt;
 
-    await this.markNotificationsAsRead(maxUpdatedAt);
-
     if (maxUpdatedAt > this.cursor.lastProcessedAt) {
-      this.cursor.lastProcessedAt = maxUpdatedAt;
+      this.pendingCursorUpdatedAt =
+        !this.pendingCursorUpdatedAt ||
+        maxUpdatedAt > this.pendingCursorUpdatedAt
+          ? maxUpdatedAt
+          : this.pendingCursorUpdatedAt;
     }
-
     for (const notification of notifications) {
       if (!notification.subject.url) continue;
       const extracted = this.extractFromSubjectUrl(notification.subject.url);
@@ -972,6 +1315,21 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
     }
+    if (this.hasRecoverableInboundTasks()) {
+      this.inboundRecoveryPending = true;
+    }
+    if (
+      !this.inboundPersistenceBlocked &&
+      !this.hasRecoverableInboundTasks() &&
+      this.pendingCursorUpdatedAt
+    ) {
+      const committedAt = this.pendingCursorUpdatedAt;
+      await this.markNotificationsAsRead(committedAt);
+      if (committedAt > this.cursor.lastProcessedAt) {
+        this.cursor.lastProcessedAt = committedAt;
+      }
+      this.pendingCursorUpdatedAt = undefined;
+    }
   }
 
   private async processCommentLane(
@@ -993,7 +1351,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (onlyMentioned && !hasMention) continue;
 
       const senderId = (comment.user?.login || 'unknown').toLowerCase();
-      const allowed = this.gate.isAllowed(senderId);
+      // Approved paired groups bypass the sender gate in preflight, so the
+      // directed lane must mirror that or follow-ups fail mention gating.
+      const allowed =
+        this.gate.isAllowed(senderId) ||
+        (directed &&
+          this.config.groupPolicy === 'pairing' &&
+          this.groupGate.isGroupApproved(ctx.chatId));
       const envelope: Envelope = {
         channelName: this.name,
         senderId,
@@ -1003,18 +1367,39 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         messageId: String(comment.id),
         text: this.botUsername ? stripBotMention(body, this.botUsername) : body,
         isGroup: true,
-        isMentioned: hasMention || (directed && allowed),
+        // Never synthesize a mention into an unapproved pairing group: the
+        // pairing step must keep dropping ambient comments, and a synthesized
+        // mention would turn every ambient comment into a pairing request.
+        isMentioned:
+          hasMention ||
+          (directed &&
+            allowed &&
+            (this.config.groupPolicy !== 'pairing' ||
+              this.groupGate.isGroupApproved(ctx.chatId))),
         isReplyToBot: false,
         metadata: this.buildRouteMetadata(ctx),
       };
 
-      if (!(await this.dispatchEnvelope(envelope, ctx.issueNumber))) {
+      if (
+        !(await this.dispatchEnvelope(envelope, ctx.issueNumber, {
+          dispatchedComments: [key],
+        }))
+      ) {
         dispatched = true;
         continue;
       }
       if (allowed) {
         this.recordDispatchedComment(key);
-        if (hasMention) dispatched = true;
+      }
+      // A mention under group pairing has a visible effect (dispatch or a
+      // pairing code comment) even when the sender gate rejects the sender;
+      // suppress the first-contact body feed so the same intent cannot be
+      // dispatched twice. Record the body as consumed too: if the thread is
+      // later re-listed as unread (mark-read can fail), the body feed must
+      // not re-trigger the same pairing intent on a later poll.
+      if (hasMention && (allowed || this.config.groupPolicy === 'pairing')) {
+        dispatched = true;
+        this.recordDispatchedBody(`${ctx.chatId}|${ctx.threadId}`);
       }
     }
 
@@ -1035,6 +1420,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ? await this.fetchPrMeta(ctx)
         : await this.fetchIssueMeta(ctx);
     const title = meta.title || ctx.subjectTitle;
+    const displayTitle = truncateCodePoints(sanitizePromptText(title), 500);
     const details =
       reason === 'review_requested'
         ? `Author: ${meta.user?.login || 'unknown'} | State: ${meta.state || 'unknown'} | Draft: ${meta.draft ? 'true' : 'false'} | Branch: ${meta.head?.ref || 'unknown'} → ${meta.base?.ref || 'unknown'}`
@@ -1052,17 +1438,26 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         reason === 'review_requested'
           ? 'Return a formal review summary with verified actionable findings, or a concise no-blocker result.'
           : 'Triage this issue and respond with the next action.',
+      displayText:
+        reason === 'review_requested'
+          ? `Review requested: ${displayTitle}`
+          : `Issue assigned: ${displayTitle}`,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
       metadata: `${this.buildMetadata(ctx.chatId, ctx.threadId, title)}\n${GITHUB_PUBLICATION_INSTRUCTIONS}\nTrigger: ${reason}.\n${buildTriggerGuidance(reason)}\n${details}`,
     };
-    await this.dispatchEnvelope(envelope, ctx.issueNumber);
+    await this.dispatchEnvelope(envelope, ctx.issueNumber, {
+      dispatchedEvents: [trigger.key],
+    });
     this.recordDispatched('dispatchedEvents', trigger.key);
   }
 
   private async processAggregateLane(ctx: NotificationContext): Promise<void> {
-    if (this.config.senderPolicy === 'pairing') {
+    if (
+      this.config.senderPolicy === 'pairing' ||
+      this.config.groupPolicy === 'pairing'
+    ) {
       await this.processCommentLane(ctx, false, true);
       return;
     }
@@ -1085,7 +1480,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const summary = comments
       .map(
         (comment) =>
-          `- @${comment.user?.login || 'unknown'}: ${(comment.body || '').trim().slice(0, MAX_AGGREGATE_COMMENT_CHARS)}`,
+          `- @${comment.user?.login || 'unknown'}: ${sanitizeDisplayText((comment.body || '').trim(), MAX_AGGREGATE_COMMENT_CHARS)}`,
       )
       .join('\n');
     const envelope: Envelope = {
@@ -1096,13 +1491,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       threadId: ctx.threadId,
       messageId: String(first.id),
       text: `Review these new comments and output exactly ${NO_REPLY_SENTINEL} if no public reply is needed:\n${summary}`,
+      displayText: summary,
       isGroup: true,
       isMentioned: true,
       isReplyToBot: false,
       metadata: this.buildRouteMetadata(ctx),
     };
 
-    await this.dispatchEnvelope(envelope, ctx.issueNumber);
+    await this.dispatchEnvelope(envelope, ctx.issueNumber, {
+      dispatchedComments: allComments.map(
+        (comment) => comment.node_id || String(comment.id),
+      ),
+    });
   }
 
   private async findDirectTrigger(
@@ -1252,7 +1652,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         metadata: this.buildRouteMetadata(ctx),
       };
 
-      await this.dispatchEnvelope(envelope, issueNumber);
+      await this.dispatchEnvelope(envelope, issueNumber, {
+        dispatchedBodies: [bodyKey],
+      });
       this.recordDispatchedBody(bodyKey);
     } catch (err) {
       process.stderr.write(
@@ -1281,18 +1683,326 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async dispatchEnvelope(
     envelope: Envelope,
     issueNumber: number,
+    dedupe: InboundTaskDedupe = {},
   ): Promise<boolean> {
+    const task = this.claimInboundTask(envelope, issueNumber, dedupe);
+    return this.runInboundTask(task);
+  }
+
+  private claimInboundTask(
+    envelope: Envelope,
+    issueNumber: number,
+    dedupe: InboundTaskDedupe,
+  ): InboundTaskRecord {
+    const existing = this.readInboundTasks().find(
+      (record) =>
+        record.source.chatId === envelope.chatId &&
+        record.source.threadId === envelope.threadId &&
+        record.source.messageId === envelope.messageId,
+    );
+    if (existing) {
+      this.applyTaskDedupe(existing);
+      return existing;
+    }
+    const now = new Date().toISOString();
+    const task: InboundTaskRecord = {
+      version: 1,
+      id: randomUUID(),
+      createdAt: now,
+      updatedAt: now,
+      state: 'accepted',
+      issueNumber,
+      source: {
+        chatId: envelope.chatId,
+        threadId: envelope.threadId,
+        messageId: envelope.messageId,
+      },
+      envelope,
+      dedupe,
+      attempts: 0,
+    };
+    this.updateInboundTasks((records) => [...records, task]);
+    this.applyTaskDedupe(task);
+    return task;
+  }
+
+  private async runInboundTask(task: InboundTaskRecord): Promise<boolean> {
+    if (!this.isRecoverableInboundTask(task)) return true;
+    const envelope = task.envelope;
+    if (!envelope) return true;
+    const attempts = (task.attempts ?? 0) + 1;
+    this.activeInboundTaskIdsByMessage.set(
+      this.inboundMessageKey(envelope.chatId, envelope.messageId),
+      task.id,
+    );
+    this.transitionInboundTask(task.id, 'running', { attempts });
+    let cancelled = false;
     try {
       await this.handleInbound(envelope);
-      return true;
+      cancelled = this.cancelledInboundTaskIds.has(task.id);
     } catch (err) {
+      const error = sanitizeLogText(
+        err instanceof Error ? err.message : String(err),
+        200,
+      );
       process.stderr.write(
         `[Channel:${this.name}] handleInbound failed for ${envelope.messageId}: ${err}\n`,
       );
-      if (!(err instanceof FinalPublicationError)) {
-        await this.postErrorComment(envelope.chatId, issueNumber);
+      if (err instanceof FinalPublicationError) {
+        if (this.cancelledInboundTaskIds.has(task.id)) {
+          // already persisted as 'cancelled' by onTaskLifecycle
+        } else if (this.hasPendingFinalDeliveryForTask(task)) {
+          this.transitionInboundTask(task.id, 'reply_pending', {
+            envelope: undefined,
+            error,
+          });
+        } else {
+          this.removeInboundTask(task.id);
+        }
+      } else if (!this.cancelledInboundTaskIds.has(task.id)) {
+        let posted = task.errorCommentPosted === true;
+        if (!posted) {
+          posted = await this.postErrorComment(
+            envelope.chatId,
+            task.issueNumber,
+            this.getInboundErrorSourceLabel(envelope),
+          );
+        }
+        this.transitionInboundTask(task.id, 'failed', {
+          error,
+          attempts,
+          errorCommentPosted: posted,
+        });
       }
       return false;
+    } finally {
+      this.activeInboundTaskIdsByMessage.delete(
+        this.inboundMessageKey(envelope.chatId, envelope.messageId),
+      );
+      this.cancelledInboundTaskIds.delete(task.id);
+    }
+    // A base-class cancellation resolves handleInbound normally (the cancel is
+    // absorbed internally), so honour the terminal cancelled state captured
+    // above instead of removing the persisted record. Bookkeeping runs outside
+    // the try so a state read/write failure fails closed rather than being
+    // misclassified as a task failure that recovery would re-run.
+    if (cancelled) return true;
+    if (this.hasPendingFinalDeliveryForTask(task)) {
+      this.transitionInboundTask(task.id, 'reply_pending', {
+        envelope: undefined,
+      });
+    } else {
+      this.removeInboundTask(task.id);
+    }
+    return true;
+  }
+
+  private async recoverInboundTasks(): Promise<void> {
+    const tasks = this.readInboundTasks().filter((task) =>
+      this.isRecoverableInboundTask(task),
+    );
+    const pendingDeliveries = tasks.length
+      ? this.readPendingFinalDeliveries(true)
+      : [];
+    const publicationAuditKeys = tasks.length
+      ? this.readPublicationAuditKeys(true)
+      : new Set<string>();
+
+    for (const task of tasks) {
+      if (!task.envelope) continue;
+      this.applyTaskDedupe(task);
+      if (
+        pendingDeliveries.some(
+          (record) =>
+            record.chatId === task.source.chatId &&
+            record.threadId === task.source.threadId &&
+            record.sourceMessageId === task.source.messageId,
+        )
+      ) {
+        this.transitionInboundTask(task.id, 'reply_pending', {
+          envelope: undefined,
+        });
+        continue;
+      }
+      if (publicationAuditKeys.has(this.inboundTaskSourceKey(task))) {
+        this.removeInboundTask(task.id);
+        continue;
+      }
+      await this.runInboundTask(task);
+    }
+  }
+
+  private isRecoverableInboundTask(task: InboundTaskRecord): boolean {
+    return (
+      task.state === 'accepted' ||
+      task.state === 'running' ||
+      (task.state === 'failed' &&
+        (task.attempts ?? 0) < MAX_INBOUND_TASK_ATTEMPTS)
+    );
+  }
+
+  private hasRecoverableInboundTasks(): boolean {
+    return this.recoverableInboundTasks > 0;
+  }
+
+  private hasPendingFinalDeliveryForTask(task: InboundTaskRecord): boolean {
+    return this.readPendingFinalDeliveries(true).some(
+      (record) =>
+        record.chatId === task.source.chatId &&
+        record.threadId === task.source.threadId &&
+        record.sourceMessageId === task.source.messageId,
+    );
+  }
+
+  private inboundTaskSourceKey(task: InboundTaskRecord): string {
+    return `${task.source.chatId}|${task.source.threadId ?? ''}|${task.source.messageId ?? ''}`;
+  }
+
+  private readPublicationAuditKeys(strict = false): Set<string> {
+    try {
+      const keys = new Set<string>();
+      for (const line of readFileSync(
+        this.channelFilePath('github-audit.jsonl'),
+        'utf-8',
+      ).split('\n')) {
+        if (!line) continue;
+        try {
+          const record = JSON.parse(line) as PublicationAuditRecord;
+          if (
+            record.outcome === 'posted' ||
+            record.outcome === 'suppressed' ||
+            record.outcome === 'posting'
+          ) {
+            keys.add(
+              `${record.repository}|${record.threadId ?? ''}|${record.sourceMessageId ?? ''}`,
+            );
+          }
+        } catch {
+          continue;
+        }
+      }
+      return keys;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return new Set();
+      if (strict) throw err;
+      return new Set();
+    }
+  }
+
+  private applyTaskDedupe(task: InboundTaskRecord): void {
+    for (const [field, keys] of Object.entries(task.dedupe) as Array<
+      [keyof InboundTaskDedupe, string[] | undefined]
+    >) {
+      for (const key of keys ?? []) {
+        this.recordDispatched(field, key);
+      }
+    }
+  }
+
+  private transitionInboundTask(
+    taskId: string,
+    state: InboundTaskState,
+    updates: Partial<
+      Pick<
+        InboundTaskRecord,
+        'envelope' | 'error' | 'attempts' | 'errorCommentPosted'
+      >
+    > = {},
+  ): void {
+    this.updateInboundTasks((records) =>
+      records.map((record) =>
+        record.id === taskId
+          ? {
+              ...record,
+              ...updates,
+              state,
+              updatedAt: new Date().toISOString(),
+            }
+          : record,
+      ),
+    );
+  }
+
+  private removeInboundTask(taskId: string): void {
+    this.updateInboundTasks((records) =>
+      records.filter((record) => record.id !== taskId),
+    );
+  }
+
+  private updateInboundTasks(
+    update: (records: InboundTaskRecord[]) => InboundTaskRecord[],
+  ): void {
+    try {
+      const records = update(this.readInboundTasks());
+      this.writeInboundTasks(records);
+      this.recoverableInboundTasks = records.filter((record) =>
+        this.isRecoverableInboundTask(record),
+      ).length;
+    } catch (err) {
+      this.inboundPersistenceBlocked = true;
+      throw err;
+    }
+  }
+
+  private inboundTasksPath(): string {
+    return this.channelFilePath('github-inbound-tasks.json');
+  }
+
+  private readInboundTasks(): InboundTaskRecord[] {
+    try {
+      const parsed = JSON.parse(readFileSync(this.inboundTasksPath(), 'utf-8'));
+      if (!Array.isArray(parsed) || !parsed.every(isInboundTaskRecord)) {
+        throw new Error('invalid GitHub inbound task state');
+      }
+      return parsed;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      this.inboundPersistenceBlocked = true;
+      process.stderr.write(
+        `[Channel:${this.name}] failed to read GitHub inbound tasks: ${sanitizeLogText(
+          err instanceof Error ? err.message : String(err),
+          200,
+        )}\n`,
+      );
+      throw err;
+    }
+  }
+
+  private writeInboundTasks(records: InboundTaskRecord[]): void {
+    const path = this.inboundTasksPath();
+    if (records.length === 0) {
+      try {
+        unlinkSync(path);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+      return;
+    }
+    const dir = dirname(path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    const tmpPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    writeFileSync(tmpPath, `${JSON.stringify(records)}\n`, {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    chmodSync(tmpPath, 0o600);
+    renameSync(tmpPath, path);
+    chmodSync(path, 0o600);
+  }
+
+  private inboundMessageKey(chatId: string, messageId?: string): string {
+    return `${chatId}|${messageId ?? ''}`;
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    const taskId = this.activeInboundTaskIdsByMessage.get(
+      this.inboundMessageKey(event.chatId, event.messageId),
+    );
+    if (!taskId) return;
+    if (event.type === 'cancelled') {
+      this.cancelledInboundTaskIds.add(taskId);
+      this.transitionInboundTask(taskId, 'cancelled');
     }
   }
 
@@ -1475,7 +2185,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private async postErrorComment(
     chatId: string,
     issueNumber: number,
-  ): Promise<void> {
+    sourceLabel?: string,
+  ): Promise<boolean> {
     try {
       await this.githubApi(
         () =>
@@ -1483,14 +2194,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             owner: chatId.split('/')[0],
             repo: chatId.split('/')[1],
             issue_number: issueNumber,
-            body: '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+            body: this.formatMarkdownAttributedText(
+              '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+              sourceLabel,
+            ),
           }),
         `postErrorComment(${chatId}#${issueNumber})`,
       );
+      return true;
     } catch (err) {
       process.stderr.write(
         `[Channel:${this.name}] postErrorComment also failed for ${chatId}#${issueNumber}, user must re-mention manually: ${err}\n`,
       );
+      return false;
     }
   }
 }

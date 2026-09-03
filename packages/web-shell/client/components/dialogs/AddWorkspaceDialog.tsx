@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useI18n } from '../../i18n';
+import { getShadowAwareActiveElement } from '../../utils/dom';
 import { DialogShell } from './DialogShell';
 import { Button } from '../ui/button';
 import {
@@ -72,13 +73,26 @@ export function AddWorkspaceDialog({
   const listOpenRef = useRef(false);
   listOpenRef.current = listOpen && suggestions.length > 0;
   const suggestSeqRef = useRef(0);
-  // Set when a suggestion is accepted or the list is dismissed, so the
-  // path-change effect knows whether to reopen the list for that update.
+  // Set while Browse is in flight, so the path-change effect keeps the
+  // pick-triggered lookup closed until the first edit; blur dismissal
+  // invalidates in-flight lookups via suggestSeqRef instead.
   const suppressNextFetchOpenRef = useRef(false);
+  const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
+
+  const cancelBlurDismiss = useCallback(() => {
+    if (blurTimeoutRef.current !== undefined) {
+      clearTimeout(blurTimeoutRef.current);
+      blurTimeoutRef.current = undefined;
+    }
+  }, []);
+
+  useEffect(() => () => cancelBlurDismiss(), [cancelBlurDismiss]);
 
   const closeList = useCallback(() => {
     setListOpen(false);
@@ -104,7 +118,12 @@ export function AddWorkspaceDialog({
           setSuggestions(result.suggestions);
           setHostSep(result.sep || '/');
           setHighlight(-1);
-          if (openOnResult || listOpenRef.current) {
+          const input = inputRef.current;
+          if (
+            input !== null &&
+            getShadowAwareActiveElement(input) === input &&
+            (openOnResult || listOpenRef.current)
+          ) {
             setListOpen(result.suggestions.length > 0);
           }
         },
@@ -149,22 +168,37 @@ export function AddWorkspaceDialog({
 
   const pickDirectory = useCallback(async () => {
     if (!onPick) return;
+    inputRef.current?.blur();
+    // The blur above scheduled the delayed dismiss; cancel it and apply the
+    // close + suppress now so the timer cannot fire after the outcome below.
+    cancelBlurDismiss();
+    closeList();
+    suppressNextFetchOpenRef.current = true;
     setBrowsing(true);
     setError(null);
+    let pickedPath: string | undefined;
     try {
-      const selectedPath = await onPick();
-      if (selectedPath) {
+      pickedPath = await onPick();
+      if (pickedPath && pickedPath !== path) {
+        // Leave the suppress flag set: the path-change effect consumes it,
+        // keeping the pick-triggered lookup closed until the first edit.
         ++suggestSeqRef.current;
-        setPath(selectedPath);
+        setPath(pickedPath);
         setSuggestions([]);
-        closeList();
+      } else {
+        // Cancelled, failed, or same-value pick: the first edit must open.
+        // A same-value pick keeps the typed path, so invalidate any lookup
+        // already in flight from before Browse was clicked.
+        if (pickedPath) ++suggestSeqRef.current;
+        suppressNextFetchOpenRef.current = false;
       }
     } catch {
+      suppressNextFetchOpenRef.current = false;
       setError(t('sidebar.addWorkspaceBrowseError'));
     } finally {
       setBrowsing(false);
     }
-  }, [onPick, closeList, t]);
+  }, [onPick, path, closeList, cancelBlurDismiss, t]);
 
   const handleInputKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
@@ -277,10 +311,20 @@ export function AddWorkspaceDialog({
                     if (error) setError(null);
                   }}
                   onKeyDown={handleInputKeyDown}
+                  onFocus={cancelBlurDismiss}
                   onBlur={() => {
                     // Delay so a mousedown on a suggestion wins over blur.
-                    setTimeout(() => {
-                      suppressNextFetchOpenRef.current = true;
+                    cancelBlurDismiss();
+                    blurTimeoutRef.current = setTimeout(() => {
+                      blurTimeoutRef.current = undefined;
+                      // Invalidate in-flight lookups via the sequence counter
+                      // rather than suppressing the next fetch, which would
+                      // leak into the first edit after the user refocuses.
+                      ++suggestSeqRef.current;
+                      // Drop the stale entries too: the invalidated lookup
+                      // never refreshes them, and ArrowDown would reopen
+                      // whatever is left against the current input.
+                      setSuggestions([]);
                       closeList();
                     }, 100);
                   }}

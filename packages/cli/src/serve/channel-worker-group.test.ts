@@ -25,7 +25,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
-import type { ChannelDeliveryRequest } from './channel-delivery-ipc.js';
+import type { ChannelDeliveryRequest } from '../runtime/channel-delivery-ipc.js';
 
 const PRIMARY = '/ws/primary';
 const SECONDARY = '/ws/secondary';
@@ -141,6 +141,40 @@ const deliveryRequest: ChannelDeliveryRequest = {
 };
 
 describe('createChannelWorkerGroup', () => {
+  it('passes workerTlsCaCertPath through to every supervisor', () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared: { ...shared, workerTlsCaCertPath: '/certs/daemon.pem' },
+    });
+
+    expect(recorded[0]!.opts.tlsCaCertPath).toBe('/certs/daemon.pem');
+  });
+
+  it('omits tlsCaCertPath when the daemon does not serve TLS', () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    expect(recorded[0]!.opts.tlsCaCertPath).toBeUndefined();
+  });
+
   it('wires loop MCP to the exact workspace session with owner-safe cleanup', async () => {
     const addSessionRuntimeMcpServer = vi.fn(async () => ({ toolCount: 3 }));
     const removeSessionRuntimeMcpServer = vi.fn(async () => ({}));
@@ -682,6 +716,36 @@ describe('createChannelWorkerGroup', () => {
     });
     await group.removeWorkspace(SECONDARY);
     expect(recorded[2]!.supervisor.stop).toHaveBeenCalledOnce();
+  });
+
+  it('forgets a permanently removed workspace instead of restoring it', async () => {
+    const runtimes = [
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false, { VERSION: 'old' }),
+    ];
+    const registry = fakeRegistry(runtimes);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+
+    await group.removeWorkspace(SECONDARY, { permanent: true });
+    runtimes.splice(1, 1, fakeRuntime(SECONDARY, false, { VERSION: 'new' }));
+    await group.restoreWorkspace(SECONDARY);
+
+    expect(recorded).toHaveLength(2);
+    expect(group.snapshots()).toEqual([
+      expect.objectContaining({ workspaceCwd: PRIMARY }),
+    ]);
   });
 
   it('removes a restored worker from routing when startup fails', async () => {

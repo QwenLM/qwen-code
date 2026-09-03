@@ -66,7 +66,10 @@ jobs:
     if: >-
       github.event.workflow_run.event == 'pull_request' &&
       github.repository == 'QwenLM/qwen-code'
-    runs-on: 'ubuntu-latest'
+    # Checks out nothing and runs no repository code (workflow_run events use
+    # base-repo YAML), so the persistent ECS pool is safe and skips the
+    # saturated hosted queue. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 10
     steps:
       - name: 'Finalize CI evidence and deferred approval'

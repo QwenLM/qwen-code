@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   assembleSystemPrompt,
   getCoreSystemPrompt,
@@ -14,7 +14,17 @@ import {
   resolvePathFromEnv,
   getCompressionPrompt,
   resolveInteractionMode,
+  resolveMainSessionOutputStyle,
 } from './prompts.js';
+// The base-prompt builder lives with the client that calls it; these tests
+// pin it against the resolver here so the prompt and the per-turn reminder
+// cannot drift apart.
+import { getMainSessionBaseSystemPrompt } from './client.js';
+import {
+  BUILT_IN_OUTPUT_STYLES,
+  getBuiltInOutputStyle,
+  type OutputStyleDefinition,
+} from './output-styles.js';
 import { InputFormat } from '../output/types.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
@@ -71,6 +81,15 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
     expect(prompt).toContain(
       'request explicit approval only when the current interaction mode can receive it',
+    );
+  });
+
+  it('identifies UserPromptSubmit hook context as distinct from user input', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Text inside a `<qwen:user-prompt-submit-context>` tag is model context added by a configured `UserPromptSubmit` hook, not user input.',
     );
   });
 
@@ -167,6 +186,12 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain('Keep it short and outcome-oriented');
     expect(prompt).toContain(
       'rather than one item per error, file, command, or minor edit',
+    );
+    expect(prompt).toContain(
+      'When an active Todo plan covers work delegated through top-level Agent calls',
+    );
+    expect(prompt).not.toContain(
+      'For complex work delegated through top-level Agent calls, create the relevant todo first',
     );
     expect(prompt).not.toContain('VERY frequently');
     expect(prompt).not.toContain('EXTREMELY helpful');
@@ -560,6 +585,326 @@ describe('Core System Prompt (prompts.ts)', () => {
       );
     });
   });
+
+  describe('outputStyle parameter', () => {
+    const concise = getBuiltInOutputStyle('Concise')!;
+    const learning = getBuiltInOutputStyle('Learning')!;
+
+    it('leaves the prompt untouched when no style is active', () => {
+      const prompt = getCoreSystemPrompt();
+      for (const style of BUILT_IN_OUTPUT_STYLES) {
+        expect(prompt).not.toContain(`# Output Style: ${style.name}`);
+      }
+    });
+
+    it('appends the style section to the end of the base prompt', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt).toContain('# Output Style: Concise');
+      // The style refines the mandates, so it has to land after them...
+      expect(prompt.indexOf('# Output Style: Concise')).toBeGreaterThan(
+        prompt.indexOf('# Core Mandates'),
+      );
+      // ...and the base prompt must still be intact.
+      expect(prompt).toContain('# Core Mandates');
+    });
+
+    it('keeps the style ahead of the context and volatile layers', () => {
+      const prompt = getCoreSystemPrompt(
+        'MEMORY_MARKER',
+        undefined,
+        'APPEND_MARKER',
+        'interactive',
+        concise,
+      );
+      const styleIndex = prompt.indexOf('# Output Style: Concise');
+      expect(styleIndex).toBeGreaterThan(-1);
+      expect(styleIndex).toBeLessThan(prompt.indexOf('MEMORY_MARKER'));
+      expect(styleIndex).toBeLessThan(prompt.indexOf('APPEND_MARKER'));
+    });
+
+    it('is ignored when QWEN_SYSTEM_MD replaces the base prompt', () => {
+      vi.stubEnv('QWEN_SYSTEM_MD', '/custom/path/system.md');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt).toContain('custom system prompt');
+      expect(prompt).not.toContain('# Output Style: Concise');
+    });
+
+    it('points the identity sentence at the style when one is active', () => {
+      const plain = getCoreSystemPrompt();
+      expect(plain).toContain('specializing in software engineering tasks');
+
+      const styled = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(styled).toContain('responding according to your "Output Style"');
+      expect(styled).not.toContain(
+        'specializing in software engineering tasks',
+      );
+    });
+
+    it('drops only the software-engineering section for keepCodingInstructions: false', () => {
+      const nonCoding = {
+        ...concise,
+        name: 'NonCoding',
+        keepCodingInstructions: false,
+      };
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        nonCoding,
+      );
+      expect(prompt).not.toContain('## Software Engineering Tasks');
+      // Everything else the base prompt carries must survive — dropping the
+      // safety rules along with the workflow guidance would be a regression.
+      expect(prompt).toContain('# Core Mandates');
+      expect(prompt).toContain('# Executing actions with care');
+      expect(prompt).toContain('## Using Your Tools');
+      expect(prompt).toContain('## Tone and Style (CLI Interaction)');
+      expect(prompt).toContain('# Output Style: NonCoding');
+    });
+
+    it('keeps the software-engineering section under a normal style', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt).toContain('## Software Engineering Tasks');
+    });
+
+    it('omits Learning from headless prompts that cannot receive a reply', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'headless',
+        learning,
+      );
+
+      expect(prompt).toContain('This is a non-interactive, single-turn run');
+      expect(prompt).toContain('specializing in software engineering tasks');
+      expect(prompt).not.toContain(
+        'responding according to your "Output Style"',
+      );
+      expect(prompt).not.toContain('# Output Style: Learning');
+      expect(prompt).not.toContain('TODO(human)');
+      expect(prompt).not.toContain('until the user has written their piece');
+    });
+
+    it('keeps Learning in interactive prompts', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        learning,
+      );
+
+      expect(prompt).toContain('# Output Style: Learning');
+      expect(prompt).toContain('TODO(human)');
+    });
+
+    it('keeps Learning in acp prompts', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'acp',
+        learning,
+      );
+
+      expect(prompt).toContain('# Output Style: Learning');
+    });
+
+    it('keeps the style section under a QWEN_SYSTEM_IDENTITY_MD override', () => {
+      // The override owns the identity sentence verbatim, so the styled
+      // wording is skipped there — but the style itself still has to land.
+      const identityPath = path.resolve('/custom/identity.md');
+      const customIdentity =
+        'You are Acme Code, an interactive CLI agent for Acme Corp.';
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockImplementation(
+        (p) => path.resolve(String(p)) === identityPath,
+      );
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === identityPath) {
+          return customIdentity;
+        }
+        throw new Error(`unexpected read: ${String(p)}`);
+      });
+
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt.startsWith(customIdentity)).toBe(true);
+      expect(prompt).not.toContain(
+        'responding according to your "Output Style"',
+      );
+      expect(prompt).toContain('# Output Style: Concise');
+    });
+
+    it('does not bake the style into the QWEN_WRITE_SYSTEM_MD dump', () => {
+      // The dump is meant to be reusable as a QWEN_SYSTEM_MD base; baking the
+      // style in would apply it twice when that file is fed back.
+      vi.stubEnv('QWEN_WRITE_SYSTEM_MD', 'true');
+      getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      const [, written] = vi.mocked(fs.writeFileSync).mock.calls[0];
+      expect(written).not.toContain('# Output Style: Concise');
+      // ...and the dumped identity sentence is the unstyled one.
+      expect(written).toContain('specializing in software engineering tasks');
+    });
+  });
+});
+
+describe('main-session style: reminder decision matches prompt section', () => {
+  const concise = getBuiltInOutputStyle('Concise')!;
+  const learning = getBuiltInOutputStyle('Learning')!;
+
+  const sessions = [
+    ['interactive', { interactive: true, acp: false }],
+    ['headless', { interactive: false, acp: false }],
+    ['acp', { interactive: false, acp: true }],
+  ] as const;
+
+  const makeConfig = (opts: {
+    customPrompt?: string;
+    style?: OutputStyleDefinition;
+    interactive: boolean;
+    acp: boolean;
+  }) => ({
+    getSystemPrompt: () => opts.customPrompt,
+    getModel: () => 'test-model',
+    getOutputStyle: () => opts.style,
+    getExperimentalZedIntegration: () => opts.acp,
+    getInputFormat: () => InputFormat.TEXT,
+    isInteractive: () => opts.interactive,
+  });
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+    vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each(sessions)(
+    'renders the %s interaction mode the config resolves to',
+    (session, flags) => {
+      const markers = {
+        interactive: 'an interactive CLI agent',
+        headless: 'a non-interactive CLI agent',
+        acp: 'a CLI agent operating through an ACP host',
+      } as const;
+      expect(getMainSessionBaseSystemPrompt(makeConfig(flags))).toContain(
+        markers[session],
+      );
+    },
+  );
+
+  interface Case {
+    name: string;
+    customPrompt?: string;
+    systemMd?: string;
+    style?: OutputStyleDefinition;
+    flags: { interactive: boolean; acp: boolean };
+  }
+
+  const cases: Case[] = [];
+  for (const customPrompt of [undefined, 'You are terse.']) {
+    for (const systemMd of [undefined, 'true']) {
+      for (const style of [undefined, concise, learning]) {
+        for (const [session, flags] of sessions) {
+          cases.push({
+            name:
+              `custom=${customPrompt ? 'yes' : 'no'} ` +
+              `systemMd=${systemMd ?? 'off'} ` +
+              `style=${style?.name ?? 'none'} session=${session}`,
+            customPrompt,
+            systemMd,
+            style,
+            flags,
+          });
+        }
+      }
+    }
+  }
+
+  // The per-turn gate in LlmClient is exactly
+  // resolveMainSessionOutputStyle(config), so pinning that decision against
+  // the rendered prompt means the reminder and the prompt cannot drift when
+  // a new prompt condition is added. The client-side wiring is pinned by the
+  // reminder tests in client.test.ts.
+  it.each(cases)(
+    'reminds if and only if the prompt carries the style section ($name)',
+    ({ customPrompt, systemMd, style, flags }) => {
+      vi.stubEnv('QWEN_SYSTEM_MD', systemMd);
+      if (systemMd) {
+        vi.mocked(fs.existsSync).mockReturnValue(true);
+        vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
+      }
+
+      const config = makeConfig({ customPrompt, style, ...flags });
+      const reminded = resolveMainSessionOutputStyle(config) !== undefined;
+      const prompt = getMainSessionBaseSystemPrompt(config);
+
+      expect(reminded).toBe(prompt.includes('# Output Style:'));
+      if (customPrompt) {
+        // The override replaces the base verbatim.
+        expect(prompt).toContain(customPrompt);
+        expect(prompt).not.toContain('You are Qwen Code');
+      } else if (!systemMd) {
+        expect(prompt).toContain('You are Qwen Code');
+      }
+    },
+  );
+
+  it('forwards the config model to the base prompt', () => {
+    const config = {
+      ...makeConfig({ interactive: true, acp: false }),
+      getModel: () => 'qwen3-coder-7b',
+    };
+
+    expect(getMainSessionBaseSystemPrompt(config)).toContain(
+      '<function=run_shell_command>',
+    );
+  });
 });
 
 describe('Model-specific tool call formats', () => {
@@ -567,6 +912,35 @@ describe('Model-specific tool call formats', () => {
     vi.resetAllMocks();
     vi.stubEnv('SANDBOX', undefined);
   });
+
+  it.each([
+    ['generic', 'gpt-4'],
+    ['qwen-coder', 'qwen3-coder-7b'],
+    ['qwen-vl', 'qwen-vl-max'],
+    ['gemma4', 'gemma-4'],
+  ])(
+    'reads the write target before establishing absence in the %s tool-call example',
+    (_style, model) => {
+      vi.mocked(isGitRepository).mockReturnValue(false);
+      const prompt = getCoreSystemPrompt(undefined, model);
+      const exampleStart = prompt.indexOf('user: Write tests for someFile.ts');
+      const exampleEnd = prompt.indexOf('</example>', exampleStart);
+      const example = prompt.slice(exampleStart, exampleEnd);
+      const targetPath = example.indexOf('/path/to/someFile.test.ts');
+      const targetReadCall = example.lastIndexOf('read_file', targetPath);
+      const absenceResult = example.indexOf(
+        'After read_file reports that /path/to/someFile.test.ts does not exist',
+      );
+      const writeCall = example.indexOf('write_file');
+
+      expect(exampleStart).toBeGreaterThanOrEqual(0);
+      expect(exampleEnd).toBeGreaterThan(exampleStart);
+      expect(targetReadCall).toBeGreaterThanOrEqual(0);
+      expect(targetPath).toBeGreaterThan(targetReadCall);
+      expect(absenceResult).toBeGreaterThan(targetPath);
+      expect(writeCall).toBeGreaterThan(absenceResult);
+    },
+  );
 
   it('should use XML format for qwen3-coder model', () => {
     vi.mocked(isGitRepository).mockReturnValue(false);
@@ -776,6 +1150,9 @@ describe('getPlanModeSystemReminder', () => {
       'wrappers, quoting tricks, aliases, or obfuscation',
     );
     expect(result).toContain('Pivot to read-only');
+    // list_directory is opt-in (off by default) — the reminder must not steer
+    // the model toward a tool that is not registered.
+    expect(result).not.toContain('list_directory');
     expect(result).toContain('does not approve the plan');
     expect(result).toContain('exit Plan mode');
   });

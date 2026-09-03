@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.21.2",
+  "version": "0.22.3",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -17,6 +17,10 @@
       "types": "./dist/src/utils/transcript-records.d.ts",
       "import": "./dist/src/utils/transcript-records.js"
     },
+    "./envVarResolver": {
+      "types": "./dist/src/utils/envVarResolver.d.ts",
+      "import": "./dist/src/utils/envVarResolver.js"
+    },
     "./goalWire": {
       "types": "./dist/src/goals/goal-wire.d.ts",
       "import": "./dist/src/goals/goal-wire.js"
@@ -25,9 +29,21 @@
       "types": "./dist/src/memory/scopes.d.ts",
       "import": "./dist/src/memory/scopes.js"
     },
+    "./subSessionConstants": {
+      "types": "./dist/src/tools/sub-session-constants.d.ts",
+      "import": "./dist/src/tools/sub-session-constants.js"
+    },
+    "./toolWriteOrigin": {
+      "types": "./dist/src/services/tool-write-origin.d.ts",
+      "import": "./dist/src/services/tool-write-origin.js"
+    },
     "./userPromptSubmitContext": {
       "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",
       "import": "./dist/src/hooks/user-prompt-submit-context.js"
+    },
+    "./noFollowOpen": {
+      "types": "./dist/src/utils/no-follow-open.d.ts",
+      "import": "./dist/src/utils/no-follow-open.js"
     },
     "./package.json": "./package.json",
     "./dist/*": "./dist/*",
@@ -51,17 +67,20 @@
     "@anthropic-ai/sdk": "^0.36.1",
     "@google/genai": "2.6.0",
     "@iarna/toml": "^2.2.5",
-    "@modelcontextprotocol/sdk": "^1.25.2",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/core": "2.0.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@opentelemetry/api": "^1.9.0",
-    "@opentelemetry/exporter-logs-otlp-grpc": "^0.203.0",
-    "@opentelemetry/exporter-logs-otlp-http": "^0.203.0",
-    "@opentelemetry/exporter-metrics-otlp-grpc": "^0.203.0",
-    "@opentelemetry/exporter-metrics-otlp-http": "^0.203.0",
-    "@opentelemetry/exporter-trace-otlp-grpc": "^0.203.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.203.0",
-    "@opentelemetry/instrumentation-http": "^0.203.0",
-    "@opentelemetry/instrumentation-undici": "^0.14.0",
-    "@opentelemetry/sdk-node": "^0.203.0",
+    "@opentelemetry/core": "^2.0.1",
+    "@opentelemetry/exporter-logs-otlp-grpc": "^0.221.0",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-metrics-otlp-grpc": "^0.221.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.221.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+    "@opentelemetry/instrumentation-http": "^0.221.0",
+    "@opentelemetry/instrumentation-undici": "^0.31.0",
+    "@opentelemetry/sdk-node": "^0.221.0",
     "@xterm/headless": "5.5.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^3.0.0",
@@ -87,7 +106,7 @@
     "picomatch": "^4.0.1",
     "prompts": "^2.4.2",
     "proper-lockfile": "^4.1.2",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.0",
     "shell-quote": "^1.9.0",
     "simple-git": "^3.36.0",
     "strip-ansi": "^7.1.0",

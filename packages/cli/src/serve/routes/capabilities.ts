@@ -8,6 +8,7 @@ import type { Application } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { getServeProtocolVersions } from '../capabilities.js';
 import type { getAdvertisedServeFeatures } from '../capabilities.js';
+import { MAX_UPLOAD_BYTES } from '../fs/index.js';
 import {
   advertisedMaxPendingPromptsPerSession,
   advertisedMaxSessions,
@@ -17,7 +18,10 @@ import {
   type CapabilitiesEnvelope,
   type ServeOptions,
 } from '../types.js';
-import type { WorkspaceRegistry } from '../workspace-registry.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
 
 interface RegisterCapabilitiesRoutesDeps {
   qwenCodeVersion?: string;
@@ -29,7 +33,25 @@ interface RegisterCapabilitiesRoutesDeps {
   maxSessionsPerWorkspace: ServeOptions['maxSessions'];
   maxTotalSessions: ServeOptions['maxTotalSessions'];
   maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
+  sessionRestoreTimeoutMs: number;
   languageCodes: string[];
+  daemonEnv: Readonly<NodeJS.ProcessEnv>;
+}
+
+function workflowsEnabledForRuntime(
+  runtime: WorkspaceRuntime | undefined,
+  daemonEnv: Readonly<NodeJS.ProcessEnv>,
+): boolean {
+  if (!runtime || !runtime.trusted) return false;
+  const env =
+    runtime.env.mode === 'runtime-overlay'
+      ? (runtime.env.effectiveEnv ?? {})
+      : (runtime.env.effectiveEnv ?? daemonEnv);
+  if (env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
+  return (
+    env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1' ||
+    runtime.env.workflowsEnabledBySettings === true
+  );
 }
 
 export function registerCapabilitiesRoutes(
@@ -37,11 +59,17 @@ export function registerCapabilitiesRoutes(
   deps: RegisterCapabilitiesRoutesDeps,
 ): void {
   app.get('/capabilities', (_req, res) => {
-    const entries = deps.workspaceRegistry.listEntries();
+    const entries = deps.workspaceRegistry
+      .listAllEntries()
+      .filter(
+        (entry) =>
+          !entry.internal ||
+          (entry.state === 'active' && entry.current !== undefined),
+      );
     const activePrimary = entries.find(
       (entry) => entry.primary && entry.state === 'active',
     )?.current?.runtime;
-    const multiWorkspace = entries.length > 1;
+    const multipleAdmissionPools = entries.length > 1;
     const features = deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
@@ -68,7 +96,11 @@ export function registerCapabilitiesRoutes(
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           deps.maxPendingPromptsPerSession,
         ),
-        ...(multiWorkspace
+        sessionRestoreTimeoutMs: deps.sessionRestoreTimeoutMs,
+        ...(features.includes('workspace_file_upload')
+          ? { maxWorkspaceFileUploadBytes: MAX_UPLOAD_BYTES }
+          : {}),
+        ...(multipleAdmissionPools
           ? {
               maxSessionsPerWorkspace: advertisedMaxSessions(
                 deps.maxSessionsPerWorkspace,
@@ -91,7 +123,14 @@ export function registerCapabilitiesRoutes(
         primary: entry.primary,
         trusted:
           entry.state === 'active' && entry.current?.runtime.trusted === true,
+        workflowsEnabled: workflowsEnabledForRuntime(
+          entry.state === 'active' ? entry.current?.runtime : undefined,
+          deps.daemonEnv,
+        ),
         ...(runtimeRemoval ? { removable: entry.removable } : {}),
+        ...(entry.current?.runtime.provenance === 'live-conversation'
+          ? { kind: 'live' as const }
+          : {}),
       })),
       supportedLanguages: deps.languageCodes,
     };

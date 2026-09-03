@@ -16,6 +16,7 @@ import {
   isAllowedMemoryPath,
 } from './memory-scoped-agent-config.js';
 import {
+  AUTO_MEMORY_PINNED_DIRNAME,
   clearAutoMemoryRootCache,
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
@@ -111,6 +112,274 @@ describe('createMemoryScopedAgentConfig', () => {
         filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
       }),
     ).resolves.toBe('deny');
+  });
+
+  it('can keep reads and writes user-memory-only', async () => {
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeProjectMemory: false,
+        includeUserMemory: true,
+        restrictReadsToMemoryPaths: true,
+      }),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.READ_FILE,
+        filePath: getUserAutoMemoryRoot(),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getAutoMemoryRoot(projectRoot), 'project', 'a.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.READ_FILE,
+        filePath: getAutoMemoryRoot(projectRoot),
+      }),
+    ).resolves.toBe('deny');
+  });
+
+  it('protects project pinned memory and aliases while leaving ordinary memory writable', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const pinnedDir = path.join(memoryRoot, AUTO_MEMORY_PINNED_DIRNAME);
+    const pinnedFile = path.join(pinnedDir, 'architecture.md');
+    const pinnedAlias = path.join(
+      memoryRoot,
+      'project',
+      `${AUTO_MEMORY_PINNED_DIRNAME}-alias`,
+    );
+    await fs.mkdir(pinnedDir, { recursive: true });
+    await fs.writeFile(pinnedFile, 'canonical architecture');
+    await fs.symlink(pinnedDir, pinnedAlias);
+
+    const protectedPm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: false,
+        protectPinnedMemory: true,
+      }),
+    );
+
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(memoryRoot, 'project', 'ordinary.md'),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: pinnedFile,
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(pinnedDir, 'new.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(
+          memoryRoot,
+          AUTO_MEMORY_PINNED_DIRNAME.toUpperCase(),
+          'architecture.md',
+        ),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: path.join(pinnedAlias, 'architecture.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(pinnedAlias, 'new.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(
+          memoryRoot,
+          `${AUTO_MEMORY_PINNED_DIRNAME}-notes`,
+          'ordinary.md',
+        ),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(
+          memoryRoot,
+          'project',
+          AUTO_MEMORY_PINNED_DIRNAME,
+          'notes.md',
+        ),
+      }),
+    ).resolves.toBe('allow');
+    expect(
+      protectedPm.findMatchingDenyRule({
+        toolName: ToolNames.EDIT,
+        filePath: pinnedFile,
+      }),
+    ).toBe('ManagedAutoMemory(edit: pinned memory is read-only)');
+    expect(
+      protectedPm.findMatchingDenyRule({
+        toolName: ToolNames.EDIT,
+        filePath: path.join(pinnedAlias, 'architecture.md'),
+      }),
+    ).toBe('ManagedAutoMemory(edit: pinned memory is read-only)');
+    expect(
+      protectedPm.findMatchingDenyRule({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(pinnedDir, 'new.md'),
+      }),
+    ).toBe('ManagedAutoMemory(write_file: pinned memory is read-only)');
+  });
+
+  it('protects user pinned memory when user memory is included', async () => {
+    const userPinnedFile = path.join(
+      getUserAutoMemoryRoot(),
+      AUTO_MEMORY_PINNED_DIRNAME,
+      'preferences.md',
+    );
+    await fs.mkdir(path.dirname(userPinnedFile), { recursive: true });
+    await fs.writeFile(userPinnedFile, 'canonical preferences');
+    const allMemoryPm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        protectPinnedMemory: true,
+      }),
+    );
+    await expect(
+      allMemoryPm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: userPinnedFile,
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      allMemoryPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getUserAutoMemoryRoot(), 'user', 'ordinary.md'),
+      }),
+    ).resolves.toBe('allow');
+  });
+
+  it('leaves pinned memory writable when protection is disabled', async () => {
+    const pinnedFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      AUTO_MEMORY_PINNED_DIRNAME,
+      'architecture.md',
+    );
+    await fs.mkdir(path.dirname(pinnedFile), { recursive: true });
+    await fs.writeFile(pinnedFile, 'canonical architecture');
+    const unprotectedPm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: false,
+      }),
+    );
+    await expect(
+      unprotectedPm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: pinnedFile,
+      }),
+    ).resolves.toBe('allow');
+  });
+
+  it('protects a pinned directory symlink and its in-memory target', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const targetDir = path.join(memoryRoot, 'project', 'shared');
+    const targetFile = path.join(targetDir, 'architecture.md');
+    const pinnedDir = path.join(memoryRoot, AUTO_MEMORY_PINNED_DIRNAME);
+    await fs.mkdir(targetDir, { recursive: true });
+    await fs.writeFile(targetFile, 'canonical architecture');
+    await fs.symlink(targetDir, pinnedDir);
+
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: false,
+        protectPinnedMemory: true,
+      }),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: path.join(pinnedDir, 'architecture.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: targetFile,
+      }),
+    ).resolves.toBe('deny');
+  });
+
+  it('reports the outside-root reason for a pinned symlink target outside memory', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const outsideDir = path.join(tempDir, 'outside-pinned-target');
+    const outsideFile = path.join(outsideDir, 'architecture.md');
+    const pinnedDir = path.join(memoryRoot, AUTO_MEMORY_PINNED_DIRNAME);
+    await fs.mkdir(outsideDir, { recursive: true });
+    await fs.writeFile(outsideFile, 'external architecture');
+    await fs.symlink(outsideDir, pinnedDir);
+
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: false,
+        protectPinnedMemory: true,
+      }),
+    );
+    const context = {
+      toolName: ToolNames.EDIT,
+      filePath: path.join(pinnedDir, 'architecture.md'),
+    };
+
+    await expect(pm.evaluate(context)).resolves.toBe('deny');
+    expect(pm.findMatchingDenyRule(context)).toBe(
+      `ManagedAutoMemory(edit: only within ${memoryRoot})`,
+    );
+  });
+
+  it('protects paths below a dangling top-level pinned symlink', async () => {
+    const pinnedDir = path.join(
+      getAutoMemoryRoot(projectRoot),
+      AUTO_MEMORY_PINNED_DIRNAME,
+    );
+    await fs.symlink(
+      path.join(tempDir, 'missing-pinned-target'),
+      pinnedDir,
+      'dir',
+    );
+
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: false,
+        protectPinnedMemory: true,
+      }),
+    );
+    const context = {
+      toolName: ToolNames.WRITE_FILE,
+      filePath: path.join(pinnedDir, 'new.md'),
+    };
+
+    await expect(pm.evaluate(context)).resolves.toBe('deny');
+    expect(pm.findMatchingDenyRule(context)).toBe(
+      'ManagedAutoMemory(write_file: pinned memory is read-only)',
+    );
   });
 
   it('allows creating new nested topic files inside memory roots', async () => {
@@ -346,6 +615,100 @@ describe('createMemoryScopedAgentConfig', () => {
       }),
     ).resolves.toBe('deny');
   });
+
+  describe('registration-gate shim delegation (#10075)', () => {
+    it('isToolDisabledByCoreToolsAllowList delegates when present, defaults to false otherwise', () => {
+      const gate = vi.fn().mockReturnValue(true);
+      const withGate: Pick<
+        PermissionManager,
+        'isToolDisabledByCoreToolsAllowList'
+      > = {
+        isToolDisabledByCoreToolsAllowList: gate,
+      };
+      const delegated = permissionManager(
+        createMemoryScopedAgentConfig(
+          {
+            getPermissionManager: () => withGate as PermissionManager,
+          } as Config,
+          projectRoot,
+        ),
+      );
+      expect(delegated.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+        true,
+      );
+      expect(gate).toHaveBeenCalledWith(ToolNames.EDIT);
+
+      const noBase = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot),
+      );
+      expect(noBase.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+        false,
+      );
+
+      // A base PM without the method (older shape) must not throw — the
+      // scheduler's own `typeof` guard relies on this returning false.
+      const legacyBase: Pick<PermissionManager, 'isToolEnabled'> = {
+        isToolEnabled: vi.fn().mockResolvedValue(true),
+      };
+      const legacy = permissionManager(
+        createMemoryScopedAgentConfig(
+          {
+            getPermissionManager: () => legacyBase as PermissionManager,
+          } as Config,
+          projectRoot,
+        ),
+      );
+      expect(legacy.isToolDisabledByCoreToolsAllowList(ToolNames.EDIT)).toBe(
+        false,
+      );
+    });
+
+    it('getToolRegistrationStatus delegates when present, defaults to registered', async () => {
+      // Use a non-scoped tool: edit/write_file/shell short-circuit as
+      // scoped tools before the base delegation.
+      const status = vi.fn().mockResolvedValue('disabled');
+      const withStatus: Pick<PermissionManager, 'getToolRegistrationStatus'> = {
+        getToolRegistrationStatus: status,
+      };
+      const delegated = permissionManager(
+        createMemoryScopedAgentConfig(
+          {
+            getPermissionManager: () => withStatus as PermissionManager,
+          } as Config,
+          projectRoot,
+        ),
+      );
+      await expect(
+        delegated.getToolRegistrationStatus(ToolNames.WEB_FETCH),
+      ).resolves.toBe('disabled');
+      expect(status).toHaveBeenCalledWith(ToolNames.WEB_FETCH);
+
+      const noBase = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot),
+      );
+      await expect(
+        noBase.getToolRegistrationStatus(ToolNames.WEB_FETCH),
+      ).resolves.toBe('registered');
+    });
+
+    it('gates the shell registration status on allowShell', async () => {
+      const disabled = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot),
+      );
+      await expect(
+        disabled.getToolRegistrationStatus(ToolNames.SHELL),
+      ).resolves.toBe('disabled');
+
+      const enabled = permissionManager(
+        createMemoryScopedAgentConfig({} as Config, projectRoot, {
+          allowShell: true,
+        }),
+      );
+      await expect(
+        enabled.getToolRegistrationStatus(ToolNames.SHELL),
+      ).resolves.toBe('registered');
+    });
+  });
 });
 
 describe('isAllowedMemoryPath with a symlinked project root', () => {
@@ -509,6 +872,48 @@ describe('isAllowedMemoryPath in default (shared) memory mode', () => {
 
     const memoryFile = path.join(root, 'project.md');
     expect(isAllowedMemoryPath(memoryFile, projectRoot)).toBe(true);
+  });
+
+  it('allows a managed project alias to a sibling project directory', async () => {
+    const projectsDir = path.join(tempDir, 'projects');
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = tempDir;
+    clearAutoMemoryRootCache();
+
+    const managedRoot = getAutoMemoryRoot(projectRoot);
+    const canonicalProjectDir = path.join(projectsDir, 'canonical-project');
+    await fs.mkdir(path.join(canonicalProjectDir, 'memory'), {
+      recursive: true,
+    });
+    await fs.symlink(
+      path.basename(canonicalProjectDir),
+      path.dirname(managedRoot),
+    );
+
+    expect(
+      isAllowedMemoryPath(
+        path.join(managedRoot, 'project', 'note.md'),
+        projectRoot,
+      ),
+    ).toBe(true);
+  });
+
+  it('denies a managed project alias that escapes the shared projects directory', async () => {
+    const projectsDir = path.join(tempDir, 'projects');
+    const outside = path.join(tempDir, 'outside');
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = tempDir;
+    clearAutoMemoryRootCache();
+
+    const managedRoot = getAutoMemoryRoot(projectRoot);
+    await fs.mkdir(projectsDir, { recursive: true });
+    await fs.mkdir(outside, { recursive: true });
+    await fs.symlink(outside, path.dirname(managedRoot));
+
+    expect(
+      isAllowedMemoryPath(
+        path.join(managedRoot, 'project', 'note.md'),
+        projectRoot,
+      ),
+    ).toBe(false);
   });
 
   it('denies a write when a symlink below the shared suffix escapes the anchor', async () => {

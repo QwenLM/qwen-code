@@ -289,6 +289,60 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     }
   });
 
+  it('hides skills from disabled levels in workspace settings', async () => {
+    // No listSkills mock: this exercises the real daemon wiring — the
+    // settings.merged.skills?.disabledLevels read, VALID_SKILL_LEVELS
+    // filtering, and the getDisabledSkillLevels shim method that the prior
+    // daemon regression broke.
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-disabled-levels-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabledLevels: ['bundled'] } }),
+    );
+    try {
+      const provider = createWorkspaceSkillsStatusProvider();
+
+      const status = await provider(workspace);
+
+      expect(status.initialized).toBe(true);
+      expect(status.skills.find((s) => s.level === 'bundled')).toBeUndefined();
+      expect(status.skills.find((s) => s.name === 'review')).toBeUndefined();
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores disabledLevels in safe mode (matches CLI child session)', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-safe-levels-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabledLevels: ['bundled'] } }),
+    );
+    const saved = process.env['QWEN_CODE_SAFE_MODE'];
+    process.env['QWEN_CODE_SAFE_MODE'] = '1';
+    try {
+      const provider = createWorkspaceSkillsStatusProvider();
+
+      const status = await provider(workspace);
+
+      expect(status.initialized).toBe(true);
+      expect(status.skills.find((s) => s.name === 'review')).toBeDefined();
+    } finally {
+      if (saved === undefined) {
+        delete process.env['QWEN_CODE_SAFE_MODE'];
+      } else {
+        process.env['QWEN_CODE_SAFE_MODE'] = saved;
+      }
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('reuses one SkillManager per workspace across calls', async () => {
     const listSpy = vi.spyOn(SkillManager.prototype, 'listSkills');
     const provider = createWorkspaceSkillsStatusProvider();

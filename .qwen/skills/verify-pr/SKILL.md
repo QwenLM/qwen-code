@@ -63,8 +63,12 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
   reads as a status notice rather than a report, say so instead of inventing
   a status table. In a follow-up round: lead the report with a previous-finding status table
   (# / finding / severity / status at the new head, where status is
-  fixed / stands / superseded / declined-with-rationale — and for declined
-  ones, say whether you agree). **Re-measure, never diff the old report**:
+  fixed / stands / worsened / superseded / declined-with-rationale — and
+  for declined ones, say whether you agree). Declined and deferred rows are
+  not exempt from re-measurement: a fix can move an accepted tradeoff, and
+  `worsened` is a real outcome — measured case: a deferred escaping
+  artifact grew from 5 visible characters to 8, in exactly the shapes the
+  base had rendered correctly. **Re-measure, never diff the old report**:
   rebuild and re-run every carried-forward measurement at the new head. The
   one narrow shortcut is a proven-identical **input closure**: quoting a
   `sha256` of one unchanged source file is not enough on its own — callers,
@@ -189,7 +193,47 @@ differs only by the change under test; the verdict is the pair of counts.
   object, and astral inputs, and lossy results (e.g. `String({})` →
   `"[object Object]"`) are called out in Findings even when every scripted
   assertion passes. A fix that holds only for the reported input shape is a
-  finding, not a pass.
+  finding, not a pass. (This overlaps the next bullet, and the overlap is
+  deliberate: the sibling-sweep text below is the one rule in this file with
+  a measured before/after behind it, so it stays byte-identical to the
+  instrument the arms actually read. Consolidating the pair means editing
+  that instrument, which is a change to make with a fresh measurement, not
+  on the way past.)
+- **A fix that closes one instance of a bug class gets its siblings
+  swept.** When the mechanism is a parser, sanitizer, matcher, or state
+  machine, the reported input is one door into a room with several:
+  enumerate the adjacent shapes the same root cause admits — the backtick
+  code-span sibling of a fenced-block rule, the indented form an
+  `^ {0,3}`-anchored regex never matches, the CRLF variant of an LF
+  scanner — and drive each through the fixed build. Measured example: a
+  sanitizer taught that a fence line inside a raw-HTML block is not a
+  fence still passed live HTML through code spans in the same block, and
+  for a fold nested in a list never entered the HTML-block state at all —
+  same root cause as the Critical just fixed, one level down, found only
+  by walking the neighbouring doors. The fix's own new test pins the
+  reported shape by construction; the siblings are exactly what it does
+  not pin.
+- **Untrusted text reaching a parser is a scaling question, not only a
+  correctness one.** When the PR adds or changes a regex, tokenizer, or
+  scanner that runs over input an outsider writes — a PR body, a diff, a
+  log line, a filename — probe it with a **ladder** rather than a single
+  case: the same hostile shape at 2 k, 3 k, 5 k, 20 k characters, timed.
+  Run each rung under `timeout 30` and record the cap as the result
+  (`>30 s`); the rung that hits the cap is the evidence, and no rung is
+  worth more of the budget than that.
+  The superlinear curve across rungs is the finding; one fast sample
+  proves nothing.
+  Measured example: a line matcher whose three parts could each match a
+  space (`\s*`, a lazy `[^*\n]+?`, `\s*`) took 0.96 s, 3.2 s, 14.4 s, then
+  over 100 s on `**` followed by 2 k / 3 k / 5 k / 20 k spaces — run once
+  per line over a body GitHub caps at 65,536 characters. Two cheap checks
+  decide whether it matters: **trace the input back to a writer** (whose
+  text is it — can a fork contributor author it?), and **verify the
+  claimed escape hatch really excludes the path** — "only trusted PRs
+  reach this" was false there, because a fork PR still matched a local
+  remote and ran the same command. Then prove the fix behaviour-preserving
+  by **enumerating the real inputs** and showing identical output on each,
+  not by arguing the two patterns are equivalent.
 - If the changed branch is unreachable in the default setup (a fallback, a
   `dist` path, an error handler), **construct the configuration that
   reaches it** — drop the tsconfig mapping, break the primary path, force
@@ -219,7 +263,14 @@ differs only by the change under test; the verdict is the pair of counts.
   the pool holds (9.98 GB of a 10 GB cap), and the churn rate (39 distinct
   lockfile states in 30 days) — because at the cap every new entry evicts
   by LRU, including entries other jobs depend on, and possibly its own,
-  degrading the very hit rate the saving assumes.
+  degrading the very hit rate the saving assumes. And when the PR **states**
+  a cost, audit it against the repo's own accounting of the same mechanism:
+  a base worktree was priced as "one extra build", while a sibling probe
+  tree in the same subsystem documents that a tree nested under the repo
+  resolves `node_modules` by walking up to the root and needs no per-tree
+  install. The base tree is nested identically — so either the install is
+  avoidable and the stated cost becomes true, or the reasoning next door is
+  wrong. A reviewer is agreeing to spend whichever it is.
 - **Test the scarier consequences and report which ones do NOT hold.** Having
   found a real problem, the temptation is to report the worst reading of it.
   Bound it instead: in the cache case the write-path finding was real
@@ -231,6 +282,14 @@ differs only by the change under test; the verdict is the pair of counts.
   `chown -R` does not follow symlinks. What survived was content and quota
   abuse. A finding that names what it is _not_ is far harder to wave away
   than one that implies everything.
+- **An accepted-tradeoff list is a completeness claim — test its
+  boundary.** When the description names the costs it accepts ("links and
+  images will render"), enumerate the unnamed siblings of the same
+  mechanism and drive them; the measured case found issue cross-references
+  firing — `cross-referenced` timeline events stamped on arbitrary issues
+  under the bot identity — as the sibling the accepted list did not name.
+  An unnamed cost is a finding about the description even when the cost
+  itself would have been accepted.
 - When the PR adds a defensive guard or shape check, its unit tests usually
   mock the reject path — so verify the **accept path against the real
   artifacts it will see in production** (the shipped chunks, the real
@@ -274,6 +333,18 @@ differs only by the change under test; the verdict is the pair of counts.
   — lazily-created backing files (`ensureConversationFile()` writes nothing
   until the first prompt) leave a window in which a just-created entity is
   invisible to any existence check that looks on disk.
+- **A capability has two ends — check the one that accepts, not only the one
+  that issues.** Where the PR gates who may _mint_ a credential, token,
+  cookie, or permit, find the code that _accepts_ it and check that the same
+  condition guards it. The two drift because they are written at different
+  times by different concerns, and the tell is that the tests are named after
+  the gated end, which makes the ungated end look covered. Measured example:
+  a cookie→`Authorization` bridge was correctly gated to a desktop shell on
+  the minting side, while the accepting middleware was mounted
+  unconditionally — so every server instance treated that cookie as a
+  bearer. Bound it as usual: no exploit was demonstrated, but `SameSite`
+  does not separate `127.0.0.1:<other-port>` from the daemon's port, because
+  for an IP host the "site" ignores the port.
 - **Measure the blast radius on bystanders, not just on the caller.** When a
   failure path can take down shared infrastructure, the interesting number
   is what happened to everything else: an unrelated session going
@@ -299,6 +370,73 @@ differs only by the change under test; the verdict is the pair of counts.
   no-op that reports success is a finding even when the merge policy itself
   is pre-existing and correct. Name the pre-existing cause and the PR's
   contribution separately, so the author is not blamed for the policy.
+- **An instruction in a prompt is not an invariant.** When a safety
+  property lives in a brief, a skill, or a doc — "at most one extra build
+  per review", "call this once" — and the same change hands the resource it
+  protects to N concurrently launched agents, nothing enforces it: find the
+  interleaving and drive it. Then **rank the interleavings by what they
+  produce**, because the dangerous one is rarely the loud one. Measured
+  case, a disposable sibling worktree with no lease: the benign race dies
+  with confusing `ENOENT`s, while in the malign one shard A finished its
+  build and got `available: true`, shard B swept the tree, and A's
+  base-side command then returned **empty output** — which reads as "the PR
+  changed this behaviour" and is quoted downstream as deterministic
+  evidence. A race that fabricates a result outranks a race that crashes.
+- **Rank a defect's variants by observability, not by blast radius.** Where
+  one root cause yields both a loud failure and a quiet one, the quiet one
+  is the finding. Measured example: an unescaped non-greedy parser fed a
+  payload containing its own close tag either dropped a required argument —
+  rejected by schema validation, loud, recoverable — or silently truncated
+  the value and wrote a truncated file. Same bug; the second is the one to
+  fix first. This is the same ordering as the concurrency rule above, where
+  a race that fabricates a result outranks one that crashes: a wrong answer
+  nobody is told about outranks a failure that announces itself.
+- **"Nothing found" and "could not measure" must be different values — then
+  check what consumes them.** A single sentinel covering both turns a broken
+  probe into a confident negative, and the damage is done by the consumer,
+  not the flag. Measured example: an `emptyDiff` flag was set both when a PR
+  genuinely had no changes and when the diff **capture failed**, and the
+  downstream skill responded to it by recommending the PR be closed as
+  superseded — so a transient fetch error could close live work. Trace every
+  such flag to its readers and say what each does with it; the same rule the
+  verdict contract already applies to this report (a harness that failed is
+  `inconclusive`, never `merge-ready` and never `findings`) applies to the
+  code under test.
+- **A validity control must run before the artifact it invalidates is
+  built.** When the PR adds a sanity check — a control arm, a baseline
+  probe, a health assertion — find where in the sequence it runs relative to
+  the output it is supposed to suppress. Measured example: a re-classifier
+  that demotes findings from a dead harness ran _after_ the findings list
+  was assembled, so a harness proven dead still filed `mutant-survived`
+  against the author. Order is the whole property here: a control that runs
+  late is not a weaker control, it is not a control at all.
+
+### Scoping from the report and the plan
+
+- **The bug report is a coverage specification — test its enumeration.**
+  A report usually names more than one case ("the same pattern was
+  observed with `write_file` and `run_shell_command`"), and those names are
+  falsifiable coverage claims the PR inherits. Build one fixture per named
+  case, parameterised by the dimensions the report itself supplies, and say
+  which ones the fix actually reaches. Measured example: a recovery guard
+  keyed on a prose-to-total length ratio was probed by holding the preamble
+  at the 1,898 characters the issue reported and varying only the tool —
+  `read_file` (98 c), `run_shell_command` (106 c) and a small `edit`
+  (196 c) were all declined, while the issue's own `edit` shape (491 c) and
+  `write_file` (1,135 c) recovered, with the threshold bisected at ~473
+  characters. The issue named `run_shell_command` explicitly, so the fix
+  covered half of what it was filed against — a scope finding that testing
+  the PR's own claim could never surface.
+- **Walk the PR's own Reviewer Test Plan step by step and report per
+  step.** It is a list of falsifiable claims the author already wrote down,
+  and the interesting outcome is the step that cannot be performed at all.
+  Measured example: step 3 asked the reviewer to insert real user input
+  into an active turn; no code path does that, and the "not reproducible"
+  cell became the round's sharpest finding — the feature's own completion
+  criterion was structurally unreachable, so an objective of the form
+  "stop once the user sends X" could never complete. A step you cannot run
+  is either a missing code path or a wrong plan; say which, and say the
+  plan needs fixing either way.
 
 ### Vacuity check on new/changed tests
 
@@ -310,17 +448,75 @@ finding, not a pass.
 Report the mutation matrix **including the mutations that changed nothing**:
 one row per guard the PR introduces, the suite that should catch it, and
 pinned / not-pinned. Survivors are not noise — classify each as an ordinary
-**coverage gap** (the behaviour is right, nothing asserts it) or as **dead
-code** (the clause cannot decide any outcome), and say which. A guard whose
-deletion leaves every test green is one of those two things, and the
-difference matters to the author. Where a survivor mirrors a pre-existing gap
+**coverage gap** (the behaviour is right, nothing asserts it), as **dead
+code** (the clause cannot decide any outcome), or as **redundant defence** (a
+sibling hunk in this same PR closes the same hazard, so nothing can observe
+this one alone), and say which. A guard whose deletion leaves every test
+green is one of those three, and the difference matters to the author: the
+first is a test to write, the second is code to delete, and the third is
+correct exactly as it stands. Where a survivor mirrors a pre-existing gap
 rather than something the PR introduced, say so — and label the whole set as
 completeness reporting, not merge conditions, unless one of them is load-bearing.
+
+**Layered guards hide each other — revert the set, not only the hunk.** A
+one-row-per-guard matrix is blind to defence in depth, which is exactly the
+shape a careful author ships: two hunks closing one hazard from different
+directions. Revert either alone and the other still holds the line, so both
+rows read "survived" and the matrix reports two coverage gaps that do not
+exist. When two or more hunks in the PR defend the same hazard, add a
+**combination row** that reverts the set together. A hazard that appears only
+in the combination row is the proof the set is load-bearing, and it
+reclassifies every single-hunk survivor in that set as redundant defence.
+Measured example: on a session-list change, reverting the every-page live
+merge alone changed nothing and reverting the emitted-identity cursor alone
+changed nothing, while reverting both returned one session twice across a
+paginated walk — a duplicate neither single-hunk row could see, on a PR whose
+two guards were both correct.
+
+**A surviving mutation needs a positive control before it becomes a
+finding.** An unmutated green run proves the suite passes; it does not prove
+your harness can make it fail. Land one mutation you expect to be caught and
+quote it beside the survivors. Measured example: inverting a fail-closed
+guard survived 429/429 and disabling it outright survived 326/326 — numbers
+worth believing only because a third mutation, deleting a clause a known
+test pins, turned exactly one test red. Without that row, "your suite does
+not cover this" and "my harness never ran your suite" are the same
+observation.
+
+**Land that control in the same file as the mutant.** A control that turns a
+test red somewhere else proves the runner runs; it does not prove the command
+you chose collects anything that exercises the file you mutated. Measured
+example: deleting a route's entire response projection left all 1021 tests of
+its package's main server suite green, and the survivor was on its way into
+the report as a coverage gap — the coverage lived in a second test file the
+chosen command never collected, and running that one turned three tests red.
+Six other mutations in the same round were all caught, so the harness-level
+control was green the whole time and said nothing about this one. Either land
+the control in the mutated file, or show that the chosen command collects at
+least one test that imports it.
+
+The mutation runs in reverse too: when the round produces a **candidate
+further fix** (a sibling shape closed, a guard tightened), apply it in a
+scratch copy and rerun the suite. Green on both sides is not reassurance —
+it is proof the suite pins nothing along that axis, and the report should
+name the fixture that would go red. A suite that cannot tell head from
+head-plus-fix has its coverage gap exactly where the next regression will
+land.
 
 Watch for the subtler failure: **a test that passes for the wrong reason.**
 If deleting the new guard leaves its own new test green, that test is pinned
 by something else (an earlier early-return, a different branch) and asserts
 nothing about the change. Name what actually pins it.
+
+**And a test's name is a claim about its fixture — read the name, then read
+the inputs.** This one is not vacuity: the assertion can fail and the
+scenario does run. The fixture simply is not the shape the name promises, so
+the name buys coverage confidence nothing paid for. Measured example: a case
+titled _"reads the script name past `run` and past a workspace flag"_ used
+`npm test --workspace=packages/cli`, where the flag trails the script and
+nothing is stepped over — while the forms that actually break,
+`npm --workspace=packages/cli run build` and `yarn --cwd packages/cli build`,
+are exactly the ones the title claims to cover.
 
 **And the failure one level earlier: the scenario never reached the code
 under test.** A vacuity check asks whether the assertion can fail; this asks
@@ -341,6 +537,18 @@ the adapter emitted" versus "prompts that actually reached the agent" differ
 by every filter on the path. Assert the number a user would experience; a
 count taken at the seam can be right while the feature is silently dropped
 downstream.
+
+- **Prove a negative by census, not by reading.** When the finding is that
+  something can never happen — a branch nothing reaches, an evidence kind
+  never produced, a request never sent — the static chain through the code
+  is the argument and a count over real runs is the proof. Measured
+  example: a verifier demanded evidence of kind `user_input`, whose only
+  producer sat behind a queue filter admitting slash commands only; the
+  chain said unreachable, and 30 verifier payloads captured from one
+  session carried exactly one kind, `delivered_output`, with zero
+  `user_input` records even though the user typed three messages during
+  that run. Report both, and state the window the census covers — an
+  absence claim is only as strong as the observations behind it.
 
 **Timing-triggered assertions have a threshold — measure it, do not sample
 it.** When an assertion's outcome depends on a wall-clock timer racing an
@@ -514,8 +722,24 @@ since the merge-base, say so and re-measure there.
   attribution was out of reach. Never
   present a per-commit table whose rows were not individually exercised.
 - **Workflow / CI / script PRs**: unit tests are the wrong oracle. Extract
-  and **execute** the embedded bash/jq/python against real data (local
-  replay), and run whichever repo lint gates the container actually has —
+  the embedded bash/jq/python **verbatim** (a YAML parser, not retyping)
+  and **execute** it against real data under the step's own shell contract
+  — `bash --noprofile --norc` plus the step's own `set` line, stubbing the
+  tools it shells out to — because `-euo pipefail` fails things an
+  interactive shell forgives. **Calibrate the replay before believing
+  it**: run the BASE arm first and require it to reproduce, byte for byte,
+  a real artifact the production step already emitted (a posted comment,
+  an uploaded file; in a follow-up round `previous-report.md` is exactly
+  this), and name the diffs you allowed (a run id, an assets block).
+  When no real emitted artifact is retrievable — a first round, no token,
+  no `previous-report.md`, or a step whose output the snapshot never
+  carries — say the replay is **uncalibrated** in _Not covered_ and name
+  what would have calibrated it. An uncalibrated replay is still worth
+  running; presenting it as calibrated is what is not allowed. A
+  replay that cannot reproduce a known real output is measuring your
+  harness, not the PR; one that can carries its calibration into every
+  downstream cell. Then run whichever repo lint gates the container
+  actually has —
   `bash -n` and `shellcheck` on extracted `run:` blocks always work; the
   repo's wrapper only lints when the pinned binaries are present, so
   install them with `node scripts/lint.js --setup` and then invoke the
@@ -604,9 +828,8 @@ workflow globs). It must contain:
   fails, say so under _Not covered_ in one line and ship the text-only report;
   do not reconstruct the pipeline by hand.
 
-  The publish job hosts what you produce on a per-PR branch
-  (`pr-assets/<N>-verify`) and appends it below the report, capped at
-  **8 images, 2 MB each**; anything
+  The publish job hosts what you produce on Aliyun OSS and appends it below the
+  report, capped at **8 images, 2 MB each**; anything
   beyond stays in the run artifacts. Name each file as a kebab-case caption
   that binds image to claim (`01-bundle-ab-base-vs-head.png`,
   `02-repaint-after-sigcont.png`) — the filename becomes the published
@@ -646,7 +869,14 @@ central claim from being tested — say why.
    sites, not just the one you hit), demonstrate the sharpest consequence
    end-to-end when budget allows, and where the cause is clear add a
    collapsed minimal suggested fix that preserves the original commit's
-   intent.
+   intent. **A suggested fix is measured, not eyeballed**: apply it in a
+   scratch copy and drive it through the same harnesses, and quote three
+   results with the diff — hostile fixtures go clean, benign fixtures come
+   out byte-identical (zero collateral), the affected suite's counts are
+   unchanged. If the suite is green both with and without the patch, say
+   so and name the fixture that would pin it — that is the unpinned-axis
+   signal from the vacuity section, and the fix should ship with its
+   fixture.
 6. **Not covered** — every claim, surface, or gate you skipped. A silent cap
    reads as "covered everything"; never allow that. When something failed to
    run rather than being skipped by choice, **prove it was environmental
@@ -655,6 +885,12 @@ central claim from being tested — say why.
    base and head both blank, so this is my sandbox, not a regression" is a
    claim a reader can check; "seems environmental" is not, and the two look
    identical in a report.
+   Distinguish reproducing the **shape** from reproducing the **cause**: a
+   harness that replays a bug's exact wire bytes proves the handling, not
+   the trigger. Say which one you have — "this reproduces the wire shape
+   the issue reported, not the model-side degradation that produces it" —
+   because a reader otherwise credits the report with an end-to-end
+   reproduction it never had.
 7. **Methodology** — one paragraph: environment, how each harness drove the
    code, where the raw logs live.
 

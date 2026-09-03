@@ -39,6 +39,7 @@ import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
 import type { VoiceMode } from '../../services/voice-settings.js';
 import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
 import type { WorkspaceSkillsStatusProvider } from '../workspace-skills-status.js';
+import type { ServeModelProviderRuntimeSyncResult } from '../types.js';
 import type {
   WorkspaceSkillInstallRequest,
   WorkspaceSkillMutationResult,
@@ -210,6 +211,13 @@ export interface DaemonWorkspaceService {
     enabled: boolean,
   ): Promise<WorkspaceSkillToggleResult>;
 
+  /** Toggle multiple skills with one settings write and one session refresh. */
+  setWorkspaceSkillsEnabled(
+    ctx: WorkspaceRequestContext,
+    skillNames: readonly string[],
+    enabled: boolean,
+  ): Promise<WorkspaceSkillBatchToggleResult>;
+
   /** Install a project- or user-level Skill from a bounded package. */
   installWorkspaceSkill(
     ctx: WorkspaceRequestContext,
@@ -239,6 +247,11 @@ export interface DaemonWorkspaceService {
   /** Reload all settings (env + model + permissions + tools + memory). */
   reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
 
+  /** Reload only the runtime model-provider registry and spawn environment. */
+  reloadModelProviders(
+    ctx: WorkspaceRequestContext,
+  ): Promise<ServeModelProviderRuntimeSyncResult>;
+
   /** Drop cached skill status so extension skill changes are re-enumerated. */
   invalidateWorkspaceSkillsStatus(): void;
 
@@ -260,6 +273,7 @@ export interface ReloadResponse {
   sessionsSkipped?: string[];
   childReloaded: boolean;
   childError?: string;
+  runtimeEnvironmentApplied?: boolean;
 }
 
 export interface WorkspaceAcpPreheatResult {
@@ -342,6 +356,29 @@ export interface WorkspaceSkillToggleResult {
   sessionsFailed: number;
 }
 
+export type WorkspaceSkillToggleErrorCode = 'skill_not_found';
+
+export interface WorkspaceSkillToggleError {
+  skillName: string;
+  code: WorkspaceSkillToggleErrorCode;
+  error: string;
+}
+
+export interface WorkspaceSkillBatchToggleItem {
+  skillName: string;
+  enabled: boolean;
+  changed: boolean;
+}
+
+export interface WorkspaceSkillBatchToggleResult {
+  enabled: boolean;
+  activation: WorkspaceSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  results: WorkspaceSkillBatchToggleItem[];
+  errors: WorkspaceSkillToggleError[];
+}
+
 export interface PersistDisabledSkillResult {
   changed: boolean;
   disabled: string[];
@@ -351,10 +388,18 @@ export interface PersistDisabledSkillResult {
   }>;
 }
 
-export type WorkspaceSkillNotToggleableReason =
-  | 'not_user_invocable'
-  | 'inactive_extension'
-  | 'locked';
+export interface PersistDisabledSkillsBatchOutcome {
+  skillName: string;
+  changed: boolean;
+}
+
+export interface PersistDisabledSkillsBatchResult {
+  outcomes: PersistDisabledSkillsBatchOutcome[];
+  settingsChanges: Array<{
+    key: 'skills.disabled' | 'skills.enabled';
+    value: string[] | undefined;
+  }>;
+}
 
 export class WorkspaceSkillNotFoundError extends Error {
   constructor(readonly skillName: string) {
@@ -363,19 +408,17 @@ export class WorkspaceSkillNotFoundError extends Error {
   }
 }
 
-export class WorkspaceSkillNotToggleableError extends Error {
-  constructor(
-    readonly skillName: string,
-    readonly reason: WorkspaceSkillNotToggleableReason,
-    readonly lockedScope?: 'system' | 'user' | 'systemDefaults',
-  ) {
-    super(
-      lockedScope
-        ? `Skill ${skillName} is locked by ${lockedScope} settings`
-        : `Skill ${skillName} is not toggleable: ${reason}`,
-    );
-    this.name = 'WorkspaceSkillNotToggleableError';
+export function mapWorkspaceSkillToggleError(
+  error: unknown,
+): WorkspaceSkillToggleError | undefined {
+  if (error instanceof WorkspaceSkillNotFoundError) {
+    return {
+      skillName: error.skillName,
+      code: 'skill_not_found',
+      error: error.message,
+    };
   }
+  return undefined;
 }
 
 /** Discriminated union for MCP server restart outcomes. */
@@ -471,6 +514,14 @@ export interface DaemonWorkspaceServiceDeps {
     assertGenerationOpen?: () => void,
   ) => Promise<PersistDisabledSkillResult>;
 
+  /** Persist multiple skill changes under one settings lock. */
+  persistDisabledSkillsBatch: (
+    workspace: string,
+    skillNames: readonly string[],
+    enabled: boolean,
+    assertGenerationOpen?: () => void,
+  ) => Promise<PersistDisabledSkillsBatchResult>;
+
   persistSetting?: (
     workspace: string,
     scope: SettingScope,
@@ -498,7 +549,21 @@ export interface DaemonWorkspaceServiceDeps {
   reloadDaemonEnv?: (
     workspace: string,
     assertGenerationOpen?: () => void,
-  ) => Promise<EnvReloadResult>;
+  ) => Promise<
+    EnvReloadResult & {
+      runtimeEnvironmentApplied?: boolean;
+    }
+  >;
+
+  /** Refresh the runtime-local spawn environment for provider mutations. */
+  reloadModelProvidersDaemonEnv?: (
+    workspace: string,
+    assertGenerationOpen?: () => void,
+  ) => Promise<
+    EnvReloadResult & {
+      runtimeEnvironmentApplied?: boolean;
+    }
+  >;
 
   /** Eagerly start the ACP child/channel without creating a session. */
   preheatAcpChild?: () => Promise<void>;

@@ -194,10 +194,9 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
     }
   }, [isOpen, options.length]);
 
-  const planText = useMemo(() => {
-    if (toolCall.kind !== 'switch_mode' || !Array.isArray(toolCall.content)) {
-      return null;
-    }
+  const contentText = useMemo(() => {
+    if (!Array.isArray(toolCall.content)) return null;
+    const texts: string[] = [];
     for (const item of toolCall.content) {
       const itemType = item['type'];
       const itemContent = item['content'];
@@ -209,12 +208,15 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
       ) {
         const inner = itemContent as Record<string, unknown>;
         if (inner['type'] === 'text' && typeof inner['text'] === 'string') {
-          return inner['text'];
+          texts.push(inner['text']);
         }
       }
     }
-    return null;
-  }, [toolCall.kind, toolCall.content]);
+    return texts.length > 0 ? texts.join('\n\n') : null;
+  }, [toolCall.content]);
+  const planText = toolCall.kind === 'switch_mode' ? contentText : null;
+  const editReviewText =
+    toolCall.kind === 'edit' || toolCall.kind === 'write' ? contentText : null;
 
   if (!isOpen) {
     return null;
@@ -225,7 +227,7 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
       {/* Main container */}
       <div
         ref={containerRef}
-        className={`relative flex flex-col rounded-large border p-2 outline-none animate-slide-up${planText ? ' max-h-[60vh]' : ''}`}
+        className={`relative flex flex-col rounded-large border p-2 outline-none animate-slide-up${planText || editReviewText ? ' max-h-[60vh]' : ''}`}
         style={{
           backgroundColor: 'var(--app-input-secondary-background)',
           borderColor: 'var(--app-input-border)',
@@ -271,6 +273,12 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
           <div className="relative z-[1] overflow-y-auto mb-2 rounded-[4px] max-h-[40vh] py-2 px-3 text-[13px] leading-normal bg-[var(--app-primary-background)] border border-[var(--app-input-border)] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--app-foreground-muted)]/30">
             <MarkdownRenderer content={planText} />
           </div>
+        )}
+
+        {editReviewText && (
+          <pre className="relative z-[1] overflow-y-auto mb-2 rounded-[4px] max-h-[40vh] py-2 px-3 text-[13px] leading-normal whitespace-pre-wrap break-words bg-[var(--app-primary-background)] border border-[var(--app-input-border)] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--app-foreground-muted)]/30">
+            {editReviewText}
+          </pre>
         )}
 
         {/* Options */}

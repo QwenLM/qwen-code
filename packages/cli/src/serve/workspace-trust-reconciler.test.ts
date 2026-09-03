@@ -48,43 +48,49 @@ function policy(
 }
 
 describe('workspace trust reconciler', () => {
-  it('does not downgrade a managed scratch runtime through folder trust policy', async () => {
-    const primary = makeRuntime('/primary', {
-      primary: true,
-      trusted: false,
-      trustMaterialization: 'false',
-    });
-    const scratch = makeRuntime('/scratch-root/scratch-project', {
-      provenance: 'managed-scratch',
-    });
-    const registry = createWorkspaceRegistry([primary, scratch]);
-    const nextPolicy = policy('two', {
-      '/primary': TrustLevel.DO_NOT_TRUST,
-      '/scratch-root/scratch-project': TrustLevel.DO_NOT_TRUST,
-    });
-    const buildRuntime =
-      vi.fn<WorkspaceTrustReconcilerOptions['buildRuntime']>();
-    const drainRuntime = vi.fn(async () => undefined);
-    const disposeRuntime = vi.fn(async () => undefined);
-    const reconciler = createWorkspaceTrustReconciler({
-      registry,
-      readLatestSnapshot: async () => nextPolicy,
-      buildRuntime,
-      drainRuntime,
-      disposeRuntime,
-    });
+  it.each(['managed-scratch', 'live-conversation'] as const)(
+    'does not downgrade a %s runtime through folder trust policy',
+    async (provenance) => {
+      const primary = makeRuntime('/primary', {
+        primary: true,
+        trusted: false,
+        trustMaterialization: 'false',
+      });
+      const scratch = makeRuntime('/scratch-root/scratch-project', {
+        provenance,
+      });
+      const registry = createWorkspaceRegistry([primary, scratch]);
+      const nextPolicy = policy('two', {
+        '/primary': TrustLevel.DO_NOT_TRUST,
+        '/scratch-root/scratch-project': TrustLevel.DO_NOT_TRUST,
+      });
+      const buildRuntime =
+        vi.fn<WorkspaceTrustReconcilerOptions['buildRuntime']>();
+      const drainRuntime = vi.fn(async () => undefined);
+      const disposeRuntime = vi.fn(async () => undefined);
+      const reconciler = createWorkspaceTrustReconciler({
+        registry,
+        readLatestSnapshot: async () => nextPolicy,
+        buildRuntime,
+        drainRuntime,
+        disposeRuntime,
+      });
 
-    await reconciler.reconcile(nextPolicy);
+      await reconciler.reconcile(nextPolicy);
 
-    expect(registry.getByWorkspaceCwd(scratch.workspaceCwd)).toBe(scratch);
-    expect(scratch.trusted).toBe(true);
-    expect(
-      registry.getEntryByWorkspaceCwd(scratch.workspaceCwd)?.appliedRevision,
-    ).toBe('two');
-    expect(buildRuntime).not.toHaveBeenCalled();
-    expect(drainRuntime).not.toHaveBeenCalled();
-    expect(disposeRuntime).not.toHaveBeenCalled();
-  });
+      expect(registry.getManagedByWorkspaceCwd(scratch.workspaceCwd)).toBe(
+        scratch,
+      );
+      expect(scratch.trusted).toBe(true);
+      expect(
+        registry.getManagedEntryByWorkspaceCwd(scratch.workspaceCwd)
+          ?.appliedRevision,
+      ).toBe('two');
+      expect(buildRuntime).not.toHaveBeenCalled();
+      expect(drainRuntime).not.toHaveBeenCalled();
+      expect(disposeRuntime).not.toHaveBeenCalled();
+    },
+  );
 
   it('closes and starts draining every trust decrease before disposing any runtime', async () => {
     const primary = makeRuntime('/primary', { primary: true });

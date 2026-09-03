@@ -16,8 +16,15 @@ export const GITHUB_CI_ONLY_FILES = new Set([
 function isDocsOnlyFile(file) {
   const normalized = file.replace(/\\/g, '/');
   return (
-    /^docs\/.+\.(?:md|mdx)$/i.test(normalized) ||
-    /^(?:README|CHANGELOG|CONTRIBUTING|CODE_OF_CONDUCT|SECURITY|SUPPORT|LICENSE|NOTICE)(?:\.[^/]*)?$/i.test(
+    // .md ONLY: MDX pages are executable (imported components, expressions)
+    // and keep the full profile with its runtime/build failure surface.
+    /^docs\/.+\.md$/i.test(normalized) ||
+    // Extensionless or known-inert documentation extensions ONLY: the open
+    // `(?:\.[^/]*)?` form classified executable files named after reserved
+    // prose basenames (README.js, SECURITY.ts, LICENSE.sh) as docs, which
+    // would downgrade an automatic review over runnable code. MDX is
+    // excluded here for the same reason it is above.
+    /^(?:README|CHANGELOG|CONTRIBUTING|CODE_OF_CONDUCT|SECURITY|SUPPORT|LICENSE|NOTICE)(?:\.(?:md|txt|rst))?$/i.test(
       normalized,
     )
   );

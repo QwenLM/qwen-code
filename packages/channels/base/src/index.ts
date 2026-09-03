@@ -4,10 +4,17 @@ export {
   resolvePath,
 } from './paths.js';
 export { PollingChannelBase } from './PollingChannelBase.js';
-export { AcpBridge } from './AcpBridge.js';
+export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
+export {
+  ACP_PRIVATE_PARENT_CAPABILITY_ENV,
+  ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  CHANNEL_BTW_METHOD,
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+} from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
   BridgeSessionInfo,
+  ChannelBtwResult,
   ChannelAgentBridge,
   ChannelLoopToolCreateInput,
   ChannelLoopToolHandler,
@@ -17,6 +24,7 @@ export type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+export { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
 export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
@@ -32,7 +40,7 @@ export type {
 } from './DaemonChannelBridge.js';
 export { BlockStreamer } from './BlockStreamer.js';
 export type { BlockStreamerOptions } from './BlockStreamer.js';
-export { ChannelBase } from './ChannelBase.js';
+export { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 export {
   CHANNEL_PROACTIVE_DELIVERY_ERROR_CODE,
   ChannelProactiveDeliveryError,
@@ -72,7 +80,11 @@ export type {
   ChannelLoopStoreOptions,
 } from './ChannelLoopStore.js';
 export { PairingStore } from './PairingStore.js';
-export type { PairingRequest } from './PairingStore.js';
+export type {
+  CreatePairingRequestResult,
+  PairingRequest,
+  PairingSubject,
+} from './PairingStore.js';
 export { GroupGate } from './GroupGate.js';
 export type { GroupCheckResult } from './GroupGate.js';
 export { DmGate } from './DmGate.js';
@@ -83,7 +95,10 @@ export { SessionRouter } from './SessionRouter.js';
 export {
   sanitizeSenderName,
   sanitizePromptText,
+  sanitizeDisplayText,
   sanitizeLogText,
+  truncateCodePoints,
+  truncateUtf16Units,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
 export type {
@@ -91,8 +106,14 @@ export type {
   BlockStreamingChunkConfig,
   BlockStreamingCoalesceConfig,
   ChannelConfig,
+  ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
   ChannelConfigFieldKind,
+  ChannelConfigNestedFieldDescriptor,
+  ChannelConfigNumberFieldDescriptor,
+  ChannelConfigObjectFieldDescriptor,
+  ChannelConfigPlainValueFieldDescriptor,
+  ChannelConfigValueFieldDescriptor,
   ChannelIdentityConfig,
   ChannelManagementDescriptor,
   ChannelMemoryIntentClassifier,

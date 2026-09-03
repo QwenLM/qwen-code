@@ -12,10 +12,11 @@ import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { Storage } from '../config/storage.js';
-import type { ForkedAgentResult } from '../utils/forkedAgent.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import type { ForkedAgentResult } from '../agents/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
 import {
+  AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
   getUserAutoMemoryRoot,
   clearAutoMemoryRootCache,
@@ -27,7 +28,7 @@ import {
 } from './dreamAgentPlanner.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
-vi.mock('../utils/forkedAgent.js', () => ({
+vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 
@@ -51,6 +52,7 @@ describe('dreamAgentPlanner', () => {
       getModel: vi.fn().mockReturnValue('qwen-test'),
       getApprovalMode: vi.fn(),
       getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
+      getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
     vi.mocked(runForkedAgent).mockReset();
   });
@@ -111,6 +113,20 @@ describe('dreamAgentPlanner', () => {
     );
   });
 
+  it('excludes pinned memories from consolidation', () => {
+    const prompt = buildConsolidationTaskPrompt(
+      path.join(tempDir, 'memory'),
+      path.join(tempDir, 'transcripts'),
+    );
+
+    expect(prompt).toContain('`pinned/`');
+    expect(prompt).toContain('Skip `pinned/` during Dream');
+    expect(prompt).toContain(
+      'Do not intentionally remove existing index entries for valid `pinned/` files',
+    );
+    expect(prompt).toContain('normal index limits still apply');
+  });
+
   it('returns the forked agent result', async () => {
     const mockResult: ForkedAgentResult = {
       status: 'completed',
@@ -133,7 +149,6 @@ describe('dreamAgentPlanner', () => {
           'read_file',
           'grep_search',
           'glob',
-          'list_directory',
           'run_shell_command',
           'write_file',
           'edit',
@@ -153,6 +168,34 @@ describe('dreamAgentPlanner', () => {
 
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ maxTimeMinutes: 30 }),
+    );
+  });
+
+  it('threads the configured memory agent turn limit into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(25);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 25 }),
+    );
+  });
+
+  it('preserves the zero turn limit sentinel', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      filesTouched: [],
+    } satisfies ForkedAgentResult);
+    vi.mocked(config.getMemoryAgentMaxTurns).mockReturnValueOnce(0);
+
+    await planManagedAutoMemoryDreamByAgent(config, projectRoot);
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTurns: 0 }),
     );
   });
 
@@ -182,8 +225,30 @@ describe('dreamAgentPlanner', () => {
     ).resolves.toBe('allow');
     await expect(
       pm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: path.join(
+          getAutoMemoryRoot(projectRoot),
+          AUTO_MEMORY_PINNED_DIRNAME,
+          'architecture.md',
+        ),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      pm.evaluate({
         toolName: ToolNames.WRITE_FILE,
         filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
+      }),
+    ).resolves.toBe('deny');
+    // Pinned protection applies to write/edit; shell deletion is blocked by
+    // the pre-existing read-only shell policy.
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.SHELL,
+        command: `rm ${path.join(
+          getAutoMemoryRoot(projectRoot),
+          AUTO_MEMORY_PINNED_DIRNAME,
+          'architecture.md',
+        )}`,
       }),
     ).resolves.toBe('deny');
   });

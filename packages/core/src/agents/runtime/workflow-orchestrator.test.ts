@@ -8,6 +8,8 @@
 // test file in the repo. Use `vi` directly.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'node:os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import {
   WorkflowOrchestrator,
   WorkflowExecutionError,
@@ -15,15 +17,28 @@ import {
   DEFAULT_MAX_AGENTS_PER_RUN,
   resolveMaxAgentsPerRun,
   resolveConcurrencyLimit,
+  resolveSubagentMaxTurns,
+  resolveSubagentMaxTimeMinutes,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+  DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
 } from './workflow-orchestrator.js';
-import type { Config } from '../../config/config.js';
+import type {
+  ApprovalMode,
+  Config,
+  SessionWorkflowPlanRevision,
+} from '../../config/config.js';
+import { AgentEventType, type AgentEventEmitter } from './agent-events.js';
+import { ToolConfirmationOutcome } from '../../tools/tools.js';
+import { WorkflowRunRegistry } from '../workflow-run-registry.js';
+import { WorkflowRunner } from './workflow-runner.js';
+import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 
 // FIX-C3 (TST-2-C1): use vi.hoisted so `created` is initialised before the
 // vi.mock factory runs AND remains accessible inside tests for assertion +
 // reset between cases. Without this, the module-level `created` array
 // accumulated across tests, so a later test could pass by coincidence.
 //
-// FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
+// FIX-C8 (TST-2-I2): record the full signature of AgentHeadless.create
 // and the (ctx, signal?) shape of execute so any drift between the production
 // call site and the real AgentHeadless surface becomes a test failure.
 const {
@@ -32,6 +47,7 @@ const {
   nextTerminateMode,
   nextOutputTokens,
   nextExecuteThrow,
+  nextExecuteHook,
 } = vi.hoisted(() => ({
   created: [] as Array<{
     name: string;
@@ -42,6 +58,8 @@ const {
     runConfig?: { max_turns?: number; max_time_minutes?: number };
     toolConfig?: { tools?: string[]; disallowedTools?: string[] };
     agentId?: string | null;
+    taskName?: string;
+    subagentId?: string;
   }>,
   nextFinalText: { value: undefined as string | undefined },
   // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
@@ -61,6 +79,11 @@ const {
   // `createChat` early-return path, NOT the production reasoning-
   // loop throw path.
   nextExecuteThrow: { value: null as Error | null },
+  nextExecuteHook: {
+    value: undefined as
+      | ((emitter: AgentEventEmitter, signal?: AbortSignal) => Promise<void>)
+      | undefined,
+  },
 }));
 
 // P3 R2 self-review (P3-T6 gap, batch): tests below for
@@ -114,6 +137,36 @@ vi.mock('../../services/gitWorktreeService.js', async (importOriginal) => {
   };
 });
 
+// `workingDir` resolution (shared with AgentTool's `working_dir`) is unit
+// tested in `agents/worktree-pin.test.ts` against a mocked GitWorktreeService.
+// Here it is a seam: these tests assert what the ORCHESTRATOR does with the
+// resolver's verdict — routes off the fast path, rebinds the runtime context,
+// surfaces the refusal — not whether git considers a directory registered.
+const pinStub = vi.hoisted(() => ({
+  resolve: {
+    value: undefined as ((workingDir: string) => Promise<unknown>) | undefined,
+  },
+  seenLabels: [] as string[],
+}));
+
+vi.mock('../worktree-pin.js', () => ({
+  resolveExternalWorktreeDir: async (
+    _config: unknown,
+    workingDir: string,
+    label = 'working_dir',
+  ) => {
+    pinStub.seenLabels.push(label);
+    return (
+      (await pinStub.resolve.value?.(workingDir)) ?? {
+        path: `/fake/repo/${workingDir}`,
+        branch: 'pr-7',
+        slug: workingDir,
+        repoRoot: '/fake/repo',
+      }
+    );
+  },
+}));
+
 vi.mock('./agent-headless.js', () => ({
   AgentHeadless: {
     create: async (
@@ -130,6 +183,8 @@ vi.mock('./agent-headless.js', () => ({
       _eventEmitter?: unknown,
       _hooks?: unknown,
       _runtimeView?: unknown,
+      taskName?: string,
+      subagentId?: string,
     ) => ({
       execute: async (
         ctx: { get: (k: string) => unknown },
@@ -145,6 +200,8 @@ vi.mock('./agent-headless.js', () => ({
           runConfig,
           toolConfig,
           agentId: getCurrentAgentId(),
+          taskName,
+          subagentId,
         });
         if (
           !promptConfig.systemPrompt?.includes('subagent spawned by a workflow')
@@ -153,6 +210,10 @@ vi.mock('./agent-headless.js', () => ({
             'orchestrator did not pass workflow subagent system prompt',
           );
         }
+        await nextExecuteHook.value?.(
+          _eventEmitter as AgentEventEmitter,
+          signal,
+        );
         // R3 (wenshao #6): simulate the production ERROR path where
         // AgentHeadless.execute() itself throws (see agent-headless.ts
         // catch arm at :287-294). If `nextExecuteThrow.value` is set,
@@ -400,6 +461,238 @@ describe('WorkflowOrchestrator', () => {
     });
   });
 
+  it('records dependency tails across sequential, parallel, and pipeline dispatches', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `mock:${prompt}`,
+    );
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        phase('Inspect');
+        await agent('inspect', { label: 'inspect' });
+        phase('Review');
+        await parallel([
+          () => agent('correctness', { label: 'correctness' }),
+          () => agent('architecture', { label: 'architecture' }),
+        ]);
+        phase('Fix');
+        await pipeline(
+          ['a', 'b'],
+          (_prev, item) => agent('verify ' + item, { label: 'verify-' + item }),
+          (_prev, item) => agent('fix ' + item, { label: 'fix-' + item }),
+        );
+      `,
+      args: undefined,
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const ids = new Map(queued.map((event) => [event.label, event.id]));
+    const dependencies = (label: string) =>
+      queued
+        .find((event) => event.label === label)!
+        .dependsOn.map((id) => queued.find((event) => event.id === id)!.label);
+
+    expect(dependencies('inspect')).toEqual([]);
+    expect(dependencies('correctness')).toEqual(['inspect']);
+    expect(dependencies('architecture')).toEqual(['inspect']);
+    expect(dependencies('verify-a')).toEqual(['correctness', 'architecture']);
+    expect(dependencies('verify-b')).toEqual(['correctness', 'architecture']);
+    expect(dependencies('fix-a')).toEqual(['verify-a']);
+    expect(dependencies('fix-b')).toEqual(['verify-b']);
+    expect(new Set(ids.values()).size).toBe(7);
+  });
+
+  it.each(['parallel', 'pipeline'] as const)(
+    'preserves newer parent dependencies when an un-awaited %s settles',
+    async (kind) => {
+      const queued: Array<{
+        id: string;
+        label?: string;
+        dependsOn: string[];
+      }> = [];
+      const orchestrator = new WorkflowOrchestrator(
+        async (prompt) => `${prompt}-done`,
+      );
+      const fanout =
+        kind === 'parallel'
+          ? `parallel([() => agent('fanout', { label: 'fanout' })])`
+          : `pipeline([0], () => agent('fanout', { label: 'fanout' }))`;
+
+      await orchestrator.run({
+        script: `
+          const pending = ${fanout};
+          await agent('parent', { label: 'parent' });
+          await pending;
+          await agent('joined', { label: 'joined' });
+        `,
+        args: undefined,
+        scheduler: new WorkflowDispatchScheduler(2),
+        emitter: {
+          dispatchQueued: (event) => queued.push(event),
+        },
+      });
+
+      const labelsById = new Map(
+        queued.map((event) => [event.id, event.label]),
+      );
+      const joined = queued.find((event) => event.label === 'joined');
+      expect(joined?.dependsOn.map((id) => labelsById.get(id)).sort()).toEqual([
+        'fanout',
+        'parent',
+      ]);
+    },
+  );
+
+  it('emits queued, started, and settled lifecycle events for one dispatch', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'done');
+    const events: string[] = [];
+
+    await orchestrator.run({
+      script: `await agent('inspect', { label: 'scope' });`,
+      args: undefined,
+      emitter: {
+        dispatchQueued: ({ id, label }) => events.push(`queued:${id}:${label}`),
+        dispatchStarted: (id) => events.push(`started:${id}`),
+        dispatchSettled: (id, error) =>
+          events.push(`settled:${id}:${error ?? 'ok'}`),
+      },
+    });
+
+    expect(events).toHaveLength(3);
+    const dispatchId = events[0]!.split(':')[1];
+    expect(events).toEqual([
+      `queued:${dispatchId}:scope`,
+      `started:${dispatchId}`,
+      `settled:${dispatchId}:ok`,
+    ]);
+  });
+
+  it('passes the recorded dispatch id into the production dispatch boundary', async () => {
+    const receivedIds: Array<string | undefined> = [];
+    const orchestrator = new WorkflowOrchestrator(
+      async (_prompt, _opts, dispatchId) => {
+        receivedIds.push(dispatchId);
+        return 'done';
+      },
+    );
+
+    await orchestrator.run({
+      script: `await agent('inspect', { label: 'scope' });`,
+      args: undefined,
+    });
+
+    expect(receivedIds).toEqual(['dispatch-1']);
+  });
+
+  it('preserves the dependency tail across empty parallel helpers', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'done');
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        await agent('before', { label: 'before' });
+        await parallel([]);
+        await agent('after parallel', { label: 'after-parallel' });
+        await pipeline([], () => agent('unused'));
+        await agent('after pipeline', { label: 'after-pipeline' });
+      `,
+      args: undefined,
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const labelById = new Map(
+      queued.map((event) => [event.id, event.label ?? event.id]),
+    );
+    const dependsOn = (label: string) =>
+      queued
+        .find((event) => event.label === label)!
+        .dependsOn.map((id) => labelById.get(id));
+
+    expect(dependsOn('after-parallel')).toEqual(['before']);
+    expect(dependsOn('after-pipeline')).toEqual(['after-parallel']);
+  });
+
+  it('does not re-inject inherited tails from a fan-out branch that never dispatches', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `${prompt}`,
+    );
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        await agent('a', { label: 'a' });
+        const pending = parallel([
+          () => agent('b', { label: 'b' }),
+          () => 42,
+        ]);
+        await agent('m', { label: 'm' });
+        await pending;
+        await agent('z', { label: 'z' });
+      `,
+      args: undefined,
+      scheduler: new WorkflowDispatchScheduler(2),
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const labelsById = new Map(queued.map((event) => [event.id, event.label]));
+    const dependsOn = (label: string) =>
+      queued
+        .find((event) => event.label === label)!
+        .dependsOn.map((id) => labelsById.get(id))
+        .sort();
+
+    expect(dependsOn('b')).toEqual(['a']);
+    expect(dependsOn('m')).toEqual(['a']);
+    // The no-dispatch branch must not re-inject the ancestor 'a' edge.
+    expect(dependsOn('z')).toEqual(['b', 'm']);
+  });
+
+  it('keeps inherited tails when no fan-out branch issues a dispatch', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'done');
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        await agent('before', { label: 'before' });
+        await parallel([() => 1, () => 2]);
+        await agent('after', { label: 'after' });
+      `,
+      args: undefined,
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const labelById = new Map(
+      queued.map((event) => [event.id, event.label ?? event.id]),
+    );
+    const after = queued.find((event) => event.label === 'after');
+    expect(after?.dependsOn.map((id) => labelById.get(id))).toEqual(['before']);
+  });
+
   it('emitter subscriber errors do not break the run (defensive try/catch)', async () => {
     const orchestrator = new WorkflowOrchestrator(
       async (prompt) => `mock:${prompt}`,
@@ -420,6 +713,15 @@ describe('WorkflowOrchestrator', () => {
       },
       logAppended: () => {
         throw new Error('log-subscriber-boom');
+      },
+      dispatchQueued: () => {
+        throw new Error('queued-subscriber-boom');
+      },
+      dispatchStarted: () => {
+        throw new Error('started-subscriber-boom');
+      },
+      dispatchSettled: () => {
+        throw new Error('settled-subscriber-boom');
       },
     };
     const outcome = await orchestrator.run({
@@ -462,7 +764,7 @@ describe('WorkflowOrchestrator', () => {
     expect(caught).toBeInstanceOf(Error);
     // Cross-realm: the sandbox wraps the host error in a vm-realm Error
     // (per T1/T8/T14 defense). The dispatch is never invoked because the
-    // gate short-circuits before limiter.run.
+    // gate short-circuits before scheduler.run.
     expect(String(caught)).toContain('exceeded the token budget');
     expect(String(caught)).toContain('1000');
     expect(dispatchCalls).toBe(0);
@@ -528,31 +830,39 @@ describe('WorkflowOrchestrator', () => {
     expect(dispatchCalls).toBe(2);
   });
 
-  it('P5 R1 #2: parallel-batch overshoot is bounded by the intra-limiter re-check', async () => {
-    // R1 Critical #2 — without the intra-limiter gate, a parallel() of N
+  it('P5 R1 #2: parallel-batch overshoot is bounded by the in-scheduler re-check', async () => {
+    // R1 Critical #2 — without the slot-acquire gate, a parallel() of N
     // thunks queues them all in one microtask burst with spent=0, so the
     // entry gate passes for every queued dispatch and the budget
     // overshoots by up to `(N-1) × per_dispatch_tokens`.
     //
-    // With the intra-limiter re-check, the gate observes budget mutations
+    // With the slot-acquire re-check, the gate observes budget mutations
     // from already-completed in-flight dispatches at slot-acquire time, so
     // queued thunks that arrive AFTER the budget is busted are refused
     // (the parallel() batch collapses them to `null`).
     const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
     const budget = new WorkflowBudgetImpl(100);
+    const scheduler = new WorkflowDispatchScheduler(1);
     let dispatchCalls = 0;
+    let dispatched = 0;
+    let completed = 0;
     const orchestrator = new WorkflowOrchestrator(async () => {
       dispatchCalls += 1;
       budget.recordSpent(40); // 3 successful dispatches saturate the cap
       return 'ok';
     });
     // 10 thunks — far more than the budget (100 / 40 ≈ 3 successful).
-    // The intra-limiter gate must reject the rest BEFORE this.dispatch
-    // runs, so `dispatchCalls` should be 3 (or 4 — see below), NOT 10.
+    // The slot-acquire gate must reject the rest BEFORE this.dispatch
+    // runs, so `dispatchCalls` is exactly 3, NOT 10.
     const outcome = await orchestrator.run({
       script: `const results = await parallel(Array.from({length: 10}, () => () => agent('q'))); return results;`,
       args: undefined,
       budget,
+      scheduler,
+      emitter: {
+        agentDispatched: () => dispatched++,
+        agentCompleted: () => completed++,
+      },
     });
     // parallel() treats budget rejections as errors-as-data → null per slot.
     expect(Array.isArray(outcome.result)).toBe(true);
@@ -561,15 +871,14 @@ describe('WorkflowOrchestrator', () => {
     const successes = results.filter((r) => r === 'ok').length;
     const nulls = results.filter((r) => r === null).length;
     expect(successes + nulls).toBe(10);
-    // Bounded overshoot: at most `concurrency_window` dispatches can be
-    // already inside `limiter.run` when the budget tips over, so the
-    // upper bound on successful dispatches is
-    // `ceil(cap / per_dispatch) + concurrency_window`. The concurrency
-    // window on test machines is `min(16, cpus-2)` ≥ 1. With cap=100,
-    // per=40, the soft cap is reached at 3 dispatches (spent=120). We
-    // ASSERT it doesn't reach 10 (the without-fix overshoot value).
-    expect(dispatchCalls).toBeLessThan(10);
-    expect(successes).toBeLessThan(10);
+    // ASSERT it doesn't reach 10 (the without-fix overshoot value):
+    // with the scheduler pinned to limit 1, slot-acquire re-checks are
+    // serialized, so exactly 3 dispatches pass (spent 0/40/80 at acquire;
+    // cap 100).
+    expect(dispatchCalls).toBe(3);
+    expect(successes).toBe(3);
+    expect(dispatched).toBe(10);
+    expect(completed).toBe(dispatched);
   });
 
   // R1 #4 fix landed in production code (debugLogger.warn at both gate
@@ -781,6 +1090,224 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.result).toBe('parent:nested-agent:inner');
   });
 
+  it('merges nested workflow logs into the parent run logs', async () => {
+    // R11-22: nested logs (here the unconsumed-rejection mirror) reach
+    // no production surface on the nested sandbox's own buffer — the
+    // orchestrator reads getLogs() only on the top-level sandbox. The
+    // merge must surface a failed nested dispatch in the parent run.
+    const orchestrator = new WorkflowOrchestrator(() =>
+      Promise.reject(new Error('nested-boom')),
+    );
+    const appendedLogs: string[] = [];
+    const outcome = await orchestrator.run({
+      script: `return 'parent:' + (await workflow('child'));`,
+      args: undefined,
+      emitter: {
+        logAppended: (line) => appendedLogs.push(line),
+      },
+      resolveSavedWorkflow: async () => ({
+        // The fire-and-forget dispatch fails but the nested script
+        // still completes — the only trace of the failure is the
+        // nested mirror line, which the merge must carry upward.
+        script: `agent('x'); return 'child-done';`,
+      }),
+    });
+    expect(outcome.result).toBe('parent:child-done');
+    expect(outcome.logs).toContain(
+      'dispatch failed (result not consumed): nested-boom',
+    );
+    expect(appendedLogs).toEqual([
+      'dispatch failed (result not consumed): nested-boom',
+    ]);
+  });
+
+  it('keeps a nested agent result behind the shared pause gate', async () => {
+    let finishDispatch: ((value: string) => void) | undefined;
+    const scheduler = new WorkflowDispatchScheduler(1);
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+    const run = orchestrator.run({
+      script: `return await workflow('child');`,
+      args: undefined,
+      scheduler,
+      resolveSavedWorkflow: async () => ({
+        script: `return await agent('inner');`,
+      }),
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+
+    scheduler.pause();
+    finishDispatch?.('nested result');
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    let settled = false;
+    // Two arms: under a rejection-shaped gate regression the promise
+    // rejects, and a fulfillment-only attach would escape as an
+    // unhandledRejection instead of failing the intended assertion.
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Flush all microtasks + a timer tick so the negative check
+    // distinguishes the pause gate from a gate-less resolve
+    // (which settles in a few microtasks without one).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({ result: 'nested result' });
+  });
+
+  // R12 (doudouOUC): the budget gate and agent cap used to return bare
+  // Promise.reject, bypassing the pause gate — a paused run whose script
+  // caught the rejection kept executing. Entry-gate rejections must
+  // settle through the same gate as every other settlement path.
+  it('holds a budget-gate rejection behind the pause gate until resume', async () => {
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    budget.recordSpent(100); // already over cap at entry
+    const scheduler = new WorkflowDispatchScheduler(1);
+    scheduler.pause();
+    expect(scheduler.snapshot().state).toBe('paused');
+
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async () => {
+      dispatchCalls += 1;
+      return 'unused';
+    });
+    const run = orchestrator.run({
+      script: `
+        let msg = 'none';
+        try { await agent('over-budget'); } catch (e) { msg = e.message; }
+        return msg;
+      `,
+      args: undefined,
+      budget,
+      scheduler,
+    });
+
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Flush microtasks + a timer tick: without the gate the rejection
+    // settles in a few microtasks, so a still-pending run after a tick
+    // proves the pause gate held it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({
+      result: expect.stringContaining('exceeded the token budget'),
+    });
+    expect(dispatchCalls).toBe(0);
+  });
+
+  it('holds an agent-cap rejection behind the pause gate until resume', async () => {
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = '1';
+    try {
+      const scheduler = new WorkflowDispatchScheduler(1);
+      scheduler.pause();
+      expect(scheduler.snapshot().state).toBe('paused');
+
+      let dispatchCalls = 0;
+      const orchestrator = new WorkflowOrchestrator(async () => {
+        dispatchCalls += 1;
+        return 'ok';
+      });
+      const run = orchestrator.run({
+        script: `
+          const p = agent('first');
+          let msg = 'none';
+          try { await agent('second'); } catch (e) { msg = e.message; }
+          return msg;
+        `,
+        args: undefined,
+        scheduler,
+      });
+
+      let settled = false;
+      void run.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(settled).toBe(false);
+
+      scheduler.resume();
+      await expect(run).resolves.toMatchObject({
+        result: expect.stringMatching(/exceeded the maximum of 1 agent/),
+      });
+      // 'first' passed the cap and dispatched on resume; 'second' never did.
+      await vi.waitFor(() => expect(dispatchCalls).toBe(1));
+    } finally {
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_AGENTS'] = prev;
+    }
+  });
+
+  it('preserves an entry-gate rejection when cancellation aborts its pause gate', async () => {
+    // Mirrors the dispatch-error variant: abort rejects the gate waiter,
+    // and the reject arm must still surface the real entry-gate error.
+    const { WorkflowBudgetImpl } = await import('./workflow-budget.js');
+    const budget = new WorkflowBudgetImpl(100);
+    budget.recordSpent(100);
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    scheduler.pause();
+    expect(scheduler.snapshot().state).toBe('paused');
+
+    const orchestrator = new WorkflowOrchestrator(async () => 'unused');
+    const run = orchestrator.run({
+      script: `
+        let msg = 'none';
+        try { await agent('over-budget'); } catch (e) { msg = e.message; }
+        return msg;
+      `,
+      args: undefined,
+      budget,
+      scheduler,
+    });
+
+    // Mirror the sibling hold tests: a bare Promise.reject regression
+    // settles the run during this wait, and abort() then finds no
+    // waiters — the unsettled assertion is what pins the gate.
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(settled).toBe(false);
+    controller.abort();
+
+    await expect(run).resolves.toMatchObject({
+      result: expect.stringContaining('exceeded the token budget'),
+    });
+  });
+
   it('P-nested: nested args are passed to the child script', async () => {
     const orchestrator = new WorkflowOrchestrator(async () => 'unused');
     const resolveSavedWorkflow = async () => ({
@@ -934,6 +1461,383 @@ describe('WorkflowOrchestrator', () => {
     expect((results[1] as { result: unknown }).result).toBe('r:b');
   });
 
+  // The boundary check runs before deriveAgentKey: hash.update() throws an
+  // opaque ERR_INVALID_ARG_TYPE for a non-string prompt, which would
+  // preempt the dispatch's descriptive error on the journaled path.
+  it('P6: rejects an invalid prompt before journal key derivation', async () => {
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `r:${prompt}`,
+    );
+    await expect(
+      orchestrator.run({
+        script: `return await agent(42);`,
+        args: undefined,
+        journal,
+      }),
+    ).rejects.toThrow(/non-empty string prompt/);
+    // The mis-call consumes nothing: no started marker, no result line.
+    expect(entries).toHaveLength(0);
+  });
+
+  it('assigns journal ids before paused parallel dispatches can dequeue', async () => {
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      append: (entry: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(entry);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const scheduler = new WorkflowDispatchScheduler(1);
+    scheduler.pause();
+    let dispatchCalls = 0;
+    const orchestrator = new WorkflowOrchestrator(async (prompt) => {
+      dispatchCalls++;
+      return prompt;
+    });
+
+    const run = orchestrator.run({
+      script: `return await parallel([
+        () => agent('a'),
+        () => agent('b'),
+        () => agent('c'),
+      ]);`,
+      args: undefined,
+      journal,
+      scheduler,
+    });
+    await vi.waitFor(() =>
+      expect(entries.filter((entry) => entry.type === 'started')).toHaveLength(
+        3,
+      ),
+    );
+    const started = entries.filter((entry) => entry.type === 'started');
+    expect(started.map((entry) => entry.agentId)).toEqual(['1', '2', '3']);
+    expect(new Set(started.map((entry) => entry.key)).size).toBe(3);
+    expect(dispatchCalls).toBe(0);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({ result: ['a', 'b', 'c'] });
+  });
+
+  it('appends an in-flight result before the paused result gate opens', async () => {
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal = {
+      append: (entry: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(entry);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const scheduler = new WorkflowDispatchScheduler(1);
+    let finish: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finish = resolve;
+        }),
+    );
+
+    const run = orchestrator.run({
+      script: `return await agent('a');`,
+      args: undefined,
+      journal,
+      scheduler,
+    });
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    scheduler.pause();
+    finish?.('done');
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+    expect(entries.filter((entry) => entry.type === 'result')).toHaveLength(1);
+    let settled = false;
+    // Two arms: under a rejection-shaped gate regression the promise
+    // rejects, and a fulfillment-only attach would escape as an
+    // unhandledRejection instead of failing the intended assertion.
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Flush all microtasks + a timer tick so the negative check
+    // distinguishes the pause gate from a gate-less resolve
+    // (which settles in a few microtasks without one).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+
+    scheduler.resume();
+    await expect(run).resolves.toMatchObject({ result: 'done' });
+  });
+
+  it('preserves a dispatch error when cancellation aborts its pause gate', async () => {
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let rejectDispatch: ((error: Error) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((_resolve, reject) => {
+          rejectDispatch = reject;
+        }),
+    );
+
+    const run = orchestrator.run({
+      script: `return await agent('a');`,
+      args: undefined,
+      scheduler,
+    });
+    await vi.waitFor(() => expect(rejectDispatch).toBeDefined());
+    scheduler.pause();
+    rejectDispatch?.(new Error('dispatch-boom'));
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+    controller.abort();
+
+    await expect(run).rejects.toThrow('dispatch-boom');
+  });
+
+  it('delivers a successful dispatch result when cancellation aborts its pause gate', async () => {
+    // A dispatch that succeeded before the run was cancelled must resolve
+    // with its result even though abort rejects the pause-gate waiter:
+    // the success arm resolves held results on abort, so this AWAITING
+    // script (two-arm .then + `await p`) observes the completed work
+    // instead of an AbortError. The unhandledRejection rationale for the
+    // resolve-on-abort arm belongs to the next test, whose fixture is
+    // genuinely fire-and-forget.
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let finishDispatch: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+
+    const run = orchestrator.run({
+      script: `
+        let saw = 'none';
+        const p = agent('a').then(
+          (v) => { saw = 'resolved:' + v; },
+          (e) => { saw = 'rejected:' + e.message; }
+        );
+        try { await agent('keep'); } catch (e) {}
+        await p;
+        return saw;
+      `,
+      args: undefined,
+      scheduler,
+    });
+    await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+    scheduler.pause();
+    finishDispatch?.('A');
+    await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+    controller.abort();
+
+    await expect(run).resolves.toMatchObject({ result: 'resolved:A' });
+  });
+
+  it('raises no unhandledRejection for an un-awaited successful dispatch on cancel', async () => {
+    // The reviewer-reported alarm: a fire-and-forget agent() call whose
+    // dispatch succeeded before the cancel must not surface a
+    // process-level unhandledRejection ("CRITICAL: Unhandled Promise
+    // Rejection") for a correctly-cancelled run.
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let finishDispatch: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+
+    let unhandled = 0;
+    const onUnhandled = () => {
+      unhandled += 1;
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const run = orchestrator.run({
+        script: `
+          agent('notify');
+          try { await agent('keep'); } catch (e) {}
+          return 'done';
+        `,
+        args: undefined,
+        scheduler,
+      });
+      await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+      scheduler.pause();
+      finishDispatch?.('A');
+      await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+      controller.abort();
+
+      await expect(run).resolves.toMatchObject({ result: 'done' });
+      // Let any pending unhandledRejection events fire before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toBe(0);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('raises no unhandledRejection for an un-awaited queued dispatch on cancel', async () => {
+    // Error-arm counterpart of the success-path test above: a
+    // fire-and-forget dispatch still QUEUED when the run is cancelled is
+    // rejected with AbortError by abortPending(). The rethrow must still
+    // reach awaiting callers, but the unobserved rejection must not
+    // surface as a process-level unhandledRejection alarm on a
+    // correctly-cancelled run.
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    let finishDispatch: ((value: string) => void) | undefined;
+    const orchestrator = new WorkflowOrchestrator(
+      () =>
+        new Promise<string>((resolve) => {
+          finishDispatch = resolve;
+        }),
+    );
+
+    let unhandled = 0;
+    const onUnhandled = () => {
+      unhandled += 1;
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const run = orchestrator.run({
+        script: `
+          agent('inflight');
+          agent('notify');
+          try { await agent('keep'); } catch (e) {}
+          return 'done';
+        `,
+        args: undefined,
+        scheduler,
+      });
+      await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+      scheduler.pause();
+      finishDispatch?.('A');
+      await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+
+      controller.abort();
+
+      await expect(run).resolves.toMatchObject({ result: 'done' });
+      // Let any pending unhandledRejection events fire before asserting.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toBe(0);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('delivers a cached dispatch result when cancellation aborts its pause gate', async () => {
+    const { buildReplay } = await import('./workflow-journal.js');
+    const entries: Array<import('./workflow-journal.js').JournalEntry> = [];
+    const journal1 = {
+      append: (e: import('./workflow-journal.js').JournalEntry) => {
+        entries.push(e);
+        return Promise.resolve();
+      },
+    } as unknown as import('./workflow-journal.js').WorkflowJournal;
+    const orch1 = new WorkflowOrchestrator(async (prompt) => `r:${prompt}`);
+    await orch1.run({
+      script: `await agent('a'); await agent('keep'); return 'done';`,
+      args: undefined,
+      journal: journal1,
+    });
+
+    const controller = new AbortController();
+    const scheduler = new WorkflowDispatchScheduler(1, controller.signal);
+    scheduler.pause();
+    let completed = 0;
+    const emitter = {
+      agentCompleted: () => {
+        completed += 1;
+      },
+    };
+    const orch2 = new WorkflowOrchestrator(async () => 'LIVE');
+    const run = orch2.run({
+      script: `
+        let saw = 'none';
+        const p = agent('a').then(
+          (v) => { saw = 'resolved:' + v; },
+          (e) => { saw = 'rejected:' + e.message; }
+        );
+        try { await agent('keep'); } catch (e) {}
+        await p;
+        return saw;
+      `,
+      args: undefined,
+      journal: { append: () => Promise.resolve() } as never,
+      resumeReplay: buildReplay(entries),
+      scheduler,
+      emitter,
+    });
+    // Both dispatches are cached; their results park behind the gate.
+    await vi.waitFor(() => expect(completed).toBe(2));
+
+    controller.abort();
+
+    await expect(run).resolves.toMatchObject({ result: 'resolved:r:a' });
+  });
+
+  it('keeps a paused run alive past the wall-clock budget and completes it after resume', async () => {
+    // The wall clock is a hang backstop armed at sandbox.run start; a
+    // run paused mid-flight executes nothing, so the watchdog must
+    // suspend on pause and re-arm on resume instead of killing the run
+    // mid-pause (after which resume is impossible).
+    const prev = process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'];
+    process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'] = '0.4';
+    try {
+      const scheduler = new WorkflowDispatchScheduler(1);
+      let finishDispatch: ((value: string) => void) | undefined;
+      const orchestrator = new WorkflowOrchestrator(
+        () =>
+          new Promise<string>((resolve) => {
+            finishDispatch = resolve;
+          }),
+      );
+      const run = orchestrator.run({
+        script: `return await agent('a');`,
+        args: undefined,
+        scheduler,
+      });
+      await vi.waitFor(() => expect(finishDispatch).toBeDefined());
+      scheduler.pause();
+      finishDispatch?.('done');
+      await vi.waitFor(() => expect(scheduler.snapshot().state).toBe('paused'));
+      // Sleep past the 400 ms budget while paused.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      let settled = false;
+      void run.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+
+      scheduler.resume();
+      await expect(run).resolves.toMatchObject({ result: 'done' });
+    } finally {
+      if (prev === undefined)
+        delete process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'];
+      else process.env['QWEN_CODE_MAX_WORKFLOW_SECONDS'] = prev;
+    }
+  });
+
   it('P6: resume serves the cached prefix without re-dispatching', async () => {
     const { buildReplay } = await import('./workflow-journal.js');
     // Run 1: record the journal.
@@ -961,12 +1865,35 @@ describe('WorkflowOrchestrator', () => {
     const journal2 = {
       append: () => Promise.resolve(),
     } as unknown as import('./workflow-journal.js').WorkflowJournal;
-    const outcome = await orch2.run({
+    const scheduler = new WorkflowDispatchScheduler(1);
+    scheduler.pause();
+    const run = orch2.run({
       script: `const a = await agent('a'); const b = await agent('b'); return a + '|' + b;`,
       args: undefined,
       journal: journal2,
       resumeReplay: buildReplay(entries),
+      scheduler,
     });
+    let settled = false;
+    // Two arms: under a rejection-shaped gate regression the promise
+    // rejects, and a fulfillment-only attach would escape as an
+    // unhandledRejection instead of failing the intended assertion.
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    // Flush all microtasks + a timer tick so the negative check
+    // distinguishes the pause gate from a gate-less cached resolve
+    // (which settles in ~4 microtasks without one).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    expect(dispatchCalls).toBe(0);
+    scheduler.resume();
+    const outcome = await run;
     expect(dispatchCalls).toBe(0); // fully cached
     expect(outcome.result).toBe('r:a|r:b'); // cached values, not LIVE
   });
@@ -1089,6 +2016,7 @@ describe('createProductionDispatch', () => {
     created.length = 0;
     nextFinalText.value = undefined;
     nextTerminateMode.value = 'GOAL';
+    nextExecuteHook.value = undefined;
   });
 
   it('routes calls through AgentHeadless and returns getFinalText', async () => {
@@ -1099,6 +2027,8 @@ describe('createProductionDispatch', () => {
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
     expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    expect(created[0]!.taskName).toBe('hello');
+    expect(created[0]!.subagentId).toBe(created[0]!.agentId);
   });
 
   it('does not suppress env bootstrap with an empty initial history', async () => {
@@ -1144,6 +2074,117 @@ describe('createProductionDispatch', () => {
     expect(created[0]!.signal!.aborted).toBe(false);
   });
 
+  it('installs and cleans up the approval bridge for every stalled attempt', async () => {
+    let attempt = 0;
+    nextExecuteHook.value = async (emitter, signal) => {
+      attempt += 1;
+      if (attempt > 1) {
+        nextTerminateMode.value = 'GOAL';
+        return;
+      }
+      nextTerminateMode.value = 'CANCELLED';
+      emitter.emit(AgentEventType.ROUND_START, {
+        subagentId: 'workflow-agent',
+        round: 1,
+        promptId: 'prompt-1',
+        timestamp: Date.now(),
+      });
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) return resolve();
+        signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+    const installed: Array<{
+      emitter: AgentEventEmitter;
+      dispatchId?: string;
+    }> = [];
+    const cleaned: AgentEventEmitter[] = [];
+    const dispatch = createProductionDispatch(
+      fakeConfig(),
+      undefined,
+      undefined,
+      (emitter, dispatchId) => {
+        installed.push({ emitter, dispatchId });
+        return () => cleaned.push(emitter);
+      },
+    );
+
+    await expect(
+      dispatch('hello', { label: 'h1', stallMs: 5 }, 'dispatch-1'),
+    ).resolves.toBe('headless-said:hello');
+    expect(installed).toHaveLength(2);
+    expect(installed[0]?.emitter).not.toBe(installed[1]?.emitter);
+    expect(installed.map(({ dispatchId }) => dispatchId)).toEqual([
+      'dispatch-1',
+      'dispatch-1',
+    ]);
+    expect(cleaned).toEqual(installed.map(({ emitter }) => emitter));
+  });
+
+  it('bubbles a production subagent approval through the run registry and resumes after ProceedOnce', async () => {
+    const registry = new WorkflowRunRegistry();
+    registry.setApprovalChangeCallback(() => {});
+    const config = {
+      getWorkflowRunRegistry: () => registry,
+    } as unknown as Config;
+    let releaseApproval!: () => void;
+    const approvalResolved = new Promise<void>((resolve) => {
+      releaseApproval = resolve;
+    });
+    const respond = vi.fn(async (outcome: ToolConfirmationOutcome) => {
+      expect(outcome).toBe(ToolConfirmationOutcome.ProceedOnce);
+      releaseApproval();
+    });
+    nextExecuteHook.value = async (emitter) => {
+      emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+        subagentId: 'workflow-agent-approval',
+        round: 1,
+        callId: 'call-approval',
+        name: 'Shell',
+        description: 'Run git status',
+        args: { command: 'git status' },
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command?',
+          command: 'git status',
+          rootCommand: 'git status',
+        },
+        respond,
+        timestamp: Date.now(),
+      });
+      await approvalResolved;
+    };
+
+    const handle = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: `return await agent('approval-required')`,
+      args: undefined,
+    });
+
+    await vi.waitFor(() => {
+      expect(registry.get(handle.runId)?.pendingApprovals).toHaveLength(1);
+    });
+    expect(respond).not.toHaveBeenCalled();
+    const approval = registry.get(handle.runId)!.pendingApprovals[0];
+
+    await expect(
+      registry.resolvePendingApproval(
+        handle.runId,
+        approval.approvalId,
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    ).resolves.toBe(true);
+
+    await expect(handle.completion).resolves.toMatchObject({
+      ok: true,
+      outcome: { result: 'headless-said:approval-required' },
+    });
+    expect(respond).toHaveBeenCalledOnce();
+    expect(registry.get(handle.runId)?.pendingApprovals).toEqual([]);
+    expect(registry.get(handle.runId)?.status).toBe('completed');
+  });
+
   // FIX-C2 (UP-2-C1): the subagent system prompt must include the binary's
   // §XmO bullets. We assert the JSON-format instruction is present because
   // its absence causes JSON-returning subagents to wrap output in code fences.
@@ -1158,14 +2199,57 @@ describe('createProductionDispatch', () => {
   });
 
   // T11 (PR #4732 R1): subagents must be bounded so a single agent() call
-  // cannot loop the model indefinitely.
+  // cannot loop the model indefinitely. The dispatch site resolves both
+  // bounds from process.env, so delete the two knobs for this test — an
+  // operator shell exporting them must not flip this hermetic assertion.
   it('passes bounded runConfig (max_turns + max_time_minutes)', async () => {
-    const dispatch = createProductionDispatch(fakeConfig());
-    await dispatch('hello', { label: 'h1' });
-    expect(created[0]!.runConfig).toEqual({
-      max_turns: 50,
-      max_time_minutes: 10,
-    });
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    try {
+      const dispatch = createProductionDispatch(fakeConfig());
+      await dispatch('hello', { label: 'h1' });
+      // Literal anchors, not the DEFAULT_* constants: an edit of the
+      // constant must fail this assertion, not move it along.
+      expect(created[0]!.runConfig).toEqual({
+        max_turns: 50,
+        max_time_minutes: 10,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
+  });
+
+  // Resolver-level tests cannot catch a revert at the dispatch site: in a
+  // clean env the DEFAULT_* constants and the resolvers produce identical
+  // numbers, so the wiring test above stays green either way. Stub the env
+  // so the dispatched runConfig itself proves the resolver is wired in.
+  it('fast-path dispatch honors the env-tunable subagent bounds', async () => {
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = '120';
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = '45';
+    try {
+      const dispatch = createProductionDispatch(fakeConfig());
+      await dispatch('hello', { label: 'h1' });
+      expect(created[0]!.runConfig).toEqual({
+        max_turns: 120,
+        max_time_minutes: 45,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
   });
 
   // T11: disallow SendMessage plus tools that break workflow return/cleanup
@@ -1388,7 +2472,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         args: undefined,
       });
       // 50 thunks >> window, so the window fully fills: peak === cap.
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
   });
@@ -1461,7 +2545,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         );`,
         args: undefined,
       });
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
 
@@ -1709,16 +2793,78 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       ).toBe(9999);
     });
 
-    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
+    // A build-and-test agent, or an analysis of a 2 000-line file, exceeds
+    // 50 turns / 10 minutes routinely — and under GOAL-terminal semantics
+    // being cut off shows up as a `null` element, i.e. an agent that
+    // silently went missing. Both bounds are operator-tunable, on the same
+    // contract as the agent cap.
+    it('per-subagent bounds default, honor an override, and clamp', () => {
+      expect(resolveSubagentMaxTurns({})).toBe(
+        DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS,
+      );
+      expect(resolveSubagentMaxTimeMinutes({})).toBe(
+        DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES,
+      );
+      expect(
+        resolveSubagentMaxTurns({ QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: '120' }),
+      ).toBe(120);
+      expect(
+        resolveSubagentMaxTimeMinutes({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: '45',
+        }),
+      ).toBe(45);
+      // Literal anchors for the hard ceilings — comparing against the
+      // HARD_* constants would assert them against themselves.
+      expect(
+        resolveSubagentMaxTurns({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: '999999',
+        }),
+      ).toBe(500);
+      expect(
+        resolveSubagentMaxTimeMinutes({
+          QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: '999999',
+        }),
+      ).toBe(100);
+    });
+
+    it('per-subagent bounds reject non-decimal-integer overrides', () => {
+      for (const raw of ['0', 'abc', '2.5', '0x10', '1e3']) {
+        expect(
+          resolveSubagentMaxTurns({ QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS: raw }),
+        ).toBe(DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS);
+        expect(
+          resolveSubagentMaxTimeMinutes({
+            QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES: raw,
+          }),
+        ).toBe(DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES);
+      }
+    });
+
+    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [2,16]', () => {
       expect(
         resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '4' }),
       ).toBe(4);
-      // invalid → cpu-derived default, always within [1, 16]
+      // invalid → cpu-derived default, always within [2, 16]
       const fallback = resolveConcurrencyLimit({
         QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '-1',
       });
-      expect(fallback).toBeGreaterThanOrEqual(1);
+      expect(fallback).toBeGreaterThanOrEqual(2);
       expect(fallback).toBeLessThanOrEqual(16);
+    });
+
+    // The default reads `availableParallelism()`, which honours the CPU
+    // affinity mask and container limits, where `os.cpus()` reports the
+    // host and can return an empty array. The floor is 2, not 1: a window
+    // of 1 turns every `parallel()` into a sequence on a small machine.
+    it('resolveConcurrencyLimit derives the default from availableParallelism, floored at 2', () => {
+      const at = (parallelism: number) =>
+        resolveConcurrencyLimit({}, () => parallelism);
+      expect(at(0)).toBe(2);
+      expect(at(1)).toBe(2);
+      expect(at(3)).toBe(2);
+      expect(at(6)).toBe(4);
+      expect(at(18)).toBe(16);
+      expect(at(64)).toBe(16);
     });
 
     // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must
@@ -1776,6 +2922,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const { GitWorktreeService } = await import(
       '../../services/gitWorktreeService.js'
     );
+    pinStub.resolve.value = undefined;
+    pinStub.seenLabels.length = 0;
     worktreeStubs.instances.length = 0;
     vi.mocked(GitWorktreeService).mockImplementation(() => {
       const stub = worktreeStubs.makeStub();
@@ -1787,12 +2935,22 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
   type StubSubagentCall = {
     config: { name?: string; model?: string; disallowedTools?: string[] };
     runtimeContextSame: boolean;
-    options?: { runConfigOverrides?: unknown };
+    /** The exact Config the dispatch handed to the runtime agent. */
+    runtimeContext: Config;
+    /** What the subagent's Config answers for "where am I?". */
+    runtimeTargetDir?: string;
+    runtimeIgnoreFiles?: string;
+    options?: {
+      runConfigOverrides?: unknown;
+      taskName?: string;
+      subagentId?: string;
+    };
     eventEmitterAttached: boolean;
     executeAgentId?: string | null;
   };
 
   function fakeConfigWithMgr(opts: {
+    transcriptDir?: string;
     findSubagentByName?: (name: string) => Promise<{
       name: string;
       description: string;
@@ -1815,9 +2973,10 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       // Hook for schema-mode tests: the override path attaches an
       // AgentEventEmitter that the dispatch listens to for `structured_output`
       // calls. The test can drive that emitter to simulate model behavior.
-      runWithEmitter?: (emitter: {
-        emit(event: string, payload: unknown): void;
-      }) => void;
+      runWithEmitter?: (
+        emitter: { emit(event: string, payload: unknown): void },
+        signal?: AbortSignal,
+      ) => void | Promise<void>;
     }>;
   }): {
     config: Config;
@@ -1838,11 +2997,42 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const cfg = {
       createToolRegistry: async () => fakeRegistry,
       getToolRegistry: () => fakeRegistry,
+      // Session Workflow plan-revision state mirroring Config's shape: an
+      // own field mutated by methods that assign `this.<field>` (config.ts
+      // set/clearSessionWorkflowPlanRevision). On an un-shimmed
+      // Object.create wrapper that assignment lands as an OWN property of
+      // the wrapper and shadows this base state — the write-through tests
+      // below assert exactly that contract.
+      sessionWorkflowPlanRevision: 'approved-revision' as unknown,
+      setSessionWorkflowPlanRevision(
+        this: Record<string, unknown>,
+        revision: unknown,
+      ) {
+        this['sessionWorkflowPlanRevision'] = revision;
+      },
+      clearSessionWorkflowPlanRevision(this: Record<string, unknown>) {
+        this['sessionWorkflowPlanRevision'] = undefined;
+      },
+      // Derived dispatch contexts layer an approval profile over the
+      // worktree profile; the derivation snapshots the base mode through
+      // these methods.
+      getApprovalMode: () => 'default' as ApprovalMode,
+      isTrustedFolder: () => true,
       // P3 R2 self-review: isolation:'worktree' provisioning reads
       // these methods. Provide deterministic returns so the tests can
       // drive GitWorktreeService stubs without re-deriving cwd.
       getTargetDir: () => '/fake/repo',
+      getFileFilteringOptions: () => ({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+        customIgnoreFiles: ['.cursorignore'],
+      }),
       getSessionId: () => 'sess_fake_test_id',
+      getProjectRoot: () => opts.transcriptDir ?? '/fake/repo',
+      getCliVersion: () => '9.9.9',
+      storage: opts.transcriptDir
+        ? { getProjectDir: () => opts.transcriptDir }
+        : undefined,
       getWorktreeSymlinkDirectories: () => [],
       getSubagentManager: () => ({
         findSubagentByName: opts.findSubagentByName ?? (async () => null),
@@ -1853,12 +3043,26 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             disallowedTools?: string[];
           },
           runtimeContext: Config,
-          options?: { eventEmitter?: unknown; runConfigOverrides?: unknown },
+          options?: {
+            eventEmitter?: unknown;
+            runConfigOverrides?: unknown;
+            taskName?: string;
+            subagentId?: string;
+          },
         ) => {
           const call: StubSubagentCall = {
             config: subagentConfig,
             runtimeContextSame: runtimeContext === cfg,
-            options: { runConfigOverrides: options?.runConfigOverrides },
+            runtimeContext,
+            runtimeTargetDir: runtimeContext.getTargetDir(),
+            runtimeIgnoreFiles: runtimeContext
+              .getFileService?.()
+              .getQwenIgnoreFileNamesDisplay(),
+            options: {
+              runConfigOverrides: options?.runConfigOverrides,
+              taskName: options?.taskName,
+              subagentId: options?.subagentId,
+            },
             eventEmitterAttached: options?.eventEmitter !== undefined,
           };
           calls.push(call);
@@ -1881,10 +3085,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
                 );
                 call.executeAgentId = getCurrentAgentId();
                 if (outcome.runWithEmitter && options?.eventEmitter) {
-                  outcome.runWithEmitter(
+                  await outcome.runWithEmitter(
                     options.eventEmitter as {
                       emit(event: string, payload: unknown): void;
                     },
+                    signal,
                   );
                 }
                 // R3 (wenshao #6): honor `nextExecuteThrow` on the
@@ -1956,6 +3161,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
     expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    expect(calls[0].options?.taskName).toBe('find foo');
+    expect(calls[0].options?.subagentId).toBe(calls[0].executeAgentId);
     // Workflow floor [AskUserQuestion, SendMessage, Monitor, EnterPlanMode,
     // ExitPlanMode, Agent] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
@@ -1967,6 +3174,325 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         'exit_plan_mode',
         'agent',
       ]),
+    );
+  });
+
+  it('records override-path events in the workflow transcript', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        onCreate: async () => ({
+          finalText: 'override-output',
+          terminateMode: 'GOAL',
+          runWithEmitter: (emitter) => {
+            emitter.emit(AgentEventType.ROUND_TEXT, {
+              subagentId: 'sub',
+              round: 1,
+              text: 'override transcript output',
+              thoughtText: '',
+              timestamp: 1,
+            });
+          },
+        }),
+      });
+
+      await createProductionDispatch(config)('override prompt', {
+        model: 'override-model',
+      });
+
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const records = fs
+        .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records).toHaveLength(2);
+      expect(records[1]!['parentUuid']).toBe(records[0]!['uuid']);
+      expect(records[1]!['agentId']).toBe(records[0]!['agentId']);
+      expect(calls[0]!.executeAgentId).toBe(records[0]!['agentId']);
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // An unlabeled override-path dispatch runs the runtime agent under the
+  // agentType's resolved canonical name; the transcript must record that
+  // same identity — not the generic default and not the raw spelling the
+  // script happened to pass (the SubagentManager lookup is
+  // case-insensitive). agentName is the only human-readable agent identity
+  // a workflow dispatch leaves on disk.
+  it('records the agentType name in the transcript for an unlabeled override dispatch', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        // Case-insensitive like the real SubagentManager lookup.
+        findSubagentByName: async (name) =>
+          name.toLowerCase() === 'code-reviewer'
+            ? {
+                name: 'code-reviewer',
+                description: 'reviews chunks',
+                systemPrompt: 'You review code.',
+                level: 'session',
+              }
+            : null,
+        onCreate: async () => ({
+          finalText: 'review-output',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await createProductionDispatch(config)('review chunk 1 of 3', {
+        agentType: 'Code-Reviewer',
+      });
+
+      expect(calls[0]!.config.name).toBe('code-reviewer');
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe('code-reviewer');
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // With BOTH label and agentType set the transcript must stamp the same
+  // identity the runtime agent runs under — the resolved agentType's
+  // canonical name. A label cannot rename a resolved agentType: a fan-out
+  // that labels each chunk would otherwise attribute every on-disk record
+  // to the label while the agent that ran is the agentType, and consumers
+  // aggregating by agentName could not correlate those dispatches with
+  // AgentTool launches of the same agentType.
+  it('stamps the resolved agentType name in the transcript when a label is also set', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        findSubagentByName: async (name) =>
+          name.toLowerCase() === 'code-reviewer'
+            ? {
+                name: 'code-reviewer',
+                description: 'reviews chunks',
+                systemPrompt: 'You review code.',
+                level: 'session',
+              }
+            : null,
+        onCreate: async () => ({
+          finalText: 'review-output',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await createProductionDispatch(config)('review chunk 1 of 3', {
+        agentType: 'Code-Reviewer',
+        label: 'chunk-1',
+      });
+
+      expect(calls[0]!.config.name).toBe('code-reviewer');
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe(calls[0]!.config.name);
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // The agentType definition is resolved exactly once per dispatch:
+  // resolveWorkflowAgentIdentity hands the resolved config to the override
+  // path instead of letting it re-run findSubagentByName — an uncached
+  // directory read + frontmatter parse per non-session level, paid on the
+  // dispatch hot path and again per stall-retry attempt.
+  it('resolves the agentType once per dispatch instead of per path', async () => {
+    let lookups = 0;
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async (name) => {
+        lookups += 1;
+        return name === 'Explore'
+          ? {
+              name: 'Explore',
+              description: 'fast read-only',
+              systemPrompt: 'You are Explore.',
+              level: 'builtin',
+            }
+          : null;
+      },
+      onCreate: async () => ({ finalText: 'done', terminateMode: 'GOAL' }),
+    });
+
+    await createProductionDispatch(config)('find foo', {
+      agentType: 'Explore',
+    });
+
+    expect(lookups).toBe(1);
+  });
+
+  // The identity invariant's third leg: an ephemeral override (model /
+  // isolation / schema only, no agentType) runs the runtime agent under the
+  // resolved display name and the transcript records that same name — a
+  // labeled model-only dispatch must not diverge into an unlabeled runtime
+  // agent.
+  it('runs a labeled model-only override under the label and records it in the transcript', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config, calls } = fakeConfigWithMgr({
+        transcriptDir,
+        onCreate: async () => ({
+          finalText: 'model-output',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await createProductionDispatch(config)('probe task', {
+        label: 'labeled-model',
+        model: 'm',
+      });
+
+      expect(calls[0]!.config.name).toBe('labeled-model');
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe('labeled-model');
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // resolveWorkflowAgentIdentity's truthy check keeps `agentType: ''` from
+  // naming the agent '' — the dispatch still throws "agent type '' not
+  // found", but the transcript seeded before that throw records the shared
+  // default, not a blank identity.
+  it('never records a blank identity for an empty agentType', async () => {
+    const transcriptDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'wf-override-transcript-'),
+    );
+    try {
+      const { config } = fakeConfigWithMgr({
+        transcriptDir,
+        findSubagentByName: async () => null,
+        onCreate: async () => ({
+          finalText: '',
+          terminateMode: 'GOAL',
+        }),
+      });
+
+      await expect(
+        createProductionDispatch(config)('task', { agentType: '' }),
+      ).rejects.toThrow(/agent type '' not found/);
+
+      const sessionDir = path.join(
+        transcriptDir,
+        'subagents',
+        'sess_fake_test_id',
+      );
+      const names = fs
+        .readdirSync(sessionDir)
+        .filter((name) => name.endsWith('.jsonl'));
+      expect(names).toHaveLength(1);
+      const first = JSON.parse(
+        fs
+          .readFileSync(path.join(sessionDir, names[0]!), 'utf8')
+          .split('\n')[0]!,
+      ) as Record<string, unknown>;
+      expect(first['agentName']).toBe('workflow-agent');
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  // The stall wrapper's abandoned error interpolates the dispatch's display
+  // name; when that name comes from a model-authored agentType definition
+  // (validateName charset-checks the TRIMMED name, so a definition named
+  // 'rev\n' registers with the raw name), control characters must not
+  // fragment the single-line error.
+  it('sanitizes control characters out of the agentType stall error', async () => {
+    const { config } = fakeConfigWithMgr({
+      findSubagentByName: async (name) =>
+        name === 'rev\n'
+          ? {
+              name: 'rev\n',
+              description: 'newline-named reviewer',
+              systemPrompt: 'You review code.',
+              level: 'session',
+            }
+          : null,
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED',
+        runWithEmitter: async (emitter, signal) => {
+          emitter.emit(AgentEventType.ROUND_START, {
+            subagentId: 'sub',
+            round: 1,
+            promptId: 'p1',
+            timestamp: Date.now(),
+          });
+          await new Promise<void>((resolve) => {
+            if (signal?.aborted) return resolve();
+            signal?.addEventListener('abort', () => resolve(), { once: true });
+          });
+        },
+      }),
+    });
+
+    const dispatch = createProductionDispatch(config);
+    const error: unknown = await dispatch('doomed', {
+      agentType: 'rev\n',
+      stallMs: 5,
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\n');
+    expect((error as Error).message).toContain(
+      'agent "rev" stalled on all 3 attempts',
     );
   });
 
@@ -2012,6 +3538,37 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     await dispatch('hi', { model: 'qwen3-max' });
     // No agentType → ephemeral default config built, then opts.model applied.
     expect(calls[0].config.model).toBe('qwen3-max');
+  });
+
+  // Same wiring guard as the fast-path sibling above, for the override
+  // dispatch site: with a clean env the resolvers and the DEFAULT_*
+  // constants are indistinguishable, so only a stubbed env proves the
+  // runConfigOverrides handed to createAgentHeadless come from the
+  // resolvers.
+  it('override-path dispatch honors the env-tunable subagent bounds', async () => {
+    const prevTurns = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+    const prevMinutes = process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = '120';
+    process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = '45';
+    try {
+      const helper = fakeConfigWithMgr({
+        onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+      });
+      await createProductionDispatch(helper.config)('hi', {
+        model: 'qwen3-max',
+      });
+      expect(helper.calls[0]!.options?.runConfigOverrides).toEqual({
+        max_turns: 120,
+        max_time_minutes: 45,
+      });
+    } finally {
+      if (prevTurns === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS'] = prevTurns;
+      if (prevMinutes === undefined)
+        delete process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'];
+      else process.env['QWEN_CODE_WORKFLOW_AGENT_MAX_MINUTES'] = prevMinutes;
+    }
   });
 
   it("isolation:'remote' throws upstream-aligned 'not available' error", async () => {
@@ -2090,6 +3647,56 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
     });
     expect(result).toEqual({ ok: true, value: 42 });
+  });
+
+  // R7-1: the schema wrapper is the second un-shimmed Object.create builder
+  // — an agent({schema}) dispatch hands the subagent a Config whose
+  // prototype revision methods would otherwise assign an own shadow of the
+  // session-global state. The write-through must reach the base.
+  it('schema-mode override writes Session Workflow revision mutations through to the base Config', async () => {
+    const { config, calls } = fakeConfigWithMgr({
+      onCreate: async () => ({
+        finalText: '',
+        terminateMode: 'CANCELLED', // schema dispatch aborts after capture
+        runWithEmitter: (emitter) => {
+          emitter.emit('tool_call', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            args: { ok: true },
+            description: '',
+            isOutputMarkdown: false,
+            timestamp: 1,
+          });
+          emitter.emit('tool_result', {
+            subagentId: 'sub',
+            round: 1,
+            callId: 'c1',
+            name: 'structured_output',
+            success: true,
+            responseParts: [],
+            resultDisplay: '',
+            durationMs: 1,
+            timestamp: 2,
+          });
+        },
+      }),
+    });
+
+    await createProductionDispatch(config)('extract', {
+      schema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+
+    const runtime = calls[0]!.runtimeContext;
+    expect(runtime).not.toBe(config);
+    runtime.clearSessionWorkflowPlanRevision();
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+    expect(
+      (config as unknown as Record<string, unknown>)[
+        'sessionWorkflowPlanRevision'
+      ],
+    ).toBeUndefined();
   });
 
   it('R1 #1: schema-mode SUCCESS records tokens via onTokens (was missing before fix)', async () => {
@@ -2561,6 +4168,237 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(helper.disposed).toBeGreaterThanOrEqual(1);
   });
 
+  // ─── workingDir: pin to a caller-owned worktree ─────────────────
+
+  // The fast path hands `config` to AgentHeadless untouched and has no way
+  // to rebind a directory, so a `workingDir` that reached it would be
+  // silently dropped and the agent would run in the parent working tree —
+  // the exact failure the option exists to prevent.
+  it('workingDir forces the override path even with no agentType/model/schema', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'pinned', terminateMode: 'GOAL' }),
+    });
+    created.length = 0;
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: '.qwen/tmp/review-pr-7',
+      }),
+    ).resolves.toBe('pinned');
+
+    // Went through SubagentManager, not the fast path's AgentHeadless.create.
+    expect(helper.calls).toHaveLength(1);
+    expect(created).toHaveLength(0);
+  });
+
+  it('workingDir rebinds the subagent runtime context to the pinned directory', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'pinned', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', {
+      workingDir: '.qwen/tmp/review-pr-7',
+    });
+
+    // The subagent's Config answers with the pinned directory, not the
+    // parent's '/fake/repo' — that rebind is what makes its file, shell and
+    // search tools resolve inside the worktree.
+    expect(helper.calls[0]!.runtimeTargetDir).toBe(
+      '/fake/repo/.qwen/tmp/review-pr-7',
+    );
+    expect(helper.calls[0]!.runtimeContextSame).toBe(false);
+    expect(helper.calls[0]!.runtimeIgnoreFiles).toContain('.cursorignore');
+  });
+
+  // R7-1: todo_write is not in WORKFLOW_SUBAGENT_DISALLOWED_TOOLS, so a
+  // divergent todo_write inside a directory-scoped workflow agent calls
+  // clearSessionWorkflowPlanRevision on the wrapper. Without the
+  // write-through shim, the prototype method assigns
+  // `this.sessionWorkflowPlanRevision = undefined` as an OWN property of
+  // the wrapper — the root Config keeps the stale approved revision and
+  // keeps rejecting top-level Agent launches against a plan that no longer
+  // exists. The shim must forward the mutation to the base.
+  it('workingDir override writes Session Workflow revision mutations through to the base Config', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'pinned', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', {
+      workingDir: '.qwen/tmp/review-pr-7',
+    });
+
+    const runtime = helper.calls[0]!.runtimeContext;
+    expect(runtime).not.toBe(helper.config);
+
+    const sentinel: SessionWorkflowPlanRevision = {
+      planId: 'plan-1',
+      sourceCallId: 'call-1',
+      todoIds: ['t1'],
+    };
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    runtime.clearSessionWorkflowPlanRevision();
+
+    // Forwarded to the base: the wrapper carries no own shadow of the
+    // field, and the base's revision is what actually changed.
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+    const base = helper.config as unknown as Record<string, unknown>;
+    expect(base['sessionWorkflowPlanRevision']).toBeUndefined();
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    expect(base['sessionWorkflowPlanRevision']).toBe(sentinel);
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+  });
+
+  // R7-1 sibling: the isolation-worktree dispatch wrapper carries the same
+  // write-through contract as the workingDir one — todo_write is not
+  // disallowed, so a divergent todo_write inside the isolated agent must
+  // forward revision mutations to the base instead of shadowing them.
+  it("isolation:'worktree' override writes Session Workflow revision mutations through to the base Config", async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'isolated', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', {
+      isolation: 'worktree',
+    });
+
+    const runtime = helper.calls[0]!.runtimeContext;
+    expect(runtime).not.toBe(helper.config);
+
+    const sentinel: SessionWorkflowPlanRevision = {
+      planId: 'plan-isolated',
+      sourceCallId: 'call-isolated',
+      todoIds: ['t1'],
+    };
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    runtime.clearSessionWorkflowPlanRevision();
+
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+    const base = helper.config as unknown as Record<string, unknown>;
+    expect(base['sessionWorkflowPlanRevision']).toBeUndefined();
+    runtime.setSessionWorkflowPlanRevision(sentinel);
+    expect(base['sessionWorkflowPlanRevision']).toBe(sentinel);
+    expect(Object.hasOwn(runtime, 'sessionWorkflowPlanRevision')).toBe(false);
+  });
+
+  it('workingDir rejects invalid values before dispatch', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', { workingDir: '' }),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  it('workingDir rejects whitespace-only values at the entrance', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', { workingDir: '  ' }),
+    ).rejects.toThrow(/workingDir.*non-empty string/);
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // The sandbox gate names this contradiction too, but it reads the raw opts
+  // BEFORE the JSON revival — an enumerable getter can withhold `isolation`
+  // during validation and surface it at stringify time. The orchestrator sees
+  // the revived plain object, so its refusal is the one that cannot be
+  // evaded; without it, isolation would silently win and workingDir would be
+  // dropped — the opposite of AgentTool's documented working_dir-wins rule.
+  it('workingDir + isolation throws instead of letting one silently win', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: '.qwen/tmp/review-pr-7',
+        isolation: 'worktree',
+      }),
+    ).rejects.toThrow(/incompatible options/);
+    expect(helper.calls).toHaveLength(0);
+    expect(worktreeStubs.instances).toHaveLength(0);
+  });
+
+  // A refused pin must abort the dispatch, not fall through to an agent
+  // running in the parent tree — the failure mode the pin exists to prevent.
+  it('workingDir surfaces the resolver refusal and dispatches nothing', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'workingDir "x" is not a registered linked worktree.',
+    });
+
+    await expect(
+      createProductionDispatch(helper.config)('hi', {
+        workingDir: 'not-a-worktree',
+      }),
+    ).rejects.toThrow(
+      /agent\(\{workingDir: "not-a-worktree"\}\).*not a registered linked worktree/,
+    );
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  it('workingDir scrubs control characters from resolver errors', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'refused\r\nforged\u0000line',
+    });
+
+    let error: unknown;
+    try {
+      await createProductionDispatch(helper.config)('hi', {
+        workingDir: 'not-a-worktree',
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\r');
+    expect((error as Error).message).not.toContain('\n');
+    expect((error as Error).message).not.toContain('\u0000');
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // Same threat on the other interpolated half: the refusal echoes the
+  // model-authored `workingDir` itself, and `JSON.stringify` escapes only
+  // C0 (U+0000-U+001F), so DEL and the C1 range (incl. NEL U+0085) reach
+  // the message raw unless the echo is sanitized too.
+  it('workingDir refusal scrubs control characters from the echoed workingDir', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'unused', terminateMode: 'GOAL' }),
+    });
+    pinStub.resolve.value = async () => ({
+      error: 'not a registered linked worktree.',
+    });
+
+    let error: unknown;
+    try {
+      await createProductionDispatch(helper.config)('hi', {
+        workingDir: 'x\u0085forged\u007fline',
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).not.toContain('\u0085');
+    expect((error as Error).message).not.toContain('\u007f');
+    expect(helper.calls).toHaveLength(0);
+  });
+
+  // The resolver names the offending parameter in its errors; a workflow
+  // script never wrote `working_dir`, so it must be told the opt's own name.
+  it('names the workflow opt, not the tool parameter, when resolving', async () => {
+    const helper = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    await createProductionDispatch(helper.config)('hi', { workingDir: 'wt' });
+    expect(pinStub.seenLabels).toEqual(['workingDir']);
+  });
+
   // ─── isolation:'worktree' provision error branches ──────────────
   // R2 self-review (test-1, [critical]): each provisionWorkflowWorktree
   // error branch had no unit test. Coverage came only from the real-
@@ -2773,6 +4611,28 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls[0].config.model).toBe('qwen3-max');
     // Default-clean stub auto-removes; no suffix expected.
     expect(String(result)).not.toMatch(/worktree preserved/);
+    expect(calls[0].runtimeContextSame).toBe(false);
+    expect(calls[0].runtimeContext.getTargetDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getCwd()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getWorkingDir()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    expect(calls[0].runtimeContext.getProjectRoot()).toBe(
+      '/fake/repo/.qwen/worktrees/agent-deadbe1',
+    );
+    // The approval profile layered over the worktree context inherits the
+    // worktree rebinding through the prototype chain. The fake worktree
+    // path does not exist on disk, so assert the rebinding's presence
+    // rather than its resolved directories.
+    expect(calls[0].runtimeContext.getWorkspaceContext()).toBeDefined();
+    expect(
+      calls[0].runtimeContext.getFileService().getQwenIgnoreFileNamesDisplay(),
+    ).toBe('.qwenignore, .cursorignore');
+    expect(config.getTargetDir()).toBe('/fake/repo');
   });
 
   it("schema + isolation:'worktree': structured payload returned, worktree info logged", async () => {
@@ -3106,5 +4966,244 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     ).rejects.toThrow(
       /subagent completed without calling StructuredOutput \(after 2 in-conversation nudges\)\./,
     );
+  });
+});
+
+// Every workflow `agent()` dispatch leaves the same per-agent JSONL
+// transcript AgentTool writes, in the same session-scoped directory. Before
+// this, a finished workflow run left only the journal — which stores a hash
+// of the prompt, not the prompt, and no `result` line at all for a dispatch
+// that threw.
+describe('createProductionDispatch — subagent transcripts', () => {
+  let projectDir: string;
+
+  beforeEach(() => {
+    created.length = 0;
+    nextFinalText.value = undefined;
+    nextTerminateMode.value = 'GOAL';
+    nextExecuteHook.value = undefined;
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wf-transcript-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+  });
+
+  function transcriptConfig(): Config {
+    return {
+      getSessionId: () => 'sess-1',
+      getProjectRoot: () => projectDir,
+      getCliVersion: () => '9.9.9',
+      storage: { getProjectDir: () => projectDir },
+    } as unknown as Config;
+  }
+
+  const sessionDir = () => path.join(projectDir, 'subagents', 'sess-1');
+
+  function transcriptNames(): string[] {
+    if (!fs.existsSync(sessionDir())) return [];
+    return fs.readdirSync(sessionDir()).filter((n) => n.endsWith('.jsonl'));
+  }
+
+  function recordsIn(name: string): Array<Record<string, unknown>> {
+    return fs
+      .readFileSync(path.join(sessionDir(), name), 'utf8')
+      .split('\n')
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+  }
+
+  const partsOf = (rec: Record<string, unknown>): unknown[] =>
+    ((rec['message'] as { parts?: unknown[] } | undefined)?.parts ??
+      []) as unknown[];
+
+  it('writes one transcript per dispatch, seeded with the dispatched prompt', async () => {
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await dispatch('review chunk 3 of 7', { label: 'chunk-3' });
+
+    const names = transcriptNames();
+    expect(names).toHaveLength(1);
+    const recs = recordsIn(names[0]!);
+    // The launch prompt is the first `user` record — the shape every
+    // transcript reader already recovers a launch prompt from.
+    expect(recs[0]!['type']).toBe('user');
+    expect(partsOf(recs[0]!)).toEqual([{ text: 'review chunk 3 of 7' }]);
+    expect(recs[0]!['agentId']).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    expect(recs[0]!['agentName']).toBe('chunk-3');
+    expect(recs[0]!['sessionId']).toBe('sess-1');
+    // Launch metadata flows through buildAgentTranscriptAttach — pin it
+    // here so a dropped builder wiring line fails the suite.
+    expect(recs[0]!['version']).toBe('9.9.9');
+    expect(recs[0]!['cwd']).toBe(projectDir);
+    expect(names[0]).toBe(`agent-${recs[0]!['agentId'] as string}.jsonl`);
+  });
+
+  // An empty prompt seeds no user record, so the transcript would give no
+  // evidence of what the agent was asked — the dispatch is rejected at the
+  // boundary instead, before any transcript is started.
+  it('rejects an empty or non-string prompt before attaching a transcript', async () => {
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await expect(dispatch('', { label: 'empty' })).rejects.toThrow(
+      /non-empty string prompt/,
+    );
+    await expect(
+      dispatch(42 as unknown as string, { label: 'bad' }),
+    ).rejects.toThrow(/non-empty string prompt/);
+    expect(transcriptNames()).toHaveLength(0);
+  });
+
+  // The display name is resolved once and handed to both the runtime agent
+  // and the transcript, so an empty label cannot diverge into a runtime
+  // agent named '' whose transcript says 'workflow-agent'.
+  it('keeps the runtime agent name and the transcript aligned for an empty label', async () => {
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await dispatch('task', { label: '' });
+
+    expect(created).toHaveLength(1);
+    expect(created[0]!.name).toBe('workflow-agent');
+    const recs = recordsIn(transcriptNames()[0]!);
+    expect(recs[0]!['agentName']).toBe('workflow-agent');
+  });
+
+  it("records the subagent's tool calls and their results", async () => {
+    nextExecuteHook.value = async (emitter) => {
+      emitter.emit(AgentEventType.TOOL_CALL, {
+        subagentId: 'sub',
+        round: 1,
+        callId: 'c1',
+        name: 'read_file',
+        args: { absolute_path: '/tmp/diff.txt', offset: 0, limit: 40 },
+        description: 'read the diff',
+        timestamp: 1,
+      });
+      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+        subagentId: 'sub',
+        round: 1,
+        responses: [
+          {
+            callId: 'c1',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'diff text' },
+                },
+              },
+            ],
+          },
+        ],
+        timestamp: 2,
+      });
+    };
+
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await dispatch('read it', { label: 'reader' });
+
+    const recs = recordsIn(transcriptNames()[0]!);
+    expect(partsOf(recs[1]!)).toEqual([
+      {
+        functionCall: {
+          id: 'c1',
+          name: 'read_file',
+          args: { absolute_path: '/tmp/diff.txt', offset: 0, limit: 40 },
+        },
+      },
+    ]);
+    expect(recs[2]!['type']).toBe('tool_result');
+    expect(recs[2]!['toolCallResult']).toEqual({ callId: 'c1' });
+  });
+
+  // A stall-retried dispatch is ONE `agent()` call. Minting the agent id per
+  // attempt would present it to every transcript reader as two agents — one
+  // of them with almost no tool calls, which is exactly the shape a coverage
+  // gate reads as an agent that did nothing.
+  it('appends a stall retry to the first attempt transcript', async () => {
+    let attempt = 0;
+    nextExecuteHook.value = async (emitter, signal) => {
+      attempt += 1;
+      if (attempt > 1) {
+        nextTerminateMode.value = 'GOAL';
+        emitter.emit(AgentEventType.ROUND_TEXT, {
+          subagentId: 'workflow-agent',
+          round: 2,
+          text: 'retry completed',
+          thoughtText: '',
+          timestamp: Date.now(),
+        });
+        return;
+      }
+      nextTerminateMode.value = 'CANCELLED';
+      emitter.emit(AgentEventType.ROUND_START, {
+        subagentId: 'workflow-agent',
+        round: 1,
+        promptId: 'prompt-1',
+        timestamp: Date.now(),
+      });
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) return resolve();
+        signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+
+    const dispatch = createProductionDispatch(transcriptConfig());
+    await expect(dispatch('flaky', { label: 'f1', stallMs: 5 })).resolves.toBe(
+      'headless-said:flaky',
+    );
+
+    expect(attempt).toBe(2);
+    const names = transcriptNames();
+    expect(names).toHaveLength(1);
+    // One launch record, not one per attempt.
+    const records = recordsIn(names[0]!);
+    const users = records.filter((r) => r['type'] === 'user');
+    expect(users).toHaveLength(1);
+    // The retry seam is visible on disk: attempt 2 seeded an agent_retry
+    // system marker before its own records.
+    expect(records[1]!['type']).toBe('system');
+    expect(records[1]!['subtype']).toBe('agent_retry');
+    expect(records[1]!['systemPayload']).toEqual({ attempt: 2 });
+    // Attempt 2's own records follow the marker — a retried agent that did
+    // nothing would end the file at the marker, exactly the shape the
+    // comment above warns about.
+    expect(records.map((r) => r['type'])).toEqual([
+      'user',
+      'system',
+      'assistant',
+    ]);
+    expect(partsOf(records[2]!)).toEqual([{ text: 'retry completed' }]);
+    for (let i = 1; i < records.length; i++) {
+      expect(records[i]!['parentUuid']).toBe(records[i - 1]!['uuid']);
+      expect(records[i]!['agentId']).toBe(records[0]!['agentId']);
+    }
+    expect(created).toHaveLength(2);
+    expect(created.map((call) => call.agentId)).toEqual([
+      records[0]!['agentId'],
+      records[0]!['agentId'],
+    ]);
+  });
+
+  // The journal writes no `result` line for a dispatch that throws, so a
+  // failed agent is invisible there. The transcript is what keeps it
+  // visible — the run left evidence of what it was asked and how far it got.
+  it('leaves a transcript for a dispatch that ends on a non-GOAL terminal', async () => {
+    nextTerminateMode.value = 'MAX_TURNS';
+    const dispatch = createProductionDispatch(transcriptConfig());
+
+    await expect(dispatch('doomed', { label: 'd1' })).rejects.toThrow(
+      /did not complete \(terminate mode: MAX_TURNS\)/,
+    );
+
+    const names = transcriptNames();
+    expect(names).toHaveLength(1);
+    expect(partsOf(recordsIn(names[0]!)[0]!)).toEqual([{ text: 'doomed' }]);
+  });
+
+  it('is best-effort: a config that cannot supply the paths still dispatches', async () => {
+    const dispatch = createProductionDispatch(fakeConfig());
+    await expect(dispatch('hello', { label: 'h1' })).resolves.toBe(
+      'headless-said:hello',
+    );
+    expect(transcriptNames()).toHaveLength(0);
   });
 });

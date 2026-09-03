@@ -150,6 +150,7 @@ describe('ModelRegistry', () => {
             name: 'GPT-4 Turbo',
             baseUrl: 'https://api.openai.com/v1',
             generationConfig: {
+              streamIdleTimeoutMs: 600000,
               samplingParams: {
                 temperature: 0.8,
                 max_tokens: 4096,
@@ -176,6 +177,7 @@ describe('ModelRegistry', () => {
 
       expect(model?.generationConfig.samplingParams?.temperature).toBe(0.8);
       expect(model?.generationConfig.samplingParams?.max_tokens).toBe(4096);
+      expect(model?.generationConfig.streamIdleTimeoutMs).toBe(600000);
       // No defaults are applied - only the configured values are present
       expect(model?.generationConfig.samplingParams?.top_p).toBeUndefined();
       expect(model?.generationConfig.timeout).toBeUndefined();
@@ -798,6 +800,27 @@ describe('ModelRegistry', () => {
       expect(registry.getModel(AuthType.USE_OPENAI, 'gpt-3.5')).toBeDefined();
     });
 
+    it('keeps the previous registry when a replacement model is invalid', () => {
+      const registry = new ModelRegistry(
+        { idealab: [{ id: 'old-model' }] } as ModelProvidersConfig,
+        { idealab: 'openai' },
+      );
+
+      expect(() =>
+        registry.reloadModels(
+          {
+            idealab: [{ id: 'new-model' }, { id: '' }],
+          } as ModelProvidersConfig,
+          { idealab: 'gemini' },
+        ),
+      ).toThrow('missing required field: id');
+
+      expect(registry.getModel(AuthType.USE_OPENAI, 'old-model')).toBeDefined();
+      expect(
+        registry.getModel(AuthType.USE_GEMINI, 'new-model'),
+      ).toBeUndefined();
+    });
+
     it('should correctly reload same-id different-baseUrl models', () => {
       const registry = new ModelRegistry({
         openai: [
@@ -855,6 +878,26 @@ describe('ModelRegistry', () => {
       expect(registry.getModelsForAuthType(AuthType.QWEN_OAUTH).length).toBe(
         QWEN_OAUTH_MODELS.length,
       );
+    });
+
+    it('exposes the applied providers config so hot-reload can diff against registry state', () => {
+      const boot: ModelProvidersConfig = {
+        openai: [{ id: 'gpt-4', name: 'GPT-4' }],
+      };
+      const registry = new ModelRegistry(boot);
+      expect(registry.getModelProvidersConfig()).toBe(boot);
+
+      const next: ModelProvidersConfig = {
+        openai: [{ id: 'gpt-5', name: 'GPT-5' }],
+      };
+      registry.reloadModels(next);
+      // The copy in reloadModels is load-bearing: without it the hot-reload
+      // gate in registerModelProvidersHotReload would diff against a stale
+      // value and rebuild the registry on every settings event.
+      expect(registry.getModelProvidersConfig()).toBe(next);
+
+      registry.reloadModels(undefined);
+      expect(registry.getModelProvidersConfig()).toBeUndefined();
     });
 
     it('should handle reload replacing same-id entries when baseUrls change', () => {
@@ -1031,6 +1074,23 @@ describe('fastOnly and voiceOnly flags', () => {
     ).toBe(true);
   });
 
+  it('should propagate image generation capability without excluding the default model', () => {
+    const registry = new ModelRegistry({
+      openai: [
+        {
+          id: 'dual-role-model',
+          supportsImageGeneration: true,
+        },
+      ],
+    });
+
+    const available = registry.getModelsForAuthType(AuthType.USE_OPENAI)[0];
+    expect(available?.supportsImageGeneration).toBe(true);
+    expect(registry.getDefaultModelForAuthType(AuthType.USE_OPENAI)?.id).toBe(
+      'dual-role-model',
+    );
+  });
+
   it('should warn when both fastOnly and voiceOnly are set', () => {
     const config: ModelProvidersConfig = {
       openai: [
@@ -1045,6 +1105,36 @@ describe('fastOnly and voiceOnly flags', () => {
     const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
     expect(models).toHaveLength(1);
     expect(models[0].fastOnly).toBe(true);
+    expect(models[0].voiceOnly).toBe(true);
+  });
+
+  it('should propagate visionOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        { id: 'gpt-4o', name: 'GPT-4o' },
+        { id: 'vision-bridge', name: 'Vision Bridge', visionOnly: true },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models.find((m) => m.id === 'gpt-4o')?.visionOnly).toBeUndefined();
+    expect(models.find((m) => m.id === 'vision-bridge')?.visionOnly).toBe(true);
+  });
+
+  it('should warn when visionOnly conflicts with another selector-only flag', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'unreachable-vision',
+          visionOnly: true,
+          voiceOnly: true,
+        },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
+    expect(models).toHaveLength(1);
+    expect(models[0].visionOnly).toBe(true);
     expect(models[0].voiceOnly).toBe(true);
   });
 });

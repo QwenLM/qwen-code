@@ -49,6 +49,7 @@ describe('BundledSkillLoader', () => {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue(undefined),
+      getCliVersion: vi.fn().mockReturnValue('0.21.2'),
       getPermissionManager: vi
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
@@ -251,8 +252,16 @@ describe('BundledSkillLoader', () => {
       );
 
       expect(mockAddSessionAllowRule).toHaveBeenCalledTimes(2);
-      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
-      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(
+        1,
+        'Bash(git *)',
+        {
+          trustGated: false,
+        },
+      );
+      expect(mockAddSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit', {
+        trustGated: false,
+      });
     });
 
     it('does not grant when the bundled skill declares no allowedTools', async () => {
@@ -338,6 +347,25 @@ describe('BundledSkillLoader', () => {
           ),
         },
       ],
+    });
+  });
+
+  it('should resolve the CLI version template variable in skill body', async () => {
+    const skill = makeSkill({
+      body: 'via Qwen Code /review (v{{cliVersion}})',
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [{ text: makeSkillPrompt('via Qwen Code /review (v0.21.2)') }],
     });
   });
 

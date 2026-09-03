@@ -14,18 +14,22 @@ import type {
   ToolResultDisplay,
   SlashCommandRecordPayload,
   AtCommandRecordPayload,
+  GoalSnapshotV2,
+  GoalStateCause,
   HistoryGap,
-  UserPromptRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   getToolResponseDisplayText,
-  stripTrailingUserPromptSubmitContextPart,
+  isGoalCheckpointBookkeepingRecord,
+  parseGoalStateRecordPayloadV2,
+  projectUserTranscriptForDisplay,
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
   HistoryItemInfo,
   HistoryItemWithoutId,
   IndividualToolCallDisplay,
+  InlineImageData,
 } from '../types.js';
 import { ToolCallStatus, MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
@@ -34,33 +38,17 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
-
-/**
- * Projects a plain user record to its display text.
- *
- * Prefers the `displayText` recorded when a UserPromptSubmit hook augmented
- * the model-bound parts. For records that carry the reserved tag but no
- * payload (written by other/newer writers), drops a trailing part that is
- * entirely a tagged hook-context block. Legacy records with bare injected
- * text fall back to the raw part concatenation.
- */
-function extractUserRecordDisplayText(
-  record: ConversationRecord['messages'][number],
-): string {
-  const payload = record.systemPayload as UserPromptRecordPayload | undefined;
-  if (payload?.displayText) {
-    return payload.displayText;
-  }
-  const parts = (record.message?.parts as Part[] | undefined) ?? [];
-  return extractTextFromParts([
-    ...stripTrailingUserPromptSubmitContextPart(parts),
-  ]);
-}
+import { coalesceFindingsHistoryItems } from './findings-coalescing.js';
+import { shouldDisplayGoalStateCause } from './goal-runtime.js';
+import {
+  collectInlineImages,
+  extractInlineContentRuns,
+} from './inline-image-parts.js';
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
  */
-function extractTextFromParts(parts: Part[] | undefined): string {
+function extractTextFromParts(parts: readonly Part[] | undefined): string {
   if (!parts) return '';
 
   const textParts: string[] = [];
@@ -202,6 +190,8 @@ function convertToHistoryItems(
   const gapByChildUuid = indexGapsByChild(historyGaps);
   const pendingAtCommands: AtCommandRecordPayload[] = [];
   let atCommandCounter = 0;
+  let lastGoalStateSnapshot: GoalSnapshotV2 | undefined;
+  let lastGoalStateCause: GoalStateCause | undefined;
 
   // Track pending tool calls for grouping with results
   const pendingToolCalls = new Map<
@@ -215,6 +205,8 @@ function convertToHistoryItems(
     resultDisplay: ToolResultDisplay | undefined;
     visionBridgeNotice?: string;
     detailedDisplay?: string;
+    images?: InlineImageData[];
+    omittedImageCount?: number;
     status: ToolCallStatus;
     confirmationDetails: undefined;
   }> = [];
@@ -283,18 +275,47 @@ function convertToHistoryItems(
         items.push({ type: 'tool_group', tools: [...currentToolGroup] });
         currentToolGroup = [];
       }
-      // Reset pending @-command state at the boundary as well: the divider
-      // means the records below begin a fresh reachable island, so an
-      // unconsumed pre-gap at_command must never be shift()-paired with the
-      // post-gap user turn (which would attach @file reads to a turn the user
-      // never wrote them on). Today reconstructHistory truncates to the tail,
-      // so the buffer is already empty here; this keeps the invariant if that
-      // ever changes.
+      // Reset pending @-command state and the Goal card baseline at the
+      // boundary as well: the divider means the records below begin a fresh
+      // reachable island, so an unconsumed pre-gap at_command must never be
+      // shift()-paired with the post-gap user turn (which would attach @file
+      // reads to a turn the user never wrote them on), and a pre-gap Goal
+      // snapshot must not suppress a post-gap lifecycle card that happens to
+      // be shape-equal to it (e.g. resume after a gap-swallowed pause). Today
+      // reconstructHistory truncates to the tail, so the at-command buffer is
+      // already empty here; this keeps the invariant if that ever changes.
       pendingAtCommands.length = 0;
+      lastGoalStateSnapshot = undefined;
+      lastGoalStateCause = undefined;
       items.push(createHistoryGapItem(gap));
     }
 
     if (record.type === 'system') {
+      if (record.subtype === 'goal_state') {
+        const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
+        if (payload) {
+          const bookkeepingOnly = isGoalCheckpointBookkeepingRecord({
+            cause: payload.cause,
+            previousCause: lastGoalStateCause,
+            previous: lastGoalStateSnapshot,
+            next: payload.snapshot,
+          });
+          lastGoalStateCause = payload.cause;
+          lastGoalStateSnapshot = payload.snapshot;
+          if (shouldDisplayGoalStateCause(payload.cause) && !bookkeepingOnly) {
+            if (currentToolGroup.length > 0) {
+              items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+              currentToolGroup = [];
+            }
+            items.push({
+              type: 'goal_state',
+              snapshot: payload.snapshot,
+              cause: payload.cause,
+            });
+          }
+        }
+        continue;
+      }
       if (record.subtype === 'slash_command') {
         // Flush any pending tool group to avoid mixing contexts.
         if (currentToolGroup.length > 0) {
@@ -308,7 +329,11 @@ function convertToHistoryItems(
           | SlashCommandRecordPayload
           | undefined;
         if (!payload) continue;
-        if (payload.phase === 'invocation' && payload.rawCommand) {
+        if (
+          payload.phase === 'invocation' &&
+          payload.rawCommand &&
+          !payload.hiddenInvocation
+        ) {
           const sentToModel =
             typeof payload.sentToModel === 'boolean'
               ? payload.sentToModel
@@ -343,6 +368,7 @@ function convertToHistoryItems(
     }
     switch (record.type) {
       case 'user': {
+        if (record.subtype === 'goal_runtime') break;
         // Restore notification items (background agent completions and cron fires)
         if (record.subtype === 'notification' || record.subtype === 'cron') {
           const payload = record.systemPayload as
@@ -361,11 +387,16 @@ function convertToHistoryItems(
         }
         if (record.subtype === 'mid_turn_user_message') {
           const payload = record.systemPayload as
-            | { displayText?: string }
+            | { displayText?: string; attachmentReferences?: unknown[] }
             | undefined;
+          const hasAttachmentReferences =
+            Array.isArray(payload?.attachmentReferences) &&
+            payload.attachmentReferences.length > 0;
           const text =
             payload?.displayText ||
-            extractTextFromParts(record.message?.parts as Part[]);
+            (hasAttachmentReferences
+              ? '[User message with attachments]'
+              : extractTextFromParts(record.message?.parts as Part[]));
           if (text) {
             items.push({ type: MessageType.USER, text, sentToModel: false });
           }
@@ -382,7 +413,10 @@ function convertToHistoryItems(
           }
 
           const payload = pendingAtCommands.shift()!;
-          const text = payload.userText || extractUserRecordDisplayText(record);
+          const projection = projectUserTranscriptForDisplay(record);
+          const text =
+            payload.userText ||
+            (projection.displayText ?? extractTextFromParts(projection.parts));
           if (text) {
             items.push({ type: 'user', text });
           }
@@ -405,7 +439,18 @@ function convertToHistoryItems(
           currentToolGroup = [];
         }
 
-        const text = extractUserRecordDisplayText(record);
+        const projection = projectUserTranscriptForDisplay(record);
+        const payload = record.systemPayload as
+          | { attachmentReferences?: unknown[] }
+          | undefined;
+        const hasAttachmentReferences =
+          Array.isArray(payload?.attachmentReferences) &&
+          payload.attachmentReferences.length > 0;
+        const text =
+          projection.displayText ||
+          (hasAttachmentReferences
+            ? '[User message with attachments]'
+            : extractTextFromParts(projection.parts));
         if (text) {
           items.push({ type: 'user', text });
         }
@@ -421,8 +466,7 @@ function convertToHistoryItems(
         // verbatim because there is no live loading area in that view.
         const thoughtText = !config ? extractThoughtTextFromParts(parts) : '';
 
-        // Extract text content (non-function-call, non-thought)
-        const text = extractTextFromParts(parts);
+        const displayRuns = extractInlineContentRuns(parts, '\n');
 
         // Extract function calls
         const functionCalls = extractFunctionCalls(parts);
@@ -440,9 +484,8 @@ function convertToHistoryItems(
           items.push({ type: 'gemini_thought', text: thoughtText });
         }
 
-        // If there's text content, add it as a gemini message
-        if (text) {
-          // Flush any pending tool group before text
+        if (displayRuns.length > 0) {
+          // Flush any pending tool group before assistant output.
           if (currentToolGroup.length > 0) {
             items.push({
               type: 'tool_group',
@@ -450,11 +493,30 @@ function convertToHistoryItems(
             });
             currentToolGroup = [];
           }
-          items.push({
-            type: 'gemini',
-            text,
-            timestamp: new Date(record.timestamp).getTime(),
-          });
+          for (const [index, run] of displayRuns.entries()) {
+            const type = index === 0 ? 'gemini' : 'gemini_content';
+            const timestamp =
+              index === 0
+                ? { timestamp: new Date(record.timestamp).getTime() }
+                : {};
+            if (run.kind === 'text') {
+              items.push({ type, text: run.text, ...timestamp });
+            } else if (run.kind === 'image') {
+              items.push({
+                type,
+                text: '',
+                images: [run.image],
+                ...timestamp,
+              });
+            } else {
+              items.push({
+                type,
+                text: '',
+                omittedImageCount: run.count,
+                ...timestamp,
+              });
+            }
+          }
         }
 
         // Track function calls for pairing with results
@@ -482,6 +544,9 @@ function convertToHistoryItems(
           const callId = record.toolCallResult.callId;
           const toolCall = currentToolGroup.find((t) => t.callId === callId);
           if (toolCall) {
+            const responseParts =
+              (record.toolCallResult.responseParts as Part[] | undefined) ??
+              (record.message?.parts as Part[] | undefined);
             // Preserve the resultDisplay as-is - it can be a string or structured object
             const rawDisplay = record.toolCallResult.resultDisplay;
             toolCall.resultDisplay = rawDisplay;
@@ -497,6 +562,14 @@ function convertToHistoryItems(
               rawStatus === 'error'
                 ? ToolCallStatus.Error
                 : ToolCallStatus.Success;
+            const { images, omittedImageCount } =
+              collectInlineImages(responseParts);
+            if (images.length > 0) {
+              toolCall.images = images;
+            }
+            if (omittedImageCount > 0) {
+              toolCall.omittedImageCount = omittedImageCount;
+            }
             // Full detail for the Ctrl+O transcript (§4.9): the complete
             // functionResponse parts are persisted on the tool_result record
             // (only resultDisplay is sanitized), so resume yields full detail
@@ -511,10 +584,8 @@ function convertToHistoryItems(
               toolCall.status === ToolCallStatus.Success &&
               isCollapsibleTool(toolCall.name)
             ) {
-              toolCall.detailedDisplay = getToolResponseDisplayText(
-                (record.toolCallResult.responseParts as Part[] | undefined) ??
-                  (record.message?.parts as Part[] | undefined),
-              );
+              toolCall.detailedDisplay =
+                getToolResponseDisplayText(responseParts);
             }
           }
           pendingToolCalls.delete(callId || '');
@@ -561,7 +632,10 @@ function convertToHistoryItems(
     });
   }
 
-  return items;
+  // A report_findings re-report REPLACES the earlier list — restored
+  // transcripts collapse the superseded displays so the initial report and
+  // its outcome re-report do not render two checklists at once.
+  return coalesceFindingsHistoryItems(items);
 }
 
 /**

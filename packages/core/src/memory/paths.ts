@@ -7,12 +7,18 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Storage } from '../config/storage.js';
-import { QWEN_DIR, resolvePath, sanitizeCwd } from '../utils/paths.js';
+import {
+  QWEN_DIR,
+  realpathNearestExisting,
+  resolvePath,
+  sanitizeCwd,
+} from '../utils/paths.js';
 import type { AutoMemoryType } from './types.js';
 import { MEMORY_PROJECT_SCOPES } from './scopes.js';
 
 export const AUTO_MEMORY_DIRNAME = 'memory';
 export const AUTO_MEMORY_INDEX_FILENAME = 'MEMORY.md';
+export const AUTO_MEMORY_PINNED_DIRNAME = 'pinned';
 export const AUTO_MEMORY_METADATA_FILENAME = 'meta.json';
 export const AUTO_MEMORY_EXTRACT_CURSOR_FILENAME = 'extract-cursor.json';
 export const AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME = 'consolidation.lock';
@@ -335,71 +341,6 @@ export function isManagedMemoryPath(
     const rel = path.relative(resolvedRoot, resolvedPath);
     return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
   });
-}
-
-/**
- * Follow a leading symlink chain at `inputPath` to its eventual target, even
- * when that target does not exist yet (a dangling link).
- *
- * Security-load-bearing: `fs.existsSync` follows links and reports a dangling
- * symlink as "missing". Relying on it lets an attacker pre-place
- * `decoy.md -> .qwen/team-memory/leak.md` (target absent) so the path classifies
- * OUTSIDE team memory and the secret scanner is skipped — while the real write
- * follows the link INTO team memory. lstat/readlink (no-follow) resolve the link
- * target so classification matches where the bytes will actually land.
- */
-function resolveLeafSymlink(inputPath: string): string {
-  const maxHops = 40; // POSIX SYMLOOP_MAX
-  let current = path.resolve(inputPath);
-  for (let i = 0; i < maxHops; i++) {
-    let stat: fs.Stats;
-    try {
-      stat = fs.lstatSync(current);
-    } catch {
-      return current; // missing or unreadable — nothing left to follow
-    }
-    if (!stat.isSymbolicLink()) {
-      return current;
-    }
-    const target = fs.readlinkSync(current);
-    if (path.isAbsolute(target)) {
-      current = target;
-    } else {
-      // Resolve relative targets against the link's real parent so an
-      // intermediate directory symlink can't mis-resolve the target.
-      let parent: string;
-      try {
-        parent = fs.realpathSync(path.dirname(current));
-      } catch {
-        parent = path.dirname(current);
-      }
-      current = path.resolve(parent, target);
-    }
-  }
-  return current; // chain too deep — caller still range-checks the result
-}
-
-function realpathNearestExisting(inputPath: string): string {
-  // Resolve a leading (possibly dangling) symlink first so a dangling link into
-  // team memory is classified by its target, not treated as a plain missing file.
-  const resolved = resolveLeafSymlink(inputPath);
-  const missingSegments: string[] = [];
-  let current = resolved;
-
-  while (!fs.existsSync(current)) {
-    const parent = path.dirname(current);
-    if (parent === current) {
-      return resolved;
-    }
-    missingSegments.unshift(path.basename(current));
-    current = parent;
-  }
-
-  try {
-    return path.join(fs.realpathSync(current), ...missingSegments);
-  } catch {
-    return resolved;
-  }
 }
 
 /**

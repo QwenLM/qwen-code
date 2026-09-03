@@ -7,10 +7,12 @@
 import type { Content, Part } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import {
-  collectReferencedImageIds,
   InMemoryImagePayloadStore,
+  buildReattachParts,
+  collectReferencedImageIds,
   countAllInlineImages,
   prepareImagePayloadsForRequest,
+  replaceImagePayloadsInPlace,
 } from './image-payload-references.js';
 
 function toolImageTurn(data: string): Content {
@@ -104,14 +106,16 @@ describe('prepareImagePayloadsForRequest', () => {
         store,
       },
     );
-    const id = JSON.stringify(firstPass).match(/Image #([a-f0-9]{12})/)?.[1];
-    expect(id).toBeDefined();
+    const marker = JSON.stringify(firstPass).match(
+      /\[Image #[a-f0-9]{12}: [^\]]+\]/,
+    )?.[0];
+    expect(marker).toBeDefined();
 
     const prepared = prepareImagePayloadsForRequest(
       [
         oldImage,
         toolImageTurn('new-shot'),
-        { role: 'user', parts: [{ text: `inspect Image #${id}` }] },
+        { role: 'user', parts: [{ text: `inspect ${marker}` }] },
       ],
       {
         maxRecentImages: 0,
@@ -163,11 +167,13 @@ describe('prepareImagePayloadsForRequest', () => {
         store,
       },
     );
-    const id = JSON.stringify(firstPass).match(/Image #([a-f0-9]{12})/)?.[1];
-    expect(id).toBeDefined();
+    const marker = JSON.stringify(firstPass).match(
+      /\[Image #[a-f0-9]{12}: [^\]]+\]/,
+    )?.[0];
+    expect(marker).toBeDefined();
 
     const prepared = prepareImagePayloadsForRequest(
-      [{ role: 'user', parts: [{ text: `inspect Image #${id}` }] }],
+      [{ role: 'user', parts: [{ text: `inspect ${marker}` }] }],
       {
         maxRecentImages: 0,
         store,
@@ -177,6 +183,25 @@ describe('prepareImagePayloadsForRequest', () => {
     expect(imageParts(prepared).map((part) => part.inlineData?.data)).toEqual([
       'old-shot',
     ]);
+  });
+
+  it('does not resurrect a stored image from a bare Image #id echo', () => {
+    const store = new InMemoryImagePayloadStore();
+    const firstPass = prepareImagePayloadsForRequest(
+      [toolImageTurn('old-shot'), { role: 'model', parts: [{ text: 'ok' }] }],
+      { maxRecentImages: 0, store },
+    );
+    const id = JSON.stringify(firstPass).match(/Image #([a-f0-9]{12})/)?.[1];
+    expect(id).toBeDefined();
+
+    // A model reply echoing just the id (not the full eviction marker) must
+    // not re-inject the stored payload.
+    const prepared = prepareImagePayloadsForRequest(
+      [{ role: 'user', parts: [{ text: `I saw Image #${id} earlier` }] }],
+      { maxRecentImages: 0, store },
+    );
+
+    expect(imageParts(prepared)).toEqual([]);
   });
 
   it('reattaches the most recent unique historical images', () => {
@@ -214,7 +239,7 @@ describe('prepareImagePayloadsForRequest', () => {
       [toolImageTurn('old-shot'), current],
       {
         maxRecentImages: 1,
-        preserveImageParts: new Set(current.parts),
+        preserveImagePartsForContentIndex: 1,
         store,
       },
     );
@@ -277,5 +302,179 @@ describe('countAllInlineImages', () => {
         { role: 'model', parts: [{ text: 'hi' }] },
       ]),
     ).toBe(0);
+  });
+});
+
+describe('replaceImagePayloadsInPlace', () => {
+  it('mutates contents in-place and returns replaced payloads', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents: Content[] = [
+      toolImageTurn('shot-a'),
+      toolImageTurn('shot-b'),
+      { role: 'user', parts: [{ text: 'continue' }] },
+    ];
+    const replaced = replaceImagePayloadsInPlace(contents, store);
+    expect(replaced).toHaveLength(2);
+    expect(countAllInlineImages(contents)).toBe(0);
+    const serialized = JSON.stringify(contents);
+    expect(serialized).toMatch(
+      /\[Image #[a-f0-9]{12}: image\/png, \d+ bytes\]/,
+    );
+  });
+
+  it('skips the specified content entry', () => {
+    const store = new InMemoryImagePayloadStore();
+    const current: Content = {
+      role: 'user',
+      parts: [{ inlineData: { mimeType: 'image/png', data: 'current-shot' } }],
+    };
+    const contents: Content[] = [toolImageTurn('old-shot'), current];
+    replaceImagePayloadsInPlace(contents, store, current);
+    expect(countAllInlineImages(contents)).toBe(1);
+    expect(JSON.stringify(contents)).toContain('"data":"current-shot"');
+    expect(JSON.stringify(contents)).not.toContain('"data":"old-shot"');
+  });
+
+  it('rewrites shared top-level and nested Part objects', () => {
+    const store = new InMemoryImagePayloadStore();
+    const topLevel: Part = {
+      inlineData: { mimeType: 'image/png', data: 'top-level' },
+    };
+    const nested: Part = {
+      inlineData: { mimeType: 'image/png', data: 'nested' },
+    };
+    const durable: Content[] = [
+      { role: 'user', parts: [topLevel] },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'screenshot',
+              response: {},
+              parts: [nested],
+            },
+          },
+        ],
+      },
+    ];
+    const curated: Content[] = durable.map((content) => ({
+      ...content,
+      parts: [...(content.parts ?? [])],
+    }));
+
+    replaceImagePayloadsInPlace(curated, store);
+
+    expect(JSON.stringify(durable)).not.toContain('"data":');
+    expect(JSON.stringify(durable).match(/Image #[a-f0-9]{12}/g)).toHaveLength(
+      2,
+    );
+  });
+});
+
+describe('buildReattachParts', () => {
+  it('picks the most recent unique images', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents: Content[] = [
+      toolImageTurn('a'),
+      toolImageTurn('b'),
+      toolImageTurn('c'),
+      toolImageTurn('c'),
+    ];
+    const replaced = replaceImagePayloadsInPlace(contents, store);
+    const parts = buildReattachParts(replaced, 2);
+    expect(parts).toHaveLength(3);
+    expect(parts[0]?.text).toContain('Recent images reattached');
+    const data = parts
+      .filter((p) => p.inlineData)
+      .map((p) => p.inlineData?.data);
+    expect(data).toEqual(['b', 'c']);
+  });
+
+  it('returns empty when maxRecentImages is zero', () => {
+    const store = new InMemoryImagePayloadStore();
+    const replaced = replaceImagePayloadsInPlace([toolImageTurn('a')], store);
+    expect(buildReattachParts(replaced, 0)).toEqual([]);
+  });
+
+  it('resolves stored markers even when the current replacement pass is empty', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents = [
+      toolImageTurn('a'),
+      toolImageTurn('b'),
+      toolImageTurn('c'),
+      { role: 'user', parts: [{ text: 'continue' }] },
+    ];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const parts = buildReattachParts([], 2, contents, store);
+
+    expect(
+      parts
+        .filter((part) => part.inlineData)
+        .map((part) => part.inlineData?.data),
+    ).toEqual(['b', 'c']);
+  });
+
+  it('reattaches a marker in the current user turn outside the recency cap', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents = [toolImageTurn('current')];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const parts = buildReattachParts([], 0, contents, store);
+
+    expect(parts.at(-1)?.inlineData?.data).toBe('current');
+  });
+
+  it('bounds current-turn marker reattachment to the recency cap', () => {
+    const store = new InMemoryImagePayloadStore();
+    const contents: Content[] = [
+      {
+        role: 'user',
+        parts: ['a', 'b', 'c'].map((data) => ({
+          inlineData: { mimeType: 'image/png', data },
+        })),
+      },
+    ];
+    replaceImagePayloadsInPlace(contents, store);
+
+    const parts = buildReattachParts([], 1, contents, store);
+
+    expect(
+      parts
+        .filter((part) => part.inlineData)
+        .map((part) => part.inlineData?.data),
+    ).toEqual(['c']);
+  });
+
+  it('does not reattach an image that is already inline', () => {
+    const store = new InMemoryImagePayloadStore();
+    const markerContents = [toolImageTurn('same')];
+    replaceImagePayloadsInPlace(markerContents, store);
+    const marker = markerContents[0]!.parts![0]!;
+    const referencedContents: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          marker,
+          { inlineData: { mimeType: 'image/png', data: 'same' } },
+        ],
+      },
+    ];
+
+    expect(buildReattachParts([], 1, referencedContents, store)).toEqual([]);
+  });
+
+  it('does not reattach an image already inline in a tool response', () => {
+    const store = new InMemoryImagePayloadStore();
+    const markerContents = [toolImageTurn('same')];
+    replaceImagePayloadsInPlace(markerContents, store);
+    const referencedContents: Content[] = [
+      markerContents[0]!,
+      toolImageTurn('same'),
+    ];
+
+    expect(buildReattachParts([], 1, referencedContents, store)).toEqual([]);
   });
 });

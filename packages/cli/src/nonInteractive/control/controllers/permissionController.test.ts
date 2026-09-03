@@ -6,9 +6,11 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import {
+  ApprovalMode,
   InputFormat,
   ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
+import type { WorkflowApproval } from '@qwen-code/qwen-code-core';
 import { createMinimalSettings } from '../../../config/settings.js';
 import type { StreamJsonOutputAdapter } from '../../io/StreamJsonOutputAdapter.js';
 import type { IControlContext } from '../ControlContext.js';
@@ -22,6 +24,7 @@ function createContext(canUseToolTimeoutMs?: number): IControlContext {
     config: {
       getDebugMode: vi.fn().mockReturnValue(false),
       getInputFormat: vi.fn().mockReturnValue(InputFormat.STREAM_JSON),
+      getWorkflowRunRegistry: vi.fn(),
     } as unknown as IControlContext['config'],
     streamJson: {
       send: vi.fn(),
@@ -48,6 +51,276 @@ function createRegistry(): IPendingRequestRegistry {
 }
 
 describe('PermissionController', () => {
+  it.each([
+    [ApprovalMode.PLAN, 'allow'],
+    [ApprovalMode.DEFAULT, 'deny'],
+    [ApprovalMode.AUTO_EDIT, 'allow'],
+    [ApprovalMode.AUTO, 'allow'],
+    [ApprovalMode.YOLO, 'allow'],
+  ] as const)(
+    'checks %s permission mode for can_use_tool',
+    async (mode, behavior) => {
+      const context = createContext();
+      context.permissionMode = mode;
+      const controller = new PermissionController(
+        context,
+        createRegistry(),
+        'PermissionController',
+      );
+
+      await expect(
+        controller.handleRequest(
+          {
+            subtype: 'can_use_tool',
+            tool_name: 'read_file',
+            tool_use_id: `tool-${mode}`,
+            input: {},
+            permission_suggestions: null,
+            blocked_path: null,
+          },
+          `request-${mode}`,
+        ),
+      ).resolves.toMatchObject({
+        subtype: 'can_use_tool',
+        behavior,
+      });
+    },
+  );
+
+  it('round-trips workflow approval through can_use_tool with updated input', async () => {
+    const context = createContext(120_000);
+    const resolvePendingApproval = vi.fn().mockResolvedValue(true);
+    vi.mocked(context.config.getWorkflowRunRegistry).mockReturnValue({
+      resolvePendingApproval,
+    } as unknown as ReturnType<
+      IControlContext['config']['getWorkflowRunRegistry']
+    >);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    const updatedInput = { command: 'echo safe' };
+    const sendControlRequest = vi
+      .spyOn(controller, 'sendControlRequest')
+      .mockResolvedValue({
+        subtype: 'success',
+        request_id: 'request-workflow',
+        response: { behavior: 'allow', updatedInput },
+      });
+    const approval = {
+      approvalId: 'wfap_1',
+      name: 'run_shell_command',
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command',
+        command: 'echo unsafe',
+        rootCommand: 'echo',
+      },
+    } as WorkflowApproval;
+    const approvalSignal = new AbortController().signal;
+
+    await controller.handleWorkflowApproval(
+      'wf_1',
+      approval,
+      { command: 'echo unsafe' },
+      approvalSignal,
+    );
+
+    expect(sendControlRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subtype: 'can_use_tool',
+        tool_name: 'run_shell_command',
+        tool_use_id: 'wfap_1',
+        input: { command: 'echo unsafe' },
+        permission_suggestions: [
+          expect.objectContaining({ type: 'allow' }),
+          expect.objectContaining({ type: 'deny' }),
+        ],
+      }),
+      120_000,
+      expect.any(AbortSignal),
+    );
+    expect(resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_1',
+      'wfap_1',
+      ToolConfirmationOutcome.ProceedOnce,
+      { updatedInput },
+    );
+  });
+
+  it('cancels a workflow approval when the host channel times out', async () => {
+    const context = createContext();
+    const resolvePendingApproval = vi.fn().mockResolvedValue(true);
+    vi.mocked(context.config.getWorkflowRunRegistry).mockReturnValue({
+      resolvePendingApproval,
+    } as unknown as ReturnType<
+      IControlContext['config']['getWorkflowRunRegistry']
+    >);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockRejectedValue(
+      new Error('Control request timeout'),
+    );
+
+    await controller.handleWorkflowApproval(
+      'wf_2',
+      {
+        approvalId: 'wfap_2',
+        name: 'write_file',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Write file',
+          prompt: 'Allow?',
+        },
+      } as WorkflowApproval,
+      { path: '/tmp/test' },
+      new AbortController().signal,
+    );
+
+    expect(resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_2',
+      'wfap_2',
+      ToolConfirmationOutcome.Cancel,
+    );
+  });
+
+  it('cancels a workflow approval when the host denies it', async () => {
+    const context = createContext();
+    const resolvePendingApproval = vi.fn().mockResolvedValue(true);
+    vi.mocked(context.config.getWorkflowRunRegistry).mockReturnValue({
+      resolvePendingApproval,
+    } as unknown as ReturnType<
+      IControlContext['config']['getWorkflowRunRegistry']
+    >);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'request-denied',
+      response: { behavior: 'deny', updatedInput: { ignored: true } },
+    });
+
+    await controller.handleWorkflowApproval(
+      'wf_3',
+      {
+        approvalId: 'wfap_3',
+        name: 'read_file',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Read file',
+          prompt: 'Allow?',
+        },
+      } as WorkflowApproval,
+      { path: '/tmp/test' },
+      new AbortController().signal,
+    );
+
+    expect(resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_3',
+      'wfap_3',
+      ToolConfirmationOutcome.Cancel,
+      undefined,
+    );
+  });
+
+  it('forwards the host deny message to the workflow subagent', async () => {
+    const context = createContext();
+    const resolvePendingApproval = vi.fn().mockResolvedValue(true);
+    vi.mocked(context.config.getWorkflowRunRegistry).mockReturnValue({
+      resolvePendingApproval,
+    } as unknown as ReturnType<
+      IControlContext['config']['getWorkflowRunRegistry']
+    >);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'request-denied-message',
+      response: { behavior: 'deny', message: 'Not allowed by policy' },
+    });
+
+    await controller.handleWorkflowApproval(
+      'wf_deny_msg',
+      {
+        approvalId: 'wfap_deny_msg',
+        name: 'read_file',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Read file',
+          prompt: 'Allow?',
+        },
+      } as WorkflowApproval,
+      { path: '/tmp/test' },
+      new AbortController().signal,
+    );
+
+    expect(resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_deny_msg',
+      'wfap_deny_msg',
+      ToolConfirmationOutcome.Cancel,
+      { cancelMessage: 'Not allowed by policy' },
+    );
+  });
+
+  it('cancels a pending host request when the workflow approval is cleared', async () => {
+    const context = createContext();
+    const resolvePendingApproval = vi.fn().mockResolvedValue(false);
+    vi.mocked(context.config.getWorkflowRunRegistry).mockReturnValue({
+      resolvePendingApproval,
+    } as unknown as ReturnType<
+      IControlContext['config']['getWorkflowRunRegistry']
+    >);
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    vi.spyOn(controller, 'sendControlRequest').mockImplementation(
+      (_payload, _timeout, signal) =>
+        new Promise((_, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => reject(new Error('Request aborted')),
+            { once: true },
+          );
+        }),
+    );
+    const approvalAbort = new AbortController();
+    const request = controller.handleWorkflowApproval(
+      'wf_cleared',
+      {
+        approvalId: 'wfap_cleared',
+        name: 'read_file',
+        confirmationDetails: {
+          type: 'info',
+          title: 'Read file',
+          prompt: 'Allow?',
+        },
+      } as WorkflowApproval,
+      { path: '/tmp/test' },
+      approvalAbort.signal,
+    );
+
+    approvalAbort.abort();
+    await request;
+
+    expect(resolvePendingApproval).toHaveBeenCalledWith(
+      'wf_cleared',
+      'wfap_cleared',
+      ToolConfirmationOutcome.Cancel,
+    );
+  });
+
   it('treats stream-json can_use_tool allow as explicit interaction without replacing the plan', async () => {
     const context = createContext();
     const controller = new PermissionController(
@@ -184,6 +457,66 @@ describe('PermissionController', () => {
     });
   });
 
+  it('binds an outgoing permission request to the turn that created it', async () => {
+    const firstTurn = new AbortController();
+    const secondTurn = new AbortController();
+    let activeTurnSignal = firstTurn.signal;
+    const context = {
+      ...createContext(120_000),
+      getActiveTurnAbortSignal: () => activeTurnSignal,
+    } satisfies IControlContext;
+    const controller = new PermissionController(
+      context,
+      createRegistry(),
+      'PermissionController',
+    );
+    let requestSignal: AbortSignal | undefined;
+    vi.spyOn(controller, 'sendControlRequest').mockImplementation(
+      (_payload, _timeout, signal) => {
+        requestSignal = signal;
+        return new Promise((_, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => reject(new Error('Request aborted')),
+            { once: true },
+          );
+        });
+      },
+    );
+    const onConfirm = vi.fn();
+
+    const updateToolCalls = controller.getToolCallUpdateCallback();
+    activeTurnSignal = secondTurn.signal;
+    updateToolCalls([
+      {
+        status: 'awaiting_approval',
+        request: {
+          callId: 'tool-call-turn-owned',
+          name: 'run_shell_command',
+          args: { command: 'sleep 10' },
+        },
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command',
+          onConfirm,
+        },
+      },
+    ]);
+
+    await vi.waitFor(() => {
+      expect(requestSignal).toBeDefined();
+    });
+    firstTurn.abort();
+
+    await vi.waitFor(() => {
+      expect(requestSignal?.aborted).toBe(true);
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: 'Error: Request aborted',
+      });
+    });
+    expect(secondTurn.signal.aborted).toBe(false);
+  });
+
   it('routes ask_user_question answers from updatedInput into the confirmation payload', async () => {
     const context = createContext(120_000);
     const controller = new PermissionController(
@@ -207,6 +540,9 @@ describe('PermissionController', () => {
         callId: 'tool-call-answers',
         name: 'ask_user_question',
         args: { questions: [] } as Record<string, unknown>,
+      },
+      invocation: {
+        requiresUserInteraction: () => true,
       },
       confirmationDetails: {
         type: 'ask_user_question',

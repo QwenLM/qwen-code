@@ -85,6 +85,7 @@ function classifyEscapeSequence(
   // Check for terminal responses in CSI sequences
   // ESC [ ? ... (DEC private mode response)
   // ESC [ > ... (DA2 response)
+  // ESC [ < ... (SGR mouse event)
   if (nextByte === 0x5b) {
     // CSI sequence, check third character
     const thirdIdx = startIdx + 2;
@@ -92,8 +93,8 @@ function classifyEscapeSequence(
       return 'incomplete';
     }
     const thirdByte = data[thirdIdx];
-    if (thirdByte === 0x3f || thirdByte === 0x3e) {
-      // ESC [ ? or ESC [ > - this is a terminal response
+    if (thirdByte === 0x3f || thirdByte === 0x3e || thirdByte === 0x3c) {
+      // ESC [ ? or ESC [ > or ESC [ < - this is a terminal response
       return 'terminal';
     }
     return 'user';
@@ -231,7 +232,7 @@ function shouldReplayPendingAtStop(pending: Buffer): boolean {
 
 /**
  * Start early input capture
- * Call immediately after setting raw mode in gemini.tsx
+ * Call immediately after setting raw mode in llm.tsx
  */
 export function startEarlyInputCapture(): void {
   if (isCapturing || !process.stdin.isTTY) {

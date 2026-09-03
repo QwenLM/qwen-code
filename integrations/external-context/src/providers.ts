@@ -5,17 +5,26 @@
  */
 
 import { ConfigurationError } from './config.js';
-import { postJson, validateProviderBaseUrl } from './http-client.js';
+import {
+  postJson,
+  ProviderHttpStatusError,
+  validateProviderBaseUrl,
+} from './http-client.js';
 import type {
   ExternalContextItem,
   ExternalContextProvider,
+  ExternalMemoryWriter,
   GenericHttpProviderConfig,
   Mem0ProviderConfig,
   ProviderConfig,
+  RememberResult,
 } from './types.js';
 
 const MEM0_BASE_URL = new URL('https://api.mem0.ai/');
 const MAX_PROVIDER_ITEMS = 5;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DEFINITIVE_WRITE_REJECTION_STATUSES = new Set([400, 401, 403, 404]);
 
 export function createProvider(
   config: ProviderConfig,
@@ -25,6 +34,18 @@ export function createProvider(
       return new Mem0PlatformV3Adapter(config);
     case 'generic-http-search-v1':
       return new GenericHttpSearchV1Adapter(config);
+    // no default
+  }
+}
+
+export function createMemoryWriter(
+  config: ProviderConfig,
+): ExternalMemoryWriter | undefined {
+  switch (config.type) {
+    case 'mem0-platform-v3':
+      return new Mem0PlatformV3Adapter(config);
+    case 'generic-http-search-v1':
+      return undefined;
     // no default
   }
 }
@@ -52,7 +73,9 @@ export class GenericHttpSearchV1Adapter implements ExternalContextProvider {
   }
 }
 
-export class Mem0PlatformV3Adapter implements ExternalContextProvider {
+export class Mem0PlatformV3Adapter
+  implements ExternalContextProvider, ExternalMemoryWriter
+{
   private readonly baseUrl: URL;
 
   constructor(
@@ -81,6 +104,66 @@ export class Mem0PlatformV3Adapter implements ExternalContextProvider {
     });
     return parseMem0Items(response);
   }
+
+  async remember(input: {
+    content: string;
+    signal: AbortSignal;
+  }): Promise<RememberResult> {
+    let response: unknown;
+    try {
+      response = await postJson({
+        url: new URL('/v3/memories/add/', this.baseUrl),
+        authorization: `Token ${this.config.apiKey}`,
+        body: {
+          messages: [{ role: 'user', content: input.content }],
+          app_id: this.config.appId,
+          infer: false,
+        },
+        signal: input.signal,
+      });
+    } catch (error) {
+      if (
+        error instanceof ProviderHttpStatusError &&
+        DEFINITIVE_WRITE_REJECTION_STATUSES.has(error.status)
+      ) {
+        return { status: 'failed' };
+      }
+      return { status: 'unknown' };
+    }
+    return parseMem0RememberResult(response);
+  }
+}
+
+function parseMem0RememberResult(response: unknown): RememberResult {
+  if (!isRecord(response)) {
+    return { status: 'unknown' };
+  }
+
+  const status = response['status'];
+  const operationId = parseOperationId(response['event_id']);
+  if (status === 'FAILED') {
+    return { status: 'failed' };
+  }
+  if (status === 'PENDING') {
+    return operationId === undefined
+      ? { status: 'unknown' }
+      : { status: 'accepted', providerOperationId: operationId };
+  }
+  if (status === 'SUCCEEDED') {
+    if (response['event_id'] !== undefined && operationId === undefined) {
+      return { status: 'unknown' };
+    }
+    return operationId === undefined
+      ? { status: 'stored' }
+      : { status: 'stored', providerOperationId: operationId };
+  }
+  return { status: 'unknown' };
+}
+
+function parseOperationId(value: unknown): string | undefined {
+  return typeof value === 'string' && UUID_PATTERN.test(value)
+    ? value
+    : undefined;
 }
 
 function parseGenericItems(response: unknown): readonly ExternalContextItem[] {

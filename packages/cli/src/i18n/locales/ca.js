@@ -58,7 +58,7 @@ export default {
   'to search history': "per cercar a l'historial",
   'to paste images': 'per enganxar imatges',
   'for external editor': 'per a editor extern',
-  'to view transcript': 'per veure la transcripció',
+  'to expand details': 'per expandir els detalls',
   'Jump through words in the input': "Salta entre paraules a l'entrada",
   'Close dialogs, cancel requests, or quit application':
     "Tanca els diàlegs, cancel·la les peticions o surt de l'aplicació",
@@ -252,9 +252,6 @@ export default {
   'Unknown Step': 'Pas desconegut',
   'Esc to close': 'Esc per tancar',
   Transcript: 'Transcripció',
-  'to close': 'per tancar',
-  'to scroll': 'per desplaçar',
-  'Failed to render transcript.': 'Error en renderitzar la transcripció.',
   'Read {{count}} file': 'Ha llegit {{count}} fitxer',
   'Read {{count}} files': 'Ha llegit {{count}} fitxers',
   'Reading {{count}} file': 'Llegint {{count}} fitxer',
@@ -515,6 +512,7 @@ export default {
   'Tool Output Truncation Lines': "Línies de truncament de la sortida d'eines",
   'Folder Trust': 'Confiança de carpeta',
   'Tool Schema Compliance': 'Compliment de Tool Schema',
+  Unset: 'No definit',
   'Auto (detect from system)': 'Automàtic (detectar del sistema)',
   'Auto (follow user input)': "Automàtic (seguir l'entrada de l'usuari)",
   'Auto (detect terminal theme)': 'Automàtic (detectar el tema del terminal)',
@@ -1120,6 +1118,14 @@ export default {
     "Ja s'està generant el resum, espereu que acabi la sol·licitud anterior",
   'No conversation found to summarize.':
     "No s'ha trobat cap conversa per resumir.",
+  'Summary path already exists and is not a generated summary: {{path}}':
+    'El camí del resum ja existeix i no és un resum generat: {{path}}',
+  'Summary path must be within the project root.':
+    'El camí del resum ha de ser dins de la arrel del projecte.',
+  'Summary path resolves to an existing directory: {{path}}':
+    'El camí del resum es resol a un directori existent: {{path}}',
+  'Summary path ends with a separator but is an existing file: {{path}}':
+    'El camí del resum acaba amb un separador però és un fitxer existent: {{path}}',
   'Failed to generate project context summary: {{error}}':
     'Error en generar el resum del context del projecte: {{error}}',
   'Saved project summary to {{filePathForDisplay}}.':
@@ -1173,6 +1179,12 @@ export default {
     "La compressió de l'historial del xat no ha reduït la mida. Això pot indicar problemes amb el missatge de compressió.",
   'Could not compress chat history due to a token counting error.':
     "No s'ha pogut comprimir l'historial del xat per un error de recompte de tokens.",
+  'Could not compress chat history because the compression summary was empty.':
+    "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió era buit.",
+  'Could not compress chat history because the compression summary was truncated.':
+    "No s'ha pogut comprimir l'historial del xat perquè el resum de compressió s'ha truncat.",
+  'Could not compress chat history due to an API error.':
+    "No s'ha pogut comprimir l'historial del xat per un error de l'API.",
   // ============================================================================
   // Ordres - Directori
   // ============================================================================
@@ -1587,8 +1599,18 @@ export default {
     'rebutjat — editeu la configuració per tornar a aprovar',
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
   'Approve or deny the request above': 'Aprova o denega la sol·licitud de dalt',
+  'from nested agent': "de l'agent imbricat",
   Running: 'En execució',
+  Pausing: 'Pausant',
   Paused: 'En pausa',
+  'Pause is cooperative; in-flight work may finish before the workflow is paused. An agent call waiting on a tool approval keeps the run in this state and still counts against the active-time limit until the approval is answered.':
+    "La pausa és cooperativa; el treball en curs pot acabar abans que el flux de treball es posi en pausa. Una crida d'agent que espera una aprovació d'eina manté l'execució en aquest estat i continua comptant per al límit de temps actiu fins que es respongui l'aprovació.",
+  'Paused: no new agents will start; script code between agent calls keeps running. Press p to resume. /clear, /branch, and switching sessions cancel paused runs.':
+    "En pausa: no s'iniciaran agents nous; el codi de l'script entre crides d'agent continua executant-se. Prem p per reprendre. /clear, /branch i el canvi de sessió cancel·len les execucions en pausa.",
+  'Pause/resume was rejected; the workflow state changed. Try again.':
+    "La pausa o la represa ha estat rebutjada; l'estat del flux de treball ha canviat. Torna-ho a provar.",
+  'Tip: use `/workflows p <runId>` or Background tasks + p to cooperatively pause/resume; use `/workflows <runId>` for details.':
+    'Consell: usa `/workflows p <runId>` o Tasques en segon pla + p per posar en pausa/reprendre cooperativament; usa `/workflows <runId>` per veure els detalls.',
   Completed: 'Completada',
   Failed: 'Fallida',
   Stopped: 'Aturada',
@@ -1974,6 +1996,19 @@ export default {
     'Desa una memòria duradora al sistema de memòria.',
   'Ask a quick side question without affecting the main conversation':
     'Fes una pregunta ràpida sense afectar la conversa principal',
+  'Get a second opinion on the current conversation from a reviewer model':
+    "Obtén una segona opinió sobre la conversa actual d'un model revisor",
+  'Consulting advisor...': "Consultant l'assessor...",
+  'Advisor review failed: {{error}}':
+    "La revisió de l'assessor ha fallat: {{error}}",
+  'No conversation context available for /advisor':
+    'No hi ha context de conversa disponible per a /advisor',
+  'Focus too long (max {{max}} chars)':
+    'El focus és massa llarg (màx. {{max}} caràcters)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    "Una altra operació està en curs, espereu que es completi abans d'executar /advisor",
+  'No response received.': "No s'ha rebut cap resposta.",
+  'No model configured.': 'No hi ha cap model configurat.',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     'Autenticació basada en navegador amb proveïdors de tercers (p. ex. OpenRouter, ModelScope)',
   'Manage Arena sessions': "Gestiona les sessions de l'Arena",
@@ -2374,6 +2409,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': 'Artefacte',
   'toolDisplayName.RecordArtifact': "Enregistra l'artefacte",
+  'toolDisplayName.ReportFindings': 'Informa de les troballes',
   'toolDisplayName.Skill': 'Habilitat',
   'toolDisplayName.EnterPlanMode': 'Entra al mode de planificació',
   'toolDisplayName.ExitPlanMode': 'Surt del mode de planificació',
@@ -2395,6 +2431,7 @@ export default {
   'toolDisplayName.TeamCreate': 'Crea equip',
   'toolDisplayName.TeamDelete': 'Suprimeix equip',
   'toolDisplayName.TeamPlanApproval': "Aprovació del pla d'equip",
+  'toolDisplayName.RequestShutdown': "Sol·licita l'aturada",
   'toolDisplayName.SendMessage': 'Envia missatge',
   'toolDisplayName.StructuredOutput': 'Sortida estructurada',
   'toolDisplayName.Monitor': 'Monitor',
@@ -2617,6 +2654,7 @@ export default {
     'Ctrl+Q per posar a la cua · ↑ per editar els missatges en cua',
   'Enter to steer · Ctrl+Q to queue':
     'Return per redirigir · Ctrl+Q per posar a la cua',
+  '{{count}} queued': '{{count}} a la cua',
   'Queue message for the next turn':
     'Posar el missatge a la cua per al torn següent',
   '{{count}} session': '{{count}} sessió',
@@ -2761,4 +2799,64 @@ export default {
     'Executant aquesta tasca programada en una sessió nova: {{link}}',
   'This scheduled run could not be started: {{error}}':
     "Aquesta execució programada no s'ha pogut iniciar: {{error}}",
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    "Gestiona les habilitats automàtiques del projecte segons l'ús recent.",
+  'Show project auto-skill lifecycle status.':
+    'Mostra l’estat del cicle de vida de les habilitats automàtiques del projecte.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Executa el manteniment del cicle de vida de les habilitats automàtiques del projecte.',
+  'Restore an archived project auto-skill.':
+    'Restaura una habilitat automàtica del projecte arxivada.',
+  'Auto-skill curator': "Gestor d'habilitats automàtiques",
+  'Last run: {{time}}': 'Última execució: {{time}}',
+  'Active: {{count}}': 'Actives: {{count}}',
+  'Stale: {{count}}': 'Obsoletes: {{count}}',
+  'Archived: {{count}}': 'Arxivades: {{count}}',
+  'Stale skills:': 'Habilitats obsoletes:',
+  'Pinned skills:': 'Habilitats fixades:',
+  'Archived skills:': 'Habilitats arxivades:',
+  'Dry run complete.': 'Simulació completada.',
+  'Curator run complete.': 'Execució del gestor completada.',
+  'Checked: {{count}}': 'Comprovades: {{count}}',
+  'First observed: {{count}}': 'Observades per primera vegada: {{count}}',
+  'Marked stale: {{count}}': 'Marcades com a obsoletes: {{count}}',
+  'Reactivated: {{count}}': 'Reactivades: {{count}}',
+  'Skipped archive collisions: {{count}}':
+    "Col·lisions d'arxivament omeses: {{count}}",
+  'Archive candidates:': "Candidates a l'arxivament:",
+  'Skipped archive collisions:': "Col·lisions d'arxivament omeses:",
+  'Skipped rename errors: {{count}}':
+    'Errors de canvi de nom omesos: {{count}}',
+  'Skipped rename errors:': 'Errors de canvi de nom omesos:',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': "S'arxivarien",
+  Archived: 'Arxivades',
+  'Failed to read auto-skill curator status: {{message}}':
+    "No s'ha pogut llegir l'estat del gestor d'habilitats automàtiques: {{message}}",
+  'Usage: /curator run [--dry-run]': 'Ús: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    "No s'ha pogut executar el gestor d'habilitats automàtiques: {{message}}",
+  'Usage: /curator restore <directory>': 'Ús: /curator restore <directori>',
+  'Restored auto-skill: {{name}}': 'Habilitat automàtica restaurada: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    "No s'ha pogut restaurar l'habilitat automàtica: {{message}}",
+  'Exclude an auto-skill from automatic maintenance.':
+    'Exclou una habilitat automàtica del manteniment automàtic.',
+  'Return a pinned auto-skill to automatic maintenance.':
+    'Retorna una habilitat automàtica fixada al manteniment automàtic.',
+  'Usage: /curator pin <directory>': 'Ús: /curator pin <directori>',
+  'Usage: /curator unpin <directory>': 'Ús: /curator unpin <directori>',
+  'Pinned auto-skill: {{name}}': 'Habilitat automàtica fixada: {{name}}',
+  'Unpinned auto-skill: {{name}}': 'Habilitat automàtica desfixada: {{name}}',
+  'Failed to update auto-skill pin: {{message}}':
+    "No s'ha pogut actualitzar la fixació de l'habilitat automàtica: {{message}}",
+  'Auto-skill curator changes are disabled in safe mode.':
+    "Els canvis del gestor d'habilitats automàtiques estan desactivats en mode segur.",
+  'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
+    "Els canvis del gestor d'habilitats automàtiques només estan disponibles en espais de treball de confiança. Marca aquesta carpeta com a fiable amb `/trust` i torna-ho a provar.",
+  'Kept model as {{model}}': 'Model mantingut com a {{model}}',
 };

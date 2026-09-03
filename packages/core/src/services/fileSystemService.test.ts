@@ -13,7 +13,7 @@ import {
   detectLineEnding,
   ensureCrlfLineEndings,
 } from './fileSystemService.js';
-import { encodeTextFileContent } from '../utils/sync-file-encoding.js';
+import { encodeTextFileContent } from './sync-file-encoding.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn().mockReturnValue('linux'));
 const mockGetSystemEncoding = vi.hoisted(() =>
@@ -80,6 +80,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 1,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });
@@ -99,6 +101,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 100,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({
@@ -121,6 +125,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 100,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       await fileSystem.readTextFile({
@@ -141,6 +147,7 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 100,
+        originalLineCountExact: true,
         truncatedByBytes: true,
       });
 
@@ -167,6 +174,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 1,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       await fileSystem.readTextFile({
@@ -312,6 +321,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'gb18030',
         originalLineCount: 1,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/gbk.txt' });
@@ -793,6 +804,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 3,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });
@@ -806,6 +819,8 @@ describe('StandardFileSystemService', () => {
         bom: false,
         encoding: 'utf-8',
         originalLineCount: 3,
+        originalLineCountExact: true,
+        truncatedByBytes: false,
       });
 
       const result = await fileSystem.readTextFile({ path: '/test/file.txt' });

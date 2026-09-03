@@ -126,6 +126,17 @@ describe('getSelectedText', () => {
     expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 4, ey: 0 })).toBe('hi');
   });
 
+  it('separates selectable runs split by a layout gap', () => {
+    const frame = frameFromLines(['status    42%']);
+    for (let x = 6; x < 10; x++) {
+      (frame.cells[0][x] as FrameCell).selectable = false;
+    }
+
+    expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 12, ey: 0 })).toBe(
+      'status 42%',
+    );
+  });
+
   it('replaces a soft visual break with its source joiner', () => {
     const frame = frameFromLines(['hello', 'world']);
     setBoundary(frame, 0, 'soft', ' ');

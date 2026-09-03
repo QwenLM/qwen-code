@@ -284,12 +284,15 @@ export abstract class DeclarativeTool<
    *   - undefined: fall back to raw params (only safe when the tool is
    *     known to have no sensitive params)
    *
-   * Default is the empty-string sentinel — fail-closed: a third-party
-   * MCP tool (or any tool that has not opted in) does not leak its raw
-   * parameters (potentially containing API keys, tokens, file contents)
-   * into the classifier LLM prompt. Tools that want their args inspected
-   * by the classifier for safety judgement should override this and
-   * return an object with only the security-relevant fields.
+   * Default is the empty-string sentinel — fail-closed: a tool that has
+   * not opted in does not leak its raw parameters (potentially containing
+   * API keys, tokens, file contents) into the classifier LLM prompt.
+   * Tools that want their args inspected by the classifier for safety
+   * judgement should override this and return an object with only the
+   * security-relevant fields. Note that `DiscoveredMCPTool` overrides
+   * this and forwards a bounded projection of every MCP call's arguments
+   * by default (see `mcp-classifier-input.ts`; opt out with
+   * `permissions.autoMode.mcp.forwardArguments: false`).
    */
   toAutoClassifierInput(
     _params: TParams,
@@ -440,20 +443,7 @@ export abstract class BaseDeclarativeTool<
  */
 export type AnyDeclarativeTool = DeclarativeTool<object, ToolResult>;
 
-/**
- * Type guard to check if an object is a Tool.
- * @param obj The object to check.
- * @returns True if the object is a Tool, false otherwise.
- */
-export function isTool(obj: unknown): obj is AnyDeclarativeTool {
-  return (
-    typeof obj === 'object' &&
-    obj !== null &&
-    'name' in obj &&
-    'build' in obj &&
-    typeof (obj as AnyDeclarativeTool).build === 'function'
-  );
-}
+export { isTool } from '../utils/is-tool.js';
 
 export type ToolArtifactKind =
   | 'file'
@@ -464,7 +454,15 @@ export type ToolArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
+
+export type ToolResultArtifactState = 'undecided' | 'none' | 'reusable';
+
+export interface ToolResultBoundaryArtifact {
+  state: ToolResultArtifactState;
+  kinds: Array<ToolArtifactKind | 'unknown'>;
+}
 
 export type ToolArtifactStorage =
   | 'workspace'
@@ -540,6 +538,12 @@ export interface ToolResult {
    * turns within the same agentic loop.
    */
   modelOverride?: string;
+
+  /**
+   * End the current Goal turn after recording this successful result. Only
+   * honored when the tool batch carries a Goal context; ignored otherwise.
+   */
+  terminateTurn?: boolean;
 }
 
 /**
@@ -633,10 +637,12 @@ export interface AgentResultDisplay {
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
+  executionMode?: 'foreground' | 'background';
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
+  skills?: string[];
   /** Real-time output-token count during execution, accumulated across subagent rounds. */
   tokenCount?: number;
 
@@ -653,6 +659,7 @@ export interface AgentResultDisplay {
     result?: string;
     resultDisplay?: string;
     responseParts?: Part[];
+    boundaryArtifact?: ToolResultBoundaryArtifact;
     description?: string;
   }>;
 }
@@ -676,6 +683,46 @@ export interface McpToolProgressData {
   total?: number;
   /** Optional human-readable progress message */
   message?: string;
+}
+
+export interface McpAppResourceCsp {
+  connectDomains?: string[];
+  resourceDomains?: string[];
+  frameDomains?: string[];
+  baseUriDomains?: string[];
+}
+
+export interface McpAppResourcePermissions {
+  camera?: Record<string, never>;
+  microphone?: Record<string, never>;
+  geolocation?: Record<string, never>;
+  clipboardWrite?: Record<string, never>;
+}
+
+export interface McpAppToolResult {
+  content?: Array<{
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+    [key: string]: unknown;
+  }>;
+  isError?: boolean;
+  structuredContent?: unknown;
+  [key: string]: unknown;
+}
+
+/** A completed MCP tool call with an interactive MCP Apps resource. */
+export interface McpAppResultDisplay {
+  type: 'mcp_app';
+  serverName: string;
+  resourceUri: string;
+  html: string;
+  toolResult: McpAppToolResult;
+  toolArguments: Record<string, unknown>;
+  fallbackText: string;
+  csp?: McpAppResourceCsp;
+  permissions?: McpAppResourcePermissions;
 }
 
 /**
@@ -711,6 +758,29 @@ export function isShellProgressData(
   );
 }
 
+export const MAX_TERMINAL_IMAGE_BYTES = 8 * 1024 * 1024;
+
+export interface TerminalImageDisplay {
+  type: 'terminal_image';
+  filePath: string;
+  mimeType: 'image/png';
+}
+
+export function isTerminalImageDisplay(
+  display: unknown,
+): display is TerminalImageDisplay {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    display.type === 'terminal_image' &&
+    'filePath' in display &&
+    typeof display.filePath === 'string' &&
+    'mimeType' in display &&
+    display.mimeType === 'image/png'
+  );
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
@@ -719,10 +789,13 @@ export type ToolResultDisplay =
   | AgentResultDisplay
   | TeamResultDisplay
   | TaskListResultDisplay
+  | FindingsResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData
+  | McpAppResultDisplay
   | VisionBridgeNoticeDisplay
-  | ShellProgressData;
+  | ShellProgressData
+  | TerminalImageDisplay;
 
 export interface TeamResultDisplay {
   type: 'team_result';
@@ -767,13 +840,66 @@ export interface DiffStat {
   user_removed_chars: number;
 }
 
+/**
+ * One review finding as the `report_findings` tool hands it to clients.
+ *
+ * Field names and enum spellings deliberately match the `qwen review
+ * findings` artifact (`packages/cli/src/commands/review/findings.ts`) so the model
+ * copies values straight out of the artifact instead of translating them —
+ * a translation layer between two spellings of the same list is where
+ * severities have historically drifted.
+ */
+export interface ReportedFinding {
+  /** The findings artifact's id (`R<round>-<n>` / `D<round>-<n>`), when one exists. */
+  id?: string;
+  severity: 'Critical' | 'Suggestion' | 'Nice to have';
+  /** Verification confidence. Absent on an unverified (low-effort) pass. */
+  confidence?: 'high' | 'low';
+  /** Where the finding came from. */
+  source?: 'review' | 'build' | 'test' | 'probe' | 'lint';
+  file: string;
+  line?: number;
+  /** One sentence stating the defect. */
+  summary: string;
+  /** `summary` compressed to <= 60 characters, for a compact list UI. */
+  shortSummary: string;
+  /** The concrete trigger and wrong outcome. */
+  failureScenario: string;
+  /** Free-form kebab-case tag (`correctness`, `security`, …). */
+  category?: string;
+  /** Which way a Critical fails — see `FINDING_DIRECTIONS`. */
+  direction?: 'certifies-falsely' | 'fails-closed';
+  /** What a Critical is measured against — see `FINDING_BASELINES`. */
+  baseline?: 'regression' | 'new-surface';
+  /** Set only on a re-report after fixes were applied. */
+  outcome?: 'fixed' | 'skipped' | 'no_change_needed';
+  /** The fixer's reason — mainly for `skipped`. */
+  outcomeNote?: string;
+}
+
+export interface FindingsResultDisplay {
+  type: 'findings_list';
+  /** The review effort the findings came from. */
+  level?: 'low' | 'medium' | 'high';
+  findings: ReportedFinding[];
+  /**
+   * Set by history/recording compaction when the retained-display budget
+   * evicted the least severe tail of a larger list: how many findings were
+   * removed. The retained prefix keeps the most severe entries.
+   */
+  omittedFindings?: number;
+}
+
 export interface TodoResultDisplay {
   type: 'todo_list';
+  planId?: string;
   todos: Array<{
     id: string;
     content: string;
     status: 'pending' | 'in_progress' | 'completed';
+    blockedBy?: string[];
   }>;
+  unchanged?: boolean;
 }
 
 export interface PlanResultDisplay {
@@ -882,6 +1008,8 @@ export interface ToolInfoConfirmationDetails {
   /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
   hideAlwaysAllow?: boolean;
   prompt: string;
+  /** Display the prompt literally instead of interpreting inline Markdown. */
+  renderPromptAsPlainText?: boolean;
   urls?: string[];
   /** Permission rules for persistence, e.g. 'WebFetch(example.com)'. */
   permissionRules?: string[];

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { promises as fsp } from 'node:fs';
+import { promises as fsp, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -15,6 +15,8 @@ import {
   FS_ACCESS_EVENT_TYPE,
   FS_DENIED_EVENT_TYPE,
   createWorkspaceFileSystemFactory,
+  resolveNewFileModeBits,
+  type NewFileModePolicy,
   type ResolvedPath,
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
@@ -36,6 +38,7 @@ async function makeHarness(opts?: {
   ignore?: Ignore;
   includeRawPaths?: boolean;
   generationGuard?: { assertOpen(): void };
+  newFileMode?: NewFileModePolicy;
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
@@ -51,6 +54,7 @@ async function makeHarness(opts?: {
     ignore: opts?.ignore,
     includeRawPaths: opts?.includeRawPaths,
     generationGuard: opts?.generationGuard,
+    newFileMode: opts?.newFileMode,
   });
   const fs = factory.forRequest({
     originatorClientId: 'client-x',
@@ -259,6 +263,48 @@ describe('WorkspaceFileSystem - readText', () => {
     expect(isFsError(err)).toBe(true);
     expect((err as { kind: string }).kind).toBe('file_too_large');
     expect((err as { hint?: string }).hint).toMatch(/readBytes/);
+  });
+
+  it('reports the same lineEnding on every page of a CRLF file', async () => {
+    // A one-line slice arrives as text ending in '\r' — the '\n' was consumed
+    // as its terminator — so detecting on the slice would call page 1 'lf'
+    // while the cursor path called page 2 'crlf', for one file.
+    const target = path.join(h.workspace, 'crlf-pages.txt');
+    await fsp.writeFile(target, 'aa\r\nbb\r\ncc\r\n');
+    const r = await h.fs.resolve('crlf-pages.txt', 'read');
+
+    const first = await h.fs.readText(r, { limit: 1 });
+    expect(first.content).toBe('aa\r');
+    expect(first.meta.lineEnding).toBe('crlf');
+
+    const second = await h.fs.readText(r, {
+      cursor: first.meta.nextCursor!,
+      limit: 1,
+    });
+    expect(second.content).toBe('bb\r');
+    expect(second.meta.lineEnding).toBe('crlf');
+
+    const trunc = await h.fs.readText(r, { maxBytes: 3 });
+    expect(trunc.content).toBe('aa\r');
+    expect(trunc.meta.truncated).toBe(true);
+    expect(trunc.meta.lineEnding).toBe('crlf');
+  });
+
+  it('keeps an unterminated CRLF tail page consistent with page one', async () => {
+    // The tail page holds only `bb` — no terminator to test — so detection
+    // must come from the CRLF pair the cursor resumed after, or the two pages
+    // of one file disagree, the exact symptom fixed above.
+    const target = path.join(h.workspace, 'crlf-no-final.txt');
+    await fsp.writeFile(target, 'aa\r\nbb');
+    const r = await h.fs.resolve('crlf-no-final.txt', 'read');
+
+    const first = await h.fs.readText(r, { limit: 1 });
+    expect(first.content).toBe('aa\r');
+    expect(first.meta.lineEnding).toBe('crlf');
+
+    const tail = await h.fs.readText(r, { cursor: first.meta.nextCursor! });
+    expect(tail.content).toBe('bb');
+    expect(tail.meta.lineEnding).toBe('crlf');
   });
 
   it('pages a large log by cursor and reassembles it exactly', async () => {
@@ -1667,6 +1713,126 @@ describe('WorkspaceFileSystem - write/edit', () => {
   });
 });
 
+// New-file mode policy (#9250): the daemon's text writers historically
+// created every NEW file at `0o600` regardless of the process umask.
+// `QWEN_SERVE_NEW_FILE_MODE=system` lets operators opt into the
+// standard `0o666 & ~umask` handling; the default stays owner-only.
+describe('WorkspaceFileSystem - new-file mode policy', () => {
+  const isPosix = process.platform !== 'win32';
+
+  it('resolveNewFileModeBits: owner policy ignores the umask', () => {
+    expect(resolveNewFileModeBits('owner', 0o000)).toBe(0o600);
+    expect(resolveNewFileModeBits('owner', 0o002)).toBe(0o600);
+    expect(resolveNewFileModeBits('owner', 0o077)).toBe(0o600);
+  });
+
+  it('resolveNewFileModeBits: system policy applies 0o666 & ~umask', () => {
+    expect(resolveNewFileModeBits('system', 0o000)).toBe(0o666);
+    expect(resolveNewFileModeBits('system', 0o002)).toBe(0o664);
+    expect(resolveNewFileModeBits('system', 0o022)).toBe(0o644);
+    expect(resolveNewFileModeBits('system', 0o077)).toBe(0o600);
+  });
+
+  it('default (owner) policy ignores a permissive umask', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness();
+    const prev = process.umask(0o002);
+    try {
+      const r = await h.fs.resolve('owner-default.txt', 'write');
+      await h.fs.writeTextOverwrite(r, 'x');
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o600);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy creates new files at 0o666 & ~umask', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      const r = await h.fs.resolve('system-new.txt', 'write');
+      const out = await h.fs.writeTextOverwrite(r, 'hello\n');
+      expect(out.created).toBe(true);
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o664);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy still preserves an existing target mode', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      const target = path.join(h.workspace, 'system-secret.txt');
+      await fsp.writeFile(target, 'old', { mode: 0o600 });
+      await fsp.chmod(target, 0o600);
+      const r = await h.fs.resolve('system-secret.txt', 'write');
+      const out = await h.fs.writeTextOverwrite(r, 'new');
+      expect(out.created).toBe(false);
+      const st = await fsp.lstat(target);
+      expect(st.mode & 0o7777).toBe(0o600);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy applies to writeTextAtomic create', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o022);
+    try {
+      const r = await h.fs.resolve('system-atomic.txt', 'write');
+      await h.fs.writeTextAtomic(r, 'a\n', { mode: 'create' });
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o644);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('system policy applies to the same-host external tool write route', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      expect(h.factory.writeSameHostToolText).toBeTypeOf('function');
+      const external = path.join(h.scratch, 'external-tool-write.txt');
+      await h.factory.writeSameHostToolText?.(
+        { route: 'TEST same-host', sessionId: 'sess-1' },
+        { path: external, content: 'ext\n' },
+      );
+      const st = await fsp.lstat(external);
+      expect(st.mode & 0o7777).toBe(0o664);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+
+  it('writeBytesAtomic keeps 0o600 even under the system policy', async () => {
+    if (!isPosix) return;
+    const h = await makeHarness({ newFileMode: 'system' });
+    const prev = process.umask(0o002);
+    try {
+      const r = await h.fs.resolve('system-bytes.bin', 'write');
+      await h.fs.writeBytesAtomic(r, Buffer.from('bin'));
+      const st = await fsp.lstat(r as string);
+      expect(st.mode & 0o7777).toBe(0o600);
+    } finally {
+      process.umask(prev);
+      await teardown(h);
+    }
+  });
+});
+
 describe('WorkspaceFileSystem - trust gate', () => {
   let h: Harness;
   beforeEach(async () => {
@@ -2145,33 +2311,39 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     expect(hits).toHaveLength(3);
   });
 
-  it('returns healthy root glob results when one workspace root fails', async () => {
-    await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
-    await fsp.chmod(h.secondWorkspace, 0o000);
-    try {
-      await expect(h.fs.glob('*.ts')).resolves.toEqual([
-        path.join(h.workspace, 'primary.ts'),
-      ]);
-    } finally {
-      await fsp.chmod(h.secondWorkspace, 0o700);
-    }
-  });
+  it.skipIf(process.platform === 'win32')(
+    'returns healthy root glob results when one workspace root fails',
+    async () => {
+      await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
+      await fsp.chmod(h.secondWorkspace, 0o000);
+      try {
+        await expect(h.fs.glob('*.ts')).resolves.toEqual([
+          path.join(h.workspace, 'primary.ts'),
+        ]);
+      } finally {
+        await fsp.chmod(h.secondWorkspace, 0o700);
+      }
+    },
+  );
 
-  it('throws AggregateError when every workspace root glob fails', async () => {
-    await fsp.chmod(h.workspace, 0o000);
-    await fsp.chmod(h.secondWorkspace, 0o000);
-    try {
-      const err = await h.fs.glob('*.ts').catch((e: unknown) => e);
-      const cause = (err as Error & { cause?: unknown }).cause;
+  it.skipIf(process.platform === 'win32')(
+    'throws AggregateError when every workspace root glob fails',
+    async () => {
+      await fsp.chmod(h.workspace, 0o000);
+      await fsp.chmod(h.secondWorkspace, 0o000);
+      try {
+        const err = await h.fs.glob('*.ts').catch((e: unknown) => e);
+        const cause = (err as Error & { cause?: unknown }).cause;
 
-      expect(isFsError(err)).toBe(true);
-      expect(cause).toBeInstanceOf(AggregateError);
-      expect((cause as AggregateError).errors).toHaveLength(2);
-    } finally {
-      await fsp.chmod(h.workspace, 0o700);
-      await fsp.chmod(h.secondWorkspace, 0o700);
-    }
-  });
+        expect(isFsError(err)).toBe(true);
+        expect(cause).toBeInstanceOf(AggregateError);
+        expect((cause as AggregateError).errors).toHaveLength(2);
+      } finally {
+        await fsp.chmod(h.workspace, 0o700);
+        await fsp.chmod(h.secondWorkspace, 0o700);
+      }
+    },
+  );
 
   it('glob with cwd searches only that resolved root', async () => {
     await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
@@ -2232,6 +2404,351 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     } finally {
       await fsp.rm(scratch, { recursive: true, force: true });
     }
+  });
+});
+
+describe('WorkspaceFileSystem - writeBytesAtomic', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => teardown(h));
+
+  it('round-trips arbitrary bytes byte-identically', async () => {
+    const data = randomBytes(4096);
+    const r = await h.fs.resolve('blob.bin', 'write');
+    const out = await h.fs.writeBytesAtomic(r, data);
+    expect(out.sizeBytes).toBe(data.length);
+    expect(out.hash).toBe(rawHash(data));
+    expect(await fsp.readFile(r as string)).toEqual(data);
+  });
+
+  it('accepts an empty buffer and hashes it', async () => {
+    const r = await h.fs.resolve('empty.bin', 'write');
+    const out = await h.fs.writeBytesAtomic(r, Buffer.alloc(0));
+    expect(out.sizeBytes).toBe(0);
+    expect(out.hash).toBe(rawHash(Buffer.alloc(0)));
+    expect((await fsp.stat(r as string)).size).toBe(0);
+  });
+
+  it('accepts a payload above the 5 MiB text cap (binary policy applies)', async () => {
+    // 6 MiB > MAX_WRITE_BYTES (5 MiB) but <= MAX_UPLOAD_BYTES (50 MiB):
+    // proves the byte path does not reuse the text-write default.
+    const data = Buffer.alloc(6 * 1024 * 1024, 7);
+    const r = await h.fs.resolve('big.bin', 'write');
+    const out = await h.fs.writeBytesAtomic(r, data);
+    expect(out.sizeBytes).toBe(data.length);
+    expect((await fsp.stat(r as string)).size).toBe(data.length);
+  });
+
+  it('rejects a payload above MAX_UPLOAD_BYTES with file_too_large', async () => {
+    const data = Buffer.alloc(50 * 1024 * 1024 + 1);
+    const r = await h.fs.resolve('too-big.bin', 'write');
+    const err = await h.fs.writeBytesAtomic(r, data).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
+    await expect(fsp.stat(r as string)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('rejects an existing target with file_already_exists', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'taken.bin'), 'x');
+    const r = await h.fs.resolve('taken.bin', 'write');
+    const err = await h.fs
+      .writeBytesAtomic(r, Buffer.from('y'))
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_already_exists');
+    // The existing content is untouched.
+    expect(
+      await fsp.readFile(path.join(h.workspace, 'taken.bin'), 'utf-8'),
+    ).toBe('x');
+  });
+
+  it('does not audit a no-clobber collision as fs.denied', async () => {
+    // Collisions are the upload route's expected candidate-loop control
+    // flow; monitoring keyed on fs.denied volume must not see them.
+    await fsp.writeFile(path.join(h.workspace, 'taken.bin'), 'x');
+    const r = await h.fs.resolve('taken.bin', 'write');
+    const deniedBefore = h.events.filter(
+      (e) => e.type === FS_DENIED_EVENT_TYPE,
+    ).length;
+    await expect(
+      h.fs.writeBytesAtomic(r, Buffer.from('y')),
+    ).rejects.toMatchObject({ kind: 'file_already_exists' });
+    expect(
+      h.events.filter((e) => e.type === FS_DENIED_EVENT_TYPE),
+    ).toHaveLength(deniedBefore);
+  });
+
+  it('rejects an escaping symlink at the boundary', async () => {
+    const outside = path.join(h.scratch, 'outside.txt');
+    await fsp.writeFile(outside, 'external');
+    const link = path.join(h.workspace, 'evil-link');
+    await fsp.symlink(outside, link);
+    const err = await h.fs.resolve('evil-link', 'write').catch((e) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+    expect(await fsp.readFile(outside, 'utf-8')).toBe('external');
+  });
+
+  it('rejects a direct symlink target with symlink_escape', async () => {
+    // Bypasses `resolve`'s realpath-follow to exercise the defensive
+    // lstat branch in the no-clobber create path. The route never hands
+    // `writeBytesAtomic` an in-workspace symlink (it numbers instead), but
+    // the fs primitive must still refuse to publish through one.
+    const real = path.join(h.workspace, 'real.bin');
+    await fsp.writeFile(real, 'orig');
+    const link = path.join(h.workspace, 'link.bin');
+    await fsp.symlink(real, link);
+    const err = await h.fs
+      .writeBytesAtomic(link as ResolvedPath, Buffer.from('overwrite?'))
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+    expect(await fsp.readFile(real, 'utf-8')).toBe('orig');
+  });
+
+  it('creates new files at 0o600', async () => {
+    if (process.platform === 'win32') return;
+    const r = await h.fs.resolve('secret.bin', 'write');
+    await h.fs.writeBytesAtomic(r, Buffer.from('s3cret'));
+    const mode = (await fsp.stat(r as string)).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it('fails with untrusted_workspace on an untrusted factory', async () => {
+    await teardown(h);
+    h = await makeHarness({ trusted: false });
+    const r = await h.fs.resolve('nope.bin', 'write');
+    const err = await h.fs
+      .writeBytesAtomic(r, Buffer.from('x'))
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('untrusted_workspace');
+  });
+
+  it('leaves no target when the generation closes before publication', async () => {
+    let checks = 0;
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          // resolve() consumes calls 1-2; writeBytesAtomic entry (3) and
+          // the inside-lock re-check (4) precede the pre-publish checkpoint
+          // (5). Close at the final publish checkpoint, when the temp file
+          // already exists.
+          if (checks === 5) throw new Error('generation closed');
+        },
+      },
+    });
+    const target = path.join(h.workspace, 'gen-closed.bin');
+    const r = await h.fs.resolve(target, 'write');
+    await expect(
+      h.fs.writeBytesAtomic(r, Buffer.from('must not land')),
+    ).rejects.toThrow('generation closed');
+    expect(checks).toBe(5);
+    await expect(fsp.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+    // No stray temp files left behind in the workspace.
+    const leftover = (await fsp.readdir(h.workspace)).filter((n) =>
+      n.endsWith('.tmp'),
+    );
+    expect(leftover).toEqual([]);
+  });
+
+  it('never clobbers when an external writer wins the pre-publish race', async () => {
+    let checks = 0;
+    let target = '';
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          // At the pre-publish checkpoint (after the entry/lock checks and
+          // the temp write), an external writer grabs the name.
+          if (checks === 5) writeFileSync(target, 'external');
+        },
+      },
+    });
+    target = path.join(h.workspace, 'race.bin');
+    const r = await h.fs.resolve('race.bin', 'write');
+    const err = await h.fs
+      .writeBytesAtomic(r, Buffer.from('upload'))
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_already_exists');
+    // The external writer's content is untouched.
+    expect(await fsp.readFile(target, 'utf-8')).toBe('external');
+    const leftover = (await fsp.readdir(h.workspace)).filter((n) =>
+      n.endsWith('.tmp'),
+    );
+    expect(leftover).toEqual([]);
+  });
+
+  it('records audit access on success and denial', async () => {
+    const ignore = new Ignore().add(['*.log']);
+    await teardown(h);
+    h = await makeHarness({ ignore });
+
+    const data = randomBytes(64);
+    const r = await h.fs.resolve('audit.log', 'write');
+    await h.fs.writeBytesAtomic(r, data);
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'write',
+    );
+    expect(access).toBeDefined();
+    expect((access!.data as { sizeBytes: number }).sizeBytes).toBe(data.length);
+    expect((access!.data as { matchedIgnore?: string }).matchedIgnore).toBe(
+      'file',
+    );
+
+    const tooBig = await h.fs.resolve('audit-big.bin', 'write');
+    await h.fs
+      .writeBytesAtomic(tooBig, Buffer.alloc(50 * 1024 * 1024 + 1))
+      .catch(() => {});
+    const denied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { errorKind: string }).errorKind === 'file_too_large',
+    );
+    expect(denied).toBeDefined();
+  });
+});
+
+describe('WorkspaceFileSystem - mkdir', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => {
+    await teardown(h);
+  });
+
+  it('creates a missing directory', async () => {
+    const r = await h.fs.resolve('new-dir', 'write');
+    await h.fs.mkdir(r);
+    const st = await fsp.stat(path.join(h.workspace, 'new-dir'));
+    expect(st.isDirectory()).toBe(true);
+  });
+
+  it('creates missing parents recursively', async () => {
+    const r = await h.fs.resolve('a/b/c', 'write');
+    await h.fs.mkdir(r, { recursive: true });
+    for (const p of ['a', 'a/b', 'a/b/c']) {
+      const st = await fsp.stat(path.join(h.workspace, p));
+      expect(st.isDirectory()).toBe(true);
+    }
+  });
+
+  it('reuses an existing directory without error', async () => {
+    const target = path.join(h.workspace, 'existing');
+    await fsp.mkdir(target);
+    const r = await h.fs.resolve('existing', 'write');
+    await expect(h.fs.mkdir(r)).resolves.toBeUndefined();
+    const st = await fsp.stat(target);
+    expect(st.isDirectory()).toBe(true);
+  });
+
+  it('rejects an existing non-directory at the target', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'file.txt'), 'x');
+    const r = await h.fs.resolve('file.txt', 'write');
+    const err = await h.fs.mkdir(r).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+
+  it('rejects a target that becomes a symlink before creation completes', async () => {
+    // `resolve` already rejects symlink escapes at admission; this pins the
+    // post-create `lstat` re-check that defends the create itself.
+    const realMkdir = fsp.mkdir;
+    const target = path.join(h.workspace, 'race-dir');
+    const spy = vi
+      .spyOn(fsp, 'mkdir')
+      .mockImplementation(
+        async (
+          input: Parameters<typeof fsp.mkdir>[0],
+          options?: Parameters<typeof fsp.mkdir>[1],
+        ) => {
+          if (String(input) === target) {
+            await fsp.rm(target, { recursive: true, force: true });
+            await fsp.symlink(h.scratch, target, 'dir');
+          }
+          return realMkdir(input, options);
+        },
+      );
+    try {
+      const r = await h.fs.resolve('race-dir', 'write');
+      const err = await h.fs.mkdir(r).catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('symlink_escape');
+      await expect(
+        fsp.stat(path.join(h.scratch, 'race-dir')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('rejects a parent swapped for a symlink mid-recursive-create', async () => {
+    // The per-component `lstat` re-check cannot see an INTERMEDIATE ancestor
+    // that becomes a symlink (it only refuses to follow the final component);
+    // the parent re-check before the next `mkdir` is what closes that window.
+    let checks = 0;
+    let firstComponent = '';
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          // The create loop's second iteration is about to mkdir `a/b`; the
+          // just-created `a` has been swapped for a symlink out of the
+          // workspace in the meantime.
+          if (checks === 5) {
+            rmSync(firstComponent, { recursive: true, force: true });
+            symlinkSync(h.scratch, firstComponent, 'dir');
+          }
+        },
+      },
+    });
+    firstComponent = path.join(h.workspace, 'a');
+    const r = await h.fs.resolve('a/b', 'write');
+    const err = await h.fs
+      .mkdir(r, { recursive: true })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+    // Nothing was created through the symlink.
+    await expect(fsp.stat(path.join(h.scratch, 'b'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('refuses the non-recursive create when a parent is missing', async () => {
+    const r = await h.fs.resolve('a/b', 'write');
+    const err = await h.fs.mkdir(r).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('path_not_found');
+  });
+
+  it('records audit access on success', async () => {
+    const r = await h.fs.resolve('audit-dir', 'write');
+    await h.fs.mkdir(r);
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'write',
+    );
+    expect(access).toBeDefined();
+    // Privacy mode hashes the path; only `QWEN_AUDIT_RAW_PATHS=1` exposes it.
+    expect((access!.data as { pathHash: string }).pathHash).toMatch(
+      /^[0-9a-f]{16}$/,
+    );
+    // `mkdir` must be distinguishable from a zero-byte file write.
+    expect((access!.data as { operation?: string }).operation).toBe('mkdir');
   });
 });
 

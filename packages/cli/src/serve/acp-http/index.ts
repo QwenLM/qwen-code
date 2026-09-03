@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
@@ -14,18 +13,30 @@ import {
   RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
   Storage,
 } from '@qwen-code/qwen-code-core';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import {
+  singleTokenCredentials,
+  type ListenerScopedCredentials,
+} from '../local-control/credentials.js';
+import { listenerIdentityOfSocket } from '../local-control/listener-identity.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
-import { AcpDispatcher } from './dispatch.js';
+import { formatHostForAuthority, isLoopbackBind } from '../loopback-binds.js';
+import {
+  AcpDispatcher,
+  type LegacyStandaloneSessionRestorer,
+  type LiveSessionIsolation,
+} from './dispatch.js';
 import { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { isInternalWorkspaceRuntime } from '../workspace-runtime-visibility.js';
 import {
   isPortableAbsolutePath,
   resolveManagedWorkspaceRuntimeByPathSelector,
@@ -37,10 +48,17 @@ import {
   type AcpConnection,
   type AcpConnectionDiagnostic,
 } from './connection-registry.js';
+import {
+  ACP_PRE_ATTACH_MAX_FRAMES_GLOBAL,
+  ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_GLOBAL,
+  AcpPreAttachBudget,
+  type AcpPreAttachBudgetSnapshot,
+} from './pre-attach-budget.js';
 import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import type { RequestedSessionIdAdmission } from '../session-id-admission.js';
 import {
   RPC,
   error as rpcError,
@@ -104,7 +122,8 @@ function isActiveDrainCorrelation(
       ? (message.params as { sessionId?: unknown })
       : undefined;
   return (
-    typeof params?.sessionId === 'string' && conn.ownsSession(params.sessionId)
+    typeof params?.sessionId === 'string' &&
+    conn.ownsSession(normalizeSessionIdForLookup(params.sessionId))
   );
 }
 
@@ -334,7 +353,11 @@ const WS_READ_METHODS = new Set([
   '_qwen/file/glob',
 ]);
 
-function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
+function isSameLoopbackOrigin(
+  origin: string,
+  localPort?: number,
+  hostname?: string,
+): boolean {
   if (!localPort) return false;
   const parsed = new URL(origin);
   // Both schemes: under `--tls-cert/--tls-key` the loopback ACP client
@@ -347,13 +370,29 @@ function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
     `https://127.0.0.1:${localPort}`,
     `https://[::1]:${localPort}`,
   ]);
+  const boundHost =
+    hostname && isLoopbackBind(hostname)
+      ? formatHostForAuthority(hostname)
+      : undefined;
+  if (boundHost) {
+    allowed.add(`http://${boundHost}:${localPort}`);
+    allowed.add(`https://${boundHost}:${localPort}`);
+  }
   // RFC 7230 §5.4: browsers omit the port in the Origin header when it
-  // matches the scheme default (http→80, https→443). Accept the port-less
-  // forms so the check doesn't fail on default ports.
-  if (localPort === 80 || localPort === 443) {
+  // matches the scheme default (http→80, https→443).
+  if (localPort === 80) {
     for (const host of ['localhost', '127.0.0.1', '[::1]']) {
       allowed.add(`http://${host}`);
+    }
+    if (boundHost) {
+      allowed.add(`http://${boundHost}`);
+    }
+  } else if (localPort === 443) {
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) {
       allowed.add(`https://${host}`);
+    }
+    if (boundHost) {
+      allowed.add(`https://${boundHost}`);
     }
   }
   return allowed.has(parsed.origin.toLowerCase());
@@ -380,6 +419,13 @@ export interface MountAcpHttpOptions {
   /** Bearer token for WS auth (WS bypasses Express middleware). */
   token?: string;
   /**
+   * Listener-scoped credentials. Supersedes `token` when set: the LAN listener
+   * attached by Local Control accepts a different credential than the primary
+   * one, which a single token cannot express. Falls back to `token` so callers
+   * that predate Local Control keep working unchanged.
+   */
+  credentials?: ListenerScopedCredentials;
+  /**
    * Parsed `--allow-origin` allowlist. The WS CSRF check (CSWSH defence)
    * rejects non-loopback origins; origins in this allowlist are also accepted,
    * so a browser extension (`chrome-extension://<id>`) can open the reverse
@@ -391,6 +437,12 @@ export interface MountAcpHttpOptions {
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
   archiveCoordinator?: SessionArchiveCoordinator;
+  /**
+   * The daemon-wide session-id admission shared with every other transport.
+   * Required: a mount-local fallback could not see draining generations, so
+   * the host must inject the shared instance (as `createServeApp` does).
+   */
+  requestedSessionIdAdmission: RequestedSessionIdAdmission;
   /** Shared lane for sessionless workspace remember tasks. */
   workspaceRememberLane: WorkspaceRememberTaskLane;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
@@ -455,6 +507,8 @@ export interface MountAcpHttpOptions {
     ws: WebSocket,
     req: IncomingMessage,
   ) => void;
+  liveSessionIsolation?: LiveSessionIsolation;
+  standaloneSessionService?: LegacyStandaloneSessionRestorer;
 }
 
 /**
@@ -465,6 +519,8 @@ export interface MountAcpHttpOptions {
  */
 export interface ExtraWsRoute {
   path: string;
+  /** The route resolves its own workspace lifecycle instead of using primary. */
+  bypassPrimaryDrain?: boolean;
   onConnection: (ws: WebSocket, req: IncomingMessage) => void;
 }
 
@@ -516,6 +572,7 @@ export interface AcpHttpMountSnapshot {
   primary: boolean;
   connectionCount: number;
   wsStreams: number;
+  preAttachGuardFailures: number;
 }
 
 export interface AcpHttpConnectionDiagnostic extends AcpConnectionDiagnostic {
@@ -532,6 +589,10 @@ export interface AcpHttpSnapshot {
   sseStreams: number;
   wsStreams: number;
   pendingClientRequests: number;
+  bufferedConnectionFrames: number;
+  bufferedSessionFrames: number;
+  pendingDeliveryFrames: number;
+  preAttach: AcpPreAttachBudgetSnapshot;
   mounts: AcpHttpMountSnapshot[];
   connections: AcpHttpConnectionDiagnostic[];
 }
@@ -568,6 +629,12 @@ export interface AcpHttpHandle {
   disposeWorkspace(workspaceId: string): void;
   /** Attach HTTP server post-listen to enable WebSocket upgrade. */
   attachServer(server: import('node:http').Server): void;
+  /**
+   * Stop serving upgrades on `server` and close the sockets already upgraded
+   * off it. Used when Local Control's LAN listener goes away; the primary
+   * listener is detached by `dispose()` instead.
+   */
+  detachServer(server: import('node:http').Server): void;
 }
 
 function runtimeEffectiveEnv(
@@ -602,11 +669,21 @@ export function mountAcpHttp(
   if (!enabled) return undefined;
 
   const daemonEnv = opts.daemonEnv ?? process.env;
+  const primarySessionRuntimeBaseDir =
+    opts.workspaceRegistry?.primary.sessionRuntimeBaseDir ??
+    Storage.getRuntimeBaseDir();
+  const archiveCoordinator =
+    opts.archiveCoordinator ?? new SessionArchiveCoordinator();
+  const requestedSessionIdAdmission = opts.requestedSessionIdAdmission;
   const getPrimaryEnv = () =>
     opts.workspaceRegistry
       ? runtimeEffectiveEnv(opts.workspaceRegistry.primary, daemonEnv)
       : daemonEnv;
   const path = opts.path ?? '/acp';
+  const preAttachBudget = new AcpPreAttachBudget({
+    maxFrames: ACP_PRE_ATTACH_MAX_FRAMES_GLOBAL,
+    maxBytes: ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_GLOBAL,
+  });
   const dispatcherRef: { current?: AcpDispatcher } = {};
   // Lifecycle gate: once `dispose()` runs, late/in-flight HTTP requests get a
   // 503 instead of racing torn-down registries (issue #6378 daemon shutdown).
@@ -662,6 +739,8 @@ export function mountAcpHttp(
       });
     },
     opts.maxConnections,
+    undefined,
+    preAttachBudget,
   );
   let cdpMcpRegistered = false;
   let cdpMcpRegistering: Promise<void> | undefined;
@@ -791,11 +870,12 @@ export function mountAcpHttp(
     getPrimaryEnv,
     opts.workspace,
     opts.workspaceRememberLane,
+    requestedSessionIdAdmission,
     opts.fsFactory,
     opts.deviceFlowRegistry,
     opts.sessionShellCommandEnabled === true,
     registry,
-    opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+    archiveCoordinator,
     opts.isPrimaryWorkspaceTrusted ??
       (() => {
         const entry = opts.workspaceRegistry?.primaryEntry;
@@ -807,8 +887,21 @@ export function mountAcpHttp(
       const guard = opts.workspaceRegistry?.primaryEntry.current?.guard;
       return guard ? () => guard.assertOpen() : undefined;
     },
-    opts.workspaceRegistry?.primary.sessionRuntimeBaseDir ??
-      Storage.getRuntimeBaseDir(),
+    undefined,
+    primarySessionRuntimeBaseDir,
+    () => {
+      const runtime = opts.workspaceRegistry?.primary;
+      return runtime
+        ? {
+            bridge: runtime.bridge,
+            sessionRuntimeBaseDir: runtime.sessionRuntimeBaseDir,
+            workspaceId: runtime.workspaceId,
+          }
+        : {
+            bridge,
+            sessionRuntimeBaseDir: primarySessionRuntimeBaseDir,
+          };
+    },
   );
   dispatcherRef.current = dispatcher;
 
@@ -844,11 +937,11 @@ export function mountAcpHttp(
       res.status(400).json({ error: 'Missing Acp-Connection-Id' });
       return;
     }
-    // NOTE: like every other route, DELETE is gated only by the bearer
-    // token — the daemon's trust boundary is "holds the token for this
-    // daemon", so any token-holder may tear down any connection (same posture
+    // NOTE: like every other route, DELETE is gated by deployment-level
+    // operator authority, not by ownership of this ACP connection. Any
+    // authorized caller may therefore tear down any connection (same posture
     // as the REST `DELETE /session/:id`). A per-connection secret would add
-    // intra-token isolation; deferred with the rest of the multi-tenant
+    // intra-operator isolation; deferred with the rest of the multi-tenant
     // hardening (design §7).
     const existed = mount.registry.delete(connectionId);
     if (existed) {
@@ -1058,7 +1151,10 @@ export function mountAcpHttp(
       res.status(404).json({ error: 'Unknown Acp-Connection-Id' });
       return;
     }
-    const sessionId = headerOf(req, ACP_SESSION_HEADER);
+    const rawSessionId = headerOf(req, ACP_SESSION_HEADER);
+    const sessionId = rawSessionId
+      ? normalizeSessionIdForLookup(rawSessionId)
+      : undefined;
 
     if (!sessionId) {
       // Connection-scoped stream. onClose logs the disconnect so a
@@ -1262,17 +1358,27 @@ export function mountAcpHttp(
           });
       },
       opts.maxConnections,
+      undefined,
+      preAttachBudget,
     );
     const workspaceRememberLane = new WorkspaceRememberTaskLane(
       rt.bridge,
       rt.workspaceCwd,
     );
+    const registeredGeneration = opts.workspaceRegistry?.getEntryByWorkspaceId(
+      rt.workspaceId,
+    )?.current;
+    const generationGuard =
+      registeredGeneration?.runtime === rt
+        ? registeredGeneration.guard
+        : rt.generationGuard;
     const secondaryDispatcher = new AcpDispatcher(
       rt.bridge,
       rt.workspaceCwd,
       () => runtimeEffectiveEnv(rt, daemonEnv),
       rt.workspaceService,
       workspaceRememberLane,
+      requestedSessionIdAdmission,
       rt.routeFileSystemFactory,
       // Phase 4: secondary mounts share the daemon-global device-flow registry
       // (single instance per daemon; OAuth credentials are global state). The
@@ -1282,13 +1388,21 @@ export function mountAcpHttp(
       opts.deviceFlowRegistry,
       opts.sessionShellCommandEnabled === true,
       secondaryRegistry,
-      opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+      archiveCoordinator,
       () => rt.trusted,
-      () => {
-        const guard = rt.generationGuard;
-        return guard ? () => guard.assertOpen() : undefined;
-      },
+      () => (generationGuard ? () => generationGuard.assertOpen() : undefined),
+      rt.provenance === 'live-conversation'
+        ? opts.liveSessionIsolation
+        : undefined,
       rt.sessionRuntimeBaseDir,
+      () => ({
+        bridge: rt.bridge,
+        sessionRuntimeBaseDir: rt.sessionRuntimeBaseDir,
+        workspaceId: rt.workspaceId,
+      }),
+      rt.provenance === 'live-conversation'
+        ? opts.standaloneSessionService
+        : undefined,
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
@@ -1332,7 +1446,9 @@ export function mountAcpHttp(
   const getOrCreateSecondaryMount = (
     rt: WorkspaceRuntime,
   ): RuntimeAcpMount | undefined => {
-    if (rt.primary || !rt.trusted) return undefined;
+    if (rt.primary || !rt.trusted || isInternalWorkspaceRuntime(rt)) {
+      return undefined;
+    }
     const existing = secondaryMounts.get(rt.workspaceId);
     if (existing) return existing;
     const mount = createSecondaryAcpMount(rt);
@@ -1424,10 +1540,25 @@ export function mountAcpHttp(
   let upgradeListener:
     | ((req: IncomingMessage, socket: Duplex, head: Buffer) => void)
     | undefined;
-  let upgradeServer: import('node:http').Server | undefined;
+  // A Set, not a single server: while Local Control is on, the same app is
+  // served by both the primary listener and the LAN listener, and each needs
+  // its own `'upgrade'` registration. The `ExtraWsRoute` invariant is
+  // unchanged — still exactly ONE listener per server, and still this one.
+  const upgradeServers = new Set<import('node:http').Server>();
+  const upgradeCredentials =
+    opts.credentials ?? singleTokenCredentials(opts.token);
 
   function setupWebSocket(httpServer: import('node:http').Server): void {
-    if (disposed || wss) return;
+    if (disposed || upgradeServers.has(httpServer)) return;
+    if (wss) {
+      // The `WebSocketServer` is `noServer: true` and therefore server-
+      // agnostic, so a second listener reuses it rather than building a
+      // parallel one — which would give the LAN its own client set, its own
+      // `maxPayload`, and its own shutdown path to get wrong.
+      upgradeServers.add(httpServer);
+      httpServer.on('upgrade', upgradeListener!);
+      return;
+    }
     wss = new WebSocketServer({
       noServer: true,
       maxPayload: 10 * 1024 * 1024,
@@ -1447,10 +1578,7 @@ export function mountAcpHttp(
         return false;
       },
     });
-    upgradeServer = httpServer;
-    const expectedTokenHash = opts.token
-      ? createHash('sha256').update(opts.token).digest()
-      : undefined;
+    upgradeServers.add(httpServer);
 
     upgradeListener = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
       if (disposed) {
@@ -1505,20 +1633,39 @@ export function mountAcpHttp(
       }
 
       const fromLoopback = isLoopbackSocket(socket);
+      const upgradeListenerIdentity = listenerIdentityOfSocket(socket);
+      const host = (req.headers['host'] ?? '').toLowerCase();
 
       // Host allowlist: mirror REST surface's hostAllowlist middleware
       // (auth.ts:196). Prevents DNS-rebinding attacks where a malicious
       // domain resolves to 127.0.0.1 and the browser sends the
       // attacker's Host header. Match the full host:port string like
       // the REST middleware does; extract port from the socket.
-      if (fromLoopback) {
-        const host = (req.headers['host'] ?? '').toLowerCase();
+      if (upgradeListenerIdentity.kind === 'local-control') {
+        const authority = upgradeListenerIdentity.authority;
+        const browserHost =
+          upgradeListenerIdentity.origin === undefined
+            ? undefined
+            : new URL(upgradeListenerIdentity.origin).host.toLowerCase();
+        if (
+          authority === undefined ||
+          (host !== authority && host !== browserHost)
+        ) {
+          logReject(`host-not-allowed ${host || '(missing)'}`);
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+      } else if (fromLoopback) {
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,
           `[::1]:${localPort}`,
           `host.docker.internal:${localPort}`,
         ]);
+        if (opts.hostname && isLoopbackBind(opts.hostname)) {
+          allowed.add(`${formatHostForAuthority(opts.hostname)}:${localPort}`);
+        }
         // RFC 7230 §5.4: browsers omit the port suffix when it matches the
         // scheme default (http→80, https→443). On TLS/port 443 the browser
         // sends `Host: localhost`, which won't match `localhost:443` and
@@ -1529,6 +1676,9 @@ export function mountAcpHttp(
           allowed.add('127.0.0.1');
           allowed.add('[::1]');
           allowed.add('host.docker.internal');
+          if (opts.hostname && isLoopbackBind(opts.hostname)) {
+            allowed.add(formatHostForAuthority(opts.hostname));
+          }
         }
         if (!allowed.has(host)) {
           logReject(`host-not-allowed ${host || '(missing)'}`);
@@ -1544,7 +1694,11 @@ export function mountAcpHttp(
       const origin = req.headers['origin'];
       if (origin) {
         try {
-          const isLoopbackOrigin = isSameLoopbackOrigin(origin, localPort);
+          const isLoopbackOrigin = isSameLoopbackOrigin(
+            origin,
+            localPort,
+            opts.hostname,
+          );
           // `--allow-origin` allowlist (same match semantics as the REST
           // `allowOriginCors`): lets an explicitly permitted non-loopback
           // origin — e.g. a browser extension's `chrome-extension://<id>`
@@ -1552,7 +1706,10 @@ export function mountAcpHttp(
           const isAllowlistedOrigin =
             opts.allowedOrigins !== undefined &&
             opts.allowedOrigins.origins.has(origin.toLowerCase());
-          if (!isLoopbackOrigin && !isAllowlistedOrigin) {
+          const isListenerOrigin =
+            upgradeListenerIdentity.kind === 'local-control' &&
+            upgradeListenerIdentity.origin === origin.toLowerCase();
+          if (!isLoopbackOrigin && !isAllowlistedOrigin && !isListenerOrigin) {
             logReject(`origin-not-allowed ${origin}`);
             socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
             socket.destroy();
@@ -1568,19 +1725,20 @@ export function mountAcpHttp(
 
       // Auth: WS bypasses Express middleware. Same posture as REST:
       // loopback without token = allow; non-loopback/token-mismatch = reject.
-      if (opts.token) {
+      //
+      // Scoped to the listener the upgrade arrived on, exactly as the REST
+      // gate is: an upgrade reaching the LAN listener must carry the pairing
+      // credential, and the runtime token does not satisfy it. Without this
+      // the subprotocol path would be a way around the scoping that
+      // `bearerAuth` enforces for plain HTTP.
+      if (!upgradeCredentials.isOpen(upgradeListenerIdentity)) {
         // Accept the token from `Authorization` (non-browser clients) or the
         // `qwen-bearer.*` subprotocol (browsers, which can't set Authorization
         // on a WebSocket). Hash-compare in constant time, same posture as REST.
-        const credentials = extractUpgradeBearer(req);
-        const actual = credentials
-          ? createHash('sha256').update(credentials).digest()
-          : undefined;
+        const presented = extractUpgradeBearer(req);
         if (
-          !actual ||
-          !expectedTokenHash ||
-          actual.length !== expectedTokenHash.length ||
-          !timingSafeEqual(expectedTokenHash, actual)
+          !presented ||
+          !upgradeCredentials.verify(presented, upgradeListenerIdentity)
         ) {
           logReject('auth-mismatch');
           socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -1627,6 +1785,12 @@ export function mountAcpHttp(
               : undefined))
           : undefined;
         if (!runtime) {
+          logReject(`workspace-mismatch ${logSafe(selector)}`);
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        if (isInternalWorkspaceRuntime(runtime)) {
           logReject(`workspace-mismatch ${logSafe(selector)}`);
           socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
           socket.destroy();
@@ -1684,6 +1848,12 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
+        if (isInternalWorkspaceRuntime(rt)) {
+          logReject(`workspace-mismatch ${logSafe(selector)}`);
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
         const entry = wsRegistry.getEntryByWorkspaceId(rt.workspaceId);
         if (
           !entry ||
@@ -1715,7 +1885,7 @@ export function mountAcpHttp(
         activeMount = resolvedMount;
       }
 
-      if (activeMount.draining) {
+      if (extraRoute?.bypassPrimaryDrain !== true && activeMount.draining) {
         logReject(`workspace-draining ${activeMount.routeLabel}`);
         socket.write(
           'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 5\r\n\r\n',
@@ -2215,9 +2385,13 @@ export function mountAcpHttp(
             message.params &&
             typeof message.params === 'object'
           ) {
-            const sid = (message.params as Record<string, unknown>)[
+            const rawSid = (message.params as Record<string, unknown>)[
               'sessionId'
             ];
+            const sid =
+              typeof rawSid === 'string'
+                ? normalizeSessionIdForLookup(rawSid)
+                : rawSid;
             if (typeof sid === 'string' && conn.ownsSession(sid)) {
               const binding = conn.sessions.get(sid);
               if (
@@ -2303,10 +2477,12 @@ export function mountAcpHttp(
     dispose: () => {
       if (disposed) return;
       disposed = true;
-      if (upgradeServer && upgradeListener) {
-        upgradeServer.removeListener('upgrade', upgradeListener);
+      if (upgradeListener) {
+        for (const server of upgradeServers) {
+          server.removeListener('upgrade', upgradeListener);
+        }
+        upgradeServers.clear();
         upgradeListener = undefined;
-        upgradeServer = undefined;
       }
       registry.dispose();
       opts.workspaceRememberLane.dispose();
@@ -2407,6 +2583,7 @@ export function mountAcpHttp(
           snap: mount.registry.getSnapshot(),
         });
       }
+      const preAttach = preAttachBudget.snapshot();
       return {
         connectionCount: perMount.reduce(
           (n, m) => n + m.snap.connectionCount,
@@ -2423,11 +2600,22 @@ export function mountAcpHttp(
           (n, m) => n + m.snap.pendingClientRequests,
           0,
         ),
+        bufferedConnectionFrames: perMount.reduce(
+          (n, m) => n + m.snap.bufferedConnectionFrames,
+          0,
+        ),
+        bufferedSessionFrames: perMount.reduce(
+          (n, m) => n + m.snap.bufferedSessionFrames,
+          0,
+        ),
+        pendingDeliveryFrames: preAttach.pendingDeliveryFrames,
+        preAttach,
         mounts: perMount.map((m) => ({
           workspaceId: m.workspaceId,
           primary: m.primary,
           connectionCount: m.snap.connectionCount,
           wsStreams: m.snap.wsStreams,
+          preAttachGuardFailures: m.snap.preAttachGuardFailures,
         })),
         connections: perMount.flatMap((mount) =>
           mount.snap.connections.map((connection) => ({
@@ -2441,6 +2629,25 @@ export function mountAcpHttp(
     },
     attachServer(server: import('node:http').Server) {
       setupWebSocket(server);
+    },
+    detachServer(server: import('node:http').Server) {
+      if (!upgradeServers.delete(server)) return;
+      if (upgradeListener) server.removeListener('upgrade', upgradeListener);
+      // Closing the listener does not close sockets already upgraded off it.
+      // Local Control's disable must actually cut the phone off — leaving a
+      // live ACP socket open would mean the pairing token is revoked but the
+      // session it opened continues, which is the opposite of what the user
+      // asked for. 1001 "going away" is the honest code: the endpoint is
+      // disappearing, and clients treat it as non-retryable.
+      if (!wss) return;
+      for (const client of wss.clients) {
+        const clientSocket = (
+          client as unknown as { _socket?: { server?: unknown } }
+        )._socket;
+        if (clientSocket?.server === server) {
+          client.terminate();
+        }
+      }
     },
   };
 }

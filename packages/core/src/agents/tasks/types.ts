@@ -37,13 +37,11 @@
  * they have a separate lifecycle and their inclusion is deferred to a
  * follow-up.
  *
- * `workflow` (P4b) is registered/observed via `WorkflowRunRegistry` and
- * differs from the others in that the registry NEVER emits a
- * `<task-notification>` envelope — `WorkflowTool` already returns its
- * own llmContent + returnDisplay payload to the model on terminal, so
- * a second envelope would duplicate the signal. The kind is widened
- * here so the UI surfaces (pill / dialog / detail body) can switch on
- * `entry.kind === 'workflow'`.
+ * `workflow` (P4b) is registered/observed via `WorkflowRunRegistry`.
+ * Foreground workflows return through their normal tool result; background
+ * workflows emit one terminal notification through a separate completion
+ * channel. The kind is widened here so the UI surfaces (pill / dialog /
+ * detail body) can switch on `entry.kind === 'workflow'`.
  */
 export type TaskKind = 'agent' | 'shell' | 'monitor' | 'workflow';
 
@@ -64,7 +62,7 @@ export type TaskStatus =
  * Common envelope every task carries regardless of kind. Per-kind
  * modules extend this via intersection (`TaskBase & { kind: 'agent', ... }`).
  */
-export interface TaskBase {
+export interface TaskBase<Status extends string = TaskStatus> {
   /** Stable id used as the registry key. Per-kind types alias this to
    *  their existing field name (e.g. `agentId`) during the back-compat
    *  window; both fields are populated to the same value at register time. */
@@ -73,7 +71,7 @@ export interface TaskBase {
   kind: TaskKind;
   /** Human label rendered in the pill/panel/dialog. */
   description: string;
-  status: TaskStatus;
+  status: Status;
   /** ms epoch when the task was registered. */
   startTime: number;
   /** ms epoch when the task transitioned out of running. */
@@ -112,7 +110,7 @@ export interface TaskBase {
  * further (e.g. shells let the registry alias `outputPath` →
  * `outputFile`).
  */
-export type TaskRegistration<T extends TaskBase> = Omit<
+export type TaskRegistration<T extends TaskBase<string>> = Omit<
   T,
   'id' | 'kind' | 'outputOffset' | 'notified'
 >;

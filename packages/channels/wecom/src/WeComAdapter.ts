@@ -299,6 +299,23 @@ export class WeComChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    await this.sendAttributedMessage(chatId, text);
+  }
+
+  protected override async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendAttributedMessage(chatId, text, sourceLabel);
+  }
+
+  private async sendAttributedMessage(
+    chatId: string,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
     const client = this.client;
     if (!client) {
       throw new Error(
@@ -307,7 +324,14 @@ export class WeComChannel extends ChannelBase {
     }
 
     const { cleanedText, media } = parseOutboundMediaMarkers(text);
-    const chunks = splitMarkdownChunks(cleanedText);
+    const prefix =
+      sourceLabel && (cleanedText.trim().length > 0 || media.length > 0)
+        ? `${escapeWeComMarkdown(sourceLabel)}\n`
+        : undefined;
+    const chunks = splitMarkdownChunks(cleanedText, prefix);
+    if (chunks.length === 0 && media.length > 0 && prefix) {
+      chunks.push(prefix.trimEnd());
+    }
     if (chunks.length === 0 && media.length === 0) {
       process.stderr.write(
         `[WeCom:${this.name}] sendMessage produced empty payload for chatId=${sanitizeLogText(
@@ -440,30 +464,32 @@ export class WeComChannel extends ChannelBase {
         );
         return;
       }
-      attachments = await this.downloadAttachments(
-        body,
-        attachments,
-        messageId,
-        attachmentRouteKey,
-        connectionGeneration,
-      );
-      if (this.disconnectGeneration !== connectionGeneration) {
-        process.stderr.write(
-          `[WeCom:${this.name}] dropping message ${logMessageId}: connection changed during attachment download.\n`,
+      await this.processPreflightedInbound(envelope, async () => {
+        attachments = await this.downloadAttachments(
+          body,
+          attachments,
+          messageId,
+          attachmentRouteKey,
+          connectionGeneration,
         );
-        return;
-      }
-      if (attachments.length) {
-        envelope.attachments = attachments;
-      }
-      if (!envelope.text && attachments.length) {
-        envelope.text = attachments.some((a) => a.type === 'image')
-          ? '(image)'
-          : `(file: ${attachments[0]?.fileName ?? 'file'})`;
-      }
-      if (rawMessageId) this.seenMessages.set(rawMessageId, Date.now());
-      processStarted = true;
-      await this.processInbound(envelope);
+        if (this.disconnectGeneration !== connectionGeneration) {
+          process.stderr.write(
+            `[WeCom:${this.name}] dropping message ${logMessageId}: connection changed during attachment download.\n`,
+          );
+          return;
+        }
+        if (attachments.length) {
+          envelope.attachments = attachments;
+        }
+        if (!envelope.text && attachments.length) {
+          envelope.text = attachments.some((a) => a.type === 'image')
+            ? '(image)'
+            : `(file: ${attachments[0]?.fileName ?? 'file'})`;
+        }
+        if (rawMessageId) this.seenMessages.set(rawMessageId, Date.now());
+        processStarted = true;
+        await this.processInbound(envelope);
+      });
     } catch (err) {
       if (rawMessageId && !processStarted) {
         this.seenMessages.delete(rawMessageId);
@@ -770,6 +796,10 @@ export class WeComChannel extends ChannelBase {
     switch (this.config.sessionScope) {
       case 'thread':
         return `${this.name}:${threadId || chatId}`;
+      case 'chat_thread':
+        return threadId
+          ? `${this.name}:${chatId}:${threadId}`
+          : `${this.name}:${chatId}`;
       case 'single':
         return `${this.name}:__single__`;
       case 'user':
@@ -1448,8 +1478,13 @@ function isWeComMediaType(value: string | undefined): value is WeComMediaType {
   );
 }
 
-function splitMarkdownChunks(text: string): string[] {
+function splitMarkdownChunks(text: string, prefix?: string): string[] {
   if (!text) return [];
+
+  const contentLimit = MARKDOWN_CHUNK_BYTES - Buffer.byteLength(prefix ?? '');
+  if (contentLimit <= 0) {
+    throw new Error('WeCom source label exceeds the markdown message limit.');
+  }
 
   const chunks: string[] = [];
   let current = '';
@@ -1458,7 +1493,7 @@ function splitMarkdownChunks(text: string): string[] {
     Buffer.byteLength(
       nextCodeFence ? `${value}\n${nextCodeFence}` : value,
       'utf8',
-    ) <= MARKDOWN_CHUNK_BYTES;
+    ) <= contentLimit;
   const flush = (closeCode = true): void => {
     if (!current) return;
     chunks.push(closeCode && codeFence ? `${current}\n${codeFence}` : current);
@@ -1515,7 +1550,11 @@ function splitMarkdownChunks(text: string): string[] {
   }
 
   flush();
-  return chunks;
+  return prefix ? chunks.map((chunk) => `${prefix}${chunk}`) : chunks;
+}
+
+function escapeWeComMarkdown(value: string): string {
+  return value.replace(/([\\`*_{}[\]()#+\-.!|>])/gu, '\\$1');
 }
 
 function toggleCodeFenceState(

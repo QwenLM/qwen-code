@@ -204,6 +204,19 @@ export class ToolRegistry {
   // tool's schema is included in subsequent function-declaration lists even
   // though it would normally be hidden.
   private revealedDeferred: Set<string> = new Set();
+  // Reveals that are session SETUP rather than ToolSearch discovery (see
+  // pinDeferredToolReveal): they survive the `/clear` reset that
+  // intentionally drops discovered reveals so the new session starts clean.
+  private pinnedDeferredReveals: Set<string> = new Set();
+  // Built-in tools demoted to deferred by an active `settings.tools.eager`
+  // allowlist (#9827, #10075). They are fully registered — listed
+  // in `/tools`, discoverable and loadable via ToolSearch, callable through
+  // the normal approval flow — but their schemas are kept out of the eager
+  // model request exactly like `shouldDefer=true` tools. Unlike ordinary
+  // deferred tools they are never auto-revealed by the budget preload:
+  // re-adding their schemas at startup would defeat the allowlist's
+  // schema-shrink purpose (#9827).
+  private permissionDeferred: Set<string> = new Set();
   private config: Config;
   private mcpClientManager: McpClientManager;
 
@@ -345,6 +358,43 @@ export class ToolRegistry {
   }
 
   /**
+   * Registers a lazy tool factory for a tool that an active
+   * `settings.tools.eager` allowlist demoted to deferred (#9827,
+   * #10075). Registration is identical to {@link registerFactory}; the name
+   * is additionally tracked so every deferred-hiding decision
+   * ({@link getFunctionDeclarations}, {@link isDeferredAndHidden},
+   * {@link getDeferredToolSummary}) treats it like a `shouldDefer=true`
+   * tool while {@link preloadDeferredToolsWithinBudget} skips it.
+   */
+  registerPermissionDeferredFactory(name: string, factory: ToolFactory): void {
+    if (this.isToolDisabled(name)) {
+      debugLogger.info(
+        `Tool factory "${name}" skipped: present in disabledTools set.`,
+      );
+      return;
+    }
+    this.factories.set(name, factory);
+    this.permissionDeferred.add(name);
+  }
+
+  /**
+   * Whether a registered tool instance is permission-deferred (see
+   * {@link registerPermissionDeferredFactory}).
+   */
+  isPermissionDeferred(name: string): boolean {
+    return this.permissionDeferred.has(name);
+  }
+
+  /**
+   * Whether a tool is deferred for hiding purposes: either the tool class
+   * opted in via `shouldDefer=true`, or an active `settings.tools.eager`
+   * allowlist demoted it (#10075).
+   */
+  private isEffectivelyDeferred(tool: AnyDeclarativeTool): boolean {
+    return tool.shouldDefer || this.permissionDeferred.has(tool.name);
+  }
+
+  /**
    * Ensures a specific tool is loaded. Returns the cached instance if already
    * loaded, otherwise invokes the factory, caches the result, and returns it.
    * Concurrent calls for the same name share a single in-flight promise so the
@@ -417,6 +467,9 @@ export class ToolRegistry {
         !this.tools.has(tool.name)
       ) {
         this.tools.set(tool.name, tool);
+        if (source.isPermissionDeferred(tool.name)) {
+          this.permissionDeferred.add(tool.name);
+        }
       }
     }
   }
@@ -690,10 +743,36 @@ export class ToolRegistry {
         }
       }
       // register each function as a tool
+      //
+      // The same PermissionManager gate that createToolRegistry applies to
+      // built-ins (via registerLazy) applies here too, with the same
+      // three-state outcome. A discovered tool the `tools.eager` allowlist
+      // omits is DEFERRED, not dropped: its schema stays out of the eager
+      // model request (the #9827 guarantee) while the tool remains listed
+      // in `/tools` and loadable on demand via ToolSearch. Dropping it
+      // instead would recreate exactly the silent-disappearance bug that
+      // #10075 reported for built-ins, just under a different knob.
+      // Whole-tool deny rules still remove the tool outright ("a whole-tool
+      // deny rule also removes the tool from the registry", settings.md),
+      // and deny rules still apply at runtime regardless.
+      const permissionManager = this.config.getPermissionManager?.();
       for (const func of functions) {
         if (!func.name) {
           debugLogger.warn('Discovered a tool with no name. Skipping.');
           continue;
+        }
+        let deferred = false;
+        if (permissionManager) {
+          const status = await permissionManager.getToolRegistrationStatus(
+            func.name,
+          );
+          if (status === 'disabled') {
+            debugLogger.info(
+              `Discovered tool "${func.name}" skipped: removed by a whole-tool deny rule or the legacy coreTools allowlist.`,
+            );
+            continue;
+          }
+          deferred = status === 'deferred';
         }
         const parameters =
           func.parametersJsonSchema &&
@@ -709,6 +788,12 @@ export class ToolRegistry {
             parameters as Record<string, unknown>,
           ),
         );
+        // Mark AFTER registerTool so every deferred-hiding decision
+        // (getFunctionDeclarations / isDeferredAndHidden /
+        // getDeferredToolSummary) treats it like a `shouldDefer` tool.
+        if (deferred) {
+          this.permissionDeferred.add(func.name);
+        }
       }
     } catch (e) {
       debugLogger.error(`Tool discovery command "${discoveryCmd}" failed:`, e);
@@ -738,7 +823,7 @@ export class ToolRegistry {
       .filter(
         (tool) =>
           includeDeferred ||
-          !tool.shouldDefer ||
+          !this.isEffectivelyDeferred(tool) ||
           tool.alwaysLoad ||
           !this.isDeferredAndHidden(tool.name),
       )
@@ -754,6 +839,20 @@ export class ToolRegistry {
    */
   revealDeferredTool(name: string): void {
     this.revealedDeferred.add(name);
+  }
+
+  /**
+   * Marks a deferred tool's reveal as session-setup state that must survive
+   * `/clear` resets: {@link clearRevealedDeferredTools} re-reveals pinned
+   * tools (while still registered and deferred) so the fresh session's
+   * `startChat` → `setTools()` re-declares them. Without a pin, a tool
+   * revealed at session creation silently drops out of the declaration list
+   * on the first `/clear` whenever the budget-based startup preload
+   * withholds it — that preload is all-or-nothing on a schema-size budget
+   * and returns early when preloading is disabled.
+   */
+  pinDeferredToolReveal(name: string): void {
+    this.pinnedDeferredReveals.add(name);
   }
 
   /**
@@ -776,7 +875,8 @@ export class ToolRegistry {
   /**
    * Whether a deferred tool is currently hidden from the model's
    * function-declaration list. Returns `true` when the tool:
-   * - is deferred (`shouldDefer=true`),
+   * - is deferred (`shouldDefer=true`, or demoted by an active
+   *   `settings.tools.eager` allowlist, #10075),
    * - is not always-loaded,
    * - has not been revealed this session, AND
    * - is not in the visibleTools config list.
@@ -785,7 +885,7 @@ export class ToolRegistry {
     const tool = this.tools.get(name);
     if (!tool) return false;
     return (
-      tool.shouldDefer &&
+      this.isEffectivelyDeferred(tool) &&
       !tool.alwaysLoad &&
       !this.revealedDeferred.has(name) &&
       !this.config.getVisibleTools().has(name)
@@ -793,12 +893,21 @@ export class ToolRegistry {
   }
 
   /**
-   * Clears the set of revealed deferred tools. Called by {@link GeminiClient}
+   * Clears the set of revealed deferred tools. Called by {@link LlmClient}
    * when a chat session is reset (e.g. `/clear`) so the new session starts
-   * with no revealed tools — the same state as any fresh session.
+   * with no ToolSearch-discovered reveals — the same state as any fresh
+   * session. Session-setup reveals pinned via {@link pinDeferredToolReveal}
+   * survive the reset (while still registered and deferred): they are part
+   * of that fresh session's setup, not of the dropped session's discovery.
    */
   clearRevealedDeferredTools(): void {
     this.revealedDeferred.clear();
+    for (const name of this.pinnedDeferredReveals) {
+      const tool = this.tools.get(name);
+      if (tool && this.isEffectivelyDeferred(tool) && !tool.alwaysLoad) {
+        this.revealedDeferred.add(name);
+      }
+    }
   }
 
   /**
@@ -812,7 +921,7 @@ export class ToolRegistry {
     const summary: DeferredToolSummary[] = [];
     this.tools.forEach((tool) => {
       if (
-        tool.shouldDefer &&
+        this.isEffectivelyDeferred(tool) &&
         !tool.alwaysLoad &&
         !this.config.getVisibleTools().has(tool.name)
       ) {
@@ -848,7 +957,14 @@ export class ToolRegistry {
     const candidates: string[] = [];
     let totalChars = 0;
     for (const tool of this.tools.values()) {
-      if (!tool.shouldDefer || tool.alwaysLoad) continue;
+      if (!this.isEffectivelyDeferred(tool) || tool.alwaysLoad) continue;
+      // Permission-deferred tools (#10075) are deliberately excluded: the
+      // budget preload exists to stabilise the prompt cache for ordinary
+      // deferred tools, but auto-revealing a demoted tool would re-add
+      // exactly the schema the `settings.tools.eager` allowlist keeps out
+      // of the eager request (#9827). Such tools stay loadable on demand
+      // via ToolSearch.
+      if (this.permissionDeferred.has(tool.name)) continue;
       if (this.config.getVisibleTools().has(tool.name)) continue;
       candidates.push(tool.name);
       totalChars += JSON.stringify(tool.schema).length;

@@ -12,6 +12,7 @@ import type {
   SubagentMeta,
 } from '../types.js';
 import type {
+  AgentResultDisplay,
   Config,
   ToolRegistry,
   AnyDeclarativeTool,
@@ -600,6 +601,33 @@ describe('ToolCallEmitter', () => {
       expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toBeUndefined();
     });
 
+    it('should replay an intact saved patch without truncated file bodies', async () => {
+      const fileDiff = '--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new';
+
+      await emitter.emitResult({
+        toolName: 'edit_file',
+        callId: 'call-edit',
+        success: true,
+        message: [],
+        resultDisplay: {
+          fileName: '/test/file.ts',
+          originalContent: 'old preview',
+          newContent: 'new preview',
+          fileDiff,
+          truncatedForSession: true,
+          fileDiffTruncated: false,
+        },
+      });
+
+      expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toEqual({
+        fileName: '/test/file.ts',
+        fileDiff,
+      });
+      expect(sendUpdateSpy.mock.calls[0][0].content).not.toContainEqual(
+        expect.objectContaining({ type: 'diff' }),
+      );
+    });
+
     it('should transform message parts to content', async () => {
       await emitter.emitResult({
         toolName: 'test_tool',
@@ -652,9 +680,15 @@ describe('ToolCallEmitter', () => {
           message: [],
           resultDisplay: {
             type: 'todo_list',
+            planId: 'plan-1',
             todos: [
               { id: '1', content: 'Task 1', status: 'pending' },
-              { id: '2', content: 'Task 2', status: 'in_progress' },
+              {
+                id: '2',
+                content: 'Task 2',
+                status: 'in_progress',
+                blockedBy: ['1'],
+              },
             ],
           },
         });
@@ -663,9 +697,23 @@ describe('ToolCallEmitter', () => {
         expect(sendUpdateSpy).toHaveBeenCalledWith({
           sessionUpdate: 'plan',
           entries: [
-            { content: 'Task 1', priority: 'medium', status: 'pending' },
-            { content: 'Task 2', priority: 'medium', status: 'in_progress' },
+            {
+              content: 'Task 1',
+              priority: 'medium',
+              status: 'pending',
+              _meta: { qwenTodo: { id: '1' } },
+            },
+            {
+              content: 'Task 2',
+              priority: 'medium',
+              status: 'in_progress',
+              _meta: { qwenTodo: { id: '2', blockedBy: ['1'] } },
+            },
           ],
+          _meta: {
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'call-todo' },
+          },
         });
       });
 
@@ -684,8 +732,14 @@ describe('ToolCallEmitter', () => {
         expect(sendUpdateSpy).toHaveBeenCalledWith({
           sessionUpdate: 'plan',
           entries: [
-            { content: 'From args', priority: 'medium', status: 'completed' },
+            {
+              content: 'From args',
+              priority: 'medium',
+              status: 'completed',
+              _meta: { qwenTodo: { id: '1' } },
+            },
           ],
+          _meta: { qwenTranscript: { planToolCallId: 'call-todo' } },
         });
       });
 
@@ -708,6 +762,48 @@ describe('ToolCallEmitter', () => {
           success: true,
           message: [],
           resultDisplay: 'Some string result',
+        });
+
+        expect(sendUpdateSpy).not.toHaveBeenCalled();
+      });
+
+      it('should not publish rejected TodoWrite arguments as a plan', async () => {
+        await emitter.emitResult({
+          toolName: ToolNames.TODO_WRITE,
+          callId: 'call-invalid-todo',
+          success: true,
+          message: [],
+          resultDisplay:
+            'Error writing todos: dependency graph contains a cycle',
+          args: {
+            todos: [
+              {
+                id: 'a',
+                content: 'Invalid cycle',
+                status: 'pending',
+                blockedBy: ['a'],
+              },
+            ],
+          },
+        });
+
+        expect(sendUpdateSpy).not.toHaveBeenCalled();
+      });
+
+      it('does not promote a subagent TodoWrite as the session plan', async () => {
+        await emitter.emitResult({
+          toolName: ToolNames.TODO_WRITE,
+          callId: 'call-subagent-todo',
+          success: true,
+          message: [],
+          resultDisplay: {
+            type: 'todo_list',
+            todos: [{ id: '1', content: 'Child task', status: 'pending' }],
+          },
+          subagentMeta: {
+            parentToolCallId: 'parent-agent',
+            subagentType: 'explore',
+          },
         });
 
         expect(sendUpdateSpy).not.toHaveBeenCalled();
@@ -945,6 +1041,49 @@ describe('ToolCallEmitter', () => {
           provenance: 'builtin',
         });
       });
+
+      it('should omit diagnostic artifact summaries from rawOutput', async () => {
+        const resultDisplay: AgentResultDisplay = {
+          type: 'task_execution',
+          subagentName: 'test-agent',
+          taskDescription: 'Test task',
+          taskPrompt: 'Test prompt',
+          status: 'completed',
+          toolCalls: [
+            {
+              callId: 'child-call',
+              name: 'read_file',
+              status: 'success',
+              resultDisplay: 'done',
+              boundaryArtifact: { state: 'reusable', kinds: ['file'] },
+            },
+          ],
+        };
+
+        await emitter.emitResult({
+          toolName: 'task',
+          callId: 'parent-call',
+          success: true,
+          message: [],
+          resultDisplay,
+        });
+
+        expect(sendUpdateSpy.mock.calls[0][0].rawOutput).toEqual({
+          ...resultDisplay,
+          toolCalls: [
+            {
+              callId: 'child-call',
+              name: 'read_file',
+              status: 'success',
+              resultDisplay: 'done',
+            },
+          ],
+        });
+        expect(resultDisplay.toolCalls?.[0].boundaryArtifact).toEqual({
+          state: 'reusable',
+          kinds: ['file'],
+        });
+      });
     });
 
     describe('Fix 5: Line null mapping in resolveToolMetadata', () => {
@@ -989,6 +1128,9 @@ describe('ToolCallEmitter', () => {
         expect(sendUpdateSpy).toHaveBeenCalledWith({
           sessionUpdate: 'plan',
           entries: [],
+          _meta: {
+            qwenTranscript: { planToolCallId: 'call-todo-empty' },
+          },
         });
       });
 
@@ -1011,6 +1153,9 @@ describe('ToolCallEmitter', () => {
         expect(sendUpdateSpy).toHaveBeenCalledWith({
           sessionUpdate: 'plan',
           entries: [],
+          _meta: {
+            qwenTranscript: { planToolCallId: 'call-todo-cleared' },
+          },
         });
       });
     });

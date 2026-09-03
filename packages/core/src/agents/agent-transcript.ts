@@ -37,13 +37,22 @@ import type {
   ChatRecord,
 } from '../services/chatRecordingService.js';
 import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
-import type { SandboxConfig } from '../config/config.js';
+import type { Config, SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getCachedGitBranch } from '../utils/gitUtils.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
 import type { Content } from '@google/genai';
+import type {
+  AgentCompletionStats,
+  BackgroundActivity,
+} from './background-tasks.js';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 const MAX_PENDING_STREAM_BYTES = 64 * 1024;
+// Kept in sync by hand with MAX_RECENT_ACTIVITIES in background-tasks.ts.
+// That module imports patchAgentMeta from this one, so importing the constant
+// back would turn a type-only edge into a runtime import cycle.
+const MAX_PERSISTED_RECENT_ACTIVITIES = 10;
 
 export function sanitizeFilenameComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -154,6 +163,12 @@ export interface AgentMeta {
   model?: string;
   /** Last terminal error, if any. */
   lastError?: string;
+  /** This run belongs to an opted-in Session Workflow revision. */
+  sessionWorkflow?: boolean;
+  /** Terminal execution summary, when the run reached a known terminal state. */
+  stats?: AgentCompletionStats;
+  /** Capped terminal snapshot of the most recent tool activities. */
+  recentActivities?: BackgroundActivity[];
 }
 
 export interface AgentPersistedCliFlags {
@@ -251,6 +266,53 @@ export function patchAgentMeta(
   return next;
 }
 
+/**
+ * Returns the JSON-safe terminal summary persisted in an agent sidecar.
+ * Legacy sidecars simply omit these optional fields.
+ */
+export function getAgentMetaTerminalSummary(
+  stats?: AgentCompletionStats,
+  recentActivities?: readonly BackgroundActivity[],
+): Pick<AgentMeta, 'stats' | 'recentActivities'> {
+  const candidateStats = stats as unknown as
+    | Record<string, unknown>
+    | undefined;
+  const normalizedStats =
+    candidateStats &&
+    Number.isFinite(candidateStats['totalTokens']) &&
+    Number.isFinite(candidateStats['outputTokens']) &&
+    Number.isFinite(candidateStats['toolUses']) &&
+    Number.isFinite(candidateStats['durationMs'])
+      ? {
+          totalTokens: candidateStats['totalTokens'] as number,
+          outputTokens: candidateStats['outputTokens'] as number,
+          toolUses: candidateStats['toolUses'] as number,
+          durationMs: candidateStats['durationMs'] as number,
+        }
+      : undefined;
+  const normalizedActivities = Array.isArray(recentActivities)
+    ? recentActivities.filter(
+        (activity): activity is BackgroundActivity =>
+          activity !== null &&
+          typeof activity === 'object' &&
+          typeof activity.name === 'string' &&
+          typeof activity.description === 'string' &&
+          Number.isFinite(activity.at),
+      )
+    : undefined;
+
+  return {
+    ...(normalizedStats ? { stats: normalizedStats } : {}),
+    ...(normalizedActivities
+      ? {
+          recentActivities: normalizedActivities
+            .slice(-MAX_PERSISTED_RECENT_ACTIVITIES)
+            .map(({ name, description, at }) => ({ name, description, at })),
+        }
+      : {}),
+  };
+}
+
 export function readLastTranscriptRecordUuidSync(
   jsonlPath: string,
 ): string | null {
@@ -324,6 +386,53 @@ export interface AttachJsonlOptions {
    * branch away from any dangling tail produced by an interrupted turn.
    */
   initialParentUuid?: string | null;
+  /**
+   * 1-based attempt number when this attach resumes a transcript after a
+   * failed attempt (2+). Seeds an `agent_retry` system marker at the seam so
+   * the retry is visible on disk. Not implied by `appendToExisting` —
+   * background resume also appends without being a retry.
+   */
+  retryAttempt?: number;
+}
+
+/** Path + options pair for {@link attachJsonlTranscriptWriter}. */
+export interface AgentTranscriptAttachTarget {
+  jsonlPath: string;
+  options: AttachJsonlOptions;
+}
+
+/**
+ * Single owner of the agent-transcript attach contract: the JSONL path plus
+ * the launch metadata shared by every attach site (AgentTool's foreground
+ * and background launches, workflow dispatch, background resume). Each site
+ * layers its extras on top, so a new launch-metadata field added here lands
+ * in every transcript instead of only the sites that happened to be updated.
+ *
+ * The path follows the merged `sessionId` — the live session by default;
+ * background resume overrides it with the persisted parent session.
+ */
+export function buildAgentTranscriptAttach(
+  config: Config,
+  agentId: string,
+  extras?: Partial<AttachJsonlOptions>,
+): AgentTranscriptAttachTarget {
+  const projectRoot = config.getProjectRoot();
+  const options: AttachJsonlOptions = {
+    agentId,
+    sessionId: config.getSessionId(),
+    cwd: projectRoot,
+    version: config.getCliVersion() || 'unknown',
+    gitBranch: getCachedGitBranch(projectRoot),
+    ...extras,
+  };
+  return {
+    jsonlPath: getAgentJsonlPath(
+      config.storage.getProjectDir(),
+      options.sessionId,
+      options.agentId,
+    ),
+    options,
+  };
 }
 
 export interface AttachJsonlTranscriptResult {
@@ -550,6 +659,10 @@ export function attachJsonlTranscriptWriter(
     recordSystem('agent_launch_prompt', {
       displayText: options.launchTaskPrompt,
     });
+  }
+
+  if (options.retryAttempt !== undefined) {
+    recordSystem('agent_retry', { attempt: options.retryAttempt });
   }
 
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);

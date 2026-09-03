@@ -21,7 +21,7 @@ These commands help you save, restore, and summarize work progress.
 | Command          | Description                                                              | Usage Examples                                                |
 | ---------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------- |
 | `/init`          | Analyze current directory and create initial context file                | `/init`                                                       |
-| `/summary`       | Generate project summary based on conversation history                   | `/summary`                                                    |
+| `/summary`       | Generate project summary based on conversation history                   | `/summary` or `/summary docs/my-summary.md`                   |
 | `/compress`      | Replace chat history with summary to save Tokens                         | `/compress` or `/summarize`                                   |
 | `/compress-fast` | Fast compression without AI — strips old tool outputs and thinking parts | `/compress-fast`                                              |
 | `/resume`        | Resume a previous conversation session                                   | `/resume` or `/continue`                                      |
@@ -37,6 +37,10 @@ These commands help you save, restore, and summarize work progress.
 > [!note]
 >
 > `/summarize` is an alias for `/compress` (it compresses chat history — a destructive operation). To generate a non-destructive project summary instead, use `/summary`.
+
+> [!note]
+>
+> `/summary` accepts an optional `[path]` argument to save the summary to a custom location within the project root. Without an argument, it saves to `.qwen/PROJECT_SUMMARY.md`. Custom-path summaries are not detected by the welcome-back flow (`ui.enableWelcomeBack`), which only reads the default `.qwen/PROJECT_SUMMARY.md` location.
 
 ### 1.2 Interface and Workspace Control
 
@@ -77,43 +81,49 @@ Commands specifically for controlling interface and output language.
 
 Commands for managing AI tools and models.
 
-| Command           | Description                                                                           | Usage Examples                                                                                            |
-| ----------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `/mcp`            | List configured MCP servers and tools                                                 | `/mcp`, `/mcp desc`, `/mcp nodesc`, `/mcp schema`                                                         |
-| `/import-config`  | Import MCP servers from Claude configs                                                | `/import-config all`, `/import-config claude-code`, `/import-config claude-desktop --scope user\|project` |
-| `/tools`          | Display currently available tool list                                                 | `/tools`, `/tools desc`                                                                                   |
-| `/skills`         | Open the Skills panel to browse, search, toggle, and launch skills                    | `/skills`, `/<skill-name>`                                                                                |
-| `/plan`           | Switch to plan mode or exit plan mode                                                 | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
-| `/approval-mode`  | Change the tool-approval mode (current session only)                                  | `/approval-mode`, `/approval-mode auto-edit`                                                              |
-| → `plan`          | Analysis only, no execution (secure review)                                           | `/approval-mode plan`                                                                                     |
-| → `default`       | Require approval for edits (daily use)                                                | `/approval-mode default`                                                                                  |
-| → `auto-edit`     | Auto-approve edits (trusted environment)                                              | `/approval-mode auto-edit`                                                                                |
-| → `auto`          | Classifier-evaluated approval (autonomous)                                            | `/approval-mode auto`                                                                                     |
-| → `yolo`          | Auto-approve everything (quick prototyping)                                           | `/approval-mode yolo`                                                                                     |
-| `/model`          | Switch model used in current session                                                  | `/model`, `/model <model-id>` (switch immediately)                                                        |
-| `/model --fast`   | Set a lighter model for prompt suggestions                                            | `/model --fast qwen3-coder-flash`                                                                         |
-| `/model --voice`  | Set the model used for voice transcription                                            | `/model --voice <model-id>`                                                                               |
-| `/model --vision` | Set the vision-bridge model used to transcribe images for a text-only main model      | `/model --vision <model-id>`                                                                              |
-| `/effort`         | Set reasoning effort for thinking-capable models                                      | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
-| `/extensions`     | Manage extensions                                                                     | `/extensions list`, `/extensions manage`                                                                  |
-| → `list`          | List installed extensions                                                             | `/extensions list`                                                                                        |
-| → `manage`        | Manage installed extensions (interactive)                                             | `/extensions manage`                                                                                      |
-| → `explore`       | Open extensions page in browser                                                       | `/extensions explore <Gemini\|ClaudeCode>`                                                                |
-| → `install`       | Install an extension from a git repo or path                                          | `/extensions install <repo-or-path>`                                                                      |
-| `/memory`         | Open the Memory Manager dialog                                                        | `/memory`                                                                                                 |
-| `/remember`       | Save a durable memory                                                                 | `/remember Prefer terse responses`                                                                        |
-| `/forget`         | Remove matching entries from auto-memory                                              | `/forget <query>`                                                                                         |
-| `/dream`          | Manually run auto-memory consolidation                                                | `/dream`                                                                                                  |
-| `/hooks`          | Manage Qwen Code hooks                                                                | `/hooks`, `/hooks list`                                                                                   |
-| `/reload-plugins` | Reload extension changes (commands, skills, agents, hooks, MCP/LSP servers) from disk | `/reload-plugins`                                                                                         |
-| `/permissions`    | Manage permission rules                                                               | `/permissions`                                                                                            |
-| `/agents`         | Manage subagents                                                                      | `/agents manage`, `/agents create`                                                                        |
-| `/arena`          | Manage Arena sessions                                                                 | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
-| `/goal`           | Set a goal — keep working until condition met                                         | `/goal <condition>`, `/goal clear`                                                                        |
-| `/tasks`          | List background tasks                                                                 | `/tasks`                                                                                                  |
-| `/workflows`      | Inspect workflow runs                                                                 | `/workflows`, `/workflows <runId>`                                                                        |
-| `/lsp`            | Show LSP server status                                                                | `/lsp`                                                                                                    |
-| `/trust`          | Manage folder trust settings                                                          | `/trust`                                                                                                  |
+| Command               | Description                                                                           | Usage Examples                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `/mcp`                | List configured MCP servers and tools                                                 | `/mcp`, `/mcp desc`, `/mcp nodesc`, `/mcp schema`                                                         |
+| `/import-config`      | Import MCP servers from Claude configs                                                | `/import-config all`, `/import-config claude-code`, `/import-config claude-desktop --scope user\|project` |
+| `/tools`              | Display currently available tool list                                                 | `/tools`, `/tools desc`                                                                                   |
+| `/skills`             | Open the Skills panel to browse, search, toggle, and launch skills                    | `/skills`, `/<skill-name>`                                                                                |
+| `/learn`              | Create a reusable project skill from a file, directory, URL, video, or text           | `/learn https://docs.example.com/api`, `/learn ./tutorial.mp4 focus on deployment`                        |
+| `/curator`            | Inspect, pin, archive, or restore inactive project auto-skills                        | `/curator`, `/curator run --dry-run`, `/curator pin <directory>`, `/curator restore <directory>`          |
+| `/plan`               | Switch to plan mode or exit plan mode                                                 | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
+| `/approval-mode`      | Change the tool-approval mode (current session only)                                  | `/approval-mode`, `/approval-mode auto-edit`                                                              |
+| → `plan`              | Analysis only, no execution (secure review)                                           | `/approval-mode plan`                                                                                     |
+| → `default`           | Require approval for edits (daily use)                                                | `/approval-mode default`                                                                                  |
+| → `auto-edit`         | Auto-approve edits (trusted environment)                                              | `/approval-mode auto-edit`                                                                                |
+| → `auto`              | Classifier-evaluated approval (autonomous)                                            | `/approval-mode auto`                                                                                     |
+| → `yolo`              | Auto-approve everything (quick prototyping)                                           | `/approval-mode yolo`                                                                                     |
+| `/peers`              | Review messages held from other Qwen Code sessions on this machine                    | `/peers`, `/peers accept <id>`, `/peers deny all`                                                         |
+| `/model`              | Switch model used in current session                                                  | `/model`, `/model <model-id>` (switch immediately)                                                        |
+| `/model --fast`       | Set a lighter model for prompt suggestions                                            | `/model --fast qwen3-coder-flash`                                                                         |
+| `/model --voice`      | Set the model used for voice transcription                                            | `/model --voice <model-id>`                                                                               |
+| `/model --vision`     | Set the vision-bridge model used to transcribe images for a text-only main model      | `/model --vision <model-id>`                                                                              |
+| `/model --compaction` | Set the model used for chat compression                                               | `/model --compaction <model-id>`, `/model --compaction clear`                                             |
+| `/model --image`      | Set an image-generation-capable model for the built-in image generation tool          | `/model --image <model-id>`                                                                               |
+| `/effort`             | Set reasoning effort for thinking-capable models                                      | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
+| `/output-style`       | Choose the output style that shapes how responses are written                         | `/output-style` (opens picker), `/output-style Concise`, `/output-style default` (no style)               |
+| `/extensions`         | Manage extensions                                                                     | `/extensions list`, `/extensions manage`                                                                  |
+| → `list`              | List installed extensions                                                             | `/extensions list`                                                                                        |
+| → `manage`            | Manage installed extensions (interactive)                                             | `/extensions manage`                                                                                      |
+| → `explore`           | Open extensions page in browser                                                       | `/extensions explore <Gemini\|ClaudeCode>`                                                                |
+| → `install`           | Install an extension from a git repo or path                                          | `/extensions install <repo-or-path>`                                                                      |
+| `/memory`             | Open the Memory Manager dialog                                                        | `/memory`                                                                                                 |
+| `/remember`           | Save a durable memory                                                                 | `/remember Prefer terse responses`                                                                        |
+| `/forget`             | Remove matching entries from auto-memory                                              | `/forget <query>`                                                                                         |
+| `/dream`              | Manually run auto-memory consolidation                                                | `/dream`                                                                                                  |
+| `/hooks`              | Manage Qwen Code hooks                                                                | `/hooks`, `/hooks list`                                                                                   |
+| `/reload-plugins`     | Reload extension changes (commands, skills, agents, hooks, MCP/LSP servers) from disk | `/reload-plugins`                                                                                         |
+| `/permissions`        | Manage permission rules                                                               | `/permissions`                                                                                            |
+| `/agents`             | Manage subagents                                                                      | `/agents manage`, `/agents create`                                                                        |
+| `/arena`              | Manage Arena sessions                                                                 | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
+| `/goal`               | Set a Goal — keep working until a verifier confirms it (see [Goals](./goals.md))      | `/goal <objective>`, `/goal edit <objective>`, `/goal pause`, `/goal resume`, `/goal clear`               |
+| `/tasks`              | List background tasks                                                                 | `/tasks`                                                                                                  |
+| `/workflows`          | Inspect workflow runs; cooperatively pause/resume a background run                    | `/workflows`, `/workflows <runId>`, `/workflows p <runId>`                                                |
+| `/lsp`                | Show LSP server status                                                                | `/lsp`                                                                                                    |
+| `/trust`              | Manage folder trust settings                                                          | `/trust`                                                                                                  |
 
 > [!warning]
 >
@@ -125,18 +135,20 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. When disabled they won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
 
 ### 1.5 Built-in Skills
 
 These commands invoke bundled skills that provide specialized workflows.
 
-| Command      | Description                                                 | Usage Examples                                                            |
-| ------------ | ----------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `/review`    | Multi-agent code review (12 parallel agents at high effort) | `/review`, `/review 123`, `/review 123 --comment`, `/review --effort low` |
-| `/loop`      | Run a prompt on a recurring schedule                        | `/loop 5m check the build`                                                |
-| `/simplify`  | Review recent changes and apply safe cleanup edits directly | `/simplify`, `/simplify focus on duplication`                             |
-| `/qc-helper` | Answer questions about Qwen Code usage and configuration    | `/qc-helper how do I configure MCP?`                                      |
+| Command       | Description                                                   | Usage Examples                                                            |
+| ------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `/review`     | Multi-agent code review (12 parallel agents at high effort)   | `/review`, `/review 123`, `/review 123 --comment`, `/review --effort low` |
+| `/coordinate` | Coordinate read-only workers and one optional worktree writer | `/coordinate investigate and fix the authentication regression`           |
+| `/loop`       | Run a prompt on a recurring schedule                          | `/loop 5m check the build`                                                |
+| `/goal-draft` | Turn a fuzzy intention into a verifiable `/goal` objective    | `/goal-draft make the auth tests pass`                                    |
+| `/simplify`   | Review recent changes and apply safe cleanup edits directly   | `/simplify`, `/simplify focus on duplication`                             |
+| `/qc-helper`  | Answer questions about Qwen Code usage and configuration      | `/qc-helper how do I configure MCP?`                                      |
 
 See [Code Review](./code-review.md) for full `/review` documentation.
 
@@ -208,7 +220,70 @@ The `/btw` command allows you to ask quick side questions without interrupting o
 >
 > Use `/btw` when you need a quick answer without derailing your main task. It's especially useful for clarifying concepts, checking facts, or getting quick explanations while staying focused on your primary workflow.
 
-### 1.7 Session Recap (`/recap`)
+### 1.7 Second Opinion (`/advisor`)
+
+The `/advisor` command runs an independent, read-only review of the conversation so far and returns a structured second opinion — without performing the task or interrupting the main conversation.
+
+| Command            | Description                            |
+| ------------------ | -------------------------------------- |
+| `/advisor`         | Review the conversation above          |
+| `/advisor <focus>` | Focus the review on a specific concern |
+
+**How It Works:**
+
+- The review is sent as a separate, single-turn API call with recent conversation context (up to the last 40 messages)
+- The reviewer model **cannot execute tools** — tools are stripped at the request level (the same mechanism as `/btw`), so the review never writes code or runs commands; every claim must be grounded in the visible transcript
+- The main conversation is **not** interrupted; the review is shown only to you
+- The review is rendered as a boxed markdown block with four fixed sections — **Verdict**, **Risks**, **Missing evidence**, and **Recommendation** — under an `/advisor · <model>` header that names the resolved reviewer model
+- Unlike `/btw`, which is fire-and-forget and leaves the session usable, `/advisor` blocks input until the review returns; over a full context window with a strong reviewer this can take tens of seconds
+- By default the main model is used; set [`advisorModel`](../configuration/settings.md#advisormodel) to route the review to a different (typically stronger) model — the recent transcript is sent to that model even when it uses another provider
+
+**Example:**
+
+```
+> /advisor is my fix for the null check actually correct?
+
+  Consulting advisor...
+
+  ╭──────────────────────────────────────────────────────╮
+  │ /advisor · qwen3-max                                 │
+  │                                                      │
+  │ Verdict                                              │
+  │ The approach is sound, but the edge case at line 42  │
+  │ is unverified.                                       │
+  │                                                      │
+  │ Risks                                                │
+  │  - The fix assumes the config is always loaded; a    │
+  │    startup race could leave it null.                 │
+  │                                                      │
+  │ Missing evidence                                     │
+  │  - No test exercises the null-config path in the     │
+  │    visible transcript.                               │
+  │                                                      │
+  │ Recommendation                                       │
+  │ Add a focused unit test for the null-config branch   │
+  │ before merging.                                      │
+  ╰──────────────────────────────────────────────────────╯
+```
+
+The review renders in a bordered box whose header names the resolved reviewer model. An unknown `advisorModel` is not validated up front — if the provider rejects it, `/advisor` reports the failure, so check the model name; only unresolvable alias selectors (e.g. `fast` with no fast model configured) fall back to the main model. Advisor requests do not use configured model fallbacks.
+
+**Supported Execution Modes:**
+
+| Mode                 | Behavior                                            |
+| -------------------- | --------------------------------------------------- |
+| Interactive          | Renders the four-section review in the conversation |
+| ACP (Agent Protocol) | Returns the review as a message result              |
+
+> [!tip]
+>
+> Use `/advisor` for a second opinion before committing to a direction — it is especially useful for catching flawed assumptions, unverified claims, or risky next steps. Configure `advisorModel` to get the review from a different model than the one driving the main conversation.
+
+> [!note]
+>
+> `advisorModel` is set in settings only; unlike `fastModel` and `visionModel`, it has no `/model` flag counterpart yet.
+
+### 1.8 Session Recap (`/recap`)
 
 The `/recap` command generates a short "where you left off" summary of the
 current session, so you can resume an old conversation without scrolling
@@ -259,7 +334,7 @@ this setting.
 > `general.showSessionRecap` to `true` to enable the auto-trigger; the
 > manual `/recap` command always works regardless of this setting.
 
-### 1.8 Diff Viewer (`/diff`)
+### 1.9 Diff Viewer (`/diff`)
 
 The `/diff` command opens an interactive diff viewer showing uncommitted changes and per-turn diffs. Use ←/→ to switch between the current git diff and individual conversation turns, ↑/↓ to browse files, and Enter to view inline diffs.
 
@@ -364,7 +439,7 @@ Use **Load more** at the bottom to fetch the next page of commits (50 per page).
 >
 > `/log` requires a git repository workspace. If the workspace is not a git repository or has no commits, the dialog shows a placeholder message.
 
-### 1.9 Information, Settings, and Help
+### 1.10 Information, Settings, and Help
 
 Commands for obtaining information and performing system settings.
 
@@ -403,7 +478,7 @@ Commands for obtaining information and performing system settings.
 >
 > `/config` reads and writes individual settings by dot-path key (e.g. `general.vimMode`), complementing the interactive `/settings` editor. Running `/config` with no argument (or `--help`) lists every settable key with its type and current value. `/config <key>` prints the current value — except for boolean keys, where it toggles the value. `/config <key>=<value>` sets the value. Changes are written to user settings (`~/.qwen/settings.json`). Only `boolean`, `string`, `number`, and `enum` settings can be changed this way — `array` and `object` settings must be edited in `settings.json` directly. Sensitive values (API keys, tokens, base URLs) are masked in output, and setting `tools.approvalMode` to `yolo` is blocked.
 
-### 1.10 Common Shortcuts
+### 1.11 Common Shortcuts
 
 | Shortcut           | Function                | Note                                                                      |
 | ------------------ | ----------------------- | ------------------------------------------------------------------------- |
@@ -413,7 +488,7 @@ Commands for obtaining information and performing system settings.
 | `Ctrl/cmd+Z`       | Undo input              | Text editing                                                              |
 | `Ctrl/cmd+Shift+Z` | Redo input              | Text editing                                                              |
 
-### 1.11 Authentication Commands
+### 1.12 Authentication Commands
 
 Use `/auth` inside a Qwen Code session to configure authentication. Use `/doctor` to inspect the current authentication and environment status.
 
@@ -632,9 +707,10 @@ These commands are run from the shell as `qwen <subcommand>` before starting an 
 
 ### Session Management
 
-| Command              | Description                       | Usage Examples                                               |
-| -------------------- | --------------------------------- | ------------------------------------------------------------ |
-| `qwen sessions list` | List recent conversation sessions | `qwen sessions list`, `qwen sessions list --json --limit 50` |
+| Command              | Description                                 | Usage Examples                                               |
+| -------------------- | ------------------------------------------- | ------------------------------------------------------------ |
+| `qwen sessions list` | List recent conversation sessions           | `qwen sessions list`, `qwen sessions list --json --limit 50` |
+| `qwen sessions ps`   | List interactive sessions running right now | `qwen sessions ps`, `qwen sessions ps --json`                |
 
 #### `qwen sessions list`
 
@@ -673,3 +749,127 @@ qwen sessions list --limit 50
 # Output as JSON for scripting
 qwen sessions list --json | jq .
 ```
+
+#### `qwen sessions ps`
+
+Lists the interactive Qwen Code sessions running on this machine right
+now. `sessions list` walks saved transcripts ("what have I worked on");
+this walks the live-process registry ("what is running at this moment").
+Records left behind by a killed session are swept as they are found.
+Headless sessions (`qwen -p`) do not register with the live-process
+registry, so they are not shown.
+
+**Flags:**
+
+| Flag     | Type    | Default | Description                                     |
+| -------- | ------- | ------- | ----------------------------------------------- |
+| `--json` | boolean | `false` | Output as JSON Lines (one JSON object per line) |
+
+**Human-readable output (default):**
+
+A table with columns: NAME, PID, AGE, DIRECTORY.
+
+**JSON output (`--json`):**
+
+Outputs JSON Lines on stdout, newest session first. Each line is a JSON
+object with fields:
+
+```
+schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
+qwenVersion
+```
+
+Nothing else is written to stdout — an empty listing prints nothing at
+all — so `qwen sessions ps --json | jq .` is safe to script against.
+
+JSON output is raw data: field values are emitted exactly as recorded,
+with no terminal sanitization. Treat them as data, and sanitize before
+rendering them in a terminal.
+
+**Examples:**
+
+```bash
+# Show the other live sessions
+qwen sessions ps
+
+# Which directories are busy right now?
+# Note: `jq -r` renders the raw recorded value in your terminal (see the
+# raw-data note above); pipe through a sanitizer if the path is untrusted.
+qwen sessions ps --json | jq -r .cwd
+```
+
+## 6. Messaging Another Running Session
+
+Two interactive sessions on the same machine can send each other
+messages. The feature is experimental and **off by default**; turn it on
+in `settings.json` and restart:
+
+```json
+{ "agents": { "crossSessionMessaging": true } }
+```
+
+Once on, the model in one session can discover the others with
+`list_agents` — each appears under `sessions` with the `name` that
+`qwen sessions ps --json` records (the table view may truncate long
+names) — and address one with `send_message` using
+that name as `to`. When two sessions share a name, `list_agents` shows
+each with a short `[ref]` and the send must include it (`name [ref]`); a
+bare name that could mean either is refused rather than guessed.
+`list_agents` also reports the session's own name under `self`, and
+`to: "*"` still means "my Agent Team teammates" and never reaches other
+sessions.
+
+A message arrives in the other session marked as coming from another
+session, not from its user, and carries none of your authority there:
+the receiving session acts on it only within its own permission settings.
+Its user can choose what happens to incoming messages with
+`agents.crossSessionInbound` (`accept`, `hold`, or `refuse`). When unset,
+a message is delivered if the receiving session still reviews each
+action (default or plan mode), or if both sessions are in a mode that
+applies actions without per-action review; otherwise it is held for
+review. Held messages are listed and released with `/peers` in the
+receiving session.
+
+The `send_message` call only confirms the message was handed to the other
+session. What became of it arrives later as a receipt: if it was held,
+declined, expired, or misaddressed (the address changed hands — list the
+agents again) — or released after a hold — a notice appears in the
+sending session's transcript (`Message to <name>: …`). The model that
+sent it is not told; if the other session replies, the reply arrives as a
+cross-session message.
+
+### Inbox authentication and scripted injection
+
+Each session's inbox requires a per-session token: a connection must
+present it on its first line before any message is read, and sessions
+exchange tokens automatically through the same registry records they
+discover each other by. Sessions from a build without token support can
+receive from a newer one, but their sends to it are dropped.
+
+A session exports its own inbox address and a token to child processes as
+`QWEN_CODE_MESSAGING_SOCKET` and `QWEN_CODE_MESSAGING_TOKEN`, so a script
+or hook the session runs can send a message back into it. This is a
+second, _child_ token that is never published anywhere: only processes
+the session started can hold it, so a message that arrives with it is
+recognized as the session's own rather than as another session's.
+
+```bash
+{ printf '%s\n' \
+    '{"msgV":1,"type":"auth","token":"'"$QWEN_CODE_MESSAGING_TOKEN"'"}' \
+    '{"msgV":1,"msgId":"'"$(uuidgen)"'","type":"user","priority":"next","message":{"role":"user","content":"build finished"}}'; \
+} | socat - UNIX-CONNECT:"$QWEN_CODE_MESSAGING_SOCKET"
+```
+
+Give every injection a fresh `msgId`. The receiving gate remembers the
+ids it has already settled, so a hook that reuses one is delivered the
+first time and silently deduplicated on every run after that.
+
+An injected message still goes through the inbound gate and is marked as
+not coming from the user, but the gate knows it came from the session's
+own process: under the mode-parity default it is delivered without review
+(a peer in the same position would be held), while an explicit
+`agents.crossSessionInbound` of `hold` or `refuse` applies to it as to
+anything else. The model sees it as
+`<cross_session_message from="own process" origin="own-process">` with a
+notice that it came from a script or hook the session ran, not from the
+user.

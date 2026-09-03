@@ -7,6 +7,7 @@
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -48,11 +49,31 @@ function step(section, name) {
   return match?.[0] ?? '';
 }
 
+// The behavioural tests below execute shell sliced out of the workflow's
+// `run: |-` blocks; the index guards and the 10-space dedent live in one
+// place so a drifted helper cannot silently extract a wrong range.
+function extractBlock(source, startMarker, endMarker, options = {}) {
+  const { includeStart = true, includeEnd = true } = options;
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(
+    endMarker,
+    start === -1 ? 0 : start + startMarker.length,
+  );
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  const sliceStart = includeStart ? start : start + startMarker.length;
+  return source
+    .slice(sliceStart, includeEnd ? end + endMarker.length : end)
+    .replace(/^ {10}/gm, '');
+}
+
 function reviewGhWrapper(runStep) {
-  const start = runStep.indexOf('cat > "$proxy_bin/gh" <<\'QWEN_GH_WRAPPER\'');
-  const bodyStart = runStep.indexOf('\n', start) + 1;
-  const end = runStep.indexOf('\n          QWEN_GH_WRAPPER', bodyStart);
-  return runStep.slice(bodyStart, end).replace(/^ {10}/gm, '');
+  return extractBlock(
+    runStep,
+    'cat > "$proxy_bin/gh" <<\'QWEN_GH_WRAPPER\'\n',
+    '\n          QWEN_GH_WRAPPER',
+    { includeStart: false, includeEnd: false },
+  );
 }
 
 function runReviewGhWrapper(
@@ -264,7 +285,8 @@ describe('qwen resolve workflow', () => {
   });
 
   it('truncates an over-long report visibly, on a character boundary', () => {
-    const helper = resolveJob.match(
+    // The report is composed in the publish job.
+    const helper = job(workflow, 'publish-resolution').match(
       /(SUMMARY_MAX_BYTES=\d+\n[\s\S]*?append_safe_file\(\) \{[\s\S]*?\n {10}\})/,
     )?.[1];
     expect(helper).toBeTruthy();
@@ -346,7 +368,9 @@ describe('qwen resolve workflow', () => {
     const contextStep = step(reviewJob, 'Resolve PR context');
     const runStep = step(reviewJob, 'Run review');
 
-    expect(reviewJob).toContain('timeout-minutes: 260');
+    expect(reviewJob).toContain(
+      "timeout-minutes: '${{ fromJSON(vars.QWEN_REVIEW_JOB_TIMEOUT_MINUTES) }}'",
+    );
     expect(contextStep).toContain('DEFAULT_TIMEOUT_MINUTES=180');
     expect(contextStep).toContain('case "$token" in');
     expect(contextStep).toContain('--timeout=*)');
@@ -354,9 +378,98 @@ describe('qwen resolve workflow', () => {
     expect(contextStep).toContain('timeout=*)');
     expect(contextStep).toContain('TIMEOUT_MINUTES="${token#timeout=}"');
     expect(runStep).toContain('if [ "${#TIMEOUT_MINUTES}" -gt 3 ]; then');
-    expect(runStep).toContain('timeout_minutes must not exceed 240 minutes');
-    expect(runStep).toContain('QWEN_TIMEOUT="$TIMEOUT_MINUTES"');
+    // The cap still comes from the repository variable, but reaches the script
+    // through the step's env: the run body must stay free of `${{ }}` or the
+    // whole workflow exceeds the 21000-character expression limit and becomes
+    // invalid. Both halves are asserted so neither can drift alone.
+    expect(runStep).toContain('MAX_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"');
+    expect(runStep).toContain(
+      "MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'",
+    );
+    expect(runStep).toContain(
+      'if [ "$TIMEOUT_MINUTES" -gt "$MAX_TIMEOUT_MINUTES" ]; then',
+    );
+    expect(runStep).toContain(
+      'fail "timeout_minutes must not exceed ${MAX_TIMEOUT_MINUTES} minutes"',
+    );
+    expect(runStep).toContain('QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"');
     expect(runStep).not.toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 5))');
+  });
+
+  it('tiers the default review timeout by PR size unless overridden', () => {
+    const contextStep = step(reviewJob, 'Resolve PR context');
+    const runStep = step(reviewJob, 'Run review');
+
+    // The context step records whether the caller chose a timeout explicitly.
+    expect(contextStep).toContain('TIMEOUT_EXPLICIT=false');
+    expect(contextStep).toContain('TIMEOUT_EXPLICIT=true');
+    expect(contextStep).toContain('echo "timeout_explicit=$TIMEOUT_EXPLICIT"');
+    expect(runStep).toContain(
+      "TIMEOUT_EXPLICIT: '${{ steps.context.outputs.timeout_explicit }}'",
+    );
+
+    // Auto-tiering only applies without an explicit --timeout, keys off
+    // additions + deletions, and never exceeds the QWEN_REVIEW_MAX_TIMEOUT_MINUTES
+    // cap: small PRs keep 180, anything larger gets the full cap.
+    expect(runStep).toContain('EFFECTIVE_TIMEOUT_MINUTES="$TIMEOUT_MINUTES"');
+    expect(runStep).toContain(
+      'if [ "${TIMEOUT_EXPLICIT:-false}" != "true" ]; then',
+    );
+    expect(runStep).toContain('--json additions,deletions');
+    expect(runStep).toContain('if [ -n "$PR_SIZE_LINES" ]; then');
+    expect(runStep).toContain('if [ "$PR_SIZE_LINES" -le 300 ]; then');
+    // The size guard must WRAP the comparison it protects: swapping the two
+    // ifs keeps both texts present while an empty PR_SIZE_LINES (a failed
+    // size lookup) hits the bare integer test and silently gets the cap.
+    const sizeGuardStart = runStep.indexOf('if [ -n "$PR_SIZE_LINES" ]; then');
+    expect(sizeGuardStart).toBeGreaterThan(-1);
+    const sizeGuardArm = runStep.slice(
+      sizeGuardStart,
+      runStep.indexOf('else', sizeGuardStart),
+    );
+    expect(sizeGuardArm).toContain('if [ "$PR_SIZE_LINES" -le 300 ]; then');
+    expect(runStep).toContain('EFFECTIVE_TIMEOUT_MINUTES=180');
+    expect(runStep).toContain(
+      'EFFECTIVE_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"',
+    );
+    expect(runStep).toContain(
+      "MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'",
+    );
+    // Slice the small-PR arm so a swap of the two assignments between the
+    // branches fails: unordered containment keeps both texts present.
+    const smallPrStart = runStep.indexOf(
+      'if [ "$PR_SIZE_LINES" -le 300 ]; then',
+    );
+    expect(smallPrStart).toBeGreaterThan(-1);
+    const smallPrArm = runStep.slice(
+      smallPrStart,
+      runStep.indexOf('else', smallPrStart),
+    );
+    expect(smallPrArm).toContain('EFFECTIVE_TIMEOUT_MINUTES=180');
+    expect(smallPrArm).not.toContain('MAX_TIMEOUT_MINUTES_VAR');
+    expect(runStep).not.toContain('EFFECTIVE_TIMEOUT_MINUTES=210');
+    expect(runStep).toContain(
+      'echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"',
+    );
+    // Every check above is order-independent containment: pin that both
+    // tiering writes precede both consumers, or a block moved below its
+    // consumer keeps the suite green while non-small PRs run on the
+    // pre-tier budget (the exact incident this feature exists for).
+    const tierInit = runStep.indexOf(
+      'EFFECTIVE_TIMEOUT_MINUTES="$TIMEOUT_MINUTES"',
+    );
+    const tierStart = runStep.indexOf(
+      'if [ "${TIMEOUT_EXPLICIT:-false}" != "true" ]; then',
+    );
+    for (const consumer of [
+      runStep.indexOf('QWEN_TIMEOUT="$EFFECTIVE_TIMEOUT_MINUTES"'),
+      runStep.indexOf(
+        'echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"',
+      ),
+    ]) {
+      expect(tierInit).toBeLessThan(consumer);
+      expect(tierStart).toBeLessThan(consumer);
+    }
   });
 
   it('tells maintainers how to retry timed-out reviews with more time', () => {
@@ -369,13 +482,79 @@ describe('qwen resolve workflow', () => {
       'REASON="Qwen review timed out after ${attempt_timeout} seconds (of the ${QWEN_TIMEOUT}-minute budget)."',
     );
     expect(runStep).toContain('[ "$qwen_status" -eq 137 ]');
-    expect(fallbackStep).toContain('FAILURE_KIND:');
-    expect(fallbackStep).toContain('TIMEOUT_MINUTES:');
-    expect(fallbackStep).toContain('@qwen-code /review --timeout=240');
+    expect(fallbackStep).toContain('failure() &&');
     expect(fallbackStep).toContain(
-      'This run already used the maximum 240 minute timeout.',
+      'FAILURE_KIND: "${{ steps.review.outputs.failure_kind || \'\' }}"',
+    );
+    expect(fallbackStep).toContain('TIMEOUT_MINUTES:');
+    expect(fallbackStep).toContain(
+      "TIMEOUT_MINUTES: '${{ steps.review.outputs.effective_timeout_minutes || steps.context.outputs.timeout_minutes }}'",
+    );
+    expect(fallbackStep).toContain(
+      'MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+    );
+    expect(fallbackStep).toContain('if [ "$FAILURE_KIND" = "timeout" ]; then');
+    // Slice the below-max arm so a transposition of the two bodies fails:
+    // unordered containment keeps both texts present in the wrong arms.
+    // Search for the else from the arm start so an unrelated earlier if/else
+    // in this step cannot invert the slice.
+    const belowMaxStart = fallbackStep.indexOf(
+      'if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then',
+    );
+    expect(belowMaxStart).toBeGreaterThan(-1);
+    const belowMaxArm = fallbackStep.slice(
+      belowMaxStart,
+      fallbackStep.indexOf('else', belowMaxStart),
+    );
+    expect(belowMaxArm).toContain(
+      '@qwen-code /review --timeout=${MAX_TIMEOUT_MINUTES}',
+    );
+    expect(belowMaxArm).not.toContain('This run already used the maximum');
+    // Symmetric slice for the at-max arm: it is an adjacent body= assignment
+    // in the same if-chain as the quota branch, the exact transposition class
+    // the belowMaxArm slice catches.
+    const atMaxStart = fallbackStep.indexOf('else', belowMaxStart);
+    expect(atMaxStart).toBeGreaterThan(-1);
+    // Line-anchored end: a bare indexOf('fi') stops at the first word
+    // CONTAINING "fi" ("specified", "notification"), silently truncating the
+    // arm and giving the not-toContain below a vacuous pass.
+    const atMaxEnd = fallbackStep.slice(atMaxStart).search(/\n\s*fi\b/);
+    expect(atMaxEnd).toBeGreaterThan(-1);
+    const atMaxArm = fallbackStep.slice(atMaxStart, atMaxStart + atMaxEnd);
+    expect(atMaxArm).toContain(
+      'This run already used the maximum ${MAX_TIMEOUT_MINUTES} minute timeout.',
+    );
+    expect(atMaxArm).not.toContain('/review --timeout=');
+    // The quota branch carries its own recovery advice; pin it to its arm.
+    const quotaStart = fallbackStep.indexOf(
+      'elif [ "$FAILURE_KIND" = "quota" ]; then',
+    );
+    expect(quotaStart).toBeGreaterThan(-1);
+    const quotaArm = fallbackStep.slice(
+      quotaStart,
+      fallbackStep.indexOf('else', quotaStart),
+    );
+    expect(quotaArm).toContain(
+      '**Qwen Code review paused — model quota exhausted.**',
+    );
+    // The branch CONDITION, not just both branch bodies: with both bodies
+    // pinned as substrings, any comparison flip (-ge/-gt/-le) keeps both
+    // strings present and ships the wrong recovery advice on every timeout.
+    expect(fallbackStep).toContain(
+      'if [ "$TIMEOUT_MINUTES" -lt "$MAX_TIMEOUT_MINUTES" ]; then',
     );
     expect(fallbackStep).toContain('**Qwen Code review timed out.**');
+    // The comment must come AFTER all three arms: containment holds wherever
+    // the line sits, so a move into one arm would silently drop the others.
+    const genericBodyStart = fallbackStep.indexOf(
+      '**Qwen Code review did not complete successfully.**',
+    );
+    expect(genericBodyStart).toBeGreaterThan(-1);
+    const commentStart = fallbackStep.indexOf('gh pr comment "$PR_NUMBER"');
+    expect(commentStart).toBeGreaterThan(genericBodyStart);
+    // The wiring that delivers every body pinned above: pointing the command
+    // at a different variable posts text none of these assertions protect.
+    expect(fallbackStep).toContain('--body "$body"');
     expect(fallbackStep).not.toContain(
       '_Qwen Code review did not complete successfully:',
     );
@@ -383,15 +562,26 @@ describe('qwen resolve workflow', () => {
 
   it('skips stale automatic review runs before invoking qwen', () => {
     const runStep = step(reviewJob, 'Run review');
+    const staleHeadStart = runStep.indexOf(
+      'if [ "$EVENT_NAME" = "pull_request_target" ]; then',
+    );
+    // Without this, a reworded guard makes `indexOf` return -1 and the slice
+    // below silently degrades instead of failing.
+    expect(staleHeadStart).toBeGreaterThan(-1);
     const staleHeadCheck = runStep.slice(
-      runStep.indexOf(
-        'if [ "${{ github.event_name }}" = "pull_request_target" ]; then',
-      ),
+      staleHeadStart,
       runStep.indexOf('PROMPT="/review ${REVIEW_URL}"'),
     );
 
+    // Both context values arrive as step env so the run body carries no
+    // `${{ }}` — see the expression-length test in
+    // qwen-pr-review-workflow.test.js for why that is load-bearing.
+    expect(runStep).toContain("EVENT_NAME: '${{ github.event_name }}'");
+    expect(runStep).toContain(
+      "EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'",
+    );
     expect(staleHeadCheck).toContain(
-      'EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"',
+      'if [ "$CURRENT_HEAD_SHA" != "$EVENT_HEAD_SHA" ]; then',
     );
     expect(runStep).toContain(
       'PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq \'[.state, .headRefOid] | @tsv\')"',
@@ -425,9 +615,7 @@ describe('qwen resolve workflow', () => {
     expect(runStep).toContain(
       'QWEN_CI_REVIEW_EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA"',
     );
-    expect(runStep).toContain(
-      'echo "expected_head_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"',
-    );
+    expect(runStep).toContain('echo "expected_head_sha=$EXPECTED_HEAD_SHA"');
     expect(fallbackStep).toContain('EXPECTED_HEAD_SHA:');
     expect(fallbackStep).toContain(
       'Skipping fallback comment: PR #${PR_NUMBER} is ${pr_state}.',
@@ -506,6 +694,9 @@ describe('qwen resolve workflow', () => {
     nextJob === -1
       ? workflow.slice(resolveJobStart)
       : workflow.slice(resolveJobStart, resolveJobStart + 1 + nextJob);
+  // The credentialed half of /resolve — verification, push, result comment —
+  // lives in its own job on a runner that never executed the agent.
+  const publishJob = job(workflow, 'publish-resolution');
   const reviewJob = job(workflow, 'review-pr');
   const delayAutomaticReviewJob = job(workflow, 'delay-automatic-review');
   const authorizeJob = job(workflow, 'authorize');
@@ -539,9 +730,13 @@ describe('qwen resolve workflow', () => {
     expect(authorizeStep).toMatch(
       /if \[ "\$PR_ACTION" = "review_requested" \]; then\s+principal="\$SENDER"/,
     );
+    const reviewRequestedStart = authorizeStep.indexOf(
+      'if [ "$PR_ACTION" = "review_requested" ]; then',
+    );
+    expect(reviewRequestedStart).toBeGreaterThan(-1);
     const reviewRequestedBranch = authorizeStep.slice(
-      authorizeStep.indexOf('if [ "$PR_ACTION" = "review_requested" ]; then'),
-      authorizeStep.indexOf('else'),
+      reviewRequestedStart,
+      authorizeStep.indexOf('else', reviewRequestedStart),
     );
     expect(reviewRequestedBranch).toContain('principal="$SENDER"');
     expect(reviewRequestedBranch).not.toContain(
@@ -558,24 +753,28 @@ describe('qwen resolve workflow', () => {
     expect(authorizeStep).not.toContain('principal="$PR_AUTHOR"');
   });
 
-  it('keeps the authorization and scope guards on resolve-pr', () => {
-    // /resolve must require write+ permission before any credentialed push.
+  it('keeps the authorization and scope guards on the /resolve lane', () => {
+    // /resolve must require write+ permission before any credentialed push;
+    // the publish job inherits that gate through `needs`.
     expect(resolveJob).toContain(
       "needs.authorize.outputs.should_review == 'true'",
     );
+    expect(publishJob).toContain("needs: ['resolve-pr']");
     // Fork PRs are supported: the head is fetched through refs/pull/N/head and
     // the resolved branch is pushed back to the PR's head repository.
     expect(resolveJob).toContain('refs/pull/${PR_NUMBER}/head');
-    expect(resolveJob).toContain('github.com/${HEAD_REPO}.git');
+    expect(publishJob).toContain('refs/pull/${PR_NUMBER}/head');
+    expect(publishJob).toContain('github.com/${HEAD_REPO}.git');
     // Out-of-scope edits (prompt-injection symptom) fail closed.
-    expect(resolveJob).toContain(
+    expect(publishJob).toContain(
       'Agent modified files outside the conflict set',
     );
-    // The push only happens through the credentialed publish step, SHA-pinned:
+    // The push only happens through the credentialed publish job, SHA-pinned:
     // the bare flag would allow any force-push regardless of the remote's current
     // state, defeating the concurrent-update guard.
-    expect(resolveJob).toContain('--force-with-lease="refs/heads/');
-    expect(resolveJob).toContain(':${HEAD_SHA}"');
+    expect(publishJob).toContain('--force-with-lease="refs/heads/');
+    expect(publishJob).toContain(':${HEAD_SHA}"');
+    expect(resolveJob).not.toContain('--force-with-lease');
   });
 
   it('fetches the PR head into a collision-free local ref', () => {
@@ -588,51 +787,695 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).not.toContain(
       '+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/${head_ref}',
     );
-    expect(resolveJob).toContain('HEAD_FETCH_REF:');
-    expect(resolveJob).toContain(
+    // The publish job fetches the same ref from GitHub for itself and then
+    // points it at the head the agent resolved FROM, so the guards compare
+    // against that commit rather than a head that moved meanwhile.
+    expect(publishJob).toContain('HEAD_FETCH_REF:');
+    expect(publishJob).toContain(
+      'git fetch origin "+refs/pull/${PR_NUMBER}/head:${HEAD_FETCH_REF}"',
+    );
+    expect(publishJob).toContain(
+      'git update-ref "$HEAD_FETCH_REF" "$HEAD_SHA"',
+    );
+    expect(publishJob).toContain(
       'git diff --name-only -z --diff-filter=ACMRT "$HEAD_FETCH_REF" HEAD',
     );
   });
 
-  it('keeps the verification-gate failure checks on resolve-pr', () => {
+  it('keeps the verification-gate failure checks on the publish job', () => {
     // These guard against prompt-injection symptoms; a future edit that drops
     // any of them from the credentialed conflict-resolution path must fail here.
-    expect(resolveJob).toContain(
+    expect(publishJob).toContain(
       'Leftover conflict markers found after resolution',
     );
-    expect(resolveJob).toContain('Branch still has merge conflicts with');
-    expect(resolveJob).toContain('The top commit is a default merge commit');
-    expect(resolveJob).toContain(
+    expect(publishJob).toContain('Branch still has merge conflicts with');
+    expect(publishJob).toContain('The top commit is a default merge commit');
+    expect(publishJob).toContain(
       'Branch unchanged and no no-action.md was written',
     );
-    expect(resolveJob).toContain(
+    expect(publishJob).toContain(
       'The conflict-resolution agent step did not succeed',
     );
-    expect(resolveJob).toContain('address-summary.md is missing');
-    expect(resolveJob).toContain('Unresolved index conflicts remain');
+    expect(publishJob).toContain('address-summary.md is missing');
+    expect(publishJob).toContain('Unresolved index conflicts remain');
   });
 
-  it('pins the core security controls on resolve-pr', () => {
-    // Checkout must not persist GITHUB_TOKEN into .git/config.
+  it('pins the core security controls on the /resolve lane', () => {
+    // Checkout must not persist GITHUB_TOKEN into .git/config, in either job.
     expect(resolveJob).toContain('persist-credentials: false');
+    expect(publishJob).toContain('persist-credentials: false');
+    expect(publishJob).not.toContain('persist-credentials: true');
     // The resolution check carries no writable GitHub token (defense in depth).
-    expect(resolveJob).toContain("GITHUB_TOKEN: ''");
-    // The agent runs sandboxed.
-    expect(resolveJob).toContain('"sandbox": true');
+    expect(publishJob).toContain("GITHUB_TOKEN: ''");
+    // The agent runs WITHOUT the container sandbox — measured, not assumed:
+    // the first day `sandbox: true` took effect (#9252, 2026-08-16) /resolve
+    // went from 84% pushed to 0 of 81, dying on a missing versioned image or
+    // hanging to the job timeout. Containment is the no-token agent, the scope
+    // guard and the ephemeral runner. Flipping this back needs a dry-run that
+    // shows the agent finishing inside the container.
+    expect(resolveJob).toContain('"sandbox": false');
+    expect(resolveJob).not.toContain('"sandbox": true');
     // Concurrent /resolve runs must not interleave on the credentialed push.
     expect(resolveJob).toContain('cancel-in-progress: false');
+    expect(publishJob).toContain('cancel-in-progress: false');
   });
 
-  it('runs the agent without any GitHub credentials', () => {
+  it('cannot drop a completed resolution while it waits to publish', () => {
+    // GitHub keeps only one PENDING job per concurrency group and replaces it
+    // when another same-group job is queued; cancel-in-progress:false guards
+    // only a RUNNING job. If the publisher shared the head-write group it
+    // would sit pending after resolve-pr finished, where a second /resolve or
+    // an autofix writer could silently cancel it — dropping a resolution that
+    // already succeeded, before it is pushed or reported. So:
+    const groupOf = (jobText) =>
+      jobText.match(/\n {4}concurrency:\n {6}group: '([^']*)'/)?.[1];
+    const resolveGroup = groupOf(resolveJob);
+    const publishGroup = groupOf(publishJob);
+    // The agent phase keeps the shared head-write group (serialised with
+    // autofix — the expensive work that must not race).
+    expect(resolveGroup).toMatch(/^qwen-pr-head-write-/);
+    // The publisher uses a PER-RUN group: one member for its whole life, so
+    // it can never be the replaced pending job.
+    expect(publishGroup).toContain('${{ github.run_id }}');
+    expect(publishGroup).not.toContain('qwen-pr-head-write-');
+    expect(publishGroup).not.toBe(resolveGroup);
+    // Correctness for two publishers that DO run at once rests on the push,
+    // not the group: force-with-lease pinned to the head the agent resolved
+    // from means exactly one wins and the other reports "moved" — never a
+    // clobber, never a silent drop.
+    const reportStep = step(publishJob, 'Report result');
+    expect(reportStep).toContain(
+      '--force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}"',
+    );
+    // And the publisher is not itself cancel-on-supersede.
+    expect(publishJob).toContain('cancel-in-progress: false');
+  });
+
+  it('runs the agent without any GitHub credentials, and nothing credentialed after it', () => {
+    const agentStart = resolveJob.indexOf("- name: 'Resolve conflicts'");
     const agentStep = resolveJob.slice(
-      resolveJob.indexOf("- name: 'Resolve conflicts'"),
-      resolveJob.indexOf("- name: 'Resolution check'"),
+      agentStart,
+      resolveJob.indexOf("- name: 'Package resolution'"),
     );
     expect(agentStep.length).toBeGreaterThan(0);
     expect(agentStep).not.toContain('GH_TOKEN');
     expect(agentStep).not.toContain('GITHUB_TOKEN');
     expect(agentStep).not.toContain('CI_BOT_PAT');
     expect(agentStep).not.toContain('CI_DEV_BOT_PAT');
+    // Once the agent has run, no step of its job may carry a secret: the
+    // runner is agent-written (config, hooks, refs, PATH, the real
+    // $GITHUB_ENV, live processes), and an in-job scrub cannot enumerate
+    // every entrance. 'Report skipped request' is the one exception, and it
+    // runs only when the agent did not (decision != run).
+    const afterAgent = resolveJob.slice(
+      resolveJob.indexOf("- name: 'Package resolution'"),
+    );
+    const skipStart = afterAgent.indexOf("- name: 'Report skipped request'");
+    expect(skipStart).toBeGreaterThan(-1);
+    expect(afterAgent.slice(0, skipStart)).not.toContain('secrets.');
+    const skipStep = step(resolveJob, 'Report skipped request');
+    expect(skipStep).toContain("steps.prepare.outputs.decision == 'skip'");
+    expect(skipStep).not.toContain("decision == 'run'");
+  });
+
+  it('publishes from a job whose runner never executed the agent', () => {
+    // The structural containment: the agent runs --yolo without a sandbox and
+    // can leave anything behind on its runner — config scopes, hooks, moved
+    // refs, PATH shims, appends to the real $GITHUB_ENV, a detached process
+    // reading /proc. An in-job denylist could not be closed (review rounds
+    // 2–5 on #10428 each demonstrated the next entrance), so the credentialed
+    // half runs on a fresh runner and takes from the agent job only a verified
+    // git bundle and the report files.
+    expect(publishJob.length).toBeGreaterThan(0);
+    expect(publishJob).toContain("needs: ['resolve-pr']");
+    expect(publishJob).toContain(
+      'if: "${{ always() && needs.resolve-pr.outputs.decision == \'run\' }}"',
+    );
+    // The token-bearing step lives in the publish job, and that job runs no
+    // agent: no `id: 'resolve_conflicts'`, no qwen invocation.
+    expect(publishJob).toContain('x-access-token:${PUSH_TOKEN}');
+    expect(resolveJob).not.toContain('x-access-token:');
+    expect(resolveJob).not.toContain('PUSH_TOKEN');
+    expect(publishJob).not.toContain("id: 'resolve_conflicts'");
+    expect(publishJob).not.toContain('qwen \\');
+    expect(publishJob).not.toContain('Install Qwen CLI');
+    // Its checkout is fresh and its refs come from GitHub, not from the
+    // agent's checkout: base and head are fetched again, and the guards
+    // compare against the head the agent resolved from.
+    expect(step(publishJob, 'Checkout base branch')).toContain(
+      'persist-credentials: false',
+    );
+    const verifyStep = step(publishJob, 'Resolution check');
+    expect(verifyStep).toContain(
+      'git fetch origin "+refs/pull/${PR_NUMBER}/head:${HEAD_FETCH_REF}" "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"',
+    );
+    expect(verifyStep).toContain(
+      "HEAD_SHA: '${{ needs.resolve-pr.outputs.head_sha }}'",
+    );
+    expect(verifyStep).toContain(
+      'git update-ref "$HEAD_FETCH_REF" "$HEAD_SHA"',
+    );
+    // The resolution is admitted as objects only: a bundle that must verify
+    // against the head fetched from GitHub and descend from the head the
+    // agent resolved from; absence means the agent changed nothing.
+    expect(verifyStep).toContain('git bundle verify "$bundle"');
+    expect(verifyStep).toContain(
+      'git fetch "$bundle" "+${resolution_ref}:${resolution_ref}"',
+    );
+    expect(verifyStep).toContain(
+      'git merge-base --is-ancestor "$HEAD_SHA" HEAD',
+    );
+    expect(verifyStep.indexOf('git bundle verify')).toBeLessThan(
+      verifyStep.indexOf('git fetch "$bundle"'),
+    );
+    expect(verifyStep.indexOf('git merge-base --is-ancestor')).toBeLessThan(
+      verifyStep.indexOf('git ls-files -u'),
+    );
+    // A missing artifact is classified, never silent. This branch is only
+    // reachable with a SUCCESSFUL agent step (any other outcome exits in the
+    // never-ran block), so it classifies the LOST ARTIFACT — upload failed
+    // or expired — never the agent run itself.
+    expect(verifyStep).toContain('its run artifact is missing');
+    expect(verifyStep).toContain('failure_kind=artifact_missing');
+    expect(step(publishJob, 'Download run artifacts')).toContain(
+      'continue-on-error: true',
+    );
+    // The two halves agree on the artifact name and the bundle's shape. The
+    // name carries run_attempt on BOTH sides: a re-run keeps the run_id, and
+    // without the suffix the second attempt 409s on the first attempt's upload
+    // while the by-name download republishes the stale first-attempt bundle.
+    // The DOWNLOAD side spells the attempt that RAN THE AGENT, not the
+    // publish job's own github.run_attempt: a partial "Re-run failed jobs"
+    // re-runs only the publish job, whose attempt number has no artifact —
+    // the upload's does. The attempt crosses the job boundary as an output
+    // the agent never writes (the runner provides GITHUB_RUN_ATTEMPT).
+    const packageStep = step(resolveJob, 'Package resolution');
+    expect(packageStep).toContain(
+      'git bundle create "${WORKDIR}/resolution.bundle" "${HEAD_SHA}..refs/heads/qwen-resolve/pr-${PR_NUMBER}"',
+    );
+    // A gitfile-replaced .git packages nothing: the guard fails closed
+    // before any bundle exists for the publish job to verify.
+    expect(packageStep).toContain('if [ ! -d .git ]; then');
+    expect(step(resolveJob, 'Resolve pull request')).toContain(
+      'echo "run_attempt=${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"',
+    );
+    expect(resolveJob).toContain(
+      "agent_run_attempt: '${{ steps.resolve.outputs.run_attempt }}'",
+    );
+    expect(step(resolveJob, 'Upload run artifacts')).toContain(
+      "name: 'qwen-resolve-pr-${{ steps.resolve.outputs.pr_number }}-attempt-${{ github.run_attempt }}'",
+    );
+    expect(step(publishJob, 'Download run artifacts')).toContain(
+      "name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-attempt-${{ needs.resolve-pr.outputs.agent_run_attempt }}'",
+    );
+    expect(step(publishJob, 'Download run artifacts')).toContain(
+      "path: '/tmp/qwen-resolve'",
+    );
+    expect(publishJob).toContain("WORKDIR: '/tmp/qwen-resolve'");
+    // The verdict on the agent step crosses the job boundary as a job output.
+    expect(resolveJob).toContain(
+      "agent_outcome: '${{ steps.resolve_conflicts.outcome }}'",
+    );
+    expect(verifyStep).toContain(
+      "RESOLVE_OUTCOME: '${{ needs.resolve-pr.outputs.agent_outcome }}'",
+    );
+    // The agent phase holds the shared head-write lock (serialised with
+    // autofix); the publisher does NOT — it uses a per-run group so a
+    // completed resolution waiting to publish can never be replaced. See
+    // 'cannot drop a completed resolution while it waits to publish'.
+    expect(resolveJob).toContain(
+      "group: 'qwen-pr-head-write-${{ github.event.issue.number || github.event.inputs.pr_number }}'",
+    );
+    expect(publishJob).toContain(
+      "group: 'qwen-pr-publish-${{ github.run_id }}'",
+    );
+    const publishGroupLine = publishJob.match(/\n {6}group: '([^']*)'/)[1];
+    expect(publishGroupLine).not.toContain('qwen-pr-head-write-');
+    // The push itself is verify-less, so a hook could never receive the URL,
+    // and it never answers a credential prompt against a rewritten one.
+    const reportStep = step(publishJob, 'Report result');
+    expect(reportStep).toContain('git push --no-verify');
+    expect(reportStep).toContain('export GIT_TERMINAL_PROMPT=0');
+    expect(reportStep).toContain(
+      "AGENT_RUN_ATTEMPT: '${{ needs.resolve-pr.outputs.agent_run_attempt }}'",
+    );
+    // The push-failure comments cite the artifact that actually exists —
+    // the agent's attempt, not this job's.
+    expect(reportStep).toContain('attempt-${AGENT_RUN_ATTEMPT}');
+    expect(reportStep).not.toContain('attempt-${{ github.run_attempt }}');
+  });
+
+  it('pins the CLI version and bounds the agent step', () => {
+    const agentStep = resolveJob.slice(
+      resolveJob.indexOf("- name: 'Resolve conflicts'"),
+      resolveJob.indexOf("- name: 'Package resolution'"),
+    );
+    // `latest` ties every run to the npm release pipeline of the moment: the
+    // 2026-08-15 dist-tag pointed at an unresolvable 0.21.12 and 14 runs died
+    // on `npm error notarget` before the agent started.
+    const installStep = step(resolveJob, 'Install Qwen CLI');
+    expect(installStep).toMatch(/QWEN_CLI_VERSION: '\d+\.\d+\.\d+'/);
+    expect(installStep).not.toContain("QWEN_CLI_VERSION: 'latest'");
+    expect(installStep).toContain('@qwen-code/qwen-code@${QWEN_CLI_VERSION}');
+    // Direct invocation, not the action: the action runs the CLI with the
+    // runner's real $GITHUB_ENV/$GITHUB_PATH; the direct call decoys them
+    // per invocation instead. Containment of everything else the agent
+    // plants lives in the publish split — see 'publishes from a job whose
+    // runner never executed the agent'.
+    expect(agentStep).not.toContain('qwen-code-action');
+    expect(agentStep).toContain('GITHUB_ENV="$decoy_dir/github-env"');
+    expect(agentStep).toContain('GITHUB_PATH="$decoy_dir/github-path"');
+    expect(agentStep).toContain('::stop-commands::');
+    // The invocation wiring itself: dropping --prompt would start a yolo
+    // agent with no task, and the auth type selects the OpenAI-compatible
+    // endpoint the secrets are for.
+    expect(agentStep).toContain('--prompt "$PROMPT" \\');
+    expect(agentStep).toContain('--auth-type openai \\');
+    // errexit is off around the invocation only: the parsing-off window
+    // must be closed and the command files truncated on every exit path,
+    // so `set +e` sits between the stop token and the invocation and
+    // `set -e` resumes after the truncation block.
+    const stopIdx = agentStep.indexOf('::stop-commands::');
+    const offIdx = agentStep.indexOf('\n          set +e\n');
+    const statusIdx = agentStep.indexOf('status=$?');
+    const onIdx = agentStep.indexOf('\n          set -e\n');
+    expect(stopIdx).toBeGreaterThan(-1);
+    expect(offIdx).toBeGreaterThan(stopIdx);
+    expect(statusIdx).toBeGreaterThan(offIdx);
+    expect(onIdx).toBeGreaterThan(
+      agentStep.indexOf(': > "${GITHUB_STEP_SUMMARY:?}"'),
+    );
+    // A hung agent must end inside the script (GNU timeout), not by the
+    // runner's timeout-minutes killing the process tree — only the
+    // script-internal timeout reaches the ::stop-commands:: resume and the
+    // command-file truncation (mirrors 'Run review'). The budget stays under
+    // the step timeout, which remains the outer backstop.
+    const timeoutCmd = agentStep.match(/timeout --kill-after=10s (\d+)s qwen/);
+    expect(timeoutCmd).not.toBeNull();
+    // The failure_kind contract depends on the exit code surviving:
+    // swallowing it (`exit 0`, a trailing `|| true`) would let a crashed or
+    // turn-capped agent report success and misroute the comment.
+    expect(agentStep).toContain('status=$?');
+    // `exit "$status"` must be the last command of the run block: only
+    // comments and blank lines may follow it (the next step's YAML comment).
+    const exitAt = agentStep.lastIndexOf('exit "$status"');
+    expect(exitAt).toBeGreaterThan(-1);
+    const tail = agentStep.slice(exitAt + 'exit "$status"'.length).split('\n');
+    expect(tail.every((l) => l.trim() === '' || l.trim().startsWith('#'))).toBe(
+      true,
+    );
+    // The decoys only mask the invocation's env; the real runner command
+    // files stay agent-discoverable and are truncated on every exit path.
+    for (const file of [
+      'GITHUB_ENV',
+      'GITHUB_PATH',
+      'GITHUB_OUTPUT',
+      'GITHUB_STEP_SUMMARY',
+    ]) {
+      expect(agentStep).toContain(`: > "\${${file}:?}" || true`);
+    }
+    expect(agentStep.indexOf('status=$?')).toBeLessThan(
+      agentStep.indexOf(': > "${GITHUB_ENV:?}"'),
+    );
+    // A hung agent must not bill the whole 120-minute job; the step timeout
+    // and the number quoted in the failure comment must agree.
+    const stepTimeout = agentStep.match(/^\s+timeout-minutes: (\d+)$/m);
+    expect(stepTimeout).not.toBeNull();
+    const reportStep = step(publishJob, 'Report result');
+    expect(reportStep).toContain(`AGENT_TIMEOUT_MINUTES: '${stepTimeout[1]}'`);
+    expect(Number(timeoutCmd[1])).toBeLessThan(Number(stepTimeout[1]) * 60);
+    // Read the ceiling instead of duplicating it as a literal: if the job's
+    // timeout-minutes drops to or below the step's, the job-level timeout
+    // cancels the whole job on a hung agent — the always()-gated 'Resolution
+    // check' and 'Report result' never start, so the failure posts neither
+    // failure_kind=infra nor a "not a verdict" comment.
+    const jobTimeout = resolveJob.match(/^ {4}timeout-minutes: (\d+)$/m);
+    expect(jobTimeout).not.toBeNull();
+    expect(Number(stepTimeout[1])).toBeLessThan(Number(jobTimeout[1]));
+  });
+
+  it('reports an agent that never ran as an infrastructure failure, not a verdict', () => {
+    // outcome != success on the agent step means no resolution was attempted
+    // (install/model/infra error, step timeout, cancellation). The comment
+    // must say so and must not invite a re-run, which repeats the failure.
+    const verifyStep = step(publishJob, 'Resolution check');
+    const reportStep = step(publishJob, 'Report result');
+    expect(reportStep).toContain(
+      "FAILURE_KIND: '${{ steps.verify.outputs.failure_kind }}'",
+    );
+    expect(reportStep).toContain(
+      "RESOLVE_OUTCOME: '${{ needs.resolve-pr.outputs.agent_outcome }}'",
+    );
+
+    // The failure_kind=infra write is pinned to the never-ran block of
+    // 'Resolution check' — moving it into the failure.md branch is the exact
+    // regression this branch exists to stop (an infrastructure failure would
+    // then post the generic verdict wording and invite re-runs).
+    const neverRanStart = verifyStep.indexOf(
+      'if [ "$RESOLVE_OUTCOME" != "success" ]; then',
+    );
+    expect(neverRanStart).toBeGreaterThan(-1);
+    const neverRanArm = verifyStep.slice(
+      neverRanStart,
+      verifyStep.indexOf('exit 1', neverRanStart),
+    );
+    expect(neverRanArm).toContain(
+      'echo "failure_kind=infra" >> "$GITHUB_OUTPUT"',
+    );
+    const failureMdStart = verifyStep.indexOf(
+      'if [ -s "${WORKDIR}/failure.md" ]; then',
+    );
+    expect(failureMdStart).toBeGreaterThan(-1);
+    const failureMdArm = verifyStep.slice(
+      failureMdStart,
+      verifyStep.indexOf('exit 1', failureMdStart),
+    );
+    expect(failureMdArm).not.toContain('failure_kind=infra');
+
+    // Pin the branch CONDITION literal, then slice the two arms of the `*)`
+    // case so a transposition of the bodies fails — unordered toContain kept
+    // both texts present in either arm.
+    // The lost-artifact arm comes FIRST: the agent SUCCEEDED, so neither
+    // the infra wording (it blames a run that did not fail, and forbids the
+    // one re-run shape that re-produces the artifact) nor the verdict
+    // wording may post for it.
+    const missingCond = 'if [ "$FAILURE_KIND" = "artifact_missing" ]; then';
+    const missingStart = reportStep.indexOf(missingCond);
+    expect(missingStart).toBeGreaterThan(-1);
+    const missingArm = reportStep.slice(
+      missingStart,
+      reportStep.indexOf('elif', missingStart),
+    );
+    expect(missingArm).toContain('finished successfully');
+    expect(missingArm).toContain('**Re-run all jobs**');
+    expect(missingArm).toContain(
+      're-running only the failed jobs cannot recover the missing artifact',
+    );
+    expect(missingArm).not.toContain('will fail the same way');
+    expect(missingArm).not.toContain('Requesting /resolve again');
+    const infraCond = 'elif [ "$FAILURE_KIND" = "infra" ]; then';
+    const infraStart = reportStep.indexOf(infraCond);
+    expect(infraStart).toBeGreaterThan(missingStart);
+    const infraArm = reportStep.slice(
+      infraStart,
+      reportStep.indexOf('else', infraStart),
+    );
+    expect(infraArm).toContain(
+      'Qwen Code could not run conflict resolution on this PR',
+    );
+    expect(infraArm).toContain('This is not a verdict on the conflict');
+    // The timeout rides as the env interpolation: hardcoding the number in
+    // the message lets the pair drift when the step timeout changes.
+    expect(infraArm).toContain('${AGENT_TIMEOUT_MINUTES}-minute timeout');
+    expect(infraArm).not.toContain('Re-run /resolve');
+    expect(infraArm).not.toContain(
+      'Qwen Code attempted to resolve merge conflicts',
+    );
+    const elseStart = reportStep.indexOf('else', infraStart);
+    expect(elseStart).toBeGreaterThan(-1);
+    // Line-anchored end on the `*)` case terminator: the else arm nests its
+    // own if/fi (the file-append loop), so a bare fi search truncates early.
+    const elseEnd = reportStep.slice(elseStart).search(/\n\s*;;/);
+    expect(elseEnd).toBeGreaterThan(-1);
+    const elseArm = reportStep.slice(elseStart, elseStart + elseEnd);
+    // Symmetric pin: the generic wording lives in the else arm only.
+    expect(elseArm).toContain(
+      'Qwen Code attempted to resolve merge conflicts but the run did not complete successfully.',
+    );
+    expect(elseArm).toContain('Check the [workflow run](');
+    expect(elseArm).not.toContain('could not run conflict resolution');
+    expect(elseArm).not.toContain('This is not a verdict');
+  });
+
+  it('packages the resolution in the agent job and verifies it on a fresh runner', () => {
+    // Drives the real run blocks — 'Package resolution' from resolve-pr and
+    // 'Resolution check' from publish-resolution — against a bare origin, an
+    // agent-side clone and a fresh publish-side clone, the way the two
+    // runners see them. The publish side never reads the agent's checkout.
+    const runBlock = (section, name) => {
+      const text = step(section, name);
+      const start =
+        text.indexOf('\n        run: |-\n') + '\n        run: |-\n'.length;
+      expect(start).toBeGreaterThan('\n        run: |-\n'.length - 1);
+      return text.slice(start).replace(/^ {10}/gm, '');
+    };
+    const packageBlock = runBlock(resolveJob, 'Package resolution');
+    const verifyBlock = runBlock(publishJob, 'Resolution check');
+    expect(packageBlock).not.toContain('${{');
+    expect(verifyBlock).not.toContain('${{');
+
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'fixture',
+      GIT_AUTHOR_EMAIL: 'fixture@example.com',
+      GIT_COMMITTER_NAME: 'fixture',
+      GIT_COMMITTER_EMAIL: 'fixture@example.com',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+    };
+    const git = (cwd, ...args) => {
+      const r = spawnSync('git', args, { cwd, env: gitEnv, encoding: 'utf8' });
+      if (r.status !== 0) {
+        throw new Error(
+          `git ${args.join(' ')} in ${cwd}:\n${r.stdout}\n${r.stderr}`,
+        );
+      }
+      return r.stdout.trim();
+    };
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-resolve-split-'));
+    try {
+      // Origin: main and a PR head that conflict on a.txt; main also adds c.txt.
+      const origin = path.join(root, 'origin.git');
+      const seed = path.join(root, 'seed');
+      git(root, 'init', '-q', '--bare', origin);
+      git(root, 'init', '-q', '-b', 'main', seed);
+      writeFileSync(path.join(seed, 'a.txt'), 'shared\n');
+      git(seed, 'add', '.');
+      git(seed, 'commit', '-q', '-m', 'chore: seed');
+      git(seed, 'checkout', '-q', '-b', 'feature');
+      writeFileSync(path.join(seed, 'a.txt'), 'feature side\n');
+      git(seed, 'commit', '-q', '-am', 'feat: feature');
+      const headSha = git(seed, 'rev-parse', 'HEAD');
+      git(seed, 'checkout', '-q', 'main');
+      writeFileSync(path.join(seed, 'a.txt'), 'main side\n');
+      writeFileSync(path.join(seed, 'c.txt'), 'from main\n');
+      git(seed, 'add', '.');
+      git(seed, 'commit', '-q', '-m', 'feat: main');
+      git(seed, 'remote', 'add', 'origin', origin);
+      git(seed, 'push', '-q', 'origin', 'main', 'feature:refs/pull/1/head');
+
+      // Agent side: the checkout the agent resolved in, plus its WORKDIR.
+      const agent = path.join(root, 'agent');
+      git(root, 'clone', '-q', origin, agent);
+      git(
+        agent,
+        'fetch',
+        '-q',
+        'origin',
+        '+refs/pull/1/head:refs/remotes/origin/qwen-resolve/pr-1/head',
+      );
+      git(
+        agent,
+        'checkout',
+        '-q',
+        '-B',
+        'qwen-resolve/pr-1',
+        'refs/remotes/origin/qwen-resolve/pr-1/head',
+      );
+      spawnSync('git', ['merge', '--no-commit', 'origin/main'], {
+        cwd: agent,
+        env: gitEnv,
+      });
+      const resolveWith = (extraFile) => {
+        writeFileSync(path.join(agent, 'a.txt'), 'resolved by agent\n');
+        git(agent, 'add', 'a.txt');
+        if (extraFile) {
+          writeFileSync(path.join(agent, extraFile), 'planted\n');
+          git(agent, 'add', extraFile);
+        }
+        git(
+          agent,
+          'commit',
+          '-q',
+          '-m',
+          'fix: resolve merge conflicts with main',
+        );
+      };
+      resolveWith(null);
+      const resolvedSha = git(agent, 'rev-parse', 'HEAD');
+
+      const pkg = (workdir, extraEnv = {}) => {
+        rmSync(workdir, { recursive: true, force: true });
+        mkdirSync(workdir, { recursive: true });
+        const r = spawnSync('bash', ['-c', packageBlock], {
+          cwd: agent,
+          env: {
+            ...gitEnv,
+            WORKDIR: workdir,
+            HEAD_SHA: headSha,
+            PR_NUMBER: '1',
+            ...extraEnv,
+          },
+          encoding: 'utf8',
+        });
+        return r;
+      };
+      const verify = (workdir, extraEnv = {}) => {
+        const publish = path.join(
+          root,
+          `publish-${Math.random().toString(36).slice(2)}`,
+        );
+        git(root, 'clone', '-q', origin, publish);
+        const out = path.join(publish, 'outputs.txt');
+        writeFileSync(out, '');
+        const r = spawnSync('bash', ['-c', verifyBlock], {
+          cwd: publish,
+          env: {
+            ...gitEnv,
+            WORKDIR: workdir,
+            PR_NUMBER: '1',
+            BASE_REF: 'main',
+            HEAD_FETCH_REF: 'refs/remotes/origin/qwen-resolve/pr-1/head',
+            HEAD_SHA: headSha,
+            RESOLVE_OUTCOME: 'success',
+            GITHUB_OUTPUT: out,
+            ...extraEnv,
+          },
+          encoding: 'utf8',
+        });
+        return { ...r, outputs: readFileSync(out, 'utf8'), publish };
+      };
+
+      // (a) The happy path: the bundle imports, descends from the head, and
+      // every structural check passes on the publish side.
+      const w1 = path.join(root, 'w1');
+      const p1 = pkg(w1);
+      expect(p1.status, p1.stdout + p1.stderr).toBe(0);
+      expect(existsSync(path.join(w1, 'resolution.bundle'))).toBe(true);
+      writeFileSync(path.join(w1, 'address-summary.md'), 'summary\n');
+      const v1 = verify(w1);
+      expect(v1.status, v1.stdout + v1.stderr).toBe(0);
+      expect(v1.outputs).toContain('outcome=fixed');
+      expect(git(v1.publish, 'rev-parse', 'HEAD')).toBe(resolvedSha);
+      expect(
+        git(
+          v1.publish,
+          'rev-parse',
+          'refs/remotes/origin/qwen-resolve/pr-1/head',
+        ),
+      ).toBe(headSha);
+
+      // (b) A bundle whose commit does not descend from the head the agent
+      // resolved from — built on main alone, as a prompt-injected agent that
+      // abandoned the PR branch would produce — is refused before any
+      // content check runs.
+      const w2 = path.join(root, 'w2');
+      mkdirSync(w2, { recursive: true });
+      git(agent, 'checkout', '-q', '-B', 'stray', 'origin/main');
+      writeFileSync(path.join(agent, 'a.txt'), 'stray\n');
+      git(agent, 'commit', '-q', '-am', 'fix: stray');
+      git(agent, 'update-ref', 'refs/heads/qwen-resolve/pr-1', 'stray');
+      git(
+        agent,
+        'bundle',
+        'create',
+        path.join(w2, 'resolution.bundle'),
+        `${headSha}..refs/heads/qwen-resolve/pr-1`,
+      );
+      writeFileSync(path.join(w2, 'address-summary.md'), 'summary\n');
+      const v2 = verify(w2);
+      expect(v2.status).toBe(1);
+      expect(v2.stdout).toContain('does not descend from the PR head');
+      expect(v2.outputs).toContain('outcome=failed');
+      expect(v2.outputs).not.toContain('outcome=fixed');
+      git(agent, 'checkout', '-q', 'qwen-resolve/pr-1');
+      git(agent, 'reset', '-q', '--hard', resolvedSha);
+
+      // (b2) A bundle whose prerequisite the publish runner has never seen
+      // (an agent-local commit) fails `git bundle verify` outright.
+      const w2b = path.join(root, 'w2b');
+      mkdirSync(w2b, { recursive: true });
+      git(agent, 'checkout', '-q', '-B', 'local-only', headSha);
+      writeFileSync(path.join(agent, 'z.txt'), 'local\n');
+      git(agent, 'add', 'z.txt');
+      git(agent, 'commit', '-q', '-m', 'chore: local only');
+      const localOnly = git(agent, 'rev-parse', 'HEAD');
+      writeFileSync(path.join(agent, 'a.txt'), 'on local\n');
+      git(agent, 'commit', '-q', '-am', 'fix: on local');
+      git(agent, 'update-ref', 'refs/heads/qwen-resolve/pr-1', 'local-only');
+      git(
+        agent,
+        'bundle',
+        'create',
+        path.join(w2b, 'resolution.bundle'),
+        `${localOnly}..refs/heads/qwen-resolve/pr-1`,
+      );
+      const v2b = verify(w2b);
+      expect(v2b.status).toBe(1);
+      expect(v2b.stdout).toContain('does not verify against the PR head');
+      expect(v2b.outputs).toContain('outcome=failed');
+      git(agent, 'checkout', '-q', '-B', 'qwen-resolve/pr-1', resolvedSha);
+
+      // (c) No bundle (the agent changed nothing) plus no-action.md → noop.
+      const w3 = path.join(root, 'w3');
+      const p3 = pkg(w3, { HEAD_SHA: resolvedSha });
+      expect(p3.status).toBe(0);
+      expect(p3.stdout).toContain('branch unchanged');
+      expect(existsSync(path.join(w3, 'resolution.bundle'))).toBe(false);
+      writeFileSync(path.join(w3, 'no-action.md'), 'nothing to do\n');
+      // A no-op is only accepted when the head really merges cleanly: verify
+      // against a base the head does not conflict with (the merge-tree check
+      // runs first and refuses a no-action.md on a still-conflicting head).
+      git(seed, 'push', '-q', 'origin', `${headSha}:refs/heads/base2`);
+      const v3 = verify(w3, { BASE_REF: 'base2' });
+      expect(v3.status, v3.stdout + v3.stderr).toBe(0);
+      expect(v3.outputs).toContain('outcome=noop');
+      const v3c = verify(w3);
+      expect(v3c.status).toBe(1);
+      expect(v3c.stdout).toContain(
+        'Branch still has merge conflicts with main',
+      );
+
+      // (d) A SUCCESSFUL agent step whose artifact is gone (its upload
+      // failed or expired) — the shape a partial "Re-run failed jobs" used
+      // to hit when the download missed the artifact. Classify the lost
+      // artifact, never the agent run: the infra comment would blame a run
+      // that succeeded and forbid the re-run that re-produces the artifact.
+      const v4 = verify(path.join(root, 'missing'));
+      expect(v4.status).toBe(1);
+      expect(v4.outputs).toContain('outcome=failed');
+      expect(v4.outputs).toContain('failure_kind=artifact_missing');
+      expect(v4.outputs).not.toContain('failure_kind=infra');
+
+      // (d2) A non-success agent step keeps the infra contract whatever the
+      // artifact state: the never-ran block fires before the import.
+      const v4b = verify(path.join(root, 'missing'), {
+        RESOLVE_OUTCOME: 'failure',
+      });
+      expect(v4b.status).toBe(1);
+      expect(v4b.outputs).toContain('outcome=failed');
+      expect(v4b.outputs).toContain('failure_kind=infra');
+
+      // (e) The scope guard still bites on the imported bundle: an extra file
+      // outside the base-changed set travels in the bundle and is refused.
+      git(agent, 'reset', '-q', '--hard', headSha);
+      spawnSync('git', ['merge', '--no-commit', 'origin/main'], {
+        cwd: agent,
+        env: gitEnv,
+      });
+      resolveWith('planted.txt');
+      const w5 = path.join(root, 'w5');
+      pkg(w5);
+      writeFileSync(path.join(w5, 'address-summary.md'), 'summary\n');
+      const v5 = verify(w5);
+      expect(v5.status).toBe(1);
+      expect(v5.stdout).toContain(
+        'Agent modified files outside the conflict set',
+      );
+      expect(v5.outputs).toContain('outcome=failed');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('supports dry-run and workflow_dispatch', () => {
@@ -647,10 +1490,863 @@ describe('qwen resolve workflow', () => {
     // changes; a token without the `workflow` scope is rejected, and that gets its
     // own actionable reason. A 403 (maintainer-edits off / org-owned fork / PAT
     // lacking push) and a stale force-with-lease are reported differently too.
-    expect(resolveJob).toContain("push_fail_reason='workflow_scope'");
-    expect(resolveJob).toContain('grant that scope to the push bot');
-    expect(resolveJob).toContain("push_fail_reason='permission'");
-    expect(resolveJob).toContain("push_fail_reason='moved'");
-    expect(resolveJob).toContain('Allow edits by maintainers');
+    expect(publishJob).toContain("push_fail_reason='workflow_scope'");
+    expect(publishJob).toContain('grant that scope to the push bot');
+    expect(publishJob).toContain("push_fail_reason='permission'");
+    expect(publishJob).toContain("push_fail_reason='moved'");
+    expect(publishJob).toContain('Allow edits by maintainers');
+  });
+});
+
+// A /resolve request is lost after the agent succeeded whenever the push is
+// declined, and before the agent even runs whenever a preflight refuses it.
+// The suite below pins the recovery paths added for the largest of those
+// losses (2026-06-25..08-27, 839 requests): the head moving during the run
+// (17 resolutions lost), fork PRs the bot cannot push to (10 agent runs
+// wasted), transient permission-API errors (silent denials), and the draft
+// gate (182 skip comments on explicit requests).
+describe('qwen resolve workflow: recovering requests that used to be lost', () => {
+  const workflow = readFileSync(
+    path.join(repoRoot, '.github/workflows/qwen-code-pr-review.yml'),
+    'utf8',
+  );
+  const resolveJob = job(workflow, 'resolve-pr');
+  const publishJob = job(workflow, 'publish-resolution');
+  const authorizeJob = job(workflow, 'authorize');
+  const prepareStep = step(resolveJob, 'Prepare pull request branch');
+  const reportStep = step(publishJob, 'Report result');
+  const authorizeStep = step(authorizeJob, 'Check principal write permission');
+
+  // The replay functions, dedented out of the `run: |-` block so a real git
+  // fixture can exercise them exactly as the runner will.
+  function replayFunctions() {
+    return extractBlock(
+      reportStep,
+      'replay_give_up() {',
+      '\n          if [ "$OUTCOME" = "fixed" ]',
+      { includeEnd: false },
+    );
+  }
+
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'fixture',
+    GIT_AUTHOR_EMAIL: 'fixture@example.com',
+    GIT_COMMITTER_NAME: 'fixture',
+    GIT_COMMITTER_EMAIL: 'fixture@example.com',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+  };
+  function git(cwd, ...args) {
+    const result = spawnSync('git', args, {
+      cwd,
+      env: gitEnv,
+      encoding: 'utf8',
+    });
+    if (result.status !== 0) {
+      throw new Error(
+        `git ${args.join(' ')} failed in ${cwd}:\n${result.stdout}\n${result.stderr}`,
+      );
+    }
+    return result.stdout.trim();
+  }
+
+  // Builds: a bare origin with `main` and refs/pull/1/head; a runner checkout
+  // on branch qwen-resolve/pr-1 holding the agent's resolution of a.txt (the
+  // conflicted file) merged on top of the ORIGINAL head; and a contributor
+  // clone that can move the head. Returns the paths and the original head SHA.
+  function makeFixture(resolveWith = 'edit', options = {}) {
+    const { conflicted = 'a.txt', sibling = null } = options;
+    const root = mkdtempSync(path.join(tmpdir(), 'qwen-resolve-replay-'));
+    const origin = path.join(root, 'origin.git');
+    const contributor = path.join(root, 'contributor');
+    const runner = path.join(root, 'runner');
+    git(root, 'init', '-q', '--bare', origin);
+    git(root, 'init', '-q', '-b', 'main', contributor);
+    writeFileSync(path.join(contributor, conflicted), 'shared line\n');
+    writeFileSync(path.join(contributor, 'b.txt'), 'b original\n');
+    if (sibling) {
+      writeFileSync(path.join(contributor, sibling), 'sibling original\n');
+    }
+    git(contributor, 'add', '.');
+    git(contributor, 'commit', '-q', '-m', 'chore: seed');
+    git(contributor, 'checkout', '-q', '-b', 'feature');
+    writeFileSync(path.join(contributor, conflicted), 'feature side\n');
+    git(contributor, 'commit', '-q', '-am', 'feat: feature side');
+    const originalHead = git(contributor, 'rev-parse', 'HEAD');
+    git(contributor, 'checkout', '-q', 'main');
+    writeFileSync(path.join(contributor, conflicted), 'main side\n');
+    writeFileSync(path.join(contributor, 'c.txt'), 'c from main\n');
+    git(contributor, 'add', '.');
+    git(contributor, 'commit', '-q', '-m', 'feat: main side');
+    git(contributor, 'remote', 'add', 'origin', origin);
+    git(
+      contributor,
+      'push',
+      '-q',
+      'origin',
+      'main',
+      'feature:refs/pull/1/head',
+    );
+
+    git(root, 'clone', '-q', origin, runner);
+    git(
+      runner,
+      'fetch',
+      '-q',
+      'origin',
+      '+refs/pull/1/head:refs/remotes/origin/qwen-resolve/pr-1/head',
+      '+refs/heads/main:refs/remotes/origin/main',
+    );
+    git(
+      runner,
+      'checkout',
+      '-q',
+      '-B',
+      'qwen-resolve/pr-1',
+      'refs/remotes/origin/qwen-resolve/pr-1/head',
+    );
+    // The agent's merge: a.txt conflicts, resolved to a line neither side had.
+    spawnSync('git', ['merge', '--no-commit', 'origin/main'], {
+      cwd: runner,
+      env: gitEnv,
+    });
+    if (resolveWith === 'delete') {
+      // Deleting the conflicted file IS the agent's resolution of it.
+      // Literal pathspecs: a glob-named file must not take its wildcard
+      // siblings with it.
+      spawnSync('git', ['rm', '-q', '--', conflicted], {
+        cwd: runner,
+        env: { ...gitEnv, GIT_LITERAL_PATHSPECS: '1' },
+      });
+    } else {
+      writeFileSync(path.join(runner, conflicted), 'resolved by agent\n');
+      spawnSync('git', ['add', '--', conflicted], {
+        cwd: runner,
+        env: { ...gitEnv, GIT_LITERAL_PATHSPECS: '1' },
+      });
+    }
+    git(runner, 'commit', '-q', '-m', 'fix: resolve merge conflicts with main');
+    const resolvedCommit = git(runner, 'rev-parse', 'HEAD');
+    return { root, origin, contributor, runner, originalHead, resolvedCommit };
+  }
+
+  function moveHead(fixture, file, content) {
+    git(fixture.contributor, 'checkout', '-q', 'feature');
+    writeFileSync(path.join(fixture.contributor, file), content);
+    git(fixture.contributor, 'add', file);
+    git(
+      fixture.contributor,
+      'commit',
+      '-q',
+      '-m',
+      `chore: move head (${file})`,
+    );
+    git(
+      fixture.contributor,
+      'push',
+      '-q',
+      'origin',
+      'feature:refs/pull/1/head',
+    );
+    return git(fixture.contributor, 'rev-parse', 'HEAD');
+  }
+
+  function runReplay(fixture) {
+    // The production step has already scrubbed the workspace before the
+    // replay runs (#10428): no .git/config — so no `origin` remote and no
+    // user.name/email — and no global config. Reproduce that state so the
+    // replay must carry its own identity and fetch by URL.
+    const replayEnv = { ...gitEnv };
+    for (const key of [
+      'GIT_AUTHOR_NAME',
+      'GIT_AUTHOR_EMAIL',
+      'GIT_COMMITTER_NAME',
+      'GIT_COMMITTER_EMAIL',
+    ]) {
+      delete replayEnv[key];
+    }
+    const script = [
+      'set -euo pipefail',
+      'rm -f .git/config',
+      replayFunctions(),
+      'replayed_on=""',
+      'if replay_on_moved_head; then rc=0; else rc=$?; fi',
+      'echo "rc=$rc"',
+      'echo "HEAD_SHA=$HEAD_SHA"',
+      'echo "replayed_on=$replayed_on"',
+      'echo "head=$(git rev-parse HEAD)"',
+      'echo "branch=$(git rev-parse --abbrev-ref HEAD)"',
+      'echo "status=$(git status --porcelain | tr "\\n" ";")"',
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: fixture.runner,
+      env: {
+        ...replayEnv,
+        PR_NUMBER: '1',
+        HEAD_SHA: fixture.originalHead,
+        BASE_REF: 'main',
+        REPO: 'QwenLM/qwen-code',
+        // The replay fetches by URL (the scrub removes the `origin` remote
+        // with .git/config); point it at the fixture's bare repository.
+        RESOLVE_ORIGIN_URL: fixture.origin,
+      },
+      encoding: 'utf8',
+    });
+    const out = Object.fromEntries(
+      result.stdout
+        .split('\n')
+        .filter((line) =>
+          /^(rc|HEAD_SHA|replayed_on|head|branch|status)=/.test(line),
+        )
+        .map((line) => line.split(/=(.*)/s).slice(0, 2)),
+    );
+    return { ...out, stdout: result.stdout, stderr: result.stderr };
+  }
+
+  it('replays the resolution when the head moved in files the conflict did not touch', () => {
+    const fixture = makeFixture();
+    try {
+      const newHead = moveHead(
+        fixture,
+        'b.txt',
+        'b changed after the agent started\n',
+      );
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('0');
+      // The lease for the second push is taken on the NEW head.
+      expect(out.HEAD_SHA).toBe(newHead);
+      expect(out.replayed_on).toBe(newHead);
+      expect(out.status).toBe('');
+      // The replayed commit sits on the new head, merges the base, keeps the
+      // agent's resolution and the contributor's new change, and reuses the
+      // agent's commit message (CI rejects git's default merge message).
+      const parents = git(
+        fixture.runner,
+        'log',
+        '-1',
+        '--format=%P',
+        out.head,
+      ).split(' ');
+      expect(parents).toContain(newHead);
+      expect(parents).toContain(
+        git(fixture.runner, 'rev-parse', 'origin/main'),
+      );
+      expect(readFileSync(path.join(fixture.runner, 'a.txt'), 'utf8')).toBe(
+        'resolved by agent\n',
+      );
+      expect(readFileSync(path.join(fixture.runner, 'b.txt'), 'utf8')).toBe(
+        'b changed after the agent started\n',
+      );
+      expect(readFileSync(path.join(fixture.runner, 'c.txt'), 'utf8')).toBe(
+        'c from main\n',
+      );
+      expect(git(fixture.runner, 'log', '-1', '--format=%s', out.head)).toBe(
+        'fix: resolve merge conflicts with main',
+      );
+      // The scrub removed user.name/email with .git/config; the replay must
+      // bring the bot identity itself (the author is reused from the agent's
+      // commit by -C).
+      expect(
+        git(fixture.runner, 'log', '-1', '--format=%cn <%ce>', out.head),
+      ).toBe('qwen-code-dev-bot <qwen-code-dev-bot@users.noreply.github.com>');
+      // Only base-changed files differ from the new head: the scope guard holds.
+      expect(
+        git(fixture.runner, 'diff', '--name-only', newHead, out.head)
+          .split('\n')
+          .sort(),
+      ).toEqual(['a.txt', 'c.txt']);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('gives up, and restores the original resolution, when the new head touched a conflicted file', () => {
+    const fixture = makeFixture();
+    try {
+      moveHead(fixture, 'a.txt', 'feature side, edited again\n');
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('1');
+      expect(out.stdout).toContain(
+        'Replay gave up: a.txt still conflicts and the new head changed it',
+      );
+      // Nothing was taken from the agent's merge for a file the contributor
+      // rewrote, the lease SHA is untouched, and the checkout is back on the
+      // original resolution with a clean tree — the artifact and the "moved"
+      // comment describe exactly what exists.
+      expect(out.HEAD_SHA).toBe(fixture.originalHead);
+      expect(out.replayed_on).toBe('');
+      expect(out.branch).toBe('qwen-resolve/pr-1');
+      expect(out.head).toBe(fixture.resolvedCommit);
+      expect(out.status).toBe('');
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('gives up when the head did not move at all (the push failed for another reason)', () => {
+    const fixture = makeFixture();
+    try {
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('1');
+      expect(out.stdout).toContain('the push was declined for another reason');
+      expect(out.head).toBe(fixture.resolvedCommit);
+      expect(out.branch).toBe('qwen-resolve/pr-1');
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('wires the replay into the push path with a lease on the new head, and never re-runs the agent', () => {
+    expect(reportStep).toContain(
+      '[ "$push_fail_reason" = "moved" ] && replay_on_moved_head && push_resolution',
+    );
+    // The lease still names ${HEAD_SHA}; the replay moves that variable to the
+    // new head instead of pushing with a bare --force.
+    expect(reportStep).toContain(
+      '--force-with-lease="refs/heads/${HEAD_REF}:${HEAD_SHA}"',
+    );
+    expect(reportStep).toContain('HEAD_SHA="$new_sha"');
+    expect(reportStep).not.toContain('--force ');
+    // The replay re-applies the structural checks of 'Resolution check'.
+    const replay = replayFunctions();
+    expect(replay).toContain("grep -InE -e '^(<<<<<<<|>>>>>>>) '");
+    expect(replay).toContain(
+      'git merge-tree --write-tree "origin/${BASE_REF}" HEAD',
+    );
+    expect(replay).toContain('comm -23 <(printf');
+    expect(replay).not.toContain('qwen-code-action');
+    // The credentialed steps remove the workspace .git/config — and with it
+    // the `origin` remote — before they run, so the replay must fetch by URL.
+    expect(replay).toContain(
+      'git fetch "${RESOLVE_ORIGIN_URL:-https://github.com/${REPO}.git}"',
+    );
+    expect(replay).not.toContain('git fetch origin');
+    // And the comment says a replay happened, and where the pushed tree is:
+    // the first artifact holds the ORIGINAL resolution (uploaded before the
+    // replay ran), so a replay records what it pushed for a second upload.
+    expect(reportStep).toContain('the resolution was replayed on top of it');
+    expect(reportStep).toContain(
+      'git diff "origin/${BASE_REF}...HEAD" > "${WORKDIR}/pushed/pushed.diff"',
+    );
+    expect(reportStep).toContain('qwen-resolve-pr-${PR_NUMBER}-pushed');
+    const pushedUpload = step(publishJob, 'Upload pushed tree');
+    expect(pushedUpload).toContain(
+      "name: 'qwen-resolve-pr-${{ needs.resolve-pr.outputs.pr_number }}-pushed'",
+    );
+    expect(pushedUpload).toContain("path: '${{ env.WORKDIR }}/pushed/'");
+    // always() (not the resolve-pr prepare gate, which has no meaning here);
+    // quote style is the workflow author's choice, so match either.
+    expect(pushedUpload).toMatch(/if:\s*['"]\$\{\{ always\(\) \}\}['"]/);
+    expect(pushedUpload).not.toContain('steps.prepare.outputs.decision');
+    expect(publishJob.indexOf("- name: 'Upload pushed tree'")).toBeGreaterThan(
+      publishJob.indexOf("- name: 'Report result'"),
+    );
+  });
+
+  it('defines every uppercase variable the resolve-pr and publish run blocks expand', () => {
+    // The steps run under `set -u`; a ${NAME} the env block does not define
+    // aborts the step at first use. The replay was shipped once with BASE_REF
+    // missing from 'Report result' — the fixture test injected it, so nothing
+    // noticed. Cover every run block of the job, not just that one.
+    const builtins = new Set([
+      'GITHUB_OUTPUT',
+      'GITHUB_REPOSITORY',
+      'GITHUB_STEP_SUMMARY',
+      'GITHUB_ENV',
+      'GITHUB_PATH',
+      'RUNNER_TEMP',
+      'HOME',
+      'PATH',
+      'RANDOM',
+      'PIPESTATUS',
+      'BASH_REMATCH',
+    ]);
+    for (const jobText of [resolveJob, publishJob]) {
+      const jobEnv = new Set(
+        [...jobText.matchAll(/^ {6}([A-Z][A-Z0-9_]*): /gm)].map((m) => m[1]),
+      );
+      const stepBlocks = jobText.split(/\n {6}- name: /).slice(1);
+      for (const block of stepBlocks) {
+        if (!/\n {8}run: \|-?\n/.test(block)) {
+          continue;
+        }
+        const name = block.slice(0, block.indexOf('\n'));
+        const stepEnv = new Set(
+          [...block.matchAll(/^ {10}([A-Z][A-Z0-9_]*): /gm)].map((m) => m[1]),
+        );
+        const run = block.slice(block.search(/\n {8}run: \|-?\n/));
+        const assigned = new Set(
+          [...run.matchAll(/(?:^|[\s;{(])([A-Z][A-Z0-9_]*)=/gm)].map(
+            (m) => m[1],
+          ),
+        );
+        const referenced = new Set(
+          [...run.matchAll(/\$\{?([A-Z][A-Z0-9_]+)\b/g)]
+            .map((m) => m[1])
+            .filter((v) => !v.startsWith('GITHUB_')),
+        );
+        const missing = [...referenced].filter(
+          (v) =>
+            !jobEnv.has(v) &&
+            !stepEnv.has(v) &&
+            !assigned.has(v) &&
+            !builtins.has(v),
+        );
+        expect(
+          missing,
+          `step ${name} expands undefined: ${missing.join(', ')}`,
+        ).toEqual([]);
+      }
+    }
+    // And the one that shipped missing is now there (the replay lives in the
+    // publish job, whose refs come from the agent job's outputs).
+    expect(step(publishJob, 'Report result')).toContain(
+      "BASE_REF: '${{ needs.resolve-pr.outputs.base_ref }}'",
+    );
+  });
+
+  it('refuses fork PRs the bot cannot push to before spending an agent run', () => {
+    expect(prepareStep).toContain('maintainerCanModify');
+    expect(prepareStep).toContain(
+      '[ "$head_repo" != "$REPO" ] && [ "$maintainer_can_modify" != "true" ]',
+    );
+    expect(prepareStep).toContain('**Allow edits by maintainers** off');
+    // Same-repo PRs report maintainerCanModify=false too; the fork check must
+    // be conjoined with the head-repo comparison or every in-repo PR is refused.
+    expect(prepareStep).not.toMatch(
+      /\n\s+if \[ "\$maintainer_can_modify" != "true" \]; then/,
+    );
+  });
+
+  it('no longer refuses draft PRs', () => {
+    // /resolve is an explicit request by a writer; a draft with conflicts is
+    // where resolving is cheapest. The automatic review lane keeps its gate.
+    expect(prepareStep).not.toContain('is draft.');
+    expect(prepareStep).not.toContain('isDraft');
+    expect(job(workflow, 'delay-automatic-review')).toContain('is draft.');
+  });
+
+  it('retries a transient permission-API error before denying, and still fails closed', () => {
+    expect(authorizeJob).toContain(
+      'failed transiently (attempt ${attempt} of 3)',
+    );
+    expect(authorizeJob).toContain('No server is currently available');
+    // The strings above stay put if the loop itself regresses: the bound,
+    // the backoff, and the retry branch are pinned by the behavioural tests
+    // below, and their YAML anchors here.
+    expect(authorizeJob).toContain('[ "$attempt" -lt 3 ]');
+    expect(authorizeJob).toContain('sleep $((attempt * 5))');
+    // After the retries the original fail-closed denial is unchanged.
+    expect(authorizeJob).toContain(
+      '::error::Permission API call failed for ${principal}: ${api_error}',
+    );
+    expect(authorizeJob).toContain(
+      'echo "should_review=false" >> "$GITHUB_OUTPUT"',
+    );
+  });
+
+  // --- classify_push_failure: order pin + behaviour against real push logs ---
+
+  it('tests the lease-decline signature before the permission patterns', () => {
+    // git echoes the destination branch into the push log; the permission
+    // patterns are substrings of plausible branch names, the moved patterns
+    // are server phrases a branch name cannot contain. Order is the guard.
+    const scope = reportStep.indexOf("push_fail_reason='workflow_scope'");
+    const moved = reportStep.indexOf("push_fail_reason='moved'");
+    const permission = reportStep.indexOf("push_fail_reason='permission'");
+    expect(scope).toBeGreaterThan(-1);
+    expect(scope).toBeLessThan(moved);
+    expect(moved).toBeLessThan(permission);
+  });
+
+  function classifyFunction() {
+    return extractBlock(
+      reportStep,
+      'classify_push_failure() {',
+      '\n          }',
+    );
+  }
+
+  function classifyScript(lines, scriptLines, extraEnv = {}) {
+    const dir = mkdtempSync(path.join(tmpdir(), 'qwen-classify-'));
+    try {
+      const pushLog = path.join(dir, 'push.log');
+      writeFileSync(pushLog, `${lines.join('\n')}\n`);
+      return spawnSync(
+        'bash',
+        [
+          '-c',
+          ['set -euo pipefail', classifyFunction(), ...scriptLines].join('\n'),
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, push_log: pushLog, ...extraEnv },
+        },
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  function classifyLog(lines) {
+    const result = classifyScript(lines, [
+      'classify_push_failure',
+      'printf "reason=%s\\n" "$push_fail_reason"',
+    ]);
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    return result.stdout.match(/^reason=(.*)$/m)?.[1];
+  }
+
+  const staleInfoLog = (branch) => [
+    'To github.com:contributor/repo.git',
+    ` ! [remote rejected] HEAD -> ${branch} (stale info)`,
+    "error: failed to push some refs to 'github.com/contributor/repo.git'",
+  ];
+
+  it('classifies a moved head by its lease decline even when the branch name echoes a permission substring', () => {
+    expect(classifyLog(staleInfoLog('feature'))).toBe('moved');
+    expect(classifyLog(staleInfoLog('fix/permission-prompt'))).toBe('moved');
+    expect(classifyLog(staleInfoLog('fix-403-error'))).toBe('moved');
+    // A branch that merely CONTAINS a moved-reason phrase — even parenthesised,
+    // which refnames legally allow — is not a lease decline: git prints the
+    // real reason last on the line, and the moved arm anchors to end-of-line.
+    // These also pin the parenthesised patterns against a bare-word
+    // regression, which every one of these branch names would trip.
+    expect(
+      classifyLog([
+        ' ! [remote rejected] HEAD -> x(non-fast-forward)y (protected branch hook declined)',
+      ]),
+    ).toBe('permission');
+    expect(
+      classifyLog([
+        ' ! [remote rejected] HEAD -> fix/non-fast-forward (cannot be updated)',
+      ]),
+    ).toBe('permission');
+    expect(
+      classifyLog([
+        ' ! [remote rejected] HEAD -> fix/non-fast-forward-retry (pre-receive hook declined)',
+        "fatal: unable to access 'https://github.com/contributor/repo.git/': The requested URL returned error: 403",
+      ]),
+    ).toBe('permission');
+    // Genuine access problems still classify as permission, the workflow-scope
+    // arm keeps its priority over both, and unknown failures stay 'other'.
+    expect(
+      classifyLog([
+        "fatal: unable to access 'https://github.com/contributor/repo.git/': The requested URL returned error: 403",
+      ]),
+    ).toBe('permission');
+    expect(
+      classifyLog([
+        'remote: refusing to allow an OAuth App to create or update workflow `.github/workflows/ci.yml` without `workflow` scope',
+      ]),
+    ).toBe('workflow_scope');
+    expect(classifyLog(['error: something else entirely'])).toBe('other');
+  });
+
+  it('re-classifies from the current push log when the replay push fails for a new reason', () => {
+    // After a failed replay push, classify_push_failure runs a second time;
+    // the reported reason must come from the second push's log, not the stale
+    // 'moved' from the first.
+    const result = classifyScript(
+      staleInfoLog('feature'),
+      [
+        'classify_push_failure',
+        'printf "first=%s\\n" "$push_fail_reason"',
+        'printf "%s\\n" "$SECOND_LOG" > "$push_log"',
+        'classify_push_failure',
+        'printf "second=%s\\n" "$push_fail_reason"',
+      ],
+      {
+        SECOND_LOG:
+          "fatal: unable to access 'https://github.com/contributor/repo.git/': The requested URL returned error: 403",
+      },
+    );
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(result.stdout).toContain('first=moved');
+    expect(result.stdout).toContain('second=permission');
+  });
+
+  it('says in the replay comment what the run artifact does and does not describe', () => {
+    // The artifact's pr.diff is computed before the replay runs; the pushed
+    // tree is the replay. The comment must say so, and must not claim files
+    // were taken from the agent's merge when the replay merged clean.
+    const armStart = reportStep.indexOf('elif [ -n "$replayed_on" ]; then');
+    expect(armStart).toBeGreaterThan(-1);
+    const arm = reportStep.slice(
+      armStart,
+      reportStep.indexOf('\n                else', armStart),
+    );
+    expect(arm).toContain('the resolution was replayed on top of it');
+    expect(arm).toContain(
+      'where a file still conflicted and the new commits had not touched it',
+    );
+    expect(arm).toContain(
+      'describes the original resolution it was replayed from',
+    );
+  });
+
+  // --- replay fixtures: the empty-merge give-up and deletion resolutions ---
+
+  // The contributor merges the base into their PR branch while the agent
+  // runs; the replay's re-merge of the base then changes nothing, so the
+  // lane must give up cleanly instead of committing an unchanged tree.
+  function mergeMainIntoHead(fixture) {
+    git(fixture.contributor, 'checkout', '-q', 'feature');
+    const merge = spawnSync('git', ['merge', '--no-edit', 'main'], {
+      cwd: fixture.contributor,
+      env: gitEnv,
+      encoding: 'utf8',
+    });
+    // a.txt still conflicts between feature and main; the contributor keeps
+    // their side and completes the merge themselves.
+    expect(merge.status).not.toBe(0);
+    writeFileSync(
+      path.join(fixture.contributor, 'a.txt'),
+      'feature side, merged by the contributor\n',
+    );
+    git(fixture.contributor, 'add', 'a.txt');
+    git(fixture.contributor, 'commit', '-q', '--no-edit');
+    git(
+      fixture.contributor,
+      'push',
+      '-q',
+      'origin',
+      'feature:refs/pull/1/head',
+    );
+    return git(fixture.contributor, 'rev-parse', 'HEAD');
+  }
+
+  it('gives up cleanly when the new head already merged the base itself', () => {
+    const fixture = makeFixture();
+    try {
+      const newHead = mergeMainIntoHead(fixture);
+      expect(newHead).not.toBe(fixture.originalHead);
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('1');
+      expect(out.stdout).toContain('changes nothing');
+      expect(out.HEAD_SHA).toBe(fixture.originalHead);
+      expect(out.replayed_on).toBe('');
+      expect(out.branch).toBe('qwen-resolve/pr-1');
+      expect(out.head).toBe(fixture.resolvedCommit);
+      expect(out.status).toBe('');
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('replays a resolution that deleted the conflicted file', () => {
+    const fixture = makeFixture('delete');
+    try {
+      const newHead = moveHead(
+        fixture,
+        'b.txt',
+        'b changed after the agent started\n',
+      );
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('0');
+      expect(out.HEAD_SHA).toBe(newHead);
+      expect(out.replayed_on).toBe(newHead);
+      // The agent's version of a.txt IS its deletion: the pushed tree must
+      // not have the file back, and the scope guard still holds.
+      expect(existsSync(path.join(fixture.runner, 'a.txt'))).toBe(false);
+      expect(
+        git(fixture.runner, 'ls-tree', '--name-only', out.head),
+      ).not.toContain('a.txt');
+      expect(
+        git(fixture.runner, 'diff', '--name-only', newHead, out.head)
+          .split('\n')
+          .sort(),
+      ).toEqual(['a.txt', 'c.txt']);
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  // Conflicted filenames legally carry glob characters; the replay's per-file
+  // diff/checkout/rm pathspecs must stay literal (GIT_LITERAL_PATHSPECS) or a
+  // file named `a[1].txt` widens every one of them to its sibling `a1.txt`.
+  it('replays when the head moved only in a glob sibling of the conflicted file', () => {
+    const fixture = makeFixture('edit', {
+      conflicted: 'a[1].txt',
+      sibling: 'a1.txt',
+    });
+    try {
+      const newHead = moveHead(
+        fixture,
+        'a1.txt',
+        'sibling edited by the new head\n',
+      );
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('0');
+      expect(out.HEAD_SHA).toBe(newHead);
+      expect(out.replayed_on).toBe(newHead);
+      // Both files intact: the agent's resolution of the conflicted file and
+      // the new head's edit of its wildcard sibling.
+      expect(readFileSync(path.join(fixture.runner, 'a[1].txt'), 'utf8')).toBe(
+        'resolved by agent\n',
+      );
+      expect(readFileSync(path.join(fixture.runner, 'a1.txt'), 'utf8')).toBe(
+        'sibling edited by the new head\n',
+      );
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a glob sibling alive when a deletion resolution is replayed', () => {
+    const fixture = makeFixture('delete', {
+      conflicted: 'a[1].txt',
+      sibling: 'a1.txt',
+    });
+    try {
+      const newHead = moveHead(
+        fixture,
+        'a1.txt',
+        'sibling edited by the new head\n',
+      );
+      const out = runReplay(fixture);
+      expect(out.rc, out.stdout + out.stderr).toBe('0');
+      expect(out.HEAD_SHA).toBe(newHead);
+      expect(out.replayed_on).toBe(newHead);
+      // The agent deleted a[1].txt; `git rm` must not have staged its
+      // wildcard sibling along with it.
+      expect(existsSync(path.join(fixture.runner, 'a[1].txt'))).toBe(false);
+      expect(readFileSync(path.join(fixture.runner, 'a1.txt'), 'utf8')).toBe(
+        'sibling edited by the new head\n',
+      );
+      expect(
+        git(fixture.runner, 'ls-tree', '--name-only', out.head).split('\n'),
+      ).toContain('a1.txt');
+    } finally {
+      rmSync(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  // --- authorize retry loop: behaviour against a scripted gh ---
+
+  function authorizeRetryBlock() {
+    return extractBlock(
+      authorizeStep,
+      'api_error_file="$(mktemp)"',
+      '\n          esac',
+    );
+  }
+
+  function runAuthorizeRetry(plan) {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-authorize-retry-'));
+    try {
+      const binDir = path.join(tempDir, 'bin');
+      mkdirSync(binDir);
+      const planFile = path.join(tempDir, 'plan.txt');
+      const callLog = path.join(tempDir, 'calls.log');
+      const sleepLog = path.join(tempDir, 'sleeps.log');
+      const outputFile = path.join(tempDir, 'output');
+      const summaryFile = path.join(tempDir, 'summary');
+      writeFileSync(planFile, `${plan.join('\n')}\n`);
+      writeFileSync(callLog, '');
+      writeFileSync(sleepLog, '');
+      writeFileSync(outputFile, '');
+      writeFileSync(summaryFile, '');
+      writeFileSync(
+        path.join(binDir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'set -euo pipefail',
+          'printf "%s\\n" "$*" >> "$AUTHORIZE_CALL_LOG"',
+          'n="$(cat "$AUTHORIZE_CALL_COUNT" 2>/dev/null || echo 0)"',
+          'n=$((n + 1))',
+          'printf "%s\\n" "$n" > "$AUTHORIZE_CALL_COUNT"',
+          'line="$(sed -n "${n}p" "$AUTHORIZE_PLAN_FILE")"',
+          'case "$line" in',
+          '  ok:*) printf "%s\\n" "${line#ok:}" ;;',
+          '  fail:*) printf "%s\\n" "${line#fail:}" >&2; exit 1 ;;',
+          'esac',
+        ].join('\n'),
+      );
+      chmodSync(path.join(binDir, 'gh'), 0o755);
+      const result = spawnSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -euo pipefail',
+            'sleep() { printf "%s\\n" "$1" >> "$AUTHORIZE_SLEEP_LOG"; }',
+            'principal=commenter',
+            'GITHUB_REPOSITORY=owner/repo',
+            authorizeRetryBlock(),
+          ].join('\n'),
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH}`,
+            AUTHORIZE_PLAN_FILE: planFile,
+            AUTHORIZE_CALL_COUNT: path.join(tempDir, 'count'),
+            AUTHORIZE_CALL_LOG: callLog,
+            AUTHORIZE_SLEEP_LOG: sleepLog,
+            GITHUB_OUTPUT: outputFile,
+            GITHUB_STEP_SUMMARY: summaryFile,
+          },
+        },
+      );
+      return {
+        ...result,
+        output: readFileSync(outputFile, 'utf8'),
+        summary: readFileSync(summaryFile, 'utf8'),
+        calls: readFileSync(callLog, 'utf8').split('\n').filter(Boolean),
+        sleeps: readFileSync(sleepLog, 'utf8').split('\n').filter(Boolean),
+      };
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  }
+
+  const TRANSIENT_503 = 'fail:HTTP 503: No server is currently available';
+
+  it('retries a transient permission-API error twice, then allows the writer', () => {
+    const out = runAuthorizeRetry([TRANSIENT_503, TRANSIENT_503, 'ok:write']);
+    expect(out.status, out.stdout + out.stderr).toBe(0);
+    expect(out.output).toContain('should_review=true');
+    expect(out.calls).toHaveLength(3);
+    for (const call of out.calls) {
+      expect(call).toBe(
+        'api repos/owner/repo/collaborators/commenter/permission --jq .permission',
+      );
+    }
+    expect(out.sleeps).toEqual(['5', '10']);
+    expect(out.stdout).toContain('failed transiently (attempt 1 of 3)');
+    expect(out.stdout).toContain('failed transiently (attempt 2 of 3)');
+  });
+
+  it('denies after three transient failures — fail closed', () => {
+    const out = runAuthorizeRetry([
+      TRANSIENT_503,
+      TRANSIENT_503,
+      TRANSIENT_503,
+    ]);
+    expect(out.status, out.stdout + out.stderr).toBe(0);
+    expect(out.output).toContain('should_review=false');
+    expect(out.output).not.toContain('should_review=true');
+    expect(out.calls).toHaveLength(3);
+    expect(out.stdout).toContain(
+      '::error::Permission API call failed for commenter',
+    );
+    expect(out.summary).toContain(
+      'Failed to check permission for commenter (API error:',
+    );
+  });
+
+  it('denies a non-transient permission-API error on the first attempt', () => {
+    const out = runAuthorizeRetry(['fail:HTTP 404: Not Found']);
+    expect(out.status, out.stdout + out.stderr).toBe(0);
+    expect(out.output).toContain('should_review=false');
+    expect(out.output).not.toContain('should_review=true');
+    expect(out.calls).toHaveLength(1);
+    expect(out.sleeps).toEqual([]);
+    expect(out.summary).toContain(
+      'Failed to check permission for commenter (API error:',
+    );
   });
 });

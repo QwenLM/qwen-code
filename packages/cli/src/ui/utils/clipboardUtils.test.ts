@@ -148,11 +148,20 @@ function setupX11Env() {
 
 const originalPlatform = process.platform;
 
+// The beforeEach below resets the module registry and re-imports the module
+// graph for every test; under heavy parallel CI load that can exceed the
+// default hook timeout without any real hang.
+const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 60_000
+  : 30_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
+
 describe('clipboardUtils', () => {
   let clipboardHasImage: () => Promise<boolean>;
   let saveClipboardImage: (dir?: string) => Promise<string | null>;
   let cleanupOldClipboardImages: (dir?: string) => Promise<void>;
   let writeOsc52: (text: string) => boolean;
+  let isWaylandSession: () => boolean;
 
   beforeEach(async () => {
     // Clean up /tmp/test directory from previous runs to ensure
@@ -176,6 +185,7 @@ describe('clipboardUtils', () => {
     saveClipboardImage = mod.saveClipboardImage;
     cleanupOldClipboardImages = mod.cleanupOldClipboardImages;
     writeOsc52 = mod.writeOsc52;
+    isWaylandSession = mod.isWaylandSession;
     mod.resetLinuxClipboardTool();
     // Set up Wayland env as default
     vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
@@ -197,7 +207,36 @@ describe('clipboardUtils', () => {
     });
   });
 
+  describe('isWaylandSession', () => {
+    it('matches the session type case-insensitively', () => {
+      vi.stubEnv('XDG_SESSION_TYPE', 'Wayland');
+      vi.stubEnv('WAYLAND_DISPLAY', '');
+
+      expect(isWaylandSession()).toBe(true);
+    });
+
+    it('uses WAYLAND_DISPLAY when the session type is unset', () => {
+      delete process.env['XDG_SESSION_TYPE'];
+      vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
+
+      expect(isWaylandSession()).toBe(true);
+    });
+  });
+
   describe('clipboardHasImage', () => {
+    it('uses wl-paste for a case-insensitive Wayland session type', async () => {
+      vi.stubEnv('XDG_SESSION_TYPE', 'Wayland');
+      vi.stubEnv('WAYLAND_DISPLAY', '');
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      mockSpawn.mockReturnValue(createMockChild('image/png\n', 0));
+
+      await clipboardHasImage();
+
+      expect(mockExecSync).toHaveBeenCalledWith('command -v wl-paste', {
+        stdio: 'ignore',
+      });
+    });
+
     it('should return true when clipboard contains image', async () => {
       mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
       const mockChild = createMockChild('image/png\nimage/bmp\n', 0);

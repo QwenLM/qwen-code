@@ -22,13 +22,16 @@ interface Deferred<T> {
 }
 
 const sdkMock = vi.hoisted(() => ({
+  ownerVersion: 0,
+  ownerGuard: { capture: vi.fn() },
   actions: {
     getTasks: vi.fn(),
   },
 }));
 
-vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useActions: () => sdkMock.actions,
+  useDaemonSessionOwnerGuard: () => sdkMock.ownerGuard,
 }));
 
 let root: Root | null = null;
@@ -109,6 +112,11 @@ beforeEach(() => {
   refreshTrigger = 0;
   latestTasks = [];
   sdkMock.actions.getTasks.mockReset();
+  sdkMock.ownerVersion = 0;
+  sdkMock.ownerGuard.capture.mockImplementation(() => {
+    const version = sdkMock.ownerVersion;
+    return { isCurrent: () => sdkMock.ownerVersion === version };
+  });
 });
 
 afterEach(async () => {
@@ -200,10 +208,17 @@ describe('useBackgroundTasks', () => {
 
     await renderHarness();
     expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+    expect(sdkMock.actions.getTasks).toHaveBeenLastCalledWith({
+      silent: true,
+    });
 
     sessionId = 'session-b';
+    sdkMock.ownerVersion += 1;
     await rerenderHarness();
     expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+    expect(sdkMock.actions.getTasks).toHaveBeenLastCalledWith({
+      silent: true,
+    });
 
     await act(async () => {
       sessionA.resolve(
@@ -224,5 +239,49 @@ describe('useBackgroundTasks', () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
     expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(3);
+    expect(sdkMock.actions.getTasks).toHaveBeenLastCalledWith({
+      silent: true,
+    });
+  });
+
+  it('ignores an old attachment response when the session id is unchanged', async () => {
+    const request = deferred<DaemonSessionTasksStatus>();
+    sdkMock.actions.getTasks.mockReturnValueOnce(request.promise);
+    await renderHarness();
+
+    sdkMock.ownerVersion += 1;
+    await act(async () => {
+      request.resolve(
+        snapshot('session-a', [monitor('stale-monitor', 'running')]),
+      );
+      await request.promise;
+    });
+
+    expect(latestTasks).toEqual([]);
+  });
+
+  it('starts polling a replacement attachment while the old request hangs', async () => {
+    const oldRequest = deferred<DaemonSessionTasksStatus>();
+    const runningMonitor = monitor('replacement-monitor', 'running');
+    sdkMock.actions.getTasks
+      .mockReturnValueOnce(oldRequest.promise)
+      .mockResolvedValueOnce(snapshot('session-a', [runningMonitor]));
+
+    await renderHarness();
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(1);
+
+    sdkMock.ownerVersion += 1;
+    await rerenderHarness();
+
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledTimes(2);
+    expect(latestTasks).toEqual([runningMonitor]);
+
+    await act(async () => {
+      oldRequest.resolve(
+        snapshot('session-a', [monitor('stale-monitor', 'completed')]),
+      );
+      await oldRequest.promise;
+    });
+    expect(latestTasks).toEqual([runningMonitor]);
   });
 });

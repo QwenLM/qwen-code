@@ -1016,13 +1016,15 @@ describe('EnhancedMarkdownTable', () => {
     expect(cellDialog()).toBeNull();
   });
 
-  it('restores focus when closing the cell value dialog', () => {
+  it('restores focus without scrolling when closing the cell value dialog', () => {
     const container = renderTable();
     const scroller = container.querySelector<HTMLElement>('[tabindex="0"]');
     expect(scroller).not.toBeNull();
+    const focus = vi.spyOn(scroller!, 'focus');
     act(() => {
       scroller!.focus();
     });
+    focus.mockClear();
 
     doubleClick(dataCell(container, 0, 0));
     expect(document.activeElement).not.toBe(scroller);
@@ -1030,6 +1032,7 @@ describe('EnhancedMarkdownTable', () => {
     click(textButton(document.body, 'Close'));
 
     expect(document.activeElement).toBe(scroller);
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
   });
 
   it('focuses the cell value dialog instead of the close button', () => {
@@ -1178,6 +1181,15 @@ describe('EnhancedMarkdownTable', () => {
     dragCells(dataCell(container, 0, 1), dataCell(container, 0, 1));
     click(textButton(container, 'Copy TSV'));
     expect(writeText).toHaveBeenLastCalledWith("'=1+1");
+  });
+
+  it('keeps an accessible name on the custom columns trigger', () => {
+    const container = renderTable();
+
+    const trigger = button(container, 'Custom columns');
+
+    expect(trigger.getAttribute('aria-label')).toBe('Custom columns');
+    expect(trigger.textContent).toContain('Custom columns');
   });
 
   it('hides columns and restores them from custom columns', () => {

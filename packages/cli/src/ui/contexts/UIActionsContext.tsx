@@ -42,6 +42,7 @@ export interface UIActions {
     scope: SettingScope,
   ) => void;
   handleEffortSelect: (effort: ReasoningEffort | undefined) => void;
+  handleOutputStyleSelect: (styleName: string | undefined) => void;
   auth: AuthController['actions'];
   handleEditorSelect: (
     editorType: EditorType | undefined,
@@ -57,6 +58,7 @@ export interface UIActions {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
+    compactionModelMode?: boolean;
     imageModelMode?: boolean;
   }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;

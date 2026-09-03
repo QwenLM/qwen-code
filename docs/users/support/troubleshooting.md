@@ -100,7 +100,12 @@ This guide provides solutions to common issues and debugging tips, including top
 - **Trackpad scrolling in tmux changes prompt history instead of scrolling the conversation**
   - **Issue:** In a tmux session, trackpad or wheel scrolling may cycle through previous prompts, similar to pressing `Up Arrow` or `Down Arrow`.
   - **Cause:** tmux can translate wheel gestures into plain arrow-key sequences. Those sequences are indistinguishable from real arrow-key presses by the time qwen-code receives them.
-  - **Solution:** If screen reader mode is disabled, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
+  - **Solution:** If screen reader mode is disabled, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
+
+- **Right-click does nothing, links do not open, or text cannot be selected in the terminal**
+  - **Issue:** Native right-click context menus, OSC 8 hyperlink clicks (Ctrl+Click or plain click on URLs), and terminal-native text selection stop working while Qwen Code is running.
+  - **Cause:** When `ui.mouseTracking` is enabled (the default), Qwen Code captures all mouse events via SGR mouse tracking to power in-app text selection, click-to-position, row hover, and viewport scrolling. The terminal forwards every mouse event to the app instead of handling it natively.
+  - **Solution:** Set `"ui.mouseTracking": false` in your `settings.json` to restore native right-click menus and clickable URL links. This turns off all in-app mouse interaction. In Virtualized History (`ui.useTerminalBuffer: true`, the default), the wheel will no longer scroll the transcript — use `Shift+↑/↓`, `PgUp/PgDn`, or `Ctrl+Home/End` instead. To also restore native terminal scrollback, set `"ui.useTerminalBuffer": false`. Requires restart.
 
 ## IDE Companion not connecting
 

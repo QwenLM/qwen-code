@@ -71,18 +71,21 @@ function Harness({
   // Mirrors the ChatEditor render seam: the mobile backend renders a plain
   // controlled textarea at the single mount point, desktop keeps the
   // CodeMirror container div.
-  return composer.mobileComposer ? (
-    <textarea
-      ref={composer.mobileComposer.textareaRef}
-      value={composer.mobileComposer.value}
-      onChange={composer.mobileComposer.onChange}
-      onBlur={composer.mobileComposer.onBlur}
-      onPaste={composer.mobileComposer.onPaste}
-      placeholder={composer.mobileComposer.placeholder}
-      data-web-shell-composer-editor
-    />
-  ) : (
-    <div ref={composer.containerRef} data-web-shell-composer-editor />
+  return (
+    <div {...composer.imageTransferHandlers} data-web-shell-composer-surface>
+      {composer.mobileComposer ? (
+        <textarea
+          ref={composer.mobileComposer.textareaRef}
+          value={composer.mobileComposer.value}
+          onChange={composer.mobileComposer.onChange}
+          onBlur={composer.mobileComposer.onBlur}
+          placeholder={composer.mobileComposer.placeholder}
+          data-web-shell-composer-editor
+        />
+      ) : (
+        <div ref={composer.containerRef} data-web-shell-composer-editor />
+      )}
+    </div>
   );
 }
 
@@ -373,17 +376,23 @@ describe('useComposerCore mobile textarea backend', () => {
     await mount();
     const preventDefault = vi.fn();
     const imageItem = {
+      kind: 'file',
       type: 'image/png',
       getAsFile: () =>
         new File([new Uint8Array([137, 80, 78, 71])], 'x.png', {
           type: 'image/png',
         }),
     };
+    const imageEvent = new Event('paste', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(imageEvent, 'clipboardData', {
+      value: { files: [], items: [imageItem], types: ['Files'] },
+    });
     await act(async () => {
-      latest!.mobileComposer!.onPaste({
-        clipboardData: { items: [imageItem] },
-        preventDefault,
-      } as unknown as React.ClipboardEvent<HTMLTextAreaElement>);
+      imageEvent.preventDefault = preventDefault;
+      container!.querySelector('textarea')!.dispatchEvent(imageEvent);
       await new Promise((resolve) => setTimeout(resolve, 20));
     });
     expect(preventDefault).toHaveBeenCalled();
@@ -391,13 +400,20 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.pastedImages[0].media_type).toBe('image/png');
 
     const textPreventDefault = vi.fn();
+    const textEvent = new Event('paste', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(textEvent, 'clipboardData', {
+      value: {
+        files: [],
+        items: [{ kind: 'string', type: 'text/plain', getAsFile: () => null }],
+        types: ['text/plain'],
+      },
+    });
     act(() => {
-      latest!.mobileComposer!.onPaste({
-        clipboardData: {
-          items: [{ type: 'text/plain', getAsFile: () => null }],
-        },
-        preventDefault: textPreventDefault,
-      } as unknown as React.ClipboardEvent<HTMLTextAreaElement>);
+      textEvent.preventDefault = textPreventDefault;
+      container!.querySelector('textarea')!.dispatchEvent(textEvent);
     });
     expect(textPreventDefault).not.toHaveBeenCalled();
   });

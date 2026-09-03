@@ -7,9 +7,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   applySkillAllowedTools,
+  canApplySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
+  clearLoadedSkillTracking,
 } from './skill-utils.js';
+import { ToolNames } from './tool-names.js';
+import type { ToolRegistry } from './tool-registry.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { Config } from '../config/config.js';
@@ -26,15 +30,37 @@ function mockPermissionManager(): {
 }
 
 describe('applySkillAllowedTools', () => {
+  it("marks the grants trust-gated when told to — a project skill's rules apply only while the folder is trusted", () => {
+    const addSessionAllowRule = vi.fn();
+    applySkillAllowedTools(
+      { addSessionAllowRule } as unknown as PermissionManager,
+      ['Bash(git *)'],
+      { trustGated: true },
+    );
+    expect(addSessionAllowRule).toHaveBeenCalledWith('Bash(git *)', {
+      trustGated: true,
+    });
+  });
+
   it('adds one session allow rule per entry, verbatim and in order', () => {
     const { pm, addSessionAllowRule } = mockPermissionManager();
 
     applySkillAllowedTools(pm, ['Bash(git *)', 'Edit', 'mcp__server__tool']);
 
     expect(addSessionAllowRule).toHaveBeenCalledTimes(3);
-    expect(addSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)');
-    expect(addSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit');
-    expect(addSessionAllowRule).toHaveBeenNthCalledWith(3, 'mcp__server__tool');
+    expect(addSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)', {
+      trustGated: false,
+    });
+    expect(addSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit', {
+      trustGated: false,
+    });
+    expect(addSessionAllowRule).toHaveBeenNthCalledWith(
+      3,
+      'mcp__server__tool',
+      {
+        trustGated: false,
+      },
+    );
   });
 
   it('no-ops when allowedTools is undefined', () => {
@@ -63,9 +89,32 @@ describe('applySkillAllowedTools', () => {
     const { pm, addSessionAllowRule } = mockPermissionManager();
     applySkillAllowedTools(pm, ['Bash(unbalanced', 'Read']);
     expect(addSessionAllowRule).toHaveBeenCalledTimes(2);
-    expect(addSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(unbalanced');
-    expect(addSessionAllowRule).toHaveBeenNthCalledWith(2, 'Read');
+    expect(addSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(unbalanced', {
+      trustGated: false,
+    });
+    expect(addSessionAllowRule).toHaveBeenNthCalledWith(2, 'Read', {
+      trustGated: false,
+    });
   });
+});
+
+describe('canApplySkillSideEffects', () => {
+  const trusted = { isTrustedFolder: () => true };
+  const untrusted = { isTrustedFolder: () => false };
+
+  it('gates project skills on folder trust', () => {
+    expect(canApplySkillSideEffects({ level: 'project' }, trusted)).toBe(true);
+    expect(canApplySkillSideEffects({ level: 'project' }, untrusted)).toBe(
+      false,
+    );
+  });
+
+  it.each(['user', 'extension', 'bundled'] as const)(
+    'never gates %s skills, which are not repo-controlled',
+    (level) => {
+      expect(canApplySkillSideEffects({ level }, untrusted)).toBe(true);
+    },
+  );
 });
 
 describe('collectAvailableSkillEntries memoize cache', () => {
@@ -79,6 +128,7 @@ describe('collectAvailableSkillEntries memoize cache', () => {
   function mockConfig(): Config {
     return {
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      isSkillEnabled: vi.fn().mockReturnValue(true),
       getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
     } as unknown as Config;
   }
@@ -145,5 +195,32 @@ describe('collectAvailableSkillEntries memoize cache', () => {
     await collectAvailableSkillEntries(sm, cfg);
 
     expect(sm.listSkills).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('clearLoadedSkillTracking', () => {
+  it('clears the SkillTool tracker when one is registered', () => {
+    const clearLoadedSkills = vi.fn();
+    const registry = {
+      getTool: vi.fn().mockReturnValue({ clearLoadedSkills }),
+    } as unknown as ToolRegistry;
+
+    clearLoadedSkillTracking(registry, 'test-boundary');
+
+    expect(registry.getTool).toHaveBeenCalledWith(ToolNames.SKILL);
+    expect(clearLoadedSkills).toHaveBeenCalledTimes(1);
+  });
+
+  it('no-ops when the registry or tracker is missing', () => {
+    expect(() =>
+      clearLoadedSkillTracking(undefined, 'test-boundary'),
+    ).not.toThrow();
+
+    const registry = {
+      getTool: vi.fn().mockReturnValue(undefined),
+    } as unknown as ToolRegistry;
+    expect(() =>
+      clearLoadedSkillTracking(registry, 'test-boundary'),
+    ).not.toThrow();
   });
 });

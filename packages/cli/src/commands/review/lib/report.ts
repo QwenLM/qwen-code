@@ -13,6 +13,12 @@ import { statSync } from 'node:fs';
 import { writeStderrLine } from '../../../utils/stdioHelpers.js';
 import { classifyHeavy } from './heavy.js';
 import type { DiffChunk, DiffPlan, PathKind } from './diff-plan.js';
+import {
+  reviewBudget,
+  type BudgetContext,
+  type ReviewBudget,
+} from './budget.js';
+import type { RepositoryContext } from './repository-context.js';
 
 export interface FileMetric {
   path: string;
@@ -83,9 +89,27 @@ export interface PlanReport {
   testDiffLines: number;
   docsDiffLines: number;
   generatedDiffLines: number;
+  /**
+   * Whether the diff signals a wrapping type — the Agent 1e roster gate reads
+   * this (see `hasWrapperTypes` in roster.ts). Always written by the capture
+   * commands this CLI ships; a plan with NO field was written by an older CLI,
+   * and the gate treats absent exactly like true — the check must not vanish
+   * from a review over version skew.
+   */
+  wrapperSignal: boolean;
   /** Contiguous, non-overlapping line ranges tiling the whole diff file. */
   chunks: DiffChunk[];
   files: FileMetric[];
+  /**
+   * How much walking the size-elastic parts of the run owe (see lib/budget.ts).
+   *
+   * In the plan rather than in a flag, for the reason `effort` is: every reader
+   * must see the same number, and a budget the caller passes is a budget the
+   * caller can inflate. It never scales a *dimension* away — that is the
+   * roster's job, and the roster reads `effort`.
+   */
+  budget: ReviewBudget;
+  repositoryContext?: RepositoryContext;
 }
 
 /**
@@ -94,10 +118,21 @@ export interface PlanReport {
  * `postImageLines` resolves a path's line count in the post-change tree. It is
  * null when there is no tree to resolve against — a bare diff file — in which
  * case heaviness cannot be decided and no file is heavy.
+ *
+ * `context` carries the two facts about the machine that the round cap depends
+ * on — the operator's `review.reverseAuditRounds` ceiling and whether this run
+ * has a deadline — and is a **required** parameter, deliberately not resolved
+ * in here. Three capture commands build a plan; an optional parameter is one a
+ * call site can quietly omit, and a policy that silently applies to two of the
+ * three review entry points is worse than one that applies to none. Passing
+ * `{}` is how a caller says "neither applies" — visibly, at the call site.
+ * Resolving them here instead would make this builder's tests depend on the
+ * machine's own `~/.qwen` and on its environment.
  */
 export function buildPlanReport(
   plan: DiffPlan,
   postImageLines: ((path: string) => number) | null,
+  context: BudgetContext,
 ): PlanReport {
   const files = plan.files.map((f): FileMetric => {
     const changedLines = f.addedLines + f.removedLines;
@@ -148,8 +183,16 @@ export function buildPlanReport(
     testDiffLines: plan.testDiffLines,
     docsDiffLines: plan.docsDiffLines,
     generatedDiffLines: plan.generatedDiffLines,
+    wrapperSignal: plan.wrapperSignal,
     chunks: plan.chunks,
     files,
+    budget: reviewBudget(
+      {
+        srcDiffLines: plan.srcDiffLines,
+        diffLines: plan.diffLines,
+      },
+      context,
+    ),
   };
 }
 
@@ -216,4 +259,70 @@ export function stringifyPlanReport(report: unknown): string {
         '{ "path": $1, "newStart": $2, "newEnd": $3 }',
       ) + '\n'
   );
+}
+
+/**
+ * The plan's `incremental` field, as both producers write it and every
+ * consumer reads it.
+ *
+ * NESTED, deliberately. The PR flow's block answers two questions — MAY this
+ * anchor scope the round (`since`/`effective`/`reason`, which only that flow
+ * has) and WHICH files it scoped to — and the second is what the brief
+ * renderer and the roster read. The local flow has no ruling to report, only
+ * a scope, so it writes the same `scope` key and nothing else. Flattening it
+ * on one side is not a shorter spelling of the same thing: the consumers key
+ * on `incremental.scope`, so a flat local block renders no incremental frame
+ * at all and every widened file is re-reviewed from scratch — the exact token
+ * burn this feature exists to prevent, and invisible, because the diff IS
+ * sliced and the round looks incremental everywhere else.
+ */
+export interface IncrementalBlock {
+  scope?: IncrementalScope;
+}
+
+/**
+ * WHICH files an incrementally-scoped round reviews, and why. It lives HERE,
+ * beside the other plan-report shapes, and not in a module of its own: a
+ * types-only module is erased by esbuild at every import site, and the
+ * bundle-staleness digest guard rightly refuses a review-source file the
+ * bundle can never contain.
+ */
+export interface IncrementalScope {
+  /**
+   * What the scope is measured FROM: a commit sha on the PR flow, a
+   * content-addressed state id on the local flow. Display-only downstream —
+   * briefs render its first 12 characters.
+   */
+  anchor: string;
+  /** Files changed since the anchor — reviewed on their hunks, in full. */
+  deltaFiles: string[];
+  /**
+   * Still-clean files pulled back in by the one-hop widening, each with the
+   * changed files it imports — the seam its brief directs the agent at.
+   */
+  interaction: Array<{ path: string; importsChanged: string[] }>;
+  /**
+   * How many still-clean files this scope leaves out. A count, not a list:
+   * nothing downstream reads the names, and on a large plan the list alone
+   * measured 23 KB against the plan's one-read budget.
+   */
+  contextFileCount: number;
+  /**
+   * Where the full-range diff still is, for a reader who needs all of it.
+   * The local flow writes it; the PR flow has no retained full-range diff to
+   * point at yet and omits the field.
+   */
+  fullDiffPath?: string | null;
+  /**
+   * Cached paths whose RECORDED change is gone from this capture — the file
+   * deleted, or the change discarded back to the diff base — while no diff
+   * section survives for them. The scope-emptied stop's split key: a cache
+   * finding citing one of these is SUPERSEDED (the bytes it cited no longer
+   * exist), and one citing any other path sits byte-identical to the round
+   * that recorded it. Published as a LIST because the split is per cited
+   * path and file presence cannot answer it — a discarded change leaves the
+   * file present with the cited bytes gone. Bounded by the cache's file
+   * count; absent when empty.
+   */
+  supersededPaths?: string[];
 }

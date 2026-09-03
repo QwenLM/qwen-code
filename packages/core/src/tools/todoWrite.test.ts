@@ -12,6 +12,7 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import type { AggregatedHookResult } from '../hooks/hookAggregator.js';
 import { Storage } from '../config/storage.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -38,6 +39,7 @@ describe('TodoWriteTool', () => {
     mockConfig = {
       getSessionId: () => 'test-session-123',
       getHookSystem: () => undefined,
+      isSessionWorkflowTodoContextActive: () => false,
       setActiveTodoReminder: vi.fn(),
     } as unknown as Config;
     tool = new TodoWriteTool(mockConfig);
@@ -106,6 +108,26 @@ describe('TodoWriteTool', () => {
       expect(result).toContain('non-empty "id" string');
     });
 
+    it('should reject oversized todo and dependency ids', () => {
+      expect(
+        tool.validateToolParams({
+          todos: [{ id: 'x'.repeat(501), content: 'Task', status: 'pending' }],
+        }),
+      ).toContain('at most 500 characters');
+      expect(
+        tool.validateToolParams({
+          todos: [
+            {
+              id: 'task',
+              content: 'Task',
+              status: 'pending',
+              blockedBy: ['x'.repeat(501)],
+            },
+          ],
+        }),
+      ).toContain('at most 500 characters');
+    });
+
     it('should reject todos with invalid status', () => {
       const params: TodoWriteParams = {
         todos: [
@@ -134,6 +156,93 @@ describe('TodoWriteTool', () => {
 
       const result = tool.validateToolParams(params);
       expect(result).toContain('unique');
+    });
+
+    it('should accept a valid dependency graph', () => {
+      expect(
+        tool.validateToolParams({
+          todos: [
+            { id: 'design', content: 'Design', status: 'completed' },
+            {
+              id: 'build',
+              content: 'Build',
+              status: 'pending',
+              blockedBy: ['design'],
+            },
+          ],
+        }),
+      ).toBeNull();
+    });
+
+    it('should validate deep dependency chains without recursive traversal', () => {
+      const todos = Array.from({ length: 3_000 }, (_, index) => ({
+        id: `todo-${index}`,
+        content: `Todo ${index}`,
+        status: 'pending' as const,
+        ...(index === 0 ? {} : { blockedBy: [`todo-${index - 1}`] }),
+      }));
+
+      expect(tool.validateToolParams({ todos })).toBeNull();
+    });
+
+    it.each([
+      {
+        name: 'duplicate dependency',
+        todos: [
+          { id: 'a', content: 'A', status: 'pending' as const },
+          {
+            id: 'b',
+            content: 'B',
+            status: 'pending' as const,
+            blockedBy: ['a', 'a'],
+          },
+        ],
+        error: 'duplicate blockedBy',
+      },
+      {
+        name: 'unknown dependency',
+        todos: [
+          {
+            id: 'a',
+            content: 'A',
+            status: 'pending' as const,
+            blockedBy: ['missing'],
+          },
+        ],
+        error: 'unknown dependency',
+      },
+      {
+        name: 'self dependency',
+        todos: [
+          {
+            id: 'a',
+            content: 'A',
+            status: 'pending' as const,
+            blockedBy: ['a'],
+          },
+        ],
+        error: 'must not depend on itself',
+      },
+      {
+        name: 'cycle',
+        todos: [
+          {
+            id: 'a',
+            content: 'A',
+            status: 'pending' as const,
+            blockedBy: ['b'],
+          },
+          {
+            id: 'b',
+            content: 'B',
+            status: 'pending' as const,
+            blockedBy: ['a'],
+          },
+        ],
+        error: 'must not contain a cycle',
+      },
+    ])('should reject a $name', ({ todos, error }) => {
+      expect(tool.validateToolParams({ todos })).toContain(error);
     });
   });
 
@@ -166,6 +275,7 @@ describe('TodoWriteTool', () => {
       expect(result.llmContent).toContain(JSON.stringify(params.todos));
       expect(result.returnDisplay).toMatchObject({
         type: 'todo_list',
+        planId: expect.any(String),
         todos: [
           { id: '1', content: 'Task 1', status: 'pending' },
           { id: '2', content: 'Task 2', status: 'in_progress' },
@@ -176,10 +286,246 @@ describe('TodoWriteTool', () => {
         expect.stringContaining('"todos"'),
         { encoding: 'utf-8' },
       );
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string),
+      ).toMatchObject({ planId: expect.any(String), todos: params.todos });
       expect(mockConfig.setActiveTodoReminder).toHaveBeenCalledWith(
         'todo-prompt',
         expect.stringContaining('Task 1'),
       );
+    });
+
+    it('should retain the plan ID while an active plan is revised', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'plan-1',
+          todos: [{ id: '1', content: 'Task', status: 'in_progress' }],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [{ id: '1', content: 'Task', status: 'completed' }],
+        })
+        .execute(mockAbortSignal);
+
+      expect(result.returnDisplay).toMatchObject({ planId: 'plan-1' });
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string),
+      ).toMatchObject({ planId: 'plan-1' });
+    });
+
+    it('should retain the plan ID for a repeated terminal snapshot', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'finished-plan',
+          todos: [{ id: '1', content: 'Done', status: 'completed' }],
+        }),
+      );
+
+      const result = await promptIdContext.run('todo-prompt', () =>
+        tool
+          .build({
+            todos: [{ id: '1', content: 'Done', status: 'completed' }],
+          })
+          .execute(mockAbortSignal),
+      );
+
+      // Identical todos → no-op short-circuit, no write
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
+      expect(result.returnDisplay).toMatchObject({
+        planId: 'finished-plan',
+        unchanged: true,
+      });
+      expect(mockConfig.setActiveTodoReminder).toHaveBeenCalledWith(
+        'todo-prompt',
+        undefined,
+      );
+    });
+
+    it('should short-circuit with unchanged flag when todos are identical', async () => {
+      const existingTodos: TodoItem[] = [
+        { id: '1', content: 'Task 1', status: 'in_progress' },
+        { id: '2', content: 'Task 2', status: 'pending' },
+      ];
+
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ planId: 'plan-abc', todos: existingTodos }),
+      );
+
+      const result = await promptIdContext.run('todo-prompt', () =>
+        tool.build({ todos: existingTodos }).execute(mockAbortSignal),
+      );
+
+      // No file write or hooks should fire
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
+      expect(mockFs.mkdir).not.toHaveBeenCalled();
+
+      // Display signals unchanged to UI layer
+      expect(result.returnDisplay).toMatchObject({
+        type: 'todo_list',
+        planId: 'plan-abc',
+        todos: existingTodos,
+        changes: { created: [], completed: [] },
+        unchanged: true,
+      });
+
+      // LLM content tells model no change occurred
+      expect(result.llmContent).toContain('already up to date');
+      expect(result.llmContent).toContain('No changes were needed');
+      expect(result.llmContent).not.toContain('modified successfully');
+
+      expect(mockConfig.setActiveTodoReminder).toHaveBeenCalledWith(
+        'todo-prompt',
+        expect.stringContaining('Task 1'),
+      );
+    });
+
+    it('should not fire hooks on no-op todo_write', async () => {
+      const existingTodos: TodoItem[] = [
+        { id: '1', content: 'Task 1', status: 'pending' },
+      ];
+
+      const mockHookSystem = {
+        fireTodoCreatedEvent: vi.fn(),
+        fireTodoCompletedEvent: vi.fn(),
+      };
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => mockHookSystem,
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ todos: existingTodos }),
+      );
+
+      await tool.build({ todos: existingTodos }).execute(mockAbortSignal);
+
+      expect(mockHookSystem.fireTodoCreatedEvent).not.toHaveBeenCalled();
+      expect(mockHookSystem.fireTodoCompletedEvent).not.toHaveBeenCalled();
+    });
+
+    it('should short-circuit with unchanged flag when modified_by_user yields identical todos', async () => {
+      const existingTodos: TodoItem[] = [
+        { id: '1', content: 'Task 1', status: 'in_progress' },
+      ];
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ planId: 'plan-abc', todos: existingTodos }),
+      );
+
+      const modifiedContent = JSON.stringify({ todos: existingTodos });
+
+      const result = await tool
+        .build({
+          todos: [],
+          modified_by_user: true,
+          modified_content: modifiedContent,
+        })
+        .execute(mockAbortSignal);
+
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
+      expect(result.returnDisplay).toMatchObject({ unchanged: true });
+    });
+
+    it('should return an error result if modified_content has invalid parsed todos', async () => {
+      const existingTodos: TodoItem[] = [
+        { id: '1', content: 'Task 1', status: 'in_progress' },
+      ];
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ planId: 'plan-abc', todos: existingTodos }),
+      );
+
+      // Parsing an invalid todo list (empty content)
+      const modifiedContent = JSON.stringify({
+        todos: [{ id: '1', content: '', status: 'pending' }],
+      });
+
+      const result = await tool
+        .build({
+          todos: [],
+          modified_by_user: true,
+          modified_content: modifiedContent,
+        })
+        .execute(mockAbortSignal);
+
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
+      // execute catches validation errors and returns an error string
+      expect(result.returnDisplay).toContain('non-empty "content"');
+    });
+
+    it('should start a new plan after the previous plan completed', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'finished-plan',
+          todos: [
+            { id: 'prepare', content: 'Prepare', status: 'completed' },
+            {
+              id: 'ship',
+              content: 'Done',
+              status: 'completed',
+              blockedBy: ['prepare'],
+            },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({ todos: [{ id: 'ship', content: 'New', status: 'pending' }] })
+        .execute(mockAbortSignal);
+      const display = result.returnDisplay as { planId?: string };
+
+      expect(display.planId).toEqual(expect.any(String));
+      expect(display.planId).not.toBe('finished-plan');
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string).todos,
+      ).toEqual([{ id: 'ship', content: 'New', status: 'pending' }]);
+    });
+
+    it('should start a new plan for a distinct all-completed snapshot', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'finished-plan',
+          todos: [{ id: '1', content: 'Done', status: 'completed' }],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [{ id: '1', content: 'Already done', status: 'completed' }],
+        })
+        .execute(mockAbortSignal);
+      const display = result.returnDisplay as { planId?: string };
+
+      expect(display.planId).toEqual(expect.any(String));
+      expect(display.planId).not.toBe('finished-plan');
+    });
+
+    it('should clear persisted plan identity while identifying the cleared plan', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'plan-to-clear',
+          todos: [{ id: '1', content: 'Task', status: 'in_progress' }],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool.build({ todos: [] }).execute(mockAbortSignal);
+      const persisted = JSON.parse(mockAtomicWrite.mock.calls[0][1] as string);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'todo_list',
+        planId: 'plan-to-clear',
+        todos: [],
+      });
+      expect(persisted).not.toHaveProperty('planId');
     });
 
     it('bounds the active Todo reminder', async () => {
@@ -266,6 +612,391 @@ describe('TodoWriteTool', () => {
         .lastCall?.[1];
       expect(reminder).toContain('New Task');
       expect(reminder).not.toContain('Updated Task');
+    });
+
+    it('preserves dependencies when a status update omits blockedBy', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          todos: [
+            { id: 'prepare', content: 'Prepare', status: 'completed' },
+            {
+              id: 'ship',
+              content: 'Ship',
+              status: 'pending',
+              blockedBy: ['prepare'],
+            },
+            {
+              id: 'note',
+              content: 'Old note',
+              status: 'pending',
+              blockedBy: ['prepare'],
+            },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      await tool
+        .build({
+          todos: [
+            { id: 'prepare', content: 'Prepare', status: 'completed' },
+            { id: 'ship', content: 'Ship', status: 'completed' },
+            {
+              id: 'note',
+              content: 'Updated note',
+              status: 'pending',
+              blockedBy: [],
+            },
+          ],
+        })
+        .execute(mockAbortSignal);
+
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string).todos,
+      ).toContainEqual(
+        expect.objectContaining({ id: 'ship', blockedBy: ['prepare'] }),
+      );
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string).todos,
+      ).toContainEqual(expect.objectContaining({ id: 'note', blockedBy: [] }));
+    });
+
+    it('drops preserved dependencies whose target the same update removes', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          todos: [
+            { id: 'a', content: 'Task A', status: 'pending' },
+            {
+              id: 'b',
+              content: 'Task B',
+              status: 'pending',
+              blockedBy: ['a'],
+            },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      // Dropping 'a' is a routine plan-shrinking edit. The preserved edge
+      // from 'b' to 'a' must not be re-injected: before the fix this
+      // rejected the ENTIRE call with 'references unknown dependency "a"'
+      // mid-execute and wrote nothing.
+      const result = await tool
+        .build({ todos: [{ id: 'b', content: 'Task B', status: 'pending' }] })
+        .execute(mockAbortSignal);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'todo_list',
+        todos: [{ id: 'b', blockedBy: [] }],
+      });
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string).todos,
+      ).toEqual([
+        { id: 'b', content: 'Task B', status: 'pending', blockedBy: [] },
+      ]);
+    });
+
+    it('reverses a dependency chain instead of failing on a preserved cycle edge', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          todos: [
+            { id: 'a', content: 'Task A', status: 'pending' },
+            {
+              id: 'b',
+              content: 'Task B',
+              status: 'pending',
+              blockedBy: ['a'],
+            },
+            {
+              id: 'c',
+              content: 'Task C',
+              status: 'pending',
+              blockedBy: ['b'],
+            },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      // Reversing the chain omits blockedBy on the new root 'c'. Preservation
+      // re-injects the stale c->b edge because 'b' survives, which closes a
+      // cycle with the incoming b->c edge. The call must fall back to the
+      // edges the caller actually sent instead of rejecting the entire update
+      // with 'must not contain a cycle' mid-execute.
+      const result = await tool
+        .build({
+          todos: [
+            {
+              id: 'a',
+              content: 'Task A',
+              status: 'pending',
+              blockedBy: ['b'],
+            },
+            {
+              id: 'b',
+              content: 'Task B',
+              status: 'pending',
+              blockedBy: ['c'],
+            },
+            { id: 'c', content: 'Task C', status: 'pending' },
+          ],
+        })
+        .execute(mockAbortSignal);
+
+      expect(result.llmContent).toContain(
+        'Todos have been modified successfully',
+      );
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string).todos,
+      ).toEqual([
+        { id: 'a', content: 'Task A', status: 'pending', blockedBy: ['b'] },
+        { id: 'b', content: 'Task B', status: 'pending', blockedBy: ['c'] },
+        { id: 'c', content: 'Task C', status: 'pending' },
+      ]);
+    });
+
+    it('marks structured output in Session Workflow context', async () => {
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => undefined,
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        setActiveTodoReminder: vi.fn(),
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          todos: [
+            { id: 'prepare', content: 'Prepare', status: 'pending' },
+            {
+              id: 'ship',
+              content: 'Ship',
+              status: 'pending',
+              blockedBy: ['prepare'],
+            },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [
+            { id: 'prepare', content: 'Prepare', status: 'completed' },
+            { id: 'ship', content: 'Ship', status: 'pending' },
+          ],
+        })
+        .execute(mockAbortSignal);
+
+      expect(result.returnDisplay).toMatchObject({ sessionWorkflow: true });
+    });
+
+    it('keeps the Session Workflow marker on an unchanged Todo list', async () => {
+      const todos: TodoItem[] = [
+        { id: 'prepare', content: 'Prepare', status: 'pending' },
+      ];
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => undefined,
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        setActiveTodoReminder: vi.fn(),
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+      mockFs.readFile.mockResolvedValue(JSON.stringify({ todos }));
+
+      const result = await tool.build({ todos }).execute(mockAbortSignal);
+
+      expect(result.returnDisplay).toMatchObject({
+        unchanged: true,
+        sessionWorkflow: true,
+      });
+    });
+
+    it('ends an approved Workflow when a new Todo plan starts', async () => {
+      const clearRevision = vi.fn();
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => undefined,
+        // Approval is stamped on the revision by the approved exit_plan_mode
+        // transition, not derived from the approval mode.
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+        getSessionWorkflowPlanRevision: vi.fn().mockReturnValue({
+          planId: 'approved-plan',
+          sourceCallId: 'todo-call-1',
+          todoIds: ['finished'],
+          approved: true,
+        }),
+        clearSessionWorkflowPlanRevision: clearRevision,
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        setActiveTodoReminder: vi.fn(),
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'approved-plan',
+          todos: [{ id: 'finished', content: 'Finished', status: 'completed' }],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [{ id: 'next', content: 'Next task', status: 'pending' }],
+        })
+        .execute(mockAbortSignal);
+
+      expect(clearRevision).toHaveBeenCalledOnce();
+      expect(result.returnDisplay).not.toMatchObject({ sessionWorkflow: true });
+      expect((result.returnDisplay as { planId?: string }).planId).not.toBe(
+        'approved-plan',
+      );
+    });
+
+    it('ends an approved Workflow when active Todo IDs change', async () => {
+      const clearRevision = vi.fn();
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => undefined,
+        // Approval is stamped on the revision by the approved exit_plan_mode
+        // transition, not derived from the approval mode.
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+        getSessionWorkflowPlanRevision: vi.fn().mockReturnValue({
+          planId: 'approved-plan',
+          sourceCallId: 'todo-call-1',
+          todoIds: ['first', 'second'],
+          approved: true,
+        }),
+        clearSessionWorkflowPlanRevision: clearRevision,
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        setActiveTodoReminder: vi.fn(),
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'approved-plan',
+          todos: [
+            { id: 'first', content: 'First', status: 'in_progress' },
+            { id: 'second', content: 'Second', status: 'pending' },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [
+            { id: 'replacement', content: 'Replacement', status: 'pending' },
+          ],
+        })
+        .execute(mockAbortSignal);
+
+      expect(clearRevision).toHaveBeenCalledOnce();
+      expect(result.returnDisplay).not.toMatchObject({ sessionWorkflow: true });
+      expect((result.returnDisplay as { planId?: string }).planId).not.toBe(
+        'approved-plan',
+      );
+    });
+
+    it('keeps an approved revision constraining membership under a PLAN-mode wrapper (R5-2)', async () => {
+      // A subagent whose definition carries `approvalMode: plan` gets a Config
+      // wrapper whose OWN approvalMode is PLAN while the plan revision is
+      // session-global and already approved. Approval status must come from
+      // the revision's stamp — not the wrapper's mode — so a divergent write
+      // inside the wrapper still ends the stale workflow binding.
+      const clearRevision = vi.fn();
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => undefined,
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.PLAN),
+        getSessionWorkflowPlanRevision: vi.fn().mockReturnValue({
+          planId: 'approved-plan',
+          sourceCallId: 'todo-call-1',
+          todoIds: ['first', 'second'],
+          approved: true,
+        }),
+        clearSessionWorkflowPlanRevision: clearRevision,
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        setActiveTodoReminder: vi.fn(),
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'approved-plan',
+          todos: [
+            { id: 'first', content: 'First', status: 'in_progress' },
+            { id: 'second', content: 'Second', status: 'pending' },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [{ id: 'intruder', content: 'Intruder', status: 'pending' }],
+        })
+        .execute(mockAbortSignal);
+
+      expect(clearRevision).toHaveBeenCalledOnce();
+      expect(result.returnDisplay).not.toMatchObject({ sessionWorkflow: true });
+      expect((result.returnDisplay as { planId?: string }).planId).not.toBe(
+        'approved-plan',
+      );
+    });
+
+    it('keeps a pending Workflow draft when PLAN-mode refinement changes Todo IDs', async () => {
+      // The revision captured from the first plan emission is still pending
+      // approval while the session is in PLAN mode; refining the draft's
+      // membership is ordinary iteration and must neither clear the revision
+      // nor strip the workflow marker from the refined plan.
+      const clearRevision = vi.fn();
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => undefined,
+        getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.PLAN),
+        getSessionWorkflowPlanRevision: vi.fn().mockReturnValue({
+          planId: 'draft-plan',
+          sourceCallId: 'todo-call-1',
+          todoIds: ['first', 'second'],
+        }),
+        clearSessionWorkflowPlanRevision: clearRevision,
+        isSessionWorkflowTodoContextActive: vi.fn().mockReturnValue(true),
+        setActiveTodoReminder: vi.fn(),
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'draft-plan',
+          todos: [
+            { id: 'first', content: 'First', status: 'pending' },
+            { id: 'second', content: 'Second', status: 'pending' },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [
+            { id: 'first', content: 'First', status: 'pending' },
+            { id: 'second', content: 'Second', status: 'pending' },
+            { id: 'third', content: 'Third', status: 'pending' },
+          ],
+        })
+        .execute(mockAbortSignal);
+
+      expect(clearRevision).not.toHaveBeenCalled();
+      expect(result.returnDisplay).toMatchObject({ sessionWorkflow: true });
+      // The draft keeps its identity so the approval stamps the refined plan.
+      expect((result.returnDisplay as { planId?: string }).planId).toBe(
+        'draft-plan',
+      );
     });
 
     it('should handle file write errors', async () => {

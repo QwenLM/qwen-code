@@ -133,6 +133,70 @@ describe('handleAtCommand @session:', () => {
     expect(JSON.stringify(result.processedQuery)).toContain('User: hi');
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'preserves a literal escaped shell special after parsing',
+    async () => {
+      mockFindSessionsByTitle.mockResolvedValue([{ sessionId: UUID }]);
+      mockResolve.mockResolvedValue({
+        text: '--- Referenced session "a\\&b" (slimmed, read-only) ---',
+        meta: {
+          sessionId: UUID,
+          title: 'a\\&b',
+          messageCount: 1,
+          approxTokens: 5,
+        },
+        truncated: false,
+      });
+
+      await handleAtCommand({
+        query: '@session:a\\\\&b',
+        config: mockConfig,
+        addItem: mockAddItem,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 3,
+        signal: abortController.signal,
+      });
+
+      expect(mockFindSessionsByTitle).toHaveBeenCalledWith('a\\&b');
+    },
+  );
+
+  it('normalizes escaped Windows session titles in prompt text', async () => {
+    const platformSpy = vi
+      .spyOn(process, 'platform', 'get')
+      .mockReturnValue('win32');
+    mockFindSessionsByTitle.mockResolvedValue([{ sessionId: UUID }]);
+    mockResolve.mockResolvedValue({
+      text: '--- Referenced session "a&b" (slimmed, read-only) ---',
+      meta: {
+        sessionId: UUID,
+        title: 'a&b',
+        messageCount: 1,
+        approxTokens: 5,
+      },
+      truncated: false,
+    });
+
+    try {
+      const result = await handleAtCommand({
+        query: '@session:a\\&b',
+        config: mockConfig,
+        addItem: mockAddItem,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 4,
+        signal: abortController.signal,
+      });
+
+      const firstPart = Array.isArray(result.processedQuery)
+        ? result.processedQuery[0]
+        : undefined;
+      expect(firstPart).toEqual({ text: '@session:a&b' });
+      expect(mockFindSessionsByTitle).toHaveBeenCalledWith('a&b');
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
   it('falls back to literal text with an error card when not found', async () => {
     mockResolve.mockResolvedValue({ notFound: true });
     const result = await handleAtCommand({
