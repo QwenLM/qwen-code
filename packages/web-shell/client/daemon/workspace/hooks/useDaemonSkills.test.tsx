@@ -375,6 +375,66 @@ describe('useDaemonSkills', () => {
     ]);
   });
 
+  it('retries a failed runtime catalog load after the daemon is ready', async () => {
+    vi.useFakeTimers();
+    mocks.context.current.capabilities.features = [
+      'workspace_skills_config_runtime',
+    ];
+    mocks.workspaceClient.workspaceConfigSkills.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/work/a',
+      initialized: true,
+      skills: [{ name: 'configured', status: 'ok' }],
+    });
+    mocks.workspaceClient.ensureRuntime.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/work/a',
+      state: 'active',
+      runtimeLive: true,
+      runtimeEpoch: 4,
+      capabilities: {
+        skills: { state: 'ready', revision: 1, runtimeEpoch: 4 },
+      },
+    });
+    mocks.workspaceClient.workspaceRuntimeSkills
+      .mockRejectedValueOnce(new Error('temporary runtime failure'))
+      .mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        runtimeEpoch: 4,
+        skills: [{ name: 'runtime-only', status: 'ok' }],
+      });
+    mocks.workspaceClient.runtimeStatus.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/work/a',
+      state: 'active',
+      runtimeLive: true,
+      runtimeEpoch: 4,
+      capabilities: {
+        skills: { state: 'ready', revision: 1, runtimeEpoch: 4 },
+      },
+    });
+
+    await renderHook();
+    await act(async () => {
+      await result?.ensureRuntime();
+    });
+    expect(result?.skills.map((skill) => skill.name)).toEqual(['configured']);
+    expect(result?.error?.message).toBe('temporary runtime failure');
+
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+
+    expect(
+      mocks.workspaceClient.workspaceRuntimeSkills,
+    ).toHaveBeenCalledTimes(2);
+    expect(result?.skills.map((skill) => skill.name)).toEqual([
+      'configured',
+      'runtime-only',
+    ]);
+    expect(result?.error).toBeUndefined();
+  });
+
   it('reloads the runtime catalog when its revision changes', async () => {
     vi.useFakeTimers();
     mocks.context.current.capabilities.features = [

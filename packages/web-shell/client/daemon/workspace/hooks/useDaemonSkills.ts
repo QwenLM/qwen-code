@@ -111,7 +111,11 @@ export function useDaemonSkills(options: DaemonSkillsOptions = {}) {
           latest.runtimeEpoch === coordinatorStatus.runtimeEpoch &&
           latestSkills?.state === currentSkills?.state &&
           latestSkills?.revision === currentSkills?.revision &&
-          latestSkills?.runtimeEpoch === currentSkills?.runtimeEpoch
+          latestSkills?.runtimeEpoch === currentSkills?.runtimeEpoch &&
+          (latestSkills?.state !== 'ready' ||
+            (runtime.data?.initialized === true &&
+              runtime.data.runtimeEpoch === latest.runtimeEpoch &&
+              runtime.error === undefined))
         ) {
           return;
         }
@@ -157,6 +161,9 @@ export function useDaemonSkills(options: DaemonSkillsOptions = {}) {
     ensureRuntime,
     reloadConfig,
     reloadRuntime,
+    runtime.data?.initialized,
+    runtime.data?.runtimeEpoch,
+    runtime.error,
     splitRuntimeAvailable,
     workspaceClient,
   ]);
@@ -212,7 +219,9 @@ export function useDaemonSkills(options: DaemonSkillsOptions = {}) {
     skills,
     loading: config.loading || (preparing && config.data === undefined),
     preparing,
-    error: config.error ?? (splitRuntimeAvailable ? prepareError : undefined),
+    error:
+      config.error ??
+      (splitRuntimeAvailable ? (prepareError ?? runtime.error) : undefined),
     reload,
     reloadConfig,
     reloadRuntime,
