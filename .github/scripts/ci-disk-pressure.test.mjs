@@ -84,6 +84,25 @@ describe('ci.yml disk-pressure evidence', () => {
     );
     assert.match(tests, /hosttests\[\$\{hosttests:-unknown\}\]/);
 
+    // test_macos and test_windows inline the same sampler (plain echo, no
+    // DISK_SAMPLES append), and no equality pin reaches them: the cross-leg
+    // byte-identity in no-ak-integration-ci.test.js stops at the `( while
+    // true` sentinel by design. Pin the sampler expression per leg, or an
+    // edit that only touches the pinned test-job copy ships green while
+    // these nightly-only lanes silently drop `load`/`hosttests`.
+    for (const jobName of ['test_macos', 'test_windows']) {
+      const leg = ciJobs[jobName].steps.find(
+        (candidate) => candidate.name === 'Run tests and generate reports',
+      );
+      assert.ok(leg, `missing run-tests step in ${jobName}`);
+      assert.match(leg.run, /load\[\$\(cut -d' ' -f1-3 \/proc\/loadavg /);
+      assert.match(
+        leg.run,
+        /hosttests=\$\(pgrep -fc '\[v\]itest' 2>\/dev\/null \|\| true\)/,
+      );
+      assert.match(leg.run, /hosttests\[\$\{hosttests:-unknown\}\]/);
+    }
+
     const sampleFormat = (script) => {
       const match = script.match(
         /sample="DFSAMPLE .*\/proc\/meminfo 2>\/dev\/null(?: \|\| true)?\)\]"/,
