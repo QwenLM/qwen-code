@@ -29,6 +29,7 @@ import {
   resolveGitDir,
 } from './gitDiff.js';
 import { UNVERIFIABLE_IDENTITY_CODE } from './no-follow-open.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -1159,7 +1160,7 @@ describe('parseShortstat ReDoS guard', () => {
     const elapsed = Date.now() - start;
     // Expect the bounded regex to either reject (too long for \d{1,10}) or
     // match trivially. Either way it must not spin.
-    expect(elapsed).toBeLessThan(250);
+    expectWithinLatencyBudget(elapsed, 250);
     expect(result).toBeNull();
   });
 });

@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { isGitIgnored } from './git-ignore.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 // git-init honors GIT_DIR/GIT_WORK_TREE/GIT_OBJECT_DIRECTORY as
 // repo-placement selectors (ambient GIT_WORK_TREE without GIT_DIR is a hard
@@ -402,7 +403,7 @@ describe('isGitIgnored', () => {
         expect(isGitIgnored(dir, 'anything.md')).toBe(false);
         const elapsed = Date.now() - start;
         expect(elapsed).toBeGreaterThanOrEqual(4000);
-        expect(elapsed).toBeLessThan(8000);
+        expectWithinLatencyBudget(elapsed, 8000);
       } finally {
         if (savedPath === undefined) delete process.env['PATH'];
         else process.env['PATH'] = savedPath;

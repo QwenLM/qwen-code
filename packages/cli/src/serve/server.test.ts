@@ -219,6 +219,7 @@ import {
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { getActiveSseCount } from './routes/sse-events.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -32348,7 +32349,7 @@ describe('runQwenServe', () => {
     // promptly; this assertion mainly proves the close didn't hang on the
     // live connection. Even if the connection had stayed open, the 5s
     // force-close timer would unblock us.
-    expect(elapsed).toBeLessThan(5_500);
+    expectWithinLatencyBudget(elapsed, 5_500);
     // Drain the fetch promise so vitest doesn't complain about open handles.
     try {
       const res = await sseFetch;

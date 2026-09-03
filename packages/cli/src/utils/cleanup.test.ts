@@ -10,6 +10,7 @@ import {
   registerCleanup,
   runExitCleanup,
 } from './cleanup';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 describe('cleanup', () => {
   beforeEach(() => {
@@ -97,7 +98,7 @@ describe('cleanup', () => {
 
       expect(hangFn).toHaveBeenCalledTimes(1);
       expect(nextFn).toHaveBeenCalledTimes(1);
-      expect(elapsed).toBeLessThan(500);
+      expectWithinLatencyBudget(elapsed, 500);
     });
 
     it('caps overall wall-clock time when many cleanups all hang', async () => {
@@ -116,7 +117,7 @@ describe('cleanup', () => {
       });
       const elapsed = Date.now() - start;
 
-      expect(elapsed).toBeLessThan(800);
+      expectWithinLatencyBudget(elapsed, 800);
       expect(elapsed).toBeGreaterThanOrEqual(80);
     });
 

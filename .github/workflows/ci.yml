@@ -794,6 +794,11 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         env:
           NO_COLOR: true
+          # A millisecond budget written on a developer machine measures the
+          # code; on the shared pool it measures the neighbours, where the same
+          # work runs 5x apart depending on placement (#10490). Skip those
+          # assertions here — they still run locally and on the hosted lanes.
+          QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
           # Bound each Vitest process on the shared ECS host. Operators can
