@@ -125,6 +125,18 @@ jobs:
           actual="$("${qwen_path}" --version)"
           echo "qwen path: ${qwen_path}"
           echo "qwen version: ${actual}"
+          if [[ "${actual}" != "${VERSION}" ]]; then
+            # Diagnose where the stale binary comes from before failing:
+            # the install step's npm may write to a different prefix than
+            # the one `command -v` resolves on this pool.
+            echo "--- diagnostics ---"
+            echo "readlink: $(readlink -f "${qwen_path}" 2>/dev/null || echo '(not a link)')"
+            ls -la /usr/local/bin/qwen /usr/bin/qwen 2>/dev/null || true
+            echo "npm prefix (sudo): $(sudo env -u NPM_CONFIG_PREFIX npm prefix -g 2>/dev/null || true)"
+            sudo cat /usr/local/lib/node_modules/@qwen-code/qwen-code/package.json 2>/dev/null | grep '"version"' || true
+            sudo ls /usr/local/lib/node_modules/@qwen-code/ 2>/dev/null || true
+            echo "--- end diagnostics ---"
+          fi
           test "${actual}" = "${VERSION}"
 
   # A failed fleet update is otherwise invisible. `qwen-code-pr-review.yml` and
