@@ -180,6 +180,7 @@ Then follow the instructions inside to install, authenticate, and use Qwen Code 
 ```
 
 - [**Aliyun Model Studio CLI**](https://github.com/modelstudioai/cli) — Official CLI for Aliyun's AI platform (`bailian-cli`). Extends Qwen Code with image/video generation, knowledge retrieval, app orchestration, and model deployment
+- [**OrcaReplay**](https://github.com/Continuum-AI-Corp/OrcaReplay) — Record a Qwen Code run, replay it offline byte-for-byte, or fork it from any step onto a different model
 
 ## Contributing
 
