@@ -53,6 +53,10 @@ describe('e2e workflow', () => {
       );
       expect(runStep.run).toContain('flock --shared --wait 1800 9');
       expect(runStep.run).toContain(
+        'exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"',
+      );
+      expect(runStep.run).toContain('flock --wait 1800 7');
+      expect(runStep.run).toContain(
         'if [ "$RUNNER_ENVIRONMENT" = \'self-hosted\' ]',
       );
     });
@@ -86,17 +90,42 @@ describe('e2e workflow', () => {
       expect(runStep.env.VERBOSE).toBe('true');
     });
 
-    it('keeps the shared lock continuously through concurrent tests', () => {
-      const imageIdIndex = runStep.run.indexOf('sandbox_image_id=');
-      const downgradeIndex = runStep.run.indexOf('flock --shared 9');
+    it('never waits on a lock another run holds through its tests', () => {
+      // Run 33637097713 lost two Docker shards to the #10605 protocol on one
+      // host: shard 1/3 held the per-commit coordinator lock and polled 30
+      // minutes for an exclusive daemon lock that a shard of run 33638984513
+      // kept shared through its whole test phase, then shard 2/3 timed out
+      // behind the coordinator lock shard 1/3 was still holding. Image
+      // preparation may only ever wait on locks bounded by a build.
+      const sharedIndex = runStep.run.indexOf('flock --shared --wait 1800 9');
+      const buildLockIndex = runStep.run.indexOf('flock --wait 1800 7');
+      const releaseIndex = runStep.run.indexOf('flock --unlock 7');
       const testIndex = runStep.run.indexOf('vitest run');
-      expect(imageIdIndex).toBeGreaterThanOrEqual(0);
-      expect(downgradeIndex).toBeGreaterThan(imageIdIndex);
-      expect(testIndex).toBeGreaterThan(downgradeIndex);
-      expect(runStep.run).toContain('until flock --nonblock 9');
+      expect(sharedIndex).toBeGreaterThanOrEqual(0);
+      expect(buildLockIndex).toBeGreaterThan(sharedIndex);
+      expect(releaseIndex).toBeGreaterThan(buildLockIndex);
+      expect(testIndex).toBeGreaterThan(releaseIndex);
+      expect(runStep.run).not.toContain('acquire_daemon_write_lock');
+      expect(runStep.run).not.toContain('flock --unlock 9');
+      expect(runStep.run).not.toContain('flock --nonblock 9');
       expect(
         yml.jobs['e2e-test-linux'].strategy['max-parallel'],
       ).toBeUndefined();
+    });
+
+    it('closes the lock descriptors in every child process', () => {
+      // A flock lives on the open file description, so a descendant that
+      // inherits the descriptor and outlives its job keeps holding the lock
+      // on the host. This shell keeps its own copy of the descriptor, so
+      // closing it in children costs nothing.
+      expect(runStep.run).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
+      expect(runStep.run).toContain("--shard='${{ matrix.shard }}' 9>&-");
+      expect(runStep.run).toContain('exec 7>&-');
+      expect(runStep.run).toContain('exec 8>&-');
+      const cleanupStep = steps.find(
+        (step) => step.name === 'Prune dangling docker images',
+      );
+      expect(cleanupStep.run).toContain("--filter 'until=24h' 9>&-");
     });
   });
 
