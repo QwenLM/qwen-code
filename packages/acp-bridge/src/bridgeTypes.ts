@@ -45,6 +45,7 @@ import type {
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
   ServeSessionResourcesStatus,
+  ServeSessionSavedWorkflowStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
@@ -721,6 +722,7 @@ export interface BridgeSessionSummary {
   createdAt: string;
   updatedAt?: string;
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
    * absent for a top-level session. Lets a UI link a sub-session back to its
    * parent. Immutable — set when the session is created. */
@@ -812,6 +814,7 @@ export interface SessionPrIssueInfo {
 
 export interface SessionMetadataUpdate {
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Issues are daemon-derived, never client-bound — the input omits them. */
   pr?: Omit<SessionPrInfo, 'issues'>;
   /** Full binding list after the update (return value only; ignored on input). */
@@ -1829,6 +1832,16 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getSessionResourcesStatus(
     sessionId: string,
   ): Promise<ServeSessionResourcesStatus>;
+
+  /**
+   * Read one saved workflow definition visible to a live session. The
+   * envelope's `workflow` is null when the name is unknown or Workflow
+   * controls are unavailable.
+   */
+  getSessionSavedWorkflow(
+    sessionId: string,
+    name: string,
+  ): Promise<ServeSessionSavedWorkflowStatus>;
 
   /**
    * Read a page of persisted transcript replay events through the ACP child.

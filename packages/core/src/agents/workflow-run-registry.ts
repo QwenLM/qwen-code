@@ -259,6 +259,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   runId: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;
+  /** Saved workflow definition name, when this run came from one. */
+  workflowName?: string;
   /** Run whose result or journal led to this attempt. */
   sourceRunId?: string;
   /** Whether this attempt reused the journal or started from scratch. */

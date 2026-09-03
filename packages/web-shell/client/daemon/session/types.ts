@@ -23,6 +23,7 @@ import type {
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
+  DaemonSessionSavedWorkflowDetail,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
   DaemonRewindResult,
@@ -114,6 +115,7 @@ export interface DaemonConnectionState {
   reasoning?: DaemonReasoningControls;
   currentMode?: string;
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Latest main-conversation model usage event. */
   tokenUsage?: DaemonTokenUsage;
   /** Authoritative Goal v2 state for the current session. */
@@ -257,6 +259,7 @@ export type DaemonNoticeOperation =
   | 'cancel_task'
   | 'control_workflow'
   | 'run_saved_workflow'
+  | 'read_saved_workflow'
   | 'load_goal'
   | 'control_goal'
   | 'clear_goal'
@@ -321,6 +324,7 @@ export interface DaemonCommandInfo {
   argumentHint?: string;
   autoSubmit?: boolean;
   source?: string;
+  altNames?: string[];
   raw: DaemonAvailableCommand;
 }
 
@@ -581,6 +585,13 @@ export interface DaemonSessionActions {
     status?: DaemonSessionWorkflowTaskStatus['status'];
     taskId?: string;
   }>;
+  /**
+   * Read one saved workflow definition (script + parsed meta). Resolves to
+   * null when the name is unknown or Workflow controls are unavailable.
+   */
+  readSavedWorkflow(
+    name: string,
+  ): Promise<DaemonSessionSavedWorkflowDetail | null>;
   getGoal(): Promise<GoalStateResponse>;
   controlGoal(request: GoalControlRequest): Promise<GoalStateResponse>;
   /**
