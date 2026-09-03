@@ -510,7 +510,13 @@ jobs:
   workspace_tests:
     name: 'Workspace Tests (${{ matrix.shard }}/3)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 45
+    # The cap has to clear the slowest honest shard, not the healthy one.
+    # In run 33713579913 a passing shard's test step took 41m32s of the
+    # ~42m the 45-minute cap left it, and attempt 3 was cancelled with both
+    # shards still live at that cap. --retry=2 re-runs every failed test on
+    # top; #10868 sized the CI unit lane's step cap for the same arithmetic.
+    # 90 clears the measured worst case plus its retries.
+    timeout-minutes: 90
     needs:
       - 'prepare'
       - 'quality_build'

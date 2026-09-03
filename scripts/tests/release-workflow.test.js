@@ -1334,7 +1334,10 @@ describe('release workflow', () => {
       quality_static: 30,
       quality_build: 45,
       quality_typecheck: 30,
-      workspace_tests: 45,
+      // Run 33713579913: a passing shard's test step took 41m32s of the
+      // ~42m a 45-minute cap left it, and attempt 3 was cancelled with
+      // both shards still live. 90 clears that plus --retry=2's re-runs.
+      workspace_tests: 90,
       quality_scripts: 30,
       quality: 5,
       integration_none: 120,
