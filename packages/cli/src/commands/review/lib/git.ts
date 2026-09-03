@@ -206,9 +206,15 @@ export function gitProbe(...args: string[]): {
   status: number | null;
   refusal: string | null;
 } {
-  const refusal = launchDirRefusal();
-  if (refusal !== null) return { out: null, status: null, refusal };
   try {
+    // INSIDE the try, which is where the spawn's own failures land. The
+    // pre-check reads `process.cwd()`, and a cwd deleted out from under this
+    // process makes that throw ENOENT — the same "git could not be run" the
+    // catch already answers, and one this probe must answer rather than throw:
+    // `releaseWorktree`'s never-throws contract and every degradation route
+    // built on a null `out` go through here.
+    const refusal = launchDirRefusal();
+    if (refusal !== null) return { out: null, status: null, refusal };
     return {
       out: execFileSync('git', args, {
         ...gitOpts(),

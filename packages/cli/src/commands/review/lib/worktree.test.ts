@@ -246,37 +246,70 @@ describe('worktreeResidue', () => {
     ).toBeUndefined();
   });
 
-  it('says UNMEASURED for a gitfile swapped at a repo that answers for this path', () => {
-    // The identity gate reads `--show-toplevel`, which prints the directory the
-    // `.git` FILE sits in — whatever that file points at. A repository whose
-    // `core.worktree` names this tree answers with this path, so the gate saw
-    // itself while every command after it would measure the plant's index.
-    // Measured in round 1: through discovery the swap certified a mutant
-    // clean.
-    writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
-    writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
-    // Genuine first, so the fixture is known to be measurable at all.
-    expect(worktreeResidue(tree).paths.sort()).toEqual([
-      '__probe__.test.ts',
-      'a.ts',
-    ]);
+  it('gives a mount that is NO repository the walk-up reason, not the gate’s', () => {
+    // The location gate below fails closed on a git it could not run, and a
+    // genuine "not a repository" is not that: it belongs to the walk-up check,
+    // whose reason says what was actually found. Folding the two would report
+    // a `.git` gitfile that does not exist — and would refuse a directory the
+    // caller's own error path already owns.
+    const root = mkdtempSync(join(tmpdir(), 'qwen-plain-'));
+    const plain = join(root, '.qwen', 'tmp', 'x');
+    mkdirSync(plain, { recursive: true });
+    try {
+      const got = worktreeResidue(plain);
+      expect(got.paths).toEqual([]);
+      expect(got.unmeasured).toBeTruthy();
+      expect(got.unmeasured).not.toContain('could not resolve its own git dir');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 
-    gitRepo('config', 'core.worktree', tree);
-    overwriteGitfile(join(tree, '.git'), `gitdir: ${join(repo, '.git')}\n`);
+  // The common-dir reason is the LOCATION gate's, and on Windows
+  // `mountRootFor` refuses every absolute path (a drive letter is the colon it
+  // refuses), so no location gate speaks there and the identity gate answers
+  // instead. Gated rather than branched on `process.platform` inside one
+  // assertion, so each lane asserts one unconditional expectation — gating
+  // case by case inside a shared assertion is how the same lane surfaced four
+  // times in this pull request.
+  it.skipIf(process.platform === 'win32')(
+    'says UNMEASURED for a gitfile swapped at a repo that answers for this path',
+    () => {
+      // The identity gate reads `--show-toplevel`, which prints the directory
+      // the `.git` FILE sits in — whatever that file points at. A repository
+      // whose `core.worktree` names this tree answers with this path, so the
+      // gate saw itself while every command after it would measure the plant's
+      // index. Measured in round 1: through discovery the swap certified a
+      // mutant clean.
+      writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
+      writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+      // Genuine first, so the fixture is known to be measurable at all.
+      expect(worktreeResidue(tree).paths.sort()).toEqual([
+        '__probe__.test.ts',
+        'a.ts',
+      ]);
 
-    const got = worktreeResidue(tree);
+      gitRepo('config', 'core.worktree', tree);
+      overwriteGitfile(join(tree, '.git'), `gitdir: ${join(repo, '.git')}\n`);
 
-    expect(got.paths).toEqual([]);
-    // Inside a mount the common-dir gate answers this shape first, and with
-    // the more useful reason: it says what the pointer IS (the repository's
-    // own common dir) rather than what the entry behind it lacks.
-    expect(got.unmeasured).toContain('common dir');
+      const got = worktreeResidue(tree);
 
-    // ...and the identity gate's own reason is still what answers where the
-    // location gates say nothing — outside a mount, where the same swap is a
-    // stale pointer rather than a plantable one. A main checkout has no
-    // `gitdir` file to "not point back", and the triager hunting one is the
-    // confusion the distinct message exists to spare.
+      expect(got.paths).toEqual([]);
+      // Inside a mount the common-dir gate answers this shape first, and with
+      // the more useful reason: it says what the pointer IS (the repository's
+      // own common dir) rather than what the entry behind it lacks.
+      expect(got.unmeasured).toContain('common dir');
+    },
+  );
+
+  it('says UNMEASURED for that swap outside a mount, where no location gate speaks', () => {
+    // The identity gate's own reason is what answers where the location gates
+    // say nothing — outside a mount, where the same swap is a stale pointer
+    // rather than a plantable one, and on Windows, where `mountRootFor`
+    // refuses every absolute path and the gated case above takes this route.
+    // A main checkout has no `gitdir` file to "not point back", and the
+    // triager hunting one is the confusion the distinct message exists to
+    // spare.
     const outside = join(repo, 'wt-outside');
     gitRepo('worktree', 'add', '--detach', '-q', outside, 'HEAD');
     gitRepo('config', 'core.worktree', outside);
@@ -857,6 +890,41 @@ describe('worktreeResidue', () => {
       // unmeasured verdict withholds the certificate, not the evidence.
       expect(got.paths).toEqual(['__probe__.test.ts']);
       expect(got.total).toBe(1);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'says UNMEASURED when the location gate cannot resolve, and never reaches status',
+    () => {
+      // The gate above asks `rev-parse --absolute-git-dir` and read EVERY null
+      // as "no objection" — so a git that timed out, failed to spawn, or died
+      // on any other fatal fell through to the `status` below, which refreshes
+      // the index and runs whatever clean filter the resolved repository
+      // configures. Its own 30s budget is a quarter of the protected
+      // commands' and the spawns below carry none at all, so a config sized
+      // between the two was measured reaching host-side filter execution.
+      // Only that one call is broken here: the shim proves the rest of the
+      // probe still answers, so the verdict comes from this gate and not from
+      // a repo the test broke wholesale.
+      const shim = mkdtempSync(join(tmpdir(), 'qwen-git-shim-'));
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      const statusRan = join(shim, 'status-ran');
+      writeFileSync(
+        join(shim, 'git'),
+        `#!/bin/sh\nfor a in "$@"; do\n  [ "$a" = --absolute-git-dir ] && { echo "fatal: simulated config parse failure" >&2; exit 128; }\n  [ "$a" = status ] && echo x >> "${statusRan}"\ndone\nexec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+      process.env['PATH'] = `${shim}:${realPath}`;
+
+      const got = worktreeResidue(tree);
+
+      expect(got.paths).toEqual([]);
+      expect(got.unmeasured).toContain('could not resolve its own git dir');
+      // The point of failing closed, and the half a message assertion cannot
+      // show: the measurement that would have run the plant's filter never ran.
+      expect(existsSync(statusRan)).toBe(false);
     },
   );
 
@@ -2048,6 +2116,27 @@ describe('untrustedGitfile', () => {
   );
 
   itWhereContainmentExists(
+    "takes git's answer unedited, trailing CR and all",
+    () => {
+      // The NBSP trap's sibling, one regex character away: `/\r?\n$/` also
+      // removes a `\r` that is the LAST BYTE OF THE PATH ITSELF, and git
+      // plumbing terminates with `\n` on every platform — so the plant
+      // `entry\r` was judged at its twin `entry`, symlinked outside the
+      // mount, and admitted while every gated command resolved through the
+      // plant. The gitfile's trailing `/` is load-bearing: git trims C-locale
+      // whitespace off a gitdir line, which would eat the `\r` first.
+      const { repo, tree, mount } = pipelineTree();
+      const planted = join(repo, '.qwen', 'tmp', 'entry\r');
+      // The twin points OUTSIDE the mount; stripping the CR lands here.
+      symlinkSync(repo, join(repo, '.qwen', 'tmp', 'entry'));
+      plantAdminEntry(planted, adminEntryOf(tree), tree, join(repo, '.git'));
+      overwriteGitfile(join(tree, '.git'), `gitdir: ${planted}/\n`);
+
+      expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
+    },
+  );
+
+  itWhereContainmentExists(
     'lets a SUBDIRECTORY of a mounted checkout resolve the way git does',
     () => {
       // The geometry my own checkout hid: a review running inside a review
@@ -2060,6 +2149,46 @@ describe('untrustedGitfile', () => {
       const sub = join(tree, 'packages', 'cli');
       mkdirSync(sub, { recursive: true });
       expect(untrustedRepositoryFrom(sub, mount)).toBeNull();
+    },
+  );
+
+  itWhereContainmentExists(
+    'refuses a launch directory git could not be run in, and passes one that is no repository',
+    () => {
+      // A directory that genuinely is no repository keeps passing through —
+      // refusing there would answer a question nobody asked, and the caller's
+      // own error path owns it. Asserted BEFORE the shim, which cannot tell
+      // the two apart.
+      const nowhere = join(tmp(), 'nowhere');
+      mkdirSync(nowhere, { recursive: true });
+      expect(untrustedRepositoryFrom(nowhere, () => nowhere)).toBeNull();
+
+      // Every OTHER null used to pass through as that same "not a repository":
+      // a timeout, a spawn failure, any other fatal. This gate's budget is a
+      // quarter of the protected commands' (`GIT_TIMEOUT_MS` in lib/git.ts), so
+      // a planted config sized to parse between the two left the gate silent
+      // while the command resolved through the pointer it never judged —
+      // `untrustedGitfile` fails closed on the same null, which is what made
+      // the asymmetry visible. Only `--absolute-git-dir` is broken here.
+      const { tree, mount } = pipelineTree();
+      const shim = mkdtempSync(join(tmpdir(), 'qwen-git-shim-'));
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], {
+        encoding: 'utf8',
+      }).trim();
+      writeFileSync(
+        join(shim, 'git'),
+        `#!/bin/sh\nfor a in "$@"; do\n  [ "$a" = --absolute-git-dir ] && { echo "fatal: simulated config parse failure" >&2; exit 128; }\ndone\nexec ${realGit} "$@"\n`,
+        { mode: 0o755 },
+      );
+      const savedPath = process.env['PATH'];
+      process.env['PATH'] = `${shim}:${savedPath}`;
+      try {
+        expect(untrustedRepositoryFrom(tree, mount)).toContain(
+          'could not resolve its own git dir',
+        );
+      } finally {
+        process.env['PATH'] = savedPath;
+      }
     },
   );
 

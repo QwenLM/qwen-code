@@ -4,6 +4,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
 
+/** `gitProbe`'s answer: the split cleanup's two refusal tests steer. */
+type ProbeAnswer = {
+  out: string | null;
+  status: number | null;
+  refusal: string | null;
+};
+
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   existsSync: vi.fn((_path: string): boolean => false),
@@ -32,12 +39,21 @@ const mocks = vi.hoisted(() => ({
   clearReviewWorktreeLease: vi.fn(),
   readReviewWorktreeLease: vi.fn((): unknown => null),
   reviewLeaseHeldByAnotherSession: vi.fn((_lease: unknown): boolean => false),
-  refExists: vi.fn(() => true),
   // cleanup's two remaining git spawns go through `lib/git`'s gated wrappers:
   // both resolve their repository from `process.cwd()`, and a launch directory
   // inside a review temp dir is one the reviewed code can point elsewhere.
   git: vi.fn((..._args: string[]): string => ''),
-  gitOpt: vi.fn((..._args: string[]): string | null => null),
+  // The probe, not `gitOpt`/`refExists`: a launch-dir refusal has to stay
+  // distinguishable from git's own "no such branch" and "nothing to prune",
+  // which is what the two refusal tests below steer. `status: 0` is the
+  // `refExists` default this replaces — the branch leg deletes.
+  gitProbe: vi.fn(
+    (..._args: string[]): ProbeAnswer => ({
+      out: '',
+      status: 0,
+      refusal: null,
+    }),
+  ),
   // The parameter is declared so `mock.calls` is typed `[string][]` rather than
   // `[][]` — the paths it was asked to free are the assertion in the sweep test.
   releaseWorktree: vi.fn((_path: string) => ({
@@ -114,10 +130,9 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
 }));
 
 vi.mock('./lib/git.js', () => ({
-  refExists: mocks.refExists,
   releaseWorktree: mocks.releaseWorktree,
   git: mocks.git,
-  gitOpt: mocks.gitOpt,
+  gitProbe: mocks.gitProbe,
 }));
 
 vi.mock('./lib/gh.js', () => ({
@@ -195,7 +210,9 @@ describe('runCleanup', () => {
     // path-dependent implementations, and a later test reading the declared
     // `[]` default would otherwise inherit them.
     mocks.readdirSync.mockImplementation((_path: string): string[] => []);
-    mocks.refExists.mockReturnValue(true);
+    // Implementations survive clearAllMocks, and both refusal tests below
+    // install one: restore the branch-exists / no-prune-failure default.
+    mocks.gitProbe.mockReturnValue({ out: '', status: 0, refusal: null });
     mocks.releaseWorktree.mockReturnValue({
       existed: false,
       freed: false,
@@ -280,6 +297,76 @@ describe('runCleanup', () => {
     );
     expect(mocks.writeStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('Failed to delete branch qwen-review/pr-123'),
+    );
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
+  it('keeps the lease when the branch leg is REFUSED, not merely absent', () => {
+    // `refExists` answered a launch-dir refusal as "no such branch", so this
+    // leg was skipped before `git` was ever reached: nothing on stderr, no
+    // `failedDestruction`, the lease released and "Nothing to clean" printed
+    // over a branch and a registration that both survived — the next
+    // `worktree add` at the fixed path then fails "missing but already
+    // registered" with nobody told why. The probe keeps the two apart.
+    mocks.gitProbe.mockImplementation(
+      (...args: string[]): ProbeAnswer =>
+        args[0] === 'rev-parse'
+          ? { out: null, status: null, refusal: 'POISONED LAUNCH DIR' }
+          : { out: '', status: 0, refusal: null },
+    );
+
+    runCleanup('pr-123');
+
+    expect(mocks.git).not.toHaveBeenCalledWith(
+      'branch',
+      '-D',
+      'qwen-review/pr-123',
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Failed to delete branch qwen-review/pr-123: git could not run from this directory',
+      ),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('POISONED LAUNCH DIR'),
+    );
+    expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
+  });
+
+  it('keeps the lease when the symlink arm cannot prune', () => {
+    // The same collapse one call earlier: `pruneWorktrees()` answered null for
+    // "refused" and for "nothing to prune" alike, so the arm announced
+    // `Removed … link` and released the lease while the registration the prune
+    // was there to clear survived. A genuine prune failure stays swallowed —
+    // it must not mask the error that got us here — but a refusal is the one
+    // cause a user can act on, so it is reported and holds the lease.
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    mocks.lstatSync.mockImplementation(((p: string) => ({
+      isSymbolicLink: () => String(p).includes('review-pr-123'),
+      isDirectory: () => !String(p).includes('review-pr-123'),
+    })) as unknown as () => {
+      isSymbolicLink: () => boolean;
+      isDirectory: () => boolean;
+    });
+    mocks.gitProbe.mockImplementation(
+      (...args: string[]): ProbeAnswer =>
+        args[0] === 'worktree'
+          ? { out: null, status: null, refusal: 'POISONED LAUNCH DIR' }
+          : { out: '', status: 0, refusal: null },
+    );
+
+    runCleanup('pr-123');
+
+    // The link IS gone, so the announcement stays true — the stderr line is
+    // about the registration behind it, not about the unlink.
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      expect.stringContaining('Removed worktree link'),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to prune after removing worktree link'),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('POISONED LAUNCH DIR'),
     );
     expect(mocks.clearReviewWorktreeLease).not.toHaveBeenCalled();
   });
@@ -573,7 +660,7 @@ describe('runCleanup', () => {
     // prune lives — so without one here the family paths were reported swept
     // while their admin entries stayed behind and wedged the next
     // `worktree add` with `already exists`.
-    expect(mocks.gitOpt).toHaveBeenCalledWith('worktree', 'prune');
+    expect(mocks.gitProbe).toHaveBeenCalledWith('worktree', 'prune');
   });
 
   it('does not announce a clean sweep when it could not list the family', () => {

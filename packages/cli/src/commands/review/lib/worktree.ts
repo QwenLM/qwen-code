@@ -189,8 +189,21 @@ export function mountRootFor(cwd: string): string | null {
 }
 
 /**
- * git's own answer to "which repository does this path resolve to", or null
- * when git cannot answer at all.
+ * A `rev-parse` answer, and which kind of no-answer a null was.
+ *
+ * `notARepository` separates the one null a gate may pass through — git ran
+ * and said this is not a repository, which is the caller's own error path to
+ * own — from every other null: a timeout, a spawn failure, any other fatal.
+ * Reading the second as the first made two of the three gates below answer
+ * "no objection" to a question git was never asked, and `revParse`'s budget
+ * is a quarter of the protected commands' (or, in `worktreeResidue`, of
+ * nothing at all), so a config sized to parse between the two reached the
+ * command the gate had just declined to judge.
+ */
+type RevParse = { value: string | null; notARepository: boolean };
+
+/**
+ * git's own answer to "which repository does this path resolve to".
  *
  * ASK GIT, rather than parsing the pointer here. The first cut read the
  * gitfile and resolved it in Node, and the two resolvers disagree in ways
@@ -217,7 +230,7 @@ export function mountRootFor(cwd: string): string | null {
  * it, symlinked outside the mount, is what the judgment then lands on. The
  * resolver that decides has to receive git's answer unedited.
  */
-function resolvedGitDir(cwd: string): string | null {
+function resolvedGitDir(cwd: string): RevParse {
   return revParse(cwd, '--absolute-git-dir');
 }
 
@@ -230,7 +243,7 @@ function resolvedGitDir(cwd: string): string | null {
  * carry one.
  */
 function resolvedCommonDir(cwd: string): string | null {
-  return revParse(cwd, '--path-format=absolute', '--git-common-dir');
+  return revParse(cwd, '--path-format=absolute', '--git-common-dir').value;
 }
 
 /**
@@ -239,7 +252,7 @@ function resolvedCommonDir(cwd: string): string | null {
  * Strips git's terminal record delimiter and NOTHING else — never `.trim()`,
  * for the reason `resolvedGitDir` gives.
  */
-function revParse(cwd: string, ...flags: string[]): string | null {
+function revParse(cwd: string, ...flags: string[]): RevParse {
   const resolved = spawnSync(
     'git',
     [
@@ -250,10 +263,31 @@ function revParse(cwd: string, ...flags: string[]): string | null {
       'rev-parse',
       ...flags,
     ],
-    { cwd, encoding: 'utf8', timeout: 30_000, env: sanitizedGitEnv() },
+    {
+      cwd,
+      encoding: 'utf8',
+      timeout: 30_000,
+      // `LC_ALL`, because `notARepository` below reads git's own sentence: a
+      // localized one classifies a launch directory that genuinely is no
+      // repository as "could not be run" and refuses it. The pin
+      // `core/utils/git-branches.ts` sets for the same reason.
+      env: { ...sanitizedGitEnv(), LC_ALL: 'C' },
+    },
   );
-  if (resolved.error || resolved.status !== 0 || !resolved.stdout) return null;
-  return resolved.stdout.replace(/\r?\n$/, '');
+  return {
+    // `\n` only, not `\r?\n`: git plumbing terminates with `\n` on every
+    // platform, so a `\r` in that regex is a `\r` that was the LAST BYTE OF
+    // THE PATH — and the judgment then landed on the twin of a plant named
+    // `evil\r`, symlinked outside the mount, while every gated command
+    // resolved through the plant.
+    value:
+      resolved.error || resolved.status !== 0 || !resolved.stdout
+        ? null
+        : resolved.stdout.replace(/\n$/, ''),
+    notARepository:
+      resolved.status === 128 &&
+      resolved.stderr.includes('not a git repository'),
+  };
 }
 
 /**
@@ -322,12 +356,16 @@ export function untrustedRepositoryFrom(
   if (mountRoot(cwd) === null) return null;
   if (!existsSync(cwd)) return null;
   const target = resolvedGitDir(cwd);
-  if (target === null) {
+  if (target.value === null) {
     // Not a repository from here at all — the caller's own error path owns
-    // that, and refusing would answer a question nobody asked.
-    return null;
+    // that, and refusing would answer a question nobody asked. Any OTHER null
+    // is git not answering, and "could not be run" is not "no objection": the
+    // command this gates resolves through a pointer nobody judged.
+    return target.notARepository
+      ? null
+      : `${cwd}: git could not resolve its own git dir, so where a command run from here would land is unmeasured`;
   }
-  const why = untrustedPointer(cwd, target, mountRoot);
+  const why = untrustedPointer(cwd, target.value, mountRoot);
   return why === null ? null : `${cwd} ${why}`;
 }
 
@@ -400,10 +438,10 @@ export function untrustedGitfile(
   // The repository git itself would use — see `resolvedGitDir` for why the
   // pointer is not parsed here.
   const target = resolvedGitDir(tree);
-  if (target === null) {
+  if (target.value === null) {
     return `${tree}: git could not resolve its own git dir`;
   }
-  const why = untrustedPointer(tree, target, mountRoot);
+  const why = untrustedPointer(tree, target.value, mountRoot);
   return why === null ? null : `${tree} ${why}`;
 }
 
@@ -1131,8 +1169,20 @@ export function worktreeResidue(
   // ordinary checkout never pays for the extra spawn.
   if (mountRootFor(cwd) !== null) {
     const target = resolvedGitDir(cwd);
-    const why =
-      target === null ? null : untrustedPointer(cwd, target, mountRootFor);
+    // git not answering is not "no objection", and widening this gate's budget
+    // cannot make it so: the spawns below carry none at all, so a config sized
+    // past it used to reach a `status` that refreshes the planted index and
+    // runs its clean filter on the host. A genuine not-a-repository still
+    // falls through — the walk-up check below fails closed on it with its own
+    // reason.
+    let why: string | null;
+    if (target.value !== null) {
+      why = untrustedPointer(cwd, target.value, mountRootFor);
+    } else {
+      why = target.notARepository
+        ? null
+        : 'git could not resolve its own git dir';
+    }
     if (why !== null) {
       return {
         paths: [],

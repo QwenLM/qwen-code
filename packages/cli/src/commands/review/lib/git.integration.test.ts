@@ -20,7 +20,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitProbe, gitRawTolerateDiff, releaseWorktree } from './git.js';
+import {
+  gitOpt,
+  gitProbe,
+  gitRawTolerateDiff,
+  releaseWorktree,
+} from './git.js';
 import { NULL_DEVICE } from './diff-flags.js';
 import { isolateHostGitConfig } from './test-utils.js';
 
@@ -369,6 +374,38 @@ describe('gitProbe — the exit status the anchor taxonomy rests on', () => {
       }
     } finally {
       rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it('answers "could not be run" when the process cwd no longer exists', () => {
+    // The launch-dir pre-check reads `process.cwd()`, which throws ENOENT once
+    // the directory is gone. Left outside the try it took the whole probe with
+    // it — and `releaseWorktree`'s documented never-throws contract, cleanup's
+    // `report()` and fetch-pr's `cleanStale` all call this with no catch of
+    // their own, so a review whose worktree was swept out from under it (the
+    // nested geometry, an operator `rm -rf` mid-run) aborted the sweep before
+    // the branch delete and the lease release, leaving the stale lease that
+    // refuses every later cleanup of that target. The pre-gate spawn degraded
+    // here instead of throwing: its own ENOENT landed in the catch.
+    const gone = join(repo, 'deleted-out-from-under');
+    mkdirSync(gone, { recursive: true });
+    process.chdir(gone);
+    try {
+      rmSync(gone, { recursive: true, force: true });
+      // The precondition, asserted rather than assumed: this is the throw the
+      // pre-check used to let escape.
+      expect(process.cwd).toThrow(/uv_cwd/);
+
+      expect(gitProbe('worktree', 'prune')).toEqual({
+        out: null,
+        status: null,
+        refusal: null,
+      });
+      // `gitOpt` and `refExists` delegate here, and every degradation route
+      // reads their null rather than catching a throw.
+      expect(gitOpt('worktree', 'prune')).toBeNull();
+    } finally {
+      process.chdir(cwd);
     }
   });
 });

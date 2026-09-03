@@ -35,7 +35,7 @@ import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptCommentIds, parseReceiptIds } from './lib/receipt.js';
 import { detectPlatformKind } from './lib/platform/registry.js';
 import { a1Json, aoneWhoamiAccount } from './lib/platform/aone-client.js';
-import { git, gitOpt, refExists, releaseWorktree } from './lib/git.js';
+import { git, gitProbe, releaseWorktree } from './lib/git.js';
 import { readBudgetStopUnfenced } from './lib/deadline.js';
 import { promptRecordDir, runEpochMs } from './lib/prompt-record.js';
 import {
@@ -683,6 +683,7 @@ function scratchWorktreesOf(worktree: string): {
 
 /**
  * Clear registrations whose worktree directory is gone. A no-op when none are.
+ * Returns why git could not be run at all, or null when it ran.
  *
  * `releaseWorktree` runs this after its own unlink and says why: a
  * registration whose tree once stood at a path wedges the next
@@ -690,7 +691,7 @@ function scratchWorktreesOf(worktree: string): {
  * out against `branch -D`. Best-effort like every other step on the cleanup
  * path — a prune that fails must not mask the error that got us here.
  */
-function pruneWorktrees(): void {
+function pruneWorktrees(): string | null {
   // Through `lib/git`'s wrapper, not a direct spawn: `worktree prune` finds its
   // repository from `process.cwd()`, and a launch directory inside a review
   // temp dir is one the reviewed code can point elsewhere — a `core.hooksPath`
@@ -699,9 +700,10 @@ function pruneWorktrees(): void {
   // directory, an ungated prune clears the PLANT's registrations and leaves the
   // real stale one standing, so it was never sweeping the repository the
   // registration belongs to. `rmSync` — the half that does clear the path — is
-  // not a git call and still runs. `gitOpt` answers null for "refused" and for
-  // "nothing to prune", which is what the caught throw answered before.
-  gitOpt('worktree', 'prune');
+  // not a git call and still runs. A genuine prune failure stays swallowed —
+  // it must not mask the error that got us here — but a refusal is the one
+  // cause a user can act on, and `gitOpt` answered null for both.
+  return gitProbe('worktree', 'prune').refusal;
 }
 
 export function runCleanup(target: string): void {
@@ -837,9 +839,20 @@ export function runCleanup(target: string): void {
           // reaching it, so the family paths were unlinked and reported swept
           // while their admin entries stayed behind. It is the only prune in
           // this function, and a no-op when nothing is stale.
-          pruneWorktrees();
+          const refusal = pruneWorktrees();
           writeStdoutLine(`Removed ${label} link: ${path}`);
           removedAny = true;
+          if (refusal !== null) {
+            // The link IS gone, so the announcement above is true — but the
+            // registration it left behind is not, and a prune git never ran is
+            // not the swallowed best-effort case this function documents.
+            writeStderrLine(
+              `Failed to prune after removing ${label} link ${path}: git ` +
+                `could not run from this directory — ${refusal}`,
+            );
+            failedAny = true;
+            failedDestruction = true;
+          }
         } catch (err) {
           // `force` suppresses ENOENT, not EACCES/EBUSY — and a link left at a
           // family path still wedges the next review's `worktree add`, which is
@@ -916,14 +929,26 @@ export function runCleanup(target: string): void {
     }
 
     const branch = reviewBranch(prNumber);
-    if (refExists(branch)) {
+    // The probe, not `refExists`: a launch-dir refusal answers "no such
+    // branch" there, so this leg was skipped silently, the lease was released
+    // over a surviving branch, and the run still printed "Nothing to clean" —
+    // a success report over a destruction that never ran.
+    const branchProbe = gitProbe('rev-parse', '--verify', '--quiet', branch);
+    if (branchProbe.refusal !== null) {
+      writeStderrLine(
+        `Failed to delete branch ${branch}: git could not run from this ` +
+          `directory — ${branchProbe.refusal}`,
+      );
+      failedAny = true;
+      failedDestruction = true;
+    } else if (branchProbe.status === 0) {
       try {
         // The throwing wrapper, not a direct spawn: `branch -D` is a
         // reference-transaction hook channel and finds its repository from
         // `process.cwd()`, so an ungated delete from a poisoned launch
-        // directory executes the plant's hooks. Refused, it lands in the catch
-        // below as a failed destruction — the branch survives and the lease
-        // stays held, which is the honest report.
+        // directory executes the plant's hooks. A pointer rewritten between
+        // the probe and this call lands in the catch below as a failed
+        // destruction — the branch survives and the lease stays held.
         git('branch', '-D', branch);
         writeStdoutLine(`Deleted ref: ${branch}`);
         removedAny = true;
