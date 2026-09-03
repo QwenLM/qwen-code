@@ -19,6 +19,7 @@ import {
   type DaemonSessionTaskStatus,
   type DaemonSettingDescriptor,
   type DaemonSkillToggleMutation,
+  type DaemonWorkspaceMcpServerStatus,
   type DaemonWorkspaceGitStatus,
   type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
@@ -46,8 +47,9 @@ type MockConnection = {
   context?: { sessionId: string };
   clientId: string;
   displayName: string | undefined;
+  titleSource?: 'manual' | 'auto';
   workspaceCwd: string;
-  currentModel: string;
+  currentModel: string | undefined;
   currentMode: string;
   models: Array<{
     id: string;
@@ -152,6 +154,9 @@ type ChatEditorTestProps = {
   workspaceFeaturesEnabled?: boolean;
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (cwd: string | undefined) => void;
+  standaloneTargetSupported?: boolean;
+  selectedStandaloneTarget?: boolean;
+  onSelectStandaloneTarget?: () => void;
   onCreateScratchWorkspace?: () => void;
   onOpenExistingWorkspace?: () => void;
   scratchWorkspaceSupported?: boolean;
@@ -405,6 +410,14 @@ const {
       }),
     },
     mockMcp: {
+      ensureRuntime: vi.fn().mockResolvedValue({}),
+      runtimeStatus: vi.fn().mockResolvedValue({
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        capabilities: {
+          mcp: { state: 'ready', revision: 0, runtimeEpoch: 1 },
+        },
+      }),
       initialize: vi.fn().mockResolvedValue({ accepted: true }),
       reloadConfig: vi.fn().mockResolvedValue({ accepted: true }),
       reload: vi.fn(),
@@ -414,6 +427,9 @@ const {
       manageServer: vi.fn(),
       addServer: vi.fn(),
       removeServer: vi.fn(),
+      setConfigServer: vi.fn(),
+      removeConfigServer: vi.fn(),
+      setConfigServerEnabled: vi.fn(),
       loading: false,
       error: undefined,
     },
@@ -455,6 +471,7 @@ const {
       latestStatusBarTasks: null as DaemonSessionMonitorTaskStatus[] | null,
       latestStatusBarOnOpenTasks: null as (() => void) | null,
       latestStatusBarHideSettings: false,
+      latestStatusBarOnSelectModel: null as (() => void) | null,
       latestMessageListProps: null as {
         messages?: Array<{
           role?: string;
@@ -1469,10 +1486,12 @@ vi.doMock('./components/StatusBar', async () => {
       tasks?: DaemonSessionMonitorTaskStatus[];
       onOpenTasks?: () => void;
       hideSettings?: boolean;
+      onSelectModel?: () => void;
     }) => {
       testState.latestStatusBarTasks = props.tasks ?? [];
       testState.latestStatusBarOnOpenTasks = props.onOpenTasks ?? null;
       testState.latestStatusBarHideSettings = props.hideSettings ?? false;
+      testState.latestStatusBarOnSelectModel = props.onSelectModel ?? null;
       return React.createElement('div');
     },
   };
@@ -2059,6 +2078,10 @@ const {
   mergeMonitorTaskSnapshot,
   mergeSideTaskCatalog,
 } = await import('./App');
+const { McpStatusMessage } = await import(
+  './components/messages/McpStatusMessage'
+);
+const { I18nProvider } = await import('./i18n');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -5528,6 +5551,7 @@ beforeEach(() => {
   mockConnection.workspaceCwd = '/tmp/project';
   mockConnection.status = 'connected';
   mockConnection.displayName = 'Session One';
+  mockConnection.titleSource = undefined;
   mockConnection.currentMode = 'default';
   mockConnection.currentModel = 'qwen';
   mockConnection.models = [{ id: 'qwen', label: 'Qwen' }];
@@ -5643,6 +5667,7 @@ beforeEach(() => {
   testState.latestStatusBarTasks = null;
   testState.latestStatusBarOnOpenTasks = null;
   testState.latestStatusBarHideSettings = false;
+  testState.latestStatusBarOnSelectModel = null;
   testState.latestMessageListProps = null;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
@@ -5810,6 +5835,16 @@ beforeEach(() => {
   mockWorkspaceActions.deleteModel.mockResolvedValue(undefined);
   mockMcp.initialize.mockClear();
   mockMcp.initialize.mockResolvedValue({ accepted: true });
+  mockMcp.ensureRuntime.mockClear();
+  mockMcp.ensureRuntime.mockResolvedValue({});
+  mockMcp.runtimeStatus.mockClear();
+  mockMcp.runtimeStatus.mockResolvedValue({
+    runtimeLive: true,
+    runtimeEpoch: 1,
+    capabilities: {
+      mcp: { state: 'ready', revision: 0, runtimeEpoch: 1 },
+    },
+  });
   mockMcp.reloadConfig.mockClear();
   mockMcp.reloadConfig.mockResolvedValue({ accepted: true });
   mockMcp.reload.mockReset();
@@ -5822,6 +5857,9 @@ beforeEach(() => {
     durationMs: 1,
   });
   mockMcp.manageServer.mockReset();
+  mockMcp.setConfigServer.mockReset();
+  mockMcp.removeConfigServer.mockReset();
+  mockMcp.setConfigServerEnabled.mockReset();
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 
@@ -10995,6 +11033,67 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('hides the empty model picker until standalone options are available', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.models = undefined;
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(
+      testState.latestChatEditorProps?.visibleToolbarActions,
+    ).not.toContain('model');
+
+    act(() => {
+      mockConnection.models = [
+        { id: 'qwen3.8-max(USE_OPENAI)', label: 'Qwen 3.8 Max' },
+      ];
+      rerender();
+    });
+    await flush();
+
+    expect(testState.latestChatEditorProps?.visibleToolbarActions).toContain(
+      'model',
+    );
+  });
+
+  it('toasts instead of opening the model dialog via /model when standalone models are unavailable', async () => {
+    const onToast = vi.fn();
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.models = undefined;
+    renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/model');
+      await Promise.resolve();
+    });
+
+    expect(onToast).toHaveBeenCalledWith(
+      'info',
+      'Models are unavailable; the daemon default will be used.',
+    );
+  });
+
+  it('toasts instead of opening the model dialog from the status bar when standalone models are unavailable', async () => {
+    const onToast = vi.fn();
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.models = [];
+    renderApp({ onToast });
+    await flush();
+
+    act(() => {
+      testState.latestStatusBarOnSelectModel?.();
+    });
+
+    expect(onToast).toHaveBeenCalledWith(
+      'info',
+      'Models are unavailable; the daemon default will be used.',
+    );
+  });
+
   it('keeps a newer standalone draft when an older session load fails', async () => {
     const load = deferred<void>();
     mockConnection.sessionContext = { kind: 'workspace', cwd: '/tmp/project' };
@@ -11089,6 +11188,93 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.createSession).not.toHaveBeenCalledWith(
       expect.objectContaining({ sessionContext: { kind: 'standalone' } }),
     );
+  });
+
+  it('keeps the sidebar New task on the primary workspace on a capable daemon', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('workspace prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: '/workspace',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      }),
+    );
+    expect(mockSessionActions.createSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ sessionContext: { kind: 'standalone' } }),
+    );
+  });
+
+  it('creates a standalone session from the composer no-workspace target', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '';
+    mockConnection.capabilities.features = ['standalone_sessions_v1'];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.standaloneTargetSupported).toBe(
+      true,
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectStandaloneTarget?.();
+      await Promise.resolve();
+    });
+    expect(testState.latestChatEditorProps?.selectedStandaloneTarget).toBe(
+      true,
+    );
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('standalone prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionContext: { kind: 'standalone' } }),
+    );
+  });
+
+  it('hides the composer no-workspace target without the capability', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    renderApp();
+    await flush();
+
+    expect(
+      testState.latestChatEditorProps?.standaloneTargetSupported,
+    ).toBeFalsy();
   });
 
   it('retries failed capabilities before routing a global new session', async () => {
@@ -11245,7 +11431,8 @@ describe('App session callbacks', () => {
   });
 
   it('reports the primary workspace, not the stale connection workspace, when the selection is unset', async () => {
-    // The common new-chat path (sidebar "New task", /clear, /new) leaves
+    // A new chat with no explicit context (a cold draft, or a global new
+    // session on a daemon without the standalone capability) leaves
     // selectedWorkspaceCwd undefined — that is how "primary" is spelled. The
     // report must fall back to the primary workspace, not the stale
     // connection.workspaceCwd left over from the previous session.
@@ -14508,6 +14695,200 @@ describe('App session callbacks', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(editorFocus).toHaveBeenCalledOnce();
+  });
+
+  it('renames a /clear successor from persisted manual title provenance', async () => {
+    mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+      {
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Bug hunt',
+        titleSource: 'manual',
+      },
+    ]);
+    const { container, rerender } = renderApp();
+    await flush();
+    await flush();
+
+    testState.prompt = '/clear';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    });
+
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.displayName = undefined;
+      rerender();
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+    });
+
+    expect(mockSessionActions.renameSession).toHaveBeenCalledWith('Bug hunt');
+    expect(
+      mockSessionActions.renameSession.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      mockSessionActions.attachSession.mock.invocationCallOrder[0],
+    );
+    expect(
+      mockSessionActions.renameSession.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockSessionActions.sendPrompt.mock.invocationCallOrder[0]);
+  });
+
+  it('attaches a /clear successor when carrying its title fails', async () => {
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'Bug hunt';
+    mockSessionActions.renameSession.mockRejectedValueOnce(
+      new Error('rename failed'),
+    );
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/clear';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    });
+
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.displayName = undefined;
+      mockConnection.titleSource = undefined;
+      rerender();
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+
+    await vi.waitFor(() => {
+      expect(mockSessionActions.attachSession).toHaveBeenCalled();
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+    });
+  });
+
+  it('does not carry an automatic title across /clear', async () => {
+    mockConnection.titleSource = 'auto';
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/clear';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    });
+
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.displayName = undefined;
+      mockConnection.titleSource = undefined;
+      rerender();
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+    });
+
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+  });
+
+  it('discards an armed /clear carry when a shrink-fold lands on a split pane', async () => {
+    let large = true;
+    let changeHandler: ((event: { matches: boolean }) => void) | undefined;
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        get matches() {
+          return query.includes('min-width') ? large : false;
+        },
+        media: query,
+        addEventListener: (
+          _type: string,
+          cb: (event: { matches: boolean }) => void,
+        ) => {
+          if (query.includes('1024')) changeHandler = cb;
+        },
+        removeEventListener: vi.fn(),
+      })),
+    });
+    mockConnection.sessionId = 'session-1';
+    mockConnection.titleSource = 'manual';
+    mockConnection.displayName = 'Bug hunt';
+
+    const { container, rerender } = renderApp();
+    await flush();
+
+    // Split view with the chat on session-1; /clear arms the carry and
+    // leaves the chat as a sessionless draft.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    testState.prompt = '/clear';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    });
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.displayName = undefined;
+      mockConnection.titleSource = undefined;
+      rerender();
+    });
+
+    // Re-enter the split (the draft chat stays sessionless), then shrink:
+    // the fold lands the first pane on the chat connection while the carry
+    // is still armed.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-split-view"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    mockSessionActions.loadSession.mockImplementationOnce(async () => {
+      // Mirrors the real loadSession(): the pane session binds the chat
+      // connection; an automatic title carries no provenance.
+      mockConnection.sessionId = 'session-1';
+      mockConnection.displayName = 'Pane task';
+    });
+    await act(async () => {
+      large = false;
+      changeHandler?.({ matches: false });
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-1');
+    });
+    rerender();
+
+    // The pane session has no manual provenance and no manual summary; a
+    // second /clear must not read the stale armed carry from the first
+    // session and rename the pane session's successor with it.
+    testState.prompt = '/clear';
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(2);
+    });
+    act(() => {
+      mockConnection.sessionId = undefined;
+      mockConnection.displayName = undefined;
+      rerender();
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('first prompt');
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+    });
+
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
   });
 
   it('focuses a cleared new session without waiting for detach', async () => {
@@ -20649,8 +21030,12 @@ describe('App session callbacks', () => {
   });
 
   it('restores composer interaction after closing Plugins on the MCP tab', async () => {
-    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+    mockMcp.reload.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
       initialized: true,
+      runtimeEpoch: 1,
+      source: 'live',
       discoveryState: 'completed',
       servers: [],
     });
@@ -20683,7 +21068,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
     await flush();
-    expect(mockWorkspaceActions.loadMcpStatus).toHaveBeenCalled();
+    expect(mockMcp.reload).toHaveBeenCalled();
     expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
 
     const mcpPanel = container.querySelector('[data-testid="inline-panel"]');
@@ -20701,6 +21086,48 @@ describe('App session callbacks', () => {
 
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
     expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+  });
+
+  it('ensures the MCP runtime when the manager is refreshed', async () => {
+    mockMcp.reload.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: true,
+      runtimeEpoch: 1,
+      source: 'live',
+      discoveryState: 'completed',
+      servers: [],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-plugins"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    const mcpTab =
+      panel?.querySelectorAll<HTMLButtonElement>('button[role="tab"]')[1];
+    await act(async () => {
+      mcpTab?.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, button: 0 }),
+      );
+      mcpTab?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(mockMcp.reload).toHaveBeenCalled());
+    mockMcp.ensureRuntime.mockClear();
+
+    const refresh = Array.from(
+      panel?.querySelectorAll<HTMLButtonElement>('button') ?? [],
+    ).find((button) => button.textContent === 'Refresh');
+    await act(async () => refresh?.click());
+
+    await vi.waitFor(() => {
+      expect(mockMcp.ensureRuntime).toHaveBeenCalledOnce();
+    });
   });
 
   it('opens Channel management from the sidebar', async () => {
@@ -20875,11 +21302,116 @@ describe('App session callbacks', () => {
     ).toHaveProperty('tabIndex', 0);
   });
 
-  it('shows server operations without duplicating tools and resources tabs', async () => {
+  it('prioritizes MCP approval and authentication labels over connection labels', async () => {
+    const servers: DaemonWorkspaceMcpServerStatus[] = [
+      {
+        name: 'disabled-server',
+        configOrigin: 'workspace_settings',
+        disabled: true,
+        approvalState: 'pending',
+        requiresAuth: true,
+        mcpStatus: 'connected',
+      },
+      {
+        name: 'approval',
+        configOrigin: 'workspace_settings',
+        disabled: false,
+        approvalState: 'pending',
+        requiresAuth: true,
+        mcpStatus: 'connected',
+      },
+      {
+        name: 'authenticating',
+        configOrigin: 'workspace_settings',
+        disabled: false,
+        authenticationState: 'pending',
+        mcpStatus: 'connected',
+      },
+      {
+        name: 'auth-failed',
+        configOrigin: 'workspace_settings',
+        disabled: false,
+        authenticationState: 'failed',
+        mcpStatus: 'connected',
+      },
+      {
+        name: 'needs-auth',
+        configOrigin: 'workspace_settings',
+        disabled: false,
+        requiresAuth: true,
+        mcpStatus: 'connecting',
+      },
+      {
+        name: 'connected-server',
+        configOrigin: 'workspace_settings',
+        disabled: false,
+        authenticationState: 'succeeded',
+        requiresAuth: true,
+        mcpStatus: 'connected',
+      },
+    ];
     mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
       initialized: true,
       discoveryState: 'completed',
       workspaceCwd: '/workspace',
+      source: 'live',
+      runtimeEpoch: 1,
+      servers,
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+
+    const labelFor = (name: string) =>
+      container.querySelector(`[aria-label="${name}"]`)?.textContent;
+    expect(labelFor('disabled-server')).toContain('disabled');
+    expect(labelFor('approval')).toContain('Needs approval');
+    expect(labelFor('authenticating')).toContain('Authenticating');
+    expect(labelFor('auth-failed')).toContain('Authentication failed');
+    expect(labelFor('needs-auth')).toContain('Needs authentication');
+    expect(labelFor('connected-server')).toContain('connected');
+
+    const messageContainer = document.createElement('div');
+    document.body.appendChild(messageContainer);
+    const root = createRoot(messageContainer);
+    mounted.push({ root, container: messageContainer });
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <McpStatusMessage
+            message={{
+              status: {
+                v: 1,
+                initialized: true,
+                discoveryState: 'completed',
+                workspaceCwd: '/workspace',
+                servers,
+              },
+              toolsByServer: {},
+              showDescriptions: false,
+              showSchema: false,
+              showTips: false,
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+    expect(messageContainer.textContent).toContain('Needs approval');
+    expect(messageContainer.textContent).toContain('Authenticating');
+    expect(messageContainer.textContent).toContain('Authentication failed');
+    expect(messageContainer.textContent).toContain('Needs authentication');
+  });
+
+  it('shows server operations without duplicating tools and resources tabs', async () => {
+    mockMcp.reload.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      workspaceCwd: '/workspace',
+      source: 'live',
+      runtimeEpoch: 1,
       servers: [
         {
           name: 'filesystem',
@@ -20945,6 +21477,223 @@ describe('App session callbacks', () => {
     expect(mockMcp.restartServer).toHaveBeenCalledWith('filesystem');
   });
 
+  it('observes MCP config reconciliation and reports a timeout', async () => {
+    const server = {
+      name: 'filesystem',
+      source: 'project' as const,
+      configOrigin: 'workspace_settings' as const,
+      disabled: false,
+      mcpStatus: 'connected' as const,
+      resourceCount: 0,
+    };
+    mockMcp.reload.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      workspaceCwd: '/workspace',
+      source: 'live',
+      runtimeEpoch: 1,
+      servers: [server],
+    });
+    mockMcp.loadTools.mockResolvedValue({
+      serverName: 'filesystem',
+      runtimeEpoch: 1,
+      tools: [],
+    });
+    mockMcp.setConfigServerEnabled.mockResolvedValue({
+      changed: true,
+      activation: 'reconciling',
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="filesystem"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="mcp-server-actions"]')
+        ?.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+      await Promise.resolve();
+    });
+
+    mockMcp.reload.mockClear();
+    mockMcp.reload.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      workspaceCwd: '/workspace',
+      source: 'live',
+      runtimeEpoch: 1,
+      servers: [{ ...server, disabled: true }],
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLElement>('[data-testid="mcp-server-action-disable"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(mockMcp.setConfigServerEnabled).toHaveBeenCalledWith(
+        'filesystem',
+        'workspace',
+        false,
+      );
+    });
+
+    expect(mockMcp.reloadConfig).not.toHaveBeenCalled();
+    expect(mockMcp.reload).toHaveBeenCalled();
+    vi.useFakeTimers();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="mcp-server-actions"]')
+        ?.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+      await Promise.resolve();
+    });
+
+    mockMcp.runtimeStatus.mockResolvedValue({
+      runtimeLive: true,
+      runtimeEpoch: 1,
+      capabilities: {
+        mcp: { state: 'starting', revision: 1, runtimeEpoch: 1 },
+      },
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLElement>('[data-testid="mcp-server-action-enable"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(81 * 1_500);
+    });
+    await flush();
+
+    expect(container.textContent).toContain(
+      'Configuration was saved, but the current session was not updated.',
+    );
+    expect(container.textContent).not.toContain('Enable complete.');
+  });
+
+  it('waits for the current MCP runtime before refreshing a status message', async () => {
+    vi.useFakeTimers();
+    mockMcp.manageServer.mockResolvedValue({
+      serverName: 'filesystem',
+      action: 'enable',
+      ok: true,
+    });
+    mockMcp.runtimeStatus
+      .mockResolvedValueOnce({
+        runtimeLive: true,
+        runtimeEpoch: 2,
+        capabilities: {
+          mcp: { state: 'starting', revision: 1, runtimeEpoch: 2 },
+        },
+      })
+      .mockResolvedValue({
+        runtimeLive: true,
+        runtimeEpoch: 2,
+        capabilities: {
+          mcp: { state: 'ready', revision: 1, runtimeEpoch: 2 },
+        },
+      });
+    mockMcp.reload.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'completed',
+      workspaceCwd: '/workspace',
+      source: 'live',
+      runtimeEpoch: 2,
+      servers: [
+        {
+          name: 'filesystem',
+          disabled: false,
+          mcpStatus: 'connected',
+        },
+      ],
+    });
+    mockMcp.loadTools.mockResolvedValue({
+      serverName: 'filesystem',
+      runtimeEpoch: 2,
+      tools: [],
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <McpStatusMessage
+            message={{
+              status: {
+                v: 1,
+                workspaceCwd: '/workspace',
+                initialized: true,
+                discoveryState: 'completed',
+                servers: [
+                  {
+                    name: 'filesystem',
+                    disabled: true,
+                    mcpStatus: 'disconnected',
+                  },
+                ],
+              },
+              toolsByServer: {},
+              showDescriptions: false,
+              showSchema: false,
+              showTips: false,
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      await Promise.resolve();
+    });
+
+    expect(mockMcp.manageServer).toHaveBeenCalledWith('filesystem', 'enable');
+    expect(mockMcp.ensureRuntime).toHaveBeenCalledOnce();
+    expect(mockMcp.runtimeStatus).toHaveBeenCalledOnce();
+    expect(mockMcp.reload).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    await flush();
+
+    expect(mockMcp.runtimeStatus).toHaveBeenCalledTimes(2);
+    expect(mockMcp.reload).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('Enable complete.');
+  });
+
   it('polls workspace MCP status until browser authentication completes', async () => {
     vi.useFakeTimers();
     const disconnectedServer = {
@@ -20960,6 +21709,8 @@ describe('App session callbacks', () => {
       initialized: true,
       discoveryState: 'completed',
       workspaceCwd: '/workspace',
+      runtimeEpoch: 1,
+      source: 'live',
       servers: [disconnectedServer],
     });
     mockMcp.loadTools.mockResolvedValue({ serverName: 'yuque', tools: [] });
@@ -20976,6 +21727,8 @@ describe('App session callbacks', () => {
         initialized: true,
         discoveryState: 'completed',
         workspaceCwd: '/workspace',
+        runtimeEpoch: 1,
+        source: 'live',
         servers: [
           { ...disconnectedServer, authenticationState: 'pending' as const },
         ],
@@ -20984,6 +21737,8 @@ describe('App session callbacks', () => {
         initialized: true,
         discoveryState: 'completed',
         workspaceCwd: '/workspace',
+        runtimeEpoch: 1,
+        source: 'live',
         servers: [
           {
             ...disconnectedServer,
@@ -21059,6 +21814,15 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
 
+    expect(container.querySelector('[role="status"]')).not.toBeNull();
+    expect(container.textContent).toContain('Loading MCP status...');
+    expect(
+      container.querySelector('input[placeholder="Search MCP…"]'),
+    ).not.toBeNull();
+    expect(container.textContent).not.toContain('Initializing MCP servers');
+    expect(container.textContent).not.toContain(
+      'The first startup can take longer',
+    );
     expect(container.textContent).not.toContain('Loading MCP tools...');
   });
 
@@ -21066,6 +21830,8 @@ describe('App session callbacks', () => {
     mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
       initialized: true,
       discoveryState: 'completed',
+      source: 'live',
+      runtimeEpoch: 1,
       servers: [],
     });
     const { container } = renderApp();
@@ -21075,6 +21841,8 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
 
+    expect(mockMcp.ensureRuntime).not.toHaveBeenCalled();
+    expect(mockMcp.runtimeStatus).toHaveBeenCalledOnce();
     expect(mockMcp.initialize).not.toHaveBeenCalled();
     expect(mockMcp.reloadConfig).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain('MCP tools are ready.');
@@ -21091,6 +21859,8 @@ describe('App session callbacks', () => {
     mockMcp.reload.mockResolvedValue({
       initialized: true,
       discoveryState: 'completed',
+      runtimeEpoch: 1,
+      source: 'live',
       servers: [],
     });
     const { container } = renderApp();
@@ -21099,6 +21869,7 @@ describe('App session callbacks', () => {
     testState.prompt = '/mcp';
     await clickSubmit(container);
     await flush();
+    expect(mockMcp.reload).toHaveBeenCalledTimes(1);
     expect(container.textContent).not.toContain('Loading MCP tools...');
 
     await act(async () => {
@@ -21106,8 +21877,51 @@ describe('App session callbacks', () => {
     });
     await flush();
 
+    expect(mockMcp.reload).toHaveBeenCalledTimes(1);
     expect(container.textContent).not.toContain('Loading MCP tools...');
     expect(container.textContent).not.toContain('MCP tools are ready.');
+  });
+
+  it('waits for a live MCP catalog from the current runtime epoch', async () => {
+    vi.useFakeTimers();
+    mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+      initialized: true,
+      discoveryState: 'starting',
+      servers: [],
+    });
+    mockMcp.reload
+      .mockResolvedValueOnce({
+        initialized: true,
+        discoveryState: 'completed',
+        runtimeEpoch: 0,
+        source: 'cache',
+        servers: [{ name: 'stale' }],
+      })
+      .mockResolvedValueOnce({
+        initialized: true,
+        discoveryState: 'completed',
+        runtimeEpoch: 1,
+        source: 'live',
+        servers: [],
+      });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/mcp';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockMcp.reload).toHaveBeenCalledTimes(1);
+    expect(container.textContent).not.toContain('stale');
+    expect(container.querySelector('[role="status"]')).not.toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    await flush();
+
+    expect(mockMcp.reload).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="status"]')).toBeNull();
   });
 
   it('auto-closes an open panel when an AskUserQuestion approval becomes pending', async () => {
@@ -25455,13 +26269,101 @@ describe('App session callbacks', () => {
 
     expect(mockSessionActions.createSession).toHaveBeenCalledWith({
       sessionContext: { kind: 'standalone' },
+      modelServiceId: 'qwen',
       approvalMode: 'default',
     });
+    expect(mockSessionActions.setModel).not.toHaveBeenCalled();
     await vi.waitFor(() => {
       expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
         'first standalone prompt',
         expect.any(Object),
       );
+    });
+  });
+
+  it('keeps a pending standalone model selection when options hydrate late', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.currentModel = undefined;
+    mockConnection.models = [];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/workspace',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/model qwen3-max');
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      mockConnection.currentModel = 'qwen-default';
+      mockConnection.currentMode = 'yolo';
+      rerender();
+      await flush();
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first standalone prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith({
+      sessionContext: { kind: 'standalone' },
+      modelServiceId: 'qwen3-max',
+      approvalMode: 'yolo',
+    });
+  });
+
+  it('hydrates the standalone model from late options when nothing is pending', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.currentModel = undefined;
+    mockConnection.models = [];
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/workspace',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      mockConnection.currentModel = 'qwen-default';
+      rerender();
+      await flush();
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('first standalone prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith({
+      sessionContext: { kind: 'standalone' },
+      modelServiceId: 'qwen-default',
+      approvalMode: 'default',
     });
   });
 

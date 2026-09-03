@@ -23,6 +23,7 @@ import {
   DaemonHttpError,
   DaemonSessionClient,
   DaemonStandaloneCreationOutcomeUnknownError,
+  STANDALONE_SESSION_OPTIONS_CAPABILITY,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
   createDaemonTranscriptStore,
   estimateDaemonTranscriptBlockBytes,
@@ -37,6 +38,7 @@ import {
   type DaemonApprovalMode,
   type DaemonEvent,
   type DaemonSseConnectReason,
+  type DaemonStandaloneSessionOptions,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
@@ -1539,8 +1541,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               !shouldCreateFreshSession
             ) {
               if (!workspaceScoped) {
+                let standaloneOptions:
+                  | DaemonStandaloneSessionOptions
+                  | undefined;
+                if (
+                  effectSessionContext?.kind === 'standalone' &&
+                  capabilityFeatures.includes(
+                    STANDALONE_SESSION_OPTIONS_CAPABILITY,
+                  )
+                ) {
+                  try {
+                    standaloneOptions =
+                      await client.getStandaloneSessionOptions();
+                  } catch (error) {
+                    console.warn(
+                      '[DaemonSessionProvider] standalone session options failed in deferred connect:',
+                      error,
+                    );
+                  }
+                }
+                if (disposed || abort.signal.aborted) return;
+                const providerModelStatus =
+                  mapProviderStatus(standaloneOptions);
+                // The options request can outlive a first-prompt create: the
+                // composer does not block while this branch is still
+                // connecting, so the session may already be attached by the
+                // time the response lands. Never publish over it.
                 setConnection((current) =>
-                  current.status === 'error'
+                  current.status === 'error' || current.sessionId
                     ? current
                     : {
                         ...clearNonWorkspaceSessionState(current),
@@ -1552,10 +1580,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                         gitStatus: undefined,
                         commands: undefined,
                         skills: undefined,
-                        models: undefined,
-                        currentModel: undefined,
-                        currentMode: undefined,
-                        contextWindow: undefined,
+                        models: standaloneOptions
+                          ? providerModelStatus.models
+                          : undefined,
+                        currentModel: providerModelStatus.currentModel,
+                        currentMode: providerModelStatus.currentMode,
+                        contextWindow: providerModelStatus.contextWindow,
                         providers: undefined,
                         capabilities: caps,
                         error: undefined,
@@ -4021,13 +4051,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             overrides?.approvalMode ??
               createSessionRequestRef.current?.approvalMode,
           );
+          const modelServiceId =
+            overrides?.modelServiceId ??
+            createSessionRequestRef.current?.modelServiceId;
           return DaemonSessionClient.createStandalone(client, {
-            ...(createSessionRequestRef.current?.modelServiceId !== undefined
-              ? {
-                  modelServiceId:
-                    createSessionRequestRef.current.modelServiceId,
-                }
-              : {}),
+            ...(modelServiceId !== undefined ? { modelServiceId } : {}),
             ...(approvalMode !== undefined ? { approvalMode } : {}),
           });
         },

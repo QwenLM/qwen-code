@@ -33,6 +33,7 @@ import {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  McpAuthenticationInProgressError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   PromptDeadlineExceededError,
   PromptQueueFullError,
@@ -56,6 +57,7 @@ import {
   extractErrorMessage,
   extractErrorCode,
 } from './bridge.js';
+import { NdJsonQueueLimitError } from './ndJsonStream.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
@@ -115,6 +117,9 @@ import {
   ToolNames,
   TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
+  upsertSessionPr,
+  writeSessionPrs,
+  type SessionPr,
 } from '@qwen-code/qwen-code-core';
 import {
   FakeAgent,
@@ -1644,10 +1649,16 @@ describe('createAcpSessionBridge', () => {
     const bridge = makeBridge({ channelFactory });
 
     await bridge.initializeWorkspaceMcp();
-    await bridge.queryWorkspaceStatus(
-      SERVE_STATUS_EXT_METHODS.workspaceMcp,
-      () => ({ discoveryState: 'not_started', servers: [] }),
-    );
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      ),
+    ).resolves.toMatchObject({
+      discoveryState: 'completed',
+      runtimeEpoch: 1,
+      source: 'live',
+    });
     expect(handle.killed).toBe(true);
 
     await expect(
@@ -1655,7 +1666,11 @@ describe('createAcpSessionBridge', () => {
         SERVE_STATUS_EXT_METHODS.workspaceMcp,
         () => ({ discoveryState: 'not_started', servers: [] }),
       ),
-    ).resolves.toMatchObject({ discoveryState: 'completed' });
+    ).resolves.toMatchObject({
+      discoveryState: 'completed',
+      runtimeEpoch: 1,
+      source: 'cache',
+    });
     expect(channelFactory).toHaveBeenCalledTimes(1);
     expect(
       handle.agent.extMethodCalls.filter(
@@ -1667,7 +1682,184 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('preserves other MCP states after disabling in a fresh child', async () => {
+  it('does not reuse completed MCP status after the runtime epoch changes', async () => {
+    const first = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
+          return { accepted: true };
+        }
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+          return { discoveryState: 'completed', servers: [] };
+        }
+        return {};
+      },
+    });
+    const second = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceMcp
+          ? { discoveryState: 'not_started', servers: [] }
+          : {},
+    });
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(first.channel)
+      .mockResolvedValueOnce(second.channel);
+    const bridge = makeBridge({ channelFactory });
+
+    await bridge.initializeWorkspaceMcp();
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      ),
+    ).resolves.toMatchObject({
+      discoveryState: 'completed',
+      runtimeEpoch: 1,
+    });
+    expect(first.killed).toBe(true);
+
+    await bridge.preheat({ keepAliveMs: 600_000 });
+    await expect(
+      bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      ),
+    ).resolves.toMatchObject({
+      discoveryState: 'not_started',
+      runtimeEpoch: 2,
+      source: 'live',
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('serializes MCP authentication across workspace bridges', async () => {
+    let authenticationActive = false;
+    const acquireMcpAuthentication = () => {
+      if (authenticationActive) return undefined;
+      authenticationActive = true;
+      return () => {
+        authenticationActive = false;
+      };
+    };
+    const makeAuthenticationChannel = () =>
+      makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+            return {
+              serverName: 'aone',
+              action: 'authenticate',
+              ok: true,
+              pending: true,
+            };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+            return {
+              discoveryState: 'completed',
+              servers: [{ name: 'aone', authenticationState: 'pending' }],
+            };
+          }
+          return {};
+        },
+      });
+    const firstHandle = makeAuthenticationChannel();
+    const secondHandle = makeAuthenticationChannel();
+    const first = makeBridge({
+      channelFactory: async () => firstHandle.channel,
+      acquireMcpAuthentication,
+    });
+    const second = makeBridge({
+      boundWorkspace: WS_B,
+      channelFactory: async () => secondHandle.channel,
+      acquireMcpAuthentication,
+    });
+
+    await expect(
+      first.manageMcpServer('aone', 'authenticate', undefined),
+    ).resolves.toMatchObject({ pending: true });
+    await expect(
+      second.manageMcpServer('aone', 'authenticate', undefined),
+    ).rejects.toBeInstanceOf(McpAuthenticationInProgressError);
+
+    await first.shutdown();
+    await expect(
+      second.manageMcpServer('aone', 'authenticate', undefined),
+    ).resolves.toMatchObject({ pending: true });
+    await second.shutdown();
+  });
+
+  it('keeps MCP authentication admission after a timed-out RPC until its channel exits', async () => {
+    vi.useFakeTimers();
+    try {
+      let authenticationActive = false;
+      const acquireMcpAuthentication = () => {
+        if (authenticationActive) return undefined;
+        authenticationActive = true;
+        return () => {
+          authenticationActive = false;
+        };
+      };
+      const stalledAuthentication = deferred<Record<string, unknown>>();
+      const firstHandle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage
+            ? await stalledAuthentication.promise
+            : {},
+      });
+      const secondHandle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage) {
+            return {
+              serverName: 'aone',
+              action: 'authenticate',
+              ok: true,
+              pending: true,
+            };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
+            return {
+              discoveryState: 'completed',
+              servers: [{ name: 'aone', authenticationState: 'pending' }],
+            };
+          }
+          return {};
+        },
+      });
+      const first = makeBridge({
+        channelFactory: async () => firstHandle.channel,
+        acquireMcpAuthentication,
+      });
+      const second = makeBridge({
+        boundWorkspace: WS_B,
+        channelFactory: async () => secondHandle.channel,
+        acquireMcpAuthentication,
+      });
+      const session = await first.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const request = first.manageMcpServer('aone', 'authenticate', undefined);
+      void request.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(600_000);
+
+      await expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+      expect(firstHandle.killed).toBe(false);
+      await expect(
+        second.manageMcpServer('aone', 'authenticate', undefined),
+      ).rejects.toBeInstanceOf(McpAuthenticationInProgressError);
+
+      await first.closeSession(session.sessionId);
+      await vi.waitFor(() => expect(firstHandle.killed).toBe(true));
+      await expect(
+        second.manageMcpServer('aone', 'authenticate', undefined),
+      ).resolves.toMatchObject({ pending: true });
+
+      await first.shutdown();
+      await second.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not reuse other MCP states after disabling in a fresh child', async () => {
     const discovery = makeChannel({
       extMethodImpl: async (method) => {
         if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
@@ -1742,7 +1934,9 @@ describe('createAcpSessionBridge', () => {
         () => ({ discoveryState: 'not_started', servers: [] }),
       ),
     ).resolves.toMatchObject({
-      discoveryState: 'completed',
+      discoveryState: 'not_started',
+      runtimeEpoch: 2,
+      source: 'cache',
       servers: [
         expect.objectContaining({
           name: 'aone',
@@ -1752,7 +1946,7 @@ describe('createAcpSessionBridge', () => {
         expect.objectContaining({
           name: 'yuque',
           disabled: false,
-          mcpStatus: 'connected',
+          mcpStatus: 'disconnected',
         }),
       ],
     });
@@ -1761,7 +1955,7 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('preserves other MCP states while polling authentication', async () => {
+  it('does not reuse other MCP states while polling in a fresh child', async () => {
     const discovery = makeChannel({
       extMethodImpl: async (method) => {
         if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
@@ -1827,14 +2021,14 @@ describe('createAcpSessionBridge', () => {
         () => ({ discoveryState: 'not_started', servers: [] }),
       ),
     ).resolves.toMatchObject({
-      discoveryState: 'completed',
+      discoveryState: 'not_started',
       servers: [
         expect.objectContaining({
           name: 'aone',
           mcpStatus: 'connected',
           authenticationState: 'succeeded',
         }),
-        expect.objectContaining({ name: 'yuque', mcpStatus: 'connected' }),
+        expect.objectContaining({ name: 'yuque', mcpStatus: 'disconnected' }),
       ],
     });
     expect(authentication.killed).toBe(true);
@@ -1842,7 +2036,7 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('preserves other MCP states after restarting in a fresh child', async () => {
+  it('does not reuse other MCP states after restarting in a fresh child', async () => {
     const discovery = makeChannel({
       extMethodImpl: async (method) => {
         if (method === SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize) {
@@ -1899,10 +2093,10 @@ describe('createAcpSessionBridge', () => {
         () => ({ discoveryState: 'not_started', servers: [] }),
       ),
     ).resolves.toMatchObject({
-      discoveryState: 'completed',
+      discoveryState: 'not_started',
       servers: [
         expect.objectContaining({ name: 'aone', mcpStatus: 'connected' }),
-        expect.objectContaining({ name: 'yuque', mcpStatus: 'connected' }),
+        expect.objectContaining({ name: 'yuque', mcpStatus: 'disconnected' }),
       ],
     });
 
@@ -12745,6 +12939,10 @@ describe('createAcpSessionBridge', () => {
     failures[1]!.resolve(
       Object.assign(new Error('bounded transport queue failed'), {
         code: 'ndjson_queue_limit_exceeded',
+        budget: 'INVALID budget <script>',
+        maxQueuedBytes: 1.9,
+        requiredBytes: -5,
+        availableBytes: Number.NaN,
       }),
     );
     await expect(restore).rejects.toBeInstanceOf(BridgeChannelClosedError);
@@ -12761,8 +12959,101 @@ describe('createAcpSessionBridge', () => {
             'ndjson_frame_too_large',
         }),
       );
+      expect(event).toHaveBeenCalledWith(
+        'channel.exited',
+        expect.objectContaining({
+          'qwen-code.daemon.channel.transport_error_code':
+            'ndjson_queue_limit_exceeded',
+          'qwen-code.daemon.channel.transport_error_detail':
+            'unknown:required=0:available=?:cap=1',
+        }),
+      );
     });
+    const frameExitAttributes = event.mock.calls.find(
+      ([name, attributes]) =>
+        name === 'channel.exited' &&
+        (attributes as Record<string, unknown>)[
+          'qwen-code.daemon.channel.transport_error_code'
+        ] === 'ndjson_frame_too_large',
+    )?.[1] as Record<string, unknown> | undefined;
+    expect(frameExitAttributes).not.toHaveProperty(
+      'qwen-code.daemon.channel.transport_error_detail',
+    );
     bridge.killAllSync();
+  });
+
+  it('records which budget fired on a transport-guard channel exit', async () => {
+    const neverPrompt = deferred<never>();
+    const handle = makeChannel({ promptImpl: () => neverPrompt.promise });
+    const failure = deferred<unknown>();
+    handle.channel = {
+      ...handle.channel,
+      transportFailed: failure.promise,
+      kill: () => deferred<never>().promise,
+    };
+    const event = vi.fn();
+    const channelLifecycle = vi.fn();
+    const telemetry: BridgeTelemetry = {
+      captureContext: () => undefined,
+      runWithContext: async (_captured, fn) => await fn(),
+      withSpan: async (_operation, _attributes, fn) => await fn(),
+      event,
+      injectPromptContext: (request) => request,
+      metrics: {
+        sessionLifecycle: vi.fn(),
+        channelLifecycle,
+        promptQueueWait: vi.fn(),
+        promptDuration: vi.fn(),
+        cancelled: vi.fn(),
+      },
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      telemetry,
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(first.sessionId, {
+        sessionId: first.sessionId,
+        prompt: [{ type: 'text', text: 'stay pending' }],
+      });
+      await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+      failure.resolve(
+        new NdJsonQueueLimitError(
+          'prepared_response',
+          256,
+          67108864,
+          262144,
+          0,
+        ),
+      );
+      await expect(prompt).rejects.toBeInstanceOf(BridgeChannelClosedError);
+      handle.crash({ exitCode: null, signalCode: 'SIGTERM' });
+      await vi.waitFor(() =>
+        expect(event).toHaveBeenCalledWith(
+          'channel.exited',
+          expect.objectContaining({
+            'qwen-code.daemon.channel.transport_failed': true,
+            'qwen-code.daemon.channel.transport_failure_initiated_teardown': true,
+            'qwen-code.daemon.channel.transport_error_code':
+              'ndjson_queue_limit_exceeded',
+            'qwen-code.daemon.channel.transport_error_detail':
+              'prepared_response:required=262144:available=0:cap=67108864',
+          }),
+        ),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'transport_detail=prepared_response:required=262144:available=0:cap=67108864',
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+      await bridge.shutdown();
+    }
   });
 
   it('does not publish a channel whose transport fails during initialize', async () => {
@@ -21324,6 +21615,7 @@ describe('createAcpSessionBridge', () => {
         modelServiceId: 'qwen-route:v1:abcdefghijklmnop',
       });
       expect(session.attached).toBe(false);
+      expect(session.modelApplied).toBe(true);
       expect(setModelCalls).toHaveLength(1);
       expect(setModelCalls[0]?.sessionId).toBe(session.sessionId);
       expect(setModelCalls[0]?.modelId).toBe('qwen-route:v1:abcdefghijklmnop');
@@ -21352,8 +21644,9 @@ describe('createAcpSessionBridge', () => {
 
     it('does NOT call setSessionModel when modelServiceId is omitted', async () => {
       const { bridge, setModelCalls } = setup();
-      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(setModelCalls).toHaveLength(0);
+      expect(session.modelApplied).toBeUndefined();
       await bridge.shutdown();
     });
 
@@ -21377,6 +21670,7 @@ describe('createAcpSessionBridge', () => {
         modelServiceId: 'definitely-not-a-real-model',
       });
       expect(session.attached).toBe(false);
+      expect(session.modelApplied).toBe(false);
       expect(bridge.sessionCount).toBe(1);
       // The model_switch_failed event must be on the bus for any
       // subscriber that subscribes with `lastEventId: 0` (replay).
@@ -27270,6 +27564,111 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('extNotification — session pr binding', () => {
+    const prBindingFactory =
+      (capture: (conn: AgentSideConnection) => void): ChannelFactory =>
+      async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        capture(new AgentSideConnection(() => new FakeAgent(), agentStream));
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+
+    it('marks the session catalog when a child reports a shell PR binding', async () => {
+      // The child persists the sidecar itself; the notification's only job
+      // is the catalog-clock mark that makes live-state clients refetch the
+      // binding instead of waiting for unrelated catalog churn.
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: prBindingFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion();
+
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: { number: 77, url: 'https://github.com/o/r/pull/77' },
+      });
+
+      const deadline = Date.now() + 2000;
+      while (
+        bridge.getSessionCatalogVersion().revision <= before.revision &&
+        Date.now() < deadline
+      ) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      expect(bridge.getSessionCatalogVersion().revision).toBeGreaterThan(
+        before.revision,
+      );
+      await bridge.shutdown();
+    });
+
+    it('drops malformed pr-binding payloads without marking the catalog', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: prBindingFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion();
+
+      const url = 'https://github.com/o/r/pull/77';
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        // missing pr
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: { number: 0, url },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: { number: 1.5, url },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: { number: 77, url: 'javascript:alert(1)' },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: {
+          number: 77,
+          url: `https://github.com/o/r/pull/${'7'.repeat(2048)}`,
+        },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        sessionId: session.sessionId,
+        pr: { number: 77, url: `${url}\nforged` },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 1,
+        // missing sessionId
+        pr: { number: 77, url },
+      });
+      void capturedConn!.extNotification('qwen/notify/session/pr-binding', {
+        v: 2,
+        sessionId: session.sessionId,
+        pr: { number: 77, url },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      expect(bridge.getSessionCatalogVersion()).toEqual(before);
+      await bridge.shutdown();
+    });
+  });
+
   describe('extNotification — recording degradation', () => {
     const recordingFactory =
       (capture: (conn: AgentSideConnection) => void): ChannelFactory =>
@@ -28788,9 +29187,98 @@ describe('createAcpSessionBridge', () => {
         (e) => e.type === 'session_metadata_updated',
       );
       expect(metaEvent).toBeDefined();
-      expect((metaEvent?.data as { displayName: string }).displayName).toBe(
-        'Test Session',
+      expect(metaEvent?.data).toMatchObject({
+        displayName: 'Test Session',
+        titleSource: 'manual',
+      });
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('uses automatic provenance for programmatic renames', async () => {
+      const titleUpdates: unknown[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                titleUpdates.push(params);
+              }
+              return { persisted: true };
+            },
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const event of sub) events.push(event);
+      })();
+      await new Promise((resolve) => setImmediate(resolve));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Voice chat',
+        titleSource: 'auto',
+      });
+
+      await vi.waitFor(() => expect(titleUpdates).toHaveLength(1));
+      expect(titleUpdates[0]).toMatchObject({
+        displayName: 'Voice chat',
+        titleSource: 'auto',
+      });
+      await vi.waitFor(() =>
+        expect(
+          events.find((event) => event.type === 'session_metadata_updated')
+            ?.data,
+        ).toMatchObject({
+          displayName: 'Voice chat',
+          titleSource: 'auto',
+        }),
       );
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('rejects an empty displayName instead of clearing only the live entry', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Payments bug',
+      });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      // A clear is never persisted (the `sessionTitle` persist skips
+      // falsy names), so accepting it would let the stale manual record
+      // resurface through the session-list merge and the `/clear` carry.
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, { displayName: '' }),
+      ).toThrow(InvalidSessionMetadataError);
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: '   ',
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+
+      await new Promise((r) => setImmediate(r));
+      expect(bridge.getSessionSummary(session.sessionId)).toMatchObject({
+        displayName: 'Payments bug',
+      });
+      expect(
+        events.filter((e) => e.type === 'session_metadata_updated'),
+      ).toHaveLength(0);
 
       await bridge.closeSession(session.sessionId);
       await drain;
@@ -29258,7 +29746,7 @@ describe('createAcpSessionBridge', () => {
             state: 'draft',
           } as { number: number; url: string },
         }),
-      ).toThrow(/`state` of `open`, `merged`, or `closed`/);
+      ).toThrow(/`state` that is one of `open`, `merged`, or `closed`/);
 
       await bridge.closeSession(session.sessionId);
       await bridge.shutdown();
@@ -29401,6 +29889,128 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('republishes and bumps the catalog when only the latest state changes', async () => {
+      // Live-state clients refetch only on catalog revision change; a
+      // state-only re-bind short-circuited as "no change" strands the
+      // stale badge state until unrelated catalog churn or a restart.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const before = bridge.getSessionCatalogVersion().revision;
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'open',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+      expect(bridge.getSessionCatalogVersion().revision).toBe(before + 2);
+
+      await new Promise((r) => setImmediate(r));
+      const prEvents = events.filter(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      expect(prEvents).toHaveLength(2);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('does not inherit the prior state when re-binding a number to another URL', async () => {
+      // The same number in another repository is another PR: inheriting
+      // the old repo's terminal 'merged' would render the new repo's open
+      // PR as merged permanently.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 5,
+          url: 'https://github.com/repo-a/r/pull/5',
+          state: 'merged',
+        },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 5, url: 'https://github.com/repo-b/r/pull/5' },
+      });
+
+      expect(effective.prs).toEqual([
+        { number: 5, url: 'https://github.com/repo-b/r/pull/5' },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('re-bind of the same PR moves it to latest with the new state', async () => {
+      // A re-bind is a fresh binding event: the number moves to latest and
+      // an omitted-then-supplied state applies; state-only refreshes go
+      // through the sweep, which preserves order.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'open',
+        },
+      });
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+      });
+
+      expect(effective.prs).toEqual([
+        { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        {
+          number: 9500,
+          url: 'https://github.com/o/r/pull/9500',
+          state: 'merged',
+        },
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
     it('echoes the current displayName on the pr metadata event', async () => {
       const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,
@@ -29457,6 +30067,121 @@ describe('createAcpSessionBridge', () => {
 
       await bridge.closeSession(session.sessionId);
       await bridge.shutdown();
+    });
+
+    it('reconciles the live list to the authoritative persisted list', async () => {
+      // The sidecar cap evicts by provenance authority (the created
+      // binding at the head survives, the oldest REVIEW goes) while the
+      // bridge merge above caps positionally (the head goes); once 11
+      // numbers accumulate the two stores evict DIFFERENT entries. The
+      // metadata routes reconcile the live entry to the persisted list
+      // after upsert — without that, every later event and rename
+      // response serves the diverged list until daemon restart.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const dir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'bridge-pr-reconcile-'),
+      );
+      // Not `${session.sessionId}.pr.json`: the bridge id is `sess:<cwd>`,
+      // so on Windows the filename carries a drive colon and separators and
+      // the sidecar's `mkdir(dirname)` fails with ENOENT. Production paths
+      // come from sessionService and key off the persisted UUID instead.
+      const sidecarPath = path.join(dir, 'session.pr.json');
+      try {
+        // The finding's shape: the created PR at position 0, nine reviews.
+        const seeded: SessionPr[] = [
+          {
+            number: 1,
+            url: 'https://github.com/o/r/pull/1',
+            createdAt: '2026-08-20T00:00:00.000Z',
+            source: 'create',
+          },
+          ...Array.from({ length: 9 }, (_, i) => ({
+            number: i + 2,
+            url: `https://github.com/o/r/pull/${i + 2}`,
+            createdAt: `2026-08-20T00:00:0${i + 1}.000Z`,
+            source: 'review' as const,
+          })),
+        ];
+        await writeSessionPrs(sidecarPath, seeded);
+        const persisted = await upsertSessionPr(sidecarPath, {
+          number: 11,
+          url: 'https://github.com/o/r/pull/11',
+          source: 'create',
+        });
+        // The authority-ranked cap keeps the created #1 and evicts the
+        // oldest review (#2).
+        expect(persisted.map((p) => p.number)).toEqual([
+          1, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        ]);
+
+        bridge.seedSessionPrs?.(session.sessionId, seeded);
+        const events: BridgeEvent[] = [];
+        const sub = bridge.subscribeEvents(session.sessionId);
+        const drain = (async () => {
+          for await (const ev of sub) events.push(ev);
+        })();
+        await new Promise((r) => setImmediate(r));
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: { number: 11, url: 'https://github.com/o/r/pull/11' },
+        });
+        // The positional bridge merge evicted #1 — the stores diverged…
+        expect(
+          bridge.getSessionSummary(session.sessionId).prs?.map((p) => p.number),
+        ).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        // …until the route reconciles the entry to the persisted list.
+        const reconciled = persisted.map(({ number, url, state }) => ({
+          number,
+          url,
+          ...(state ? { state } : {}),
+        }));
+        expect(bridge.getSessionSummary(session.sessionId).prs).not.toEqual(
+          reconciled,
+        );
+        const revisionBeforeSet = bridge.getSessionCatalogVersion().revision;
+        bridge.setSessionPrs?.(session.sessionId, persisted);
+        expect(bridge.getSessionSummary(session.sessionId).prs).toEqual(
+          reconciled,
+        );
+        // The mutation's own event went out with the diverged list; the
+        // reconcile must publish a corrective event carrying the
+        // authoritative list and advance the catalog so revision-gated
+        // refetchers re-trigger — silence here left event consumers on
+        // the wrong list until unrelated churn.
+        await new Promise((r) => setImmediate(r));
+        const prEvents = events.filter(
+          (e) =>
+            e.type === 'session_metadata_updated' &&
+            (e.data as { prs?: unknown }).prs !== undefined,
+        );
+        expect(
+          (
+            prEvents[prEvents.length - 1]?.data as {
+              prs?: Array<{ number: number }>;
+            }
+          ).prs?.map((p) => p.number),
+        ).toEqual([1, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+        expect(bridge.getSessionCatalogVersion().revision).toBe(
+          revisionBeforeSet + 1,
+        );
+        // Reconciling to a list the live entry already matches is a no-op:
+        // no event, no revision bump.
+        const eventCount = events.length;
+        bridge.setSessionPrs?.(session.sessionId, persisted);
+        await new Promise((r) => setImmediate(r));
+        expect(events.length).toBe(eventCount);
+        expect(bridge.getSessionCatalogVersion().revision).toBe(
+          revisionBeforeSet + 1,
+        );
+
+        await bridge.closeSession(session.sessionId);
+        await drain;
+        await bridge.shutdown();
+      } finally {
+        await fsp.rm(dir, { recursive: true, force: true });
+      }
     });
 
     it('does not apply displayName when the combined pr is invalid', async () => {
@@ -31993,7 +32718,7 @@ describe('preheat', () => {
     await secondBridge.shutdown();
   });
 
-  it('keeps an idle-timeout-zero channel alive while workspace status is pending', async () => {
+  it('reaps an idle-timeout-zero preheat after workspace status settles', async () => {
     const statusResult = deferred<Record<string, unknown>>();
     const statusMethod = 'qwen/status/workspace/test';
     const handle = makeChannel({
@@ -32026,10 +32751,10 @@ describe('preheat', () => {
 
     statusResult.resolve({ ready: true });
     await expect(status).resolves.toEqual({ ready: true });
-    expect(handle.killed).toBe(false);
+    expect(handle.killed).toBe(true);
     expect(bridge.getWorkspaceRuntimeLifecycleSnapshot!()).toMatchObject({
-      state: 'idle',
-      runtimeLive: true,
+      state: 'cold',
+      runtimeLive: false,
       activeWork: false,
     });
 

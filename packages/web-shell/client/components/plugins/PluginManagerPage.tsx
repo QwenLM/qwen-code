@@ -1,21 +1,9 @@
 import { useCallback, useEffect, useMemo, useState, type Ref } from 'react';
-import { SearchIcon, ServerIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
-import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
 import { AgentsManagerPage } from '../agents/AgentsManagerPage';
 import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
 import { McpManagerPage } from '../mcp/McpManagerPage';
 import { SkillsManagerPage } from '../skills/SkillsManagerPage';
-import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
-import { Button } from '../ui/button';
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '../ui/empty';
-import { Input } from '../ui/input';
 import {
   Select,
   SelectContent,
@@ -31,16 +19,12 @@ import type { EmbeddedManagerPage } from './manager-page';
 type PluginTab = 'extensions' | 'mcp' | 'skills' | 'agents';
 
 interface PluginManagerPageProps {
-  mcpMessage: SerializedMcpStatusMessage | null;
-  loadMcpMessage: () => Promise<void>;
   onClose: () => void;
   onUseSkill: (name: string) => void;
   initialFocusRef?: Ref<HTMLButtonElement>;
 }
 
 export function PluginManagerPage({
-  mcpMessage,
-  loadMcpMessage,
   onClose,
   onUseSkill,
   initialFocusRef,
@@ -79,8 +63,6 @@ export function PluginManagerPage({
   const [activeTab, setActiveTab] = useState<PluginTab>('extensions');
   const [detailOpen, setDetailOpen] = useState(false);
   const [pageRevision, setPageRevision] = useState(0);
-  const [mcpLoaded, setMcpLoaded] = useState(false);
-  const [mcpLoadError, setMcpLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (
@@ -93,16 +75,6 @@ export function PluginManagerPage({
     }
     setSelectedWorkspaceCwd(defaultWorkspaceCwd);
   }, [defaultWorkspaceCwd, selectedWorkspaceCwd, workspaces]);
-
-  const loadMcp = useCallback(() => {
-    setMcpLoaded(false);
-    setMcpLoadError(null);
-    void loadMcpMessage()
-      .then(() => setMcpLoaded(true))
-      .catch((error: unknown) => {
-        setMcpLoadError(error instanceof Error ? error.message : String(error));
-      });
-  }, [loadMcpMessage]);
 
   const resetToRoot = useCallback(() => {
     setDetailOpen(false);
@@ -118,14 +90,11 @@ export function PluginManagerPage({
     setActiveTab(nextTab);
     setDetailOpen(false);
     setPageRevision((revision) => revision + 1);
-    if (nextTab === 'mcp') {
-      loadMcp();
-    }
   };
 
   const workspaceSelect = (disabled: boolean) =>
-    activeTab === 'skills' &&
-    splitSkillsRuntimeAvailable &&
+    (activeTab === 'mcp' ||
+      (activeTab === 'skills' && splitSkillsRuntimeAvailable)) &&
     workspaces.length > 1 ? (
       <Select
         value={selectedWorkspaceCwd}
@@ -198,44 +167,14 @@ export function PluginManagerPage({
             onClose={onClose}
             embedded={embedded}
           />
-        ) : mcpLoadError ? (
-          <Alert variant="destructive" className="mt-4">
-            <AlertTitle>{t('plugins.mcpLoadFailed')}</AlertTitle>
-            <AlertDescription className="space-y-3">
-              <p>{mcpLoadError}</p>
-              <Button variant="outline" size="sm" onClick={loadMcp}>
-                {t('common.retry')}
-              </Button>
-            </AlertDescription>
-          </Alert>
-        ) : mcpMessage && mcpLoaded ? (
+        ) : (
           <McpManagerPage
-            key={`mcp-${pageRevision}`}
-            message={mcpMessage}
+            key={`mcp-${pageRevision}-${selectedWorkspaceCwd ?? ''}`}
             onClose={onClose}
             embedded={embedded}
+            workspaceCwd={selectedWorkspaceCwd}
+            workspaceControl={workspaceSelect(true)}
           />
-        ) : (
-          <div className="flex w-full flex-col gap-6 pb-8 pt-4">
-            <div className="relative">
-              <SearchIcon className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                aria-label={t('common.search')}
-                readOnly
-                className="pl-9"
-                placeholder={`${t('common.search')} MCP…`}
-              />
-            </div>
-            <Empty className="border">
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <ServerIcon />
-                </EmptyMedia>
-                <EmptyTitle>{t('mcp.empty')}</EmptyTitle>
-                <EmptyDescription>{t('mcp.emptyDescription')}</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          </div>
         )}
       </TabsContent>
     </Tabs>

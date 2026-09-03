@@ -1353,6 +1353,92 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('uses the workspace-scoped MCP config and runtime REST routes', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { activation: 'reconciling' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const workspace = client.workspaceByCwd('/work/secondary');
+
+      await client.setUserMcpServer('docs', { command: 'node' });
+      await client.setUserMcpServerEnabled('docs', false);
+      await client.removeUserMcpServer('docs');
+      await workspace.setMcpServer('docs', { command: 'node' });
+      await workspace.setMcpServerEnabled('docs', true);
+      await workspace.removeMcpServer('docs');
+      await workspace.mcpConfig();
+      await workspace.runtimeMcp();
+      await workspace.runtimeMcpTools('docs');
+      await workspace.runtimeMcpResources('docs');
+      await workspace.reloadRuntimeMcp({ forceReconnectWhich: ['docs'] });
+      await workspace.restartRuntimeMcpServer('docs');
+      await workspace.manageRuntimeMcpServer('docs', 'authenticate');
+
+      expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
+        [
+          'PUT',
+          'http://daemon/workspace/config/mcp/servers/docs',
+          '{"scope":"user","config":{"command":"node"}}',
+        ],
+        ['POST', 'http://daemon/workspace/config/mcp/docs/disable', '{}'],
+        [
+          'DELETE',
+          'http://daemon/workspace/config/mcp/servers/docs?scope=user',
+          null,
+        ],
+        [
+          'PUT',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/config/mcp/servers/docs',
+          '{"scope":"workspace","config":{"command":"node"}}',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/config/mcp/docs/enable',
+          '{}',
+        ],
+        [
+          'DELETE',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/config/mcp/servers/docs?scope=workspace',
+          null,
+        ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/config/mcp/servers',
+          null,
+        ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/mcp',
+          null,
+        ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/mcp/docs/tools',
+          null,
+        ],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/mcp/docs/resources',
+          null,
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/mcp/reload',
+          '{"forceReconnectWhich":["docs"]}',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/mcp/docs/restart',
+          '{}',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/runtime/mcp/docs/authenticate',
+          '{}',
+        ],
+      ]);
+    });
+
     it('asks the daemon host to open the workspace locally', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
