@@ -369,7 +369,6 @@ jobs:
       - name: 'Publish @qwen-code/qwen-live'
         working-directory: 'packages/qwen-live'
         env:
-          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
           NPM_TAG: "${{ inputs.prerelease == true && 'preview' || 'latest' }}"
         run: |
@@ -395,8 +394,9 @@ jobs:
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0
           fi
-          # Check if the package exists at all — provenance requires an
-          # existing package, so the first publish omits it.
+          # npm trusted publishing (OIDC) authenticates via the job's
+          # id-token: write permission — no NPM_TOKEN secret needed.
+          # Provenance requires an existing package; first publish omits it.
           if npm view "${PACKAGE_NAME}" version >/dev/null 2>&1; then
             npm publish --access public --provenance --tag "$NPM_TAG"
           else
