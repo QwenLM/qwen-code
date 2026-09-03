@@ -236,6 +236,8 @@ export type {
   WebShellMonitorTask,
   WebShellPreparedSubmit,
   WebShellSubmitSnapshot,
+  WebShellSessionArtifactsChange,
+  WebShellSessionArtifactsChangeReason,
   WebShellModelInfo,
   WebShellSkillInfo,
 } from './customization';

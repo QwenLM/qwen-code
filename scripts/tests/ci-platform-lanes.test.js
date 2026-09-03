@@ -37,7 +37,7 @@ const failureIssue = parse(
 // `on:` parses as the boolean true in YAML 1.1.
 const triggers = ci[true] ?? ci['on'];
 const LANES = ['test_macos', 'test_windows'];
-const PUSH_JOBS = ['classify_pr', 'test'];
+const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
 // The extended ceilings are scoped to the ECS pool: `runs-on` falls back to
@@ -87,6 +87,19 @@ it('keeps the no-AK gate above its dependency-install budget on ECS', () => {
 it('keeps the no-AK gate on its pre-contention ceiling when hosted', () => {
   expect(timeoutMinutesOn('integration_no_ak', HOSTED_RUNNER)).toBe(30);
   expect(timeoutMinutesOn('integration_no_ak', '')).toBe(30);
+});
+
+it('keeps lint_and_static sized for cold-cache pool runs', () => {
+  // Both numbers are measured, not predicted: a flat 45 was tried first and
+  // the lane was beheaded twice running honestly on cold-cache hk3 pool
+  // runners — at 30 flat (install 892s vs the sibling Test job's 347s) and
+  // again at 45 (install 940s, bundle closure 681s vs a warm 171s, every
+  // step 2–4x). Routed like test's 120/60 and no_ak's 60/30 for the same
+  // pool-contention reason; hosted keeps the tighter ceiling so a genuine
+  // hang there does not burn the ECS allowance.
+  expect(timeoutMinutesOn('lint_and_static', ECS_RUNNER)).toBe(90);
+  expect(timeoutMinutesOn('lint_and_static', HOSTED_RUNNER)).toBe(45);
+  expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
 });
 
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
@@ -159,7 +172,8 @@ const assertEventReachesOnly = (event, allowedJobs) => {
 describe('platform lanes — triggers', () => {
   it('gives the workflow a scheduled trigger', () => {
     // Without it the lanes have no path to `main` at all: `ci.yml`'s push
-    // trigger is accepted only by `test` and the `classify_pr` it depends on,
+    // trigger is accepted only by `test`, `lint_and_static`, and the
+    // `classify_pr` they depend on,
     // so a merge-queue-only gate on a repository with no merge queue is an off
     // switch for these two.
     expect(triggers.schedule).toBeDefined();
@@ -278,11 +292,12 @@ describe('platform lanes — triggers', () => {
 // `ci.yml` carried no push trigger while no merge queue was enabled, so
 // nothing validated the merged tree before it landed and the only check after
 // it was the ~40-minute E2E — a regression could sit in `main` for hours. The
-// trigger is back, taken by `test` and the `classify_pr` it depends on.
+// trigger is back, taken by `test`, `lint_and_static`, and the `classify_pr`
+// they depend on.
 //
 // The runner-routing tests in `.github/scripts/ci-runner-routing.test.mjs`
 // cannot reach any of this: they drive `pick_runner`'s shell directly with
-// EVENT_NAME=push, bypassing the trigger and both job gates, so they stay
+// EVENT_NAME=push, bypassing the trigger and all three job gates, so they stay
 // green if either loses its push arm. What is pinned here is the YAML half —
 // the same class of invariant as `keeps a nightly run to exactly the two
 // lanes` above, and for the same reason: every mutation below leaves the whole
@@ -303,6 +318,60 @@ describe('post-merge push lane', () => {
     // main-ci-failure-issue.yml's `head_branch == 'main'` filter means no
     // issue is filed for tag runs: a silent red on release day.
     expect(triggers.push).toEqual({ branches: ['main'] });
+  });
+
+  it("lint_and_static shares test's exact gate", () => {
+    // The split exists so this job can become a required check on its own;
+    // its gate is therefore as security-relevant as test's. One equality
+    // rides on test's whole-literal pin below: if the two gates ever
+    // diverge — someone widening or narrowing the lint lane independently —
+    // this fails before the divergence ships, and the literal pin still
+    // guards the shared shape.
+    expect(condOf('lint_and_static')).toBe(condOf('test'));
+  });
+
+  it('lint_and_static keeps the minimal token its required-check role needs', () => {
+    // This block overrides the workflow-level `checks: write` /
+    // `statuses: write` grant. The lane runs contributor code (`npm ci`
+    // executes the PR's lifecycle scripts) on same-repo PRs, merge_group,
+    // dispatch and push; widening this — say by copying `test`'s block when
+    // adding a reporter — hands write tokens to that code. `test`'s own
+    // wider block is legitimate: dorny/test-reporter needs `checks: write`.
+    expect(ci.jobs.lint_and_static.permissions).toEqual({ contents: 'read' });
+  });
+
+  it('keeps every shared prelude step identical between test and lint_and_static', () => {
+    // The split copied the checkout/node/install prelude into the new job,
+    // and copies drift: the first merge after the split brought #10799's
+    // trusted-classifier rework, which updated `test`'s copy and left the
+    // lint one stale — resolved by hand that time. Field-for-field equality
+    // over every same-named step turns the next drift into a red test
+    // instead of a review archaeology exercise.
+    const byName = (job) =>
+      new Map(
+        (ci.jobs[job].steps ?? []).map((s) => [
+          s.name,
+          JSON.stringify(s, Object.keys(s).sort()),
+        ]),
+      );
+    const t = byName('test');
+    const l = byName('lint_and_static');
+    // The one same-named step that MUST differ: both jobs can fail in one
+    // run, and upload-artifact v4+ rejects duplicate artifact names, so the
+    // collector carries a per-job name. Everything else that shares a name
+    // must be byte-identical.
+    const deliberatelyDivergent = new Set(['Upload disk-pressure samples']);
+    const shared = [...t.keys()].filter(
+      (n) => l.has(n) && !deliberatelyDivergent.has(n),
+    );
+    // The prelude is what is duplicated; if this floor ever drops, steps
+    // were renamed apart and the guard is no longer guarding anything.
+    expect(shared.length).toBeGreaterThanOrEqual(12);
+    for (const n of shared) {
+      expect(l.get(n), `step "${n}" drifted between the two jobs`).toBe(
+        t.get(n),
+      );
+    }
   });
 
   it('classify_pr admits push in its event allowlist', () => {
@@ -336,7 +405,7 @@ describe('post-merge push lane', () => {
     );
   });
 
-  it('keeps a post-merge run to exactly classify_pr and test', () => {
+  it('keeps a post-merge run to exactly its expected jobs', () => {
     // The mirror of the nightly assertion, through the same helper: a `push:`
     // trigger fires the whole workflow, so every other job must exclude push
     // outright or gate on an allowlist that cannot contain it. Otherwise a
@@ -353,25 +422,36 @@ describe('post-merge push lane', () => {
     // pull_request / merge_group, and its `merge-base --is-ancestor` check
     // passes for a newer tip regardless. Order matters as much as presence —
     // the arm has to sit before the `github.ref` fallback to ever be reached.
-    const checkout = (ci.jobs.test.steps ?? []).find((s) =>
-      String(s.uses ?? '').startsWith('actions/checkout'),
-    );
-    expect(checkout).toBeDefined();
-    expect(String(checkout.with?.ref ?? '')).toBe(
-      "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
-    );
+    for (const job of ['test', 'lint_and_static']) {
+      const checkout = (ci.jobs[job].steps ?? []).find((s) =>
+        String(s.uses ?? '').startsWith('actions/checkout'),
+      );
+      expect(checkout, job).toBeDefined();
+      expect(String(checkout.with?.ref ?? ''), job).toBe(
+        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
+      );
+    }
   });
 
-  it('does not upload coverage from a post-merge run', () => {
-    // The artifact's only consumer, post_coverage_comment, is gated to
-    // pull_request; nothing else under .github/ reads coverage-reports-*.
-    // Without this exclusion every merge spends pool egress and artifact
-    // retention on a lane with no reader.
+  it('collects and uploads coverage only from the post-merge run', () => {
+    // Coverage is switched on by QWEN_CI_COVERAGE, which the unit-test step
+    // sets only for push (main): pull-request runs had no reader for the
+    // reports and paid about a fifth of the suite's wall time collecting
+    // them. The upload gate must agree with the switch, or a PR run uploads
+    // an empty artifact and a push run collects reports nobody keeps.
+    const run = stepOf('test', 'Run tests and generate reports');
+    expect(run).toBeDefined();
+    expect(String(run.env?.QWEN_CI_COVERAGE)).toBe(
+      "${{ github.event_name == 'push' && '1' || '' }}",
+    );
     const step = stepOf('test', 'Upload coverage reports');
     expect(step).toBeDefined();
     expect(String(step.if)).toBe(
-      "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name != 'push' }}",
+      "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && github.event_name == 'push' }}",
     );
+    // The pull-request coverage comment was the artifact's only reader; with
+    // no PR-side reports it has nothing to post and must stay gone.
+    expect(ci.jobs.post_coverage_comment).toBeUndefined();
   });
 
   it('scopes the concurrency group and keeps main uncancellable', () => {

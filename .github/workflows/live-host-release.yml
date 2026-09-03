@@ -278,6 +278,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: 'write'
+      id-token: 'write'
     env:
       GH_REPO: '${{ github.repository }}'
     steps:
@@ -358,8 +359,12 @@ jobs:
       - name: 'Install dependencies'
         run: 'npm install --ignore-scripts'
 
-      - name: 'Build qwen-live'
-        run: 'npm run build --workspace @qwen-code/qwen-live'
+      - name: 'Build dependency chain (core → acp-bridge → sdk → qwen-live)'
+        run: |-
+          npm run build --workspace @qwen-code/qwen-code-core
+          npm run build --workspace @qwen-code/acp-bridge
+          npm run build --workspace @qwen-code/sdk
+          npm run build --workspace @qwen-code/qwen-live
 
       - name: 'Publish @qwen-code/qwen-live'
         working-directory: 'packages/qwen-live'
@@ -372,6 +377,20 @@ jobs:
           PACKAGE_NAME="$(node -p "require('./package.json').name")"
           # Align the package version with the Host release version.
           npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
+          # Rewrite the file: dependency on @qwen-code/sdk to a versioned
+          # specifier — npm publish ships package.json verbatim, and
+          # "file:../sdk-typescript" is a monorepo-local link that does
+          # not exist for consumers. Use ^0.1.8 (the sdk's current
+          # published version range).
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            if (pkg.dependencies && pkg.dependencies['@qwen-code/sdk']) {
+              pkg.dependencies['@qwen-code/sdk'] = '^0.1.8';
+              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+              console.log('Rewrote @qwen-code/sdk dependency to ^0.1.8');
+            }
+          "
           if npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
             echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
             exit 0

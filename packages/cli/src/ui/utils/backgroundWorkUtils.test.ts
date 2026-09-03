@@ -209,7 +209,11 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
           status: 'running',
           description: 'research the codebase',
           subagentType: 'Explore',
-          startTime: now - 75_600_000,
+          // Stamped at call time, not from the describe-scope `now`: the
+          // rendered duration is measured against the `Date.now()` taken
+          // inside `describeBlockingBackgroundWork`, so a collection-time
+          // stamp reads 21h plus however long collecting took.
+          startTime: Date.now() - 75_600_000,
         },
         {
           agentId: 'fg_run',
