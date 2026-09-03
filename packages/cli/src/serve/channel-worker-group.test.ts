@@ -718,6 +718,36 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[2]!.supervisor.stop).toHaveBeenCalledOnce();
   });
 
+  it('forgets a permanently removed workspace instead of restoring it', async () => {
+    const runtimes = [
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false, { VERSION: 'old' }),
+    ];
+    const registry = fakeRegistry(runtimes);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+
+    await group.removeWorkspace(SECONDARY, { permanent: true });
+    runtimes.splice(1, 1, fakeRuntime(SECONDARY, false, { VERSION: 'new' }));
+    await group.restoreWorkspace(SECONDARY);
+
+    expect(recorded).toHaveLength(2);
+    expect(group.snapshots()).toEqual([
+      expect.objectContaining({ workspaceCwd: PRIMARY }),
+    ]);
+  });
+
   it('removes a restored worker from routing when startup fails', async () => {
     const runtimes = [
       fakeRuntime(PRIMARY, true),
