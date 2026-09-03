@@ -29,6 +29,16 @@ export function getApiHistoryPromptId(content: Content): string | undefined {
   return (content as IdentifiedContent)[API_HISTORY_PROMPT_ID];
 }
 
+/**
+ * Locates the single API history entry marked with `promptId`.
+ *
+ * Returns -1 when no entry carries the identity **and** when more than one
+ * does. Identities are minted per entrance (`sessionId########<n>`) and their
+ * counters restart independently, so a duplicate is possible; callers treat
+ * both cases the same way — the identity does not resolve, so fall back to
+ * whatever mapping was used before identities existed rather than guess
+ * between two candidates.
+ */
 export function findApiHistoryPromptIndex(
   history: readonly Content[],
   promptId: string,

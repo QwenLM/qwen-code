@@ -15,7 +15,6 @@ import {
 import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
-  computeResumedPromptCountSeed,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
@@ -42,14 +41,6 @@ export interface UseResumeCommandOptions {
    */
   loadHistory?: UseHistoryManagerReturn['loadHistory'];
   startNewSession: (sessionId: string) => void;
-  /**
-   * Seeds the prompt counter after the UI swap, mirroring the startup
-   * --resume seeding in AppContainer: startNewSession resets the counter
-   * to 0, and without seeding the first post-resume prompt would mint
-   * `sessionId########0`, colliding with the resumed first turn's
-   * persisted promptId.
-   */
-  seedPromptCount?: (count: number) => void;
   clearPendingState?: () => void;
   setSessionName?: (name: string | null) => void;
   remount?: () => void;
@@ -100,7 +91,6 @@ export function useResumeCommand(
     historyManager,
     loadHistory: loadHistoryOverride,
     startNewSession,
-    seedPromptCount,
     clearPendingState,
     setSessionName,
     remount,
@@ -245,17 +235,6 @@ export function useResumeCommand(
         startNewSession(sessionId);
         uiSwapped = true;
         config.getLlmClient()?.commitTelemetrySwap?.();
-        // Seed the prompt counter from the resumed session, mirroring the
-        // startup --resume path in AppContainer: the startNewSession
-        // above reset it to 0, and the seed must sit one past the largest
-        // persisted promptId suffix. Counting surviving user records
-        // under-seeds once rewind/teammate turns make the mint space
-        // sparse, and the re-minted collision trips the rewind fail-closed
-        // branch for duplicated identities.
-        const promptCountSeed = computeResumedPromptCountSeed(sessionData);
-        if (promptCountSeed > 0) {
-          seedPromptCount?.(promptCountSeed);
-        }
         setSessionName?.(customTitle ?? null);
         clearPendingState?.();
         clearItems();
@@ -366,7 +345,6 @@ export function useResumeCommand(
       clearItems,
       loadHistory,
       startNewSession,
-      seedPromptCount,
       clearPendingState,
       setSessionName,
       remount,

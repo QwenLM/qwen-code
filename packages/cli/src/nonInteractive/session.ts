@@ -208,22 +208,6 @@ class Session {
       // otherwise suppress every event emitted during the
       // `Session.ensureConfigInitialized` flow above.
       finalizeStartupProfile(this.config.getSessionId());
-      const resumedSessionData =
-        typeof this.config.getResumedSessionData === 'function'
-          ? this.config.getResumedSessionData()
-          : undefined;
-      if (resumedSessionData) {
-        const { computeResumedPromptCountSeed } = await import(
-          '../ui/utils/resumeHistoryUtils.js'
-        );
-        // getNextPromptId() pre-increments, so seed the largest
-        // persisted suffix itself: the first post-resume mint then
-        // lands one past every identity the resumed session persists.
-        this.promptIdCounter = Math.max(
-          this.promptIdCounter,
-          computeResumedPromptCountSeed(resumedSessionData) - 1,
-        );
-      }
       this.configInitialized = true;
       this.registerMonitorRegistrations();
       this.registerMonitorNotifications();

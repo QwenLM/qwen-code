@@ -115,7 +115,6 @@ import {
   clearCacheSafeParams,
   getCacheSafeParams,
 } from '../agents/forkedAgent.js';
-import { markApiHistoryPrompt } from '../services/sessionService.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -11336,144 +11335,71 @@ Other open files:
     });
 
     describe('retry sendMessageType', () => {
-      it('reuses a stripped prompt identity only for matching retry content', async () => {
-        const orphanedPrompt: Content = {
-          role: 'user',
-          parts: [
-            { text: '<system-reminder>context</system-reminder>' },
-            { text: 'IDE context\nsecond message' },
-          ],
-        };
-        markApiHistoryPrompt(orphanedPrompt, 'prompt-retry');
+      it('should call stripOrphanedUserEntriesFromHistory before executing', async () => {
         const mockChat: Partial<LlmChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
-          getHistoryLength: vi.fn().mockReturnValue(0),
+          getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValue(2),
           setHistory: vi.fn(),
-          stripOrphanedUserEntriesFromHistory: vi
-            .fn()
-            .mockReturnValue([orphanedPrompt]),
+          stripOrphanedUserEntriesFromHistory: vi.fn(),
           repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
         client['chat'] = mockChat as LlmChat;
 
-        mockTurnRunFn.mockImplementation(() =>
-          (async function* () {
-            yield { type: 'content', value: 'retry response' };
-          })(),
-        );
+        const mockStream = (async function* () {
+          yield { type: 'content', value: 'retry response' };
+        })();
+        mockTurnRunFn.mockReturnValue(mockStream);
 
-        for (const [text, expectedIdentity] of [
-          ['second message', 'prompt-retry'],
-          ['different message', undefined],
-        ] as const) {
-          await fromAsync(
-            client.sendMessageStream(
-              [{ text }],
-              new AbortController().signal,
-              'prompt-retry',
-              { type: SendMessageType.Retry },
-            ),
-          );
-          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[3]).toBe(
-            expectedIdentity,
-          );
+        // Act: send with retry type
+        const stream = client.sendMessageStream(
+          [{ text: 'second message' }],
+          new AbortController().signal,
+          'prompt-retry',
+          { type: SendMessageType.Retry },
+        );
+        for await (const _ of stream) {
+          /* consume */
         }
 
+        // Assert: the cleanup method was called
         expect(
           mockChat.stripOrphanedUserEntriesFromHistory,
-        ).toHaveBeenCalledTimes(2);
+        ).toHaveBeenCalledOnce();
       });
 
-      it('donates the stripped identity when the retry is sent under a fresh prompt id', async () => {
-        // No first-party Retry surface resends the original prompt id: the
-        // TUI dispatches submitQuery(retryQuery, Retry, undefined, ...) and
-        // submitQuery mints a fresh `sessionId########(N+1)`, which never
-        // equals the stripped orphan's mark. The adoption gate must donate
-        // on the content match alone, otherwise the retried turn lands
-        // unmarked while the UI item keeps the original id and rewind
-        // refuses it as "compressed".
-        const orphanedPrompt: Content = {
-          role: 'user',
-          parts: [{ text: 'my prompt' }],
-        };
-        markApiHistoryPrompt(orphanedPrompt, 'session########3');
+      it('leaves the retried turn unmarked while a user prompt owns its identity', async () => {
+        // Only a first-party user prompt claims an identity in model
+        // history. A retry re-enters unmarked and rewind maps it
+        // positionally, which is what it did before identities existed —
+        // guessing an identity for it from the stripped orphan's content
+        // would be the same content-shape inference this change removes.
         const mockChat: Partial<LlmChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
           getHistoryLength: vi.fn().mockReturnValue(0),
           setHistory: vi.fn(),
-          stripOrphanedUserEntriesFromHistory: vi
-            .fn()
-            .mockReturnValue([orphanedPrompt]),
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
           repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
         client['chat'] = mockChat as LlmChat;
 
         mockTurnRunFn.mockImplementation(() =>
           (async function* () {
-            yield { type: 'content', value: 'retry response' };
+            yield { type: 'content', value: 'response' };
           })(),
         );
 
-        await fromAsync(
-          client.sendMessageStream(
-            [{ text: 'my prompt' }],
-            new AbortController().signal,
-            'session########4',
-            { type: SendMessageType.Retry },
-          ),
-        );
-        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[3]).toBe(
-          'session########3',
-        );
-      });
-
-      it('matches retry content when the stripped entry carries a trailing hook context part', async () => {
-        // A UserPromptSubmit hook returning additional context appends a
-        // trailing part at push time, while hooks do not fire for Retry: the
-        // stripped entry is [userText, hookContextPart] against the bare
-        // retry [userText]. Tail-anchored matching selected the hook part
-        // and failed; the window match must find the user text anywhere in
-        // the entry (and keep refusing genuinely different content).
-        const orphanedPrompt: Content = {
-          role: 'user',
-          parts: [
-            { text: 'my prompt' },
-            {
-              text: '<qwen:user-prompt-submit-context>\nextra context\n</qwen:user-prompt-submit-context>',
-            },
-          ],
-        };
-        markApiHistoryPrompt(orphanedPrompt, 'prompt-hook-context');
-        const mockChat: Partial<LlmChat> = {
-          addHistory: vi.fn(),
-          getHistory: vi.fn().mockReturnValue([]),
-          getHistoryLength: vi.fn().mockReturnValue(0),
-          setHistory: vi.fn(),
-          stripOrphanedUserEntriesFromHistory: vi
-            .fn()
-            .mockReturnValue([orphanedPrompt]),
-          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
-        };
-        client['chat'] = mockChat as LlmChat;
-
-        mockTurnRunFn.mockImplementation(() =>
-          (async function* () {
-            yield { type: 'content', value: 'retry response' };
-          })(),
-        );
-
-        for (const [text, expectedIdentity] of [
-          ['my prompt', 'prompt-hook-context'],
-          ['other prompt', undefined],
+        for (const [type, expectedIdentity] of [
+          [SendMessageType.UserQuery, 'session########4'],
+          [SendMessageType.Retry, undefined],
         ] as const) {
           await fromAsync(
             client.sendMessageStream(
-              [{ text }],
+              [{ text: 'my prompt' }],
               new AbortController().signal,
-              'prompt-hook-context-next',
-              { type: SendMessageType.Retry },
+              'session########4',
+              { type },
             ),
           );
           expect(mockTurnConstructorFn.mock.calls.at(-1)?.[3]).toBe(

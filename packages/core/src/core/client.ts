@@ -15,7 +15,6 @@ import type {
 } from '@google/genai';
 import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
-import { isDeepStrictEqual } from 'node:util';
 
 // Config
 import type { Config } from '../config/config.js';
@@ -144,7 +143,6 @@ import {
 import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
-  getApiHistoryPromptId,
   replayUiTelemetryFromConversation,
 } from '../services/sessionService.js';
 import { reportError } from '../utils/errorReporting.js';
@@ -2983,7 +2981,6 @@ export class LlmClient {
       return takePendingGoalEvents();
     };
     let strippedRetryEntries: Content[] = [];
-    let retryPromptIdentity: string | undefined;
     const currentPushCount = () =>
       this.getChat().getUserContentPushCount?.() ?? 0;
 
@@ -3092,52 +3089,6 @@ export class LlmClient {
 
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
-      const strippedEntry =
-        strippedRetryEntries.length === 1 ? strippedRetryEntries[0] : undefined;
-      const strippedIdentity = strippedEntry
-        ? getApiHistoryPromptId(strippedEntry)
-        : undefined;
-      const retryParts = createUserContent(request).parts ?? [];
-      // The stripped entry can carry parts appended around the user text:
-      // the UserPromptSubmit hook context part is appended at push time
-      // (hooks do not fire for Retry, so the re-send never carries it), and
-      // LlmChat can append a manual plan-exit notice the same way. Locate
-      // the retry parts as a contiguous window anywhere in the stripped
-      // entry instead of anchoring on the tail, normalizing each window
-      // part by the same endsWith rule.
-      let contentMatches = false;
-      if (strippedEntry && retryParts.length > 0) {
-        const strippedParts = strippedEntry.parts ?? [];
-        for (
-          let start = 0;
-          start + retryParts.length <= strippedParts.length;
-          start++
-        ) {
-          const windowParts = strippedParts
-            .slice(start, start + retryParts.length)
-            .map((part, index) => {
-              const retryText = retryParts[index]?.text;
-              return retryText && part.text?.endsWith(retryText)
-                ? { ...part, text: retryText }
-                : part;
-            });
-          if (isDeepStrictEqual(windowParts, retryParts)) {
-            contentMatches = true;
-            break;
-          }
-        }
-      }
-      // Donate the orphan's identity on the content match alone: no
-      // first-party Retry surface resends the original prompt id (the TUI
-      // and headless retry paths mint a fresh one), so also requiring
-      // `strippedIdentity === prompt_id` left every real retry unmarked
-      // while the UI item kept the original id. The exactly-one-stripped-
-      // entry restriction above and the content match keep the donation
-      // fail-closed, and the donation cannot collide with the restore in
-      // `restoreStrippedRetryEntries`: restore only runs when the push
-      // never landed, so at most one carrier of the identity ever exists.
-      retryPromptIdentity =
-        strippedEntry && contentMatches ? strippedIdentity : undefined;
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -3781,9 +3732,10 @@ export class LlmClient {
         this.getChat(),
         prompt_id,
         goalPermit,
-        messageType === SendMessageType.UserQuery
-          ? prompt_id
-          : retryPromptIdentity,
+        // Only a first-party user prompt owns its identity in model history.
+        // Every other send (retry, continuation, tool result, cron) leaves
+        // the entry unmarked and stays on the positional rewind path.
+        messageType === SendMessageType.UserQuery ? prompt_id : undefined,
       );
 
       // Assemble the outgoing request. IDE context is merged into the

@@ -13,6 +13,7 @@ import {
   CommandKind,
 } from './types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
+import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
 
 async function restoreAction(
@@ -145,7 +146,21 @@ async function restoreAction(
         };
       }
       context.ui.clearPendingState?.();
-      loadHistory(toolCallData.history);
+      // A checkpoint is JSON, so the model-facing `clientHistory` restored
+      // below carries no prompt identities (they live on non-serializable
+      // Symbol metadata). Drop the identities the UI items still carry so
+      // both sides of the restored conversation agree that this history is
+      // unidentified: rewind then maps it positionally, as it did before
+      // identities existed. Leaving them on would let a later prompt that
+      // re-mints one of these ids resolve a restored turn onto the wrong
+      // model entry.
+      loadHistory(
+        toolCallData.history.map((item: HistoryItem) =>
+          item.type === 'user' && item.promptId
+            ? { ...item, promptId: undefined }
+            : item,
+        ),
+      );
     }
 
     if (toolCallData.clientHistory) {

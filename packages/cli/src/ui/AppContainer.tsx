@@ -81,7 +81,6 @@ import {
 import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
-  computeResumedPromptCountSeed,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
 import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
@@ -1147,17 +1146,16 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         loadHistoryWithLatchReconciliation(historyItems);
 
-        // Seed the prompt counter from the resumed session so new
-        // promptIds don't collide with restored file history snapshots or
-        // surviving records' persisted identities. The seed must sit one
-        // past the largest persisted promptId suffix — counting surviving
-        // user records under-seeds once rewind/teammate turns make the
-        // mint space sparse, and a re-minted collision trips the rewind
-        // fail-closed branch for duplicated identities.
-        const promptCountSeed =
-          computeResumedPromptCountSeed(resumedSessionData);
-        if (promptCountSeed > 0) {
-          seedPromptCount(promptCountSeed);
+        // Seed the prompt counter from the resumed conversation so new
+        // promptIds don't collide with restored file history snapshots.
+        const userTurnCount = resumedSessionData.conversation.messages.filter(
+          (m) =>
+            m.type === 'user' &&
+            m.subtype !== 'mid_turn_user_message' &&
+            m.subtype !== 'realtime_message',
+        ).length;
+        if (userTurnCount > 0) {
+          seedPromptCount(userTurnCount);
         }
 
         const recovered = await config.loadPausedBackgroundAgents(
@@ -1814,7 +1812,6 @@ export const AppContainer = (props: AppContainerProps) => {
     // re-arms the latch when the rebuilt history has no announcement.
     loadHistory: loadHistoryWithLatchReconciliation,
     startNewSession,
-    seedPromptCount,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
     remount: refreshStatic,

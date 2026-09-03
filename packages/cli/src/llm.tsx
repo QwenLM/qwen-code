@@ -1389,6 +1389,8 @@ export async function main() {
       settings,
     );
 
+    const prompt_id = createNonInteractivePromptId(config.getSessionId());
+
     if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
       const { runNonInteractiveStreamJson } = await import(
@@ -1427,25 +1429,6 @@ export async function main() {
       process.exit(1);
     }
 
-    let prompt_id = createNonInteractivePromptId(config.getSessionId());
-    const resumedSessionData =
-      typeof config.getResumedSessionData === 'function'
-        ? config.getResumedSessionData()
-        : undefined;
-    if (resumedSessionData) {
-      // A resumed headless run must not re-mint a promptId the resumed
-      // session already persisted: the duplicate identity makes rewind
-      // fail closed on both turns. Seed one past the largest persisted
-      // suffix, like the interactive resume entrances.
-      const { computeResumedPromptCountSeed } = await import(
-        './ui/utils/resumeHistoryUtils.js'
-      );
-      prompt_id = createNonInteractivePromptId(
-        config.getSessionId(),
-        computeResumedPromptCountSeed(resumedSessionData),
-      );
-    }
-
     logUserPrompt(config, {
       'event.name': 'user_prompt',
       'event.timestamp': new Date().toISOString(),
@@ -1480,11 +1463,8 @@ export async function main() {
   }
 }
 
-export function createNonInteractivePromptId(
-  sessionId: string,
-  promptCountSeed = 0,
-): string {
-  return `${sessionId}########${promptCountSeed}`;
+export function createNonInteractivePromptId(sessionId: string): string {
+  return `${sessionId}########0`;
 }
 
 /**

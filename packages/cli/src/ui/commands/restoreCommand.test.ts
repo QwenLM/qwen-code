@@ -150,6 +150,35 @@ describe('restoreCommand', () => {
       });
     });
 
+    it('drops prompt identities from the restored history items', async () => {
+      // The checkpoint is JSON, so `clientHistory` comes back without the
+      // Symbol prompt marks. Restoring UI items that still claim identities
+      // would let a later prompt re-mint one of them and resolve a restored
+      // turn onto the wrong model entry, so both sides stay unidentified.
+      const toolCallData = {
+        history: [
+          { type: 'user', text: 'first', promptId: 'session########0' },
+          { type: 'gemini', text: 'answer' },
+          { type: 'user', text: 'second', promptId: 'session########1' },
+        ],
+        clientHistory: [{ role: 'user', parts: [{ text: 'first' }] }],
+        toolCall: { name: 'run_shell_command', args: 'ls' },
+      };
+      await fs.writeFile(
+        path.join(checkpointsDir, 'identified.json'),
+        JSON.stringify(toolCallData),
+      );
+      const command = restoreCommand(mockConfig);
+
+      await command?.action?.(mockContext, 'identified');
+
+      expect(mockContext.ui.loadHistory).toHaveBeenCalledWith([
+        { type: 'user', text: 'first', promptId: undefined },
+        { type: 'gemini', text: 'answer' },
+        { type: 'user', text: 'second', promptId: undefined },
+      ]);
+    });
+
     it('should restore a tool call and project state', async () => {
       const toolCallData = {
         history: [{ type: 'user', text: 'do a thing' }],
