@@ -30,6 +30,8 @@ export default defineConfig({
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
     dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
+      // Same switch as cli/core: only the post-merge main run collects it.
+      enabled: process.env['QWEN_CI_COVERAGE'] === '1',
       provider: 'v8',
       reportsDirectory: '../coverage',
       reporter: ['text-summary', 'json-summary', 'html'],

@@ -111,6 +111,9 @@ const { mockListWorkflowSnapshots } = vi.hoisted(() => ({
 const { mockListSavedWorkflows } = vi.hoisted(() => ({
   mockListSavedWorkflows: vi.fn().mockResolvedValue([]),
 }));
+const { mockResolveSavedWorkflowScript } = vi.hoisted(() => ({
+  mockResolveSavedWorkflowScript: vi.fn(),
+}));
 const { mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockAddDaemonRequestAttribute: vi.fn(),
 }));
@@ -314,6 +317,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).tryWithWorkflowTaskMutation,
   listSavedWorkflows: mockListSavedWorkflows,
+  resolveSavedWorkflowScript: mockResolveSavedWorkflowScript,
+  extractAndStripMeta: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).extractAndStripMeta,
   listWorkflowSnapshots: mockListWorkflowSnapshots,
   createDebugLogger: () => mockDebugLogger,
   extractDaemonTraceContext: mockExtractDaemonTraceContext,
@@ -4243,6 +4250,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      // Per-session folder-trust flag (security.folderTrust.enabled of the
+      // admission workspace), bound once at Config construction. Default off;
+      // bootRelocatableSession overrides it to reflect the fed workspace.
+      getFolderTrust: vi.fn().mockReturnValue(false),
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
@@ -4286,7 +4297,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setWorkflowsEnabled: vi.fn(),
       getBareMode: vi.fn().mockReturnValue(false),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
-      getFolderTrust: vi.fn().mockReturnValue(true),
       isTrustedFolder: vi.fn().mockReturnValue(true),
     };
   }
@@ -4686,6 +4696,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
+      // The gate reads config.getFolderTrust() (admission-workspace flag),
+      // so mirror the fed workspace's security.folderTrust.enabled here.
+      getFolderTrust: vi
+        .fn()
+        .mockReturnValue(
+          settings.merged.security?.folderTrust?.enabled ?? false,
+        ),
     });
     Object.assign(innerConfig.getLlmClient(), {
       addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
@@ -6302,6 +6319,133 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const { agent, agentPromise, sessionId } = await bootRelocatableSession(
         settings,
         'expected-capability',
+      );
+
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: canonicalTarget,
+            allowedRoots: [canonicalRoot],
+          }),
+        ).rejects.toThrow('Directory not trusted');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+  });
+
+  it('resolves the cd trust gate from the session workspace, not the stale this.settings cache', async () => {
+    await withEmptyTrustedFolders(async (directory) => {
+      const root = path.join(directory, 'Conversations');
+      const target = path.join(root, 'conversation-cross-workspace');
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+      const canonicalRoot = await fs.realpath(root);
+      const canonicalTarget = await fs.realpath(target);
+      // Session A's workspace enables folder trust.
+      const aSettings = makeSessionSettings({
+        mcpServers: {},
+        security: { folderTrust: { enabled: true } },
+      });
+      const { agent, agentPromise, sessionId } = await bootRelocatableSession(
+        aSettings,
+        'expected-capability',
+      );
+      // A different workspace's activity has since refreshed the agent's
+      // "latest loaded" cache to a workspace that DISABLES folder trust.
+      // Reading that cache in the cd gate (the pre-fix bug) would switch off
+      // session A's trust check and admit the untrusted cd; the fix reads
+      // config.getFolderTrust() (A's admission-workspace flag), so the gate
+      // still enforces.
+      (agent as unknown as { settings: LoadedSettings }).settings =
+        makeSessionSettings({
+          mcpServers: {},
+          security: { folderTrust: { enabled: false } },
+        });
+
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: canonicalTarget,
+            allowedRoots: [canonicalRoot],
+          }),
+        ).rejects.toThrow('Directory not trusted');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+  });
+
+  it('does not gate cd when the session workspace disables folder trust, even if the stale cache enables it', async () => {
+    // Mirror of the test above. Session A's own workspace DISABLES folder
+    // trust, while the stale `this.settings` cache holds a trust-ENABLED
+    // workspace. The gate must follow A's own settings and NOT gate the cd —
+    // otherwise a gate that OR-combined both sources would fail closed and
+    // spuriously reject an ordinary cd for a session whose workspace never
+    // asked for trust enforcement.
+    await withEmptyTrustedFolders(async (directory) => {
+      const root = path.join(directory, 'Conversations');
+      const target = path.join(root, 'conversation-trust-disabled');
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+      const canonicalRoot = await fs.realpath(root);
+      const canonicalTarget = await fs.realpath(target);
+      // Session A's workspace disables folder trust.
+      const aSettings = makeSessionSettings({ mcpServers: {} });
+      const { agent, agentPromise, sessionId } = await bootRelocatableSession(
+        aSettings,
+        'expected-capability',
+      );
+      (agent as unknown as { settings: LoadedSettings }).settings =
+        makeSessionSettings({
+          mcpServers: {},
+          security: { folderTrust: { enabled: true } },
+        });
+
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: canonicalTarget,
+            allowedRoots: [canonicalRoot],
+          }),
+        ).resolves.toMatchObject({ newCwd: canonicalTarget });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+  });
+
+  it('keeps the cd trust gate armed after the cwd drifts into a settings-less subdirectory', async () => {
+    // The gate must bind folder-trust to the ADMISSION workspace, not re-read
+    // it from the current cwd: a prior cd moves targetDir into a subdirectory
+    // that carries no `.qwen/settings.json`, so a cwd-keyed read would resolve
+    // disabled (isFolderTrustEnabled defaults to false) and disarm the gate
+    // for the rest of the session. config.getFolderTrust() stays true, so an
+    // untrusted cd is still rejected.
+    await withEmptyTrustedFolders(async (directory) => {
+      const root = path.join(directory, 'Conversations');
+      const target = path.join(root, 'conversation-subtree-drift');
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+      const canonicalRoot = await fs.realpath(root);
+      const canonicalTarget = await fs.realpath(target);
+      const aSettings = makeSessionSettings({
+        mcpServers: {},
+        security: { folderTrust: { enabled: true } },
+      });
+      const { agent, agentPromise, sessionId, innerConfig } =
+        await bootRelocatableSession(aSettings, 'expected-capability');
+      // cwd has drifted into a subdirectory whose settings disable folder
+      // trust. A cwd-keyed gate would read this and skip; the admission-bound
+      // config.getFolderTrust() must not.
+      innerConfig.getTargetDir.mockReturnValue('/tmp/sub');
+      vi.mocked(loadSettings).mockImplementation((cwd?: string) =>
+        cwd === '/tmp/sub'
+          ? makeSessionSettings({ mcpServers: {} })
+          : aSettings,
       );
 
       try {
@@ -12920,6 +13064,96 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('reads a saved workflow definition with its parsed meta', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+    const scriptPath = '/tmp/.qwen/workflows/deep-review.js';
+    const script = [
+      'export const meta = {',
+      "  name: 'deep-review',",
+      "  description: 'Review deeply',",
+      "  phases: [{ title: 'Scan', detail: 'grep' }],",
+      '}',
+      "return await agent('go')",
+      '',
+    ].join('\n');
+    mockListSavedWorkflows.mockResolvedValueOnce([
+      { name: 'deep-review', source: 'project', scriptPath },
+    ]);
+    mockResolveSavedWorkflowScript.mockResolvedValueOnce({
+      name: 'deep-review',
+      scriptPath,
+      script,
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow, {
+        sessionId,
+        name: 'deep-review',
+      }),
+    ).resolves.toEqual({
+      v: 1,
+      sessionId,
+      name: 'deep-review',
+      workflow: {
+        v: 1,
+        sessionId,
+        name: 'deep-review',
+        source: 'project',
+        scriptPath,
+        script,
+        meta: {
+          name: 'deep-review',
+          description: 'Review deeply',
+          phases: [{ title: 'Scan', detail: 'grep' }],
+        },
+      },
+    });
+    expect(mockResolveSavedWorkflowScript).toHaveBeenCalledWith(
+      'deep-review',
+      expect.anything(),
+    );
+
+    // Unknown names and disabled Workflow controls both fail closed to null.
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow, {
+        sessionId,
+        name: 'missing',
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, name: 'missing', workflow: null });
+    innerConfig.isWorkflowsEnabled.mockReturnValue(false);
+    mockListSavedWorkflows.mockClear();
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow, {
+        sessionId,
+        name: 'deep-review',
+      }),
+    ).resolves.toEqual({
+      v: 1,
+      sessionId,
+      name: 'deep-review',
+      workflow: null,
+    });
+    expect(mockListSavedWorkflows).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('uses the exact run id when a concurrent saved workflow uses the same script', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -12988,9 +13222,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       status: 'running',
       taskId: 'wf_5678efab',
     });
-    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
-      scriptPath: '/tmp/.qwen/workflows/deep-review.js',
-    });
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith(
+      {
+        scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+      },
+      'deep-review',
+    );
     expect(execute).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
@@ -13006,6 +13243,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       runId: 'wf_1234abcd',
       kind: 'workflow' as const,
       status: 'failed' as 'failed' | 'running',
+      workflowName: 'deep-review',
       script: 'return await agent(args.prompt)',
       args: { prompt: 'retry this path' },
     };
@@ -13048,11 +13286,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         action: 'retry',
       }),
     ).resolves.toEqual({ changed: true, status: 'running' });
-    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
-      script: task.script,
-      args: task.args,
-      resumeFromRunId: task.runId,
-    });
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith(
+      {
+        script: task.script,
+        args: task.args,
+        resumeFromRunId: task.runId,
+      },
+      task.workflowName,
+    );
     expect(execute).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
@@ -13296,6 +13537,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       runId: 'wf_1234abcd',
       kind: 'workflow' as const,
       status: 'failed' as 'failed' | 'running',
+      workflowName: 'deep-review',
       script: 'return await agent(args.prompt)',
       args: { prompt: 'rerun everything' },
     };
@@ -13366,10 +13608,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       status: 'running',
       taskId: rerun.runId,
     });
-    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
-      script: task.script,
-      args: task.args,
-    });
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith(
+      {
+        script: task.script,
+        args: task.args,
+      },
+      task.workflowName,
+    );
     expect(execute).toHaveBeenCalledOnce();
     expect(rerun).toMatchObject({
       sourceRunId: task.runId,
