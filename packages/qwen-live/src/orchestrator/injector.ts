@@ -26,8 +26,6 @@ const RECHECK_MIN_MS = 100;
 const PROGRESS_THROTTLE_MS = 5 * 60_000;
 const MAX_SPOKEN_CHARS = 280;
 const MAX_CONTEXT_CHARS = 6_000;
-/** 24 kHz mono PCM16. */
-const PLAYBACK_BYTES_PER_MS = 48;
 
 export type InjectorItemKind =
   | 'complete'
@@ -79,7 +77,8 @@ export class Injector {
   private queue: InjectorItem[] = [];
   private speechInProgress = false;
   private responseInFlight = false;
-  private playbackDeadline = 0;
+  private playbackInProgress = false;
+  private playbackCompletedAt = 0;
   private lastProgressAt = new Map<string, number>();
   private timer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
@@ -95,8 +94,9 @@ export class Injector {
   // -- window state signals (fed by the orchestrator) ----------------------
 
   noteSpeechStarted(): boolean {
-    const outputWasPlaying = this.playbackDeadline > this.now();
-    this.playbackDeadline = 0;
+    const outputWasPlaying = this.playbackInProgress;
+    this.playbackInProgress = false;
+    this.playbackCompletedAt = 0;
     this.speechInProgress = true;
     // Barge-in semantics: pending progress is stale the moment the user
     // speaks; conclusions and permission asks stay queued. A dropped item
@@ -128,13 +128,20 @@ export class Injector {
     this.poke();
   }
 
-  noteOutputAudio(bytes: number): void {
-    const start = Math.max(this.now(), this.playbackDeadline);
-    this.playbackDeadline = start + bytes / PLAYBACK_BYTES_PER_MS;
+  notePlaybackStarted(): void {
+    this.playbackInProgress = true;
+    this.playbackCompletedAt = 0;
+  }
+
+  notePlaybackCompleted(): void {
+    this.playbackInProgress = false;
+    this.playbackCompletedAt = this.now();
+    this.poke();
   }
 
   noteOutputCleared(): void {
-    this.playbackDeadline = 0;
+    this.playbackInProgress = false;
+    this.playbackCompletedAt = 0;
     this.poke();
   }
 
@@ -194,9 +201,13 @@ export class Injector {
 
   private windowClosedForMs(): number {
     if (this.speechInProgress || this.responseInFlight) return -1;
-    const quietAt = this.playbackDeadline + this.quietGapMs;
-    const wait = quietAt - this.now();
-    return wait > 0 ? wait : 0;
+    if (this.playbackInProgress) return -1;
+    if (this.playbackCompletedAt > 0) {
+      const quietAt = this.playbackCompletedAt + this.quietGapMs;
+      const wait = quietAt - this.now();
+      return wait > 0 ? wait : 0;
+    }
+    return 0;
   }
 
   private poke(): void {

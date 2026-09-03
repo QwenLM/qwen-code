@@ -22185,6 +22185,73 @@ describe('Session', () => {
         expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalled();
       });
 
+      it.each([
+        ['skill', CommandKind.SKILL],
+        ['custom command', CommandKind.FILE],
+      ])(
+        'keeps attachments when a %s expands into a model prompt',
+        async (_, kind) => {
+          vi.mocked(
+            nonInteractiveCliCommands.handleSlashCommand,
+          ).mockResolvedValueOnce({
+            type: 'submit_prompt',
+            content: [{ text: 'Expanded skill prompt' }],
+            resolvedCommand: {
+              name: 'price-sheet',
+              kind,
+            },
+          });
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: '/price-sheet update these prices' },
+              { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'attachment:///notes.txt',
+                  mimeType: 'text/plain',
+                  text: 'hello',
+                },
+              },
+            ],
+          });
+
+          expect(firstSentMessage()).toEqual([
+            { text: '@attachment:///notes.txt' },
+            { inlineData: { mimeType: 'image/png', data: 'QUJD' } },
+            { text: 'File: attachment:///notes.txt\nhello' },
+            { text: 'Expanded skill prompt' },
+          ]);
+        },
+      );
+
+      it('does not forward attachments from built-in commands', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Expanded built-in prompt' }],
+          resolvedCommand: {
+            name: 'remember',
+            kind: CommandKind.BUILT_IN,
+          },
+        });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: '/remember this' },
+            { type: 'image', mimeType: 'image/png', data: 'QUJD' },
+          ],
+        });
+
+        expect(firstSentMessage()).toEqual([
+          { text: 'Expanded built-in prompt' },
+        ]);
+      });
+
       it('preserves an expanded slash prompt cancelled before model send', async () => {
         const finishedSpy = vi
           .spyOn(core, 'logConversationFinishedEvent')

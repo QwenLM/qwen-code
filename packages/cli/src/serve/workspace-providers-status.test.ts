@@ -131,6 +131,36 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(second.current?.modelId).toBe('model-b(openai)');
   });
 
+  it('treats a non-positive contextWindowSize as unset in the catalog', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'model-zero' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'model-zero',
+            name: 'Model Zero',
+            generationConfig: { contextWindowSize: 0 },
+          },
+          {
+            id: 'model-big',
+            name: 'Model Big',
+            generationConfig: { contextWindowSize: 8192 },
+          },
+        ],
+      },
+    });
+
+    const status = await provider(workspace, false);
+    const models = status.providers.flatMap((entry) => entry.models);
+    const zero = models.find((model) => model.baseModelId === 'model-zero');
+    const big = models.find((model) => model.baseModelId === 'model-big');
+
+    expect(zero?.contextLimit).toBeGreaterThan(0);
+    expect(big?.contextLimit).toBe(8192);
+  });
+
   it('returns the workspace approval mode', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
