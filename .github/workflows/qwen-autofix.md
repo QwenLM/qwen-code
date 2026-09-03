@@ -2308,7 +2308,7 @@ brake keys on measured regeneration, not identity: every source gets a
 bounded number of untagged feedback batches per counting window once
 Critical-only engages — the review bot's budget is zero (all deferred),
 a human's is this many CONSUMED batches. Past it, continuing requires
-one conscious act (**[Critical]**, a Request changes review, or /retry),
+one conscious act (starting a comment with **[Critical]**, a Request changes review, or /retry),
 which is precisely what separates intent from automation.
 ```
 

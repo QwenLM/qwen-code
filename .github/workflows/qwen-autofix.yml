@@ -853,6 +853,7 @@ jobs:
                 exit 1
                 ;;
             esac
+            echo 'QWEN_SKIP_LATENCY_BUDGETS=1' >> "${GITHUB_ENV}"
           fi
           # Capability preflight for the persistent pool: this job's agent
           # runs inside the docker sandbox, and a missing daemon otherwise
@@ -3974,6 +3975,7 @@ jobs:
                 exit 1
                 ;;
             esac
+            echo 'QWEN_SKIP_LATENCY_BUDGETS=1' >> "${GITHUB_ENV}"
           fi
           # Capability preflight for the persistent pool: this job's agent
           # runs inside the docker sandbox, and a missing daemon otherwise
@@ -4679,6 +4681,9 @@ jobs:
               --argjson critical_after "${CRITICAL_ONLY_AFTER_ROUND}" \
               --argjson k "${CRITICAL_ONLY_HUMAN_BATCHES}" \
               --slurpfile rv "${WORKDIR}/rv.json" --slurpfile rc "${WORKDIR}/rc.json" --slurpfile ic "${WORKDIR}/ic.json" '
+              def leading_critical:
+                gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
+                | startswith("**[Critical]**");
               ([ ($ic | add)[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
                  | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
                  | {ts: .[0], acted: .[1], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]
@@ -4692,14 +4697,14 @@ jobs:
               | ($rc | add) as $comments
               | ([ $reviews[]
                    | select((.state // "") == "COMMENTED")
-                   | select(((.body // "") | contains("**[Critical]**")) | not)
+                   | select(((.body // "") | leading_critical) | not)
                    | {at: (.submitted_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ]
                  + [ $comments[]
                    | select((
-                       ((.body // "") | contains("**[Critical]**"))
+                       ((.body // "") | leading_critical)
                        or ((.in_reply_to_id // null) as $root
                          | $root != null
-                         and any($comments[]; .id == $root and ((.body // "") | contains("**[Critical]**"))))
+                         and any($comments[]; .id == $root and ((.body // "") | leading_critical)))
                        or ((.pull_request_review_id // null) as $review
                          | $review != null
                          and any($reviews[]; .id == $review and ((.state // "") == "CHANGES_REQUESTED")))
@@ -4709,7 +4714,7 @@ jobs:
                    | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                    | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                    | select((.body // "") | test("^\\s*@qwen-code /") | not)
-                   | select(((.body // "") | contains("**[Critical]**")) | not)
+                   | select(((.body // "") | leading_critical) | not)
                    | {at: (.created_at // ""), login: (.user.login // ""), assoc: (.author_association // "")} ])
               | map(select(.login != "" and .login != $ab and .login != $rb) | select(.assoc | IN($trust[])))
               | [ .[] | . as $c
@@ -4789,17 +4794,23 @@ jobs:
               echo
               jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
                 --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
+                def leading_critical:
+                  gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
+                  | startswith("**[Critical]**");
                 .[]
                 | select((.submitted_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
                 | select((.state // "") == "COMMENTED")
-                | select(((.body // "") | contains("**[Critical]**")) | not)
+                | select(((.body // "") | leading_critical) | not)
                 | "- Review by @\(.user.login): \(.html_url // $pr_url)"' \
                 "${WORKDIR}/rv.json"
               jq -rs --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
                 --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" \
                 --slurpfile reviews "${WORKDIR}/rv.json" '
+                def leading_critical:
+                  gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
+                  | startswith("**[Critical]**");
                 add as $comments
                 | ($reviews | add) as $reviews
                 | $comments[]
@@ -4807,12 +4818,12 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.user.login // "") == $rb) or ((.user.login // "") | IN($over[])))
                 | select((
-                    ((.body // "") | contains("**[Critical]**"))
+                    ((.body // "") | leading_critical)
                     or ((.in_reply_to_id // null) as $root
                       | $root != null
                       and any($comments[];
                         .id == $root
-                        and ((.body // "") | contains("**[Critical]**"))))
+                        and ((.body // "") | leading_critical)))
                     or ((.pull_request_review_id // null) as $review
                       | $review != null
                       and any($reviews[];
@@ -4823,6 +4834,9 @@ jobs:
                 "${WORKDIR}/rc.json"
               jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
                 --arg pr_url "${PR_URL}" --argjson over "${OVER_BUDGET_AUTHORS}" '
+                def leading_critical:
+                  gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
+                  | startswith("**[Critical]**");
                 .[]
                 | select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
@@ -4830,12 +4844,12 @@ jobs:
                 | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack|qwen-review-salvaged) ") | not)
                 | select(((((.user.login // "") == $rb)) and ((.body // "") | test("<!-- qwen-review docs-only-medium "))) | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
-                | select(((.body // "") | contains("**[Critical]**")) | not)
+                | select(((.body // "") | leading_critical) | not)
                 | "- PR comment by @\(.user.login): \(.html_url // $pr_url)"' \
                 "${WORKDIR}/ic.json"
               if [[ "${OVER_BUDGET_AUTHORS}" != '[]' ]]; then
                 echo
-                jq -r '.[] | "- @" + . + " is at this window'"'"'s regular-feedback budget — to continue: tag **[Critical]**, submit a Request changes review, or comment `@qwen-code /retry` for a fresh window. / @" + . + " 本窗口常规反馈预算已用完——继续请标 **[Critical]**、提交 Request changes、或评论 `@qwen-code /retry` 开新窗口。"' <<< "${OVER_BUDGET_AUTHORS}"
+                jq -r '.[] | "- @" + . + " is at this window'"'"'s regular-feedback budget — to continue: start your comment with **[Critical]**, submit a Request changes review, or comment `@qwen-code /retry` for a fresh window. / @" + . + " 本窗口常规反馈预算已用完——继续请以 **[Critical]** 开头评论、提交 Request changes、或评论 `@qwen-code /retry` 开新窗口。"' <<< "${OVER_BUDGET_AUTHORS}"
               fi
               echo
               echo '<details>'
@@ -4895,6 +4909,9 @@ jobs:
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" \
               --argjson over "${OVER_BUDGET_AUTHORS}" '
+              def leading_critical:
+                gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
+                | startswith("**[Critical]**");
               .[]
               | select((.submitted_at // "") > $wm)
               | select((.user.login // "") != $ab)
@@ -4903,7 +4920,7 @@ jobs:
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
                   or (.state // "") == "CHANGES_REQUESTED"
-                  or ((.body // "") | contains("**[Critical]**")))
+                  or ((.body // "") | leading_critical))
               | "- [rv:\(.id)] [\(.state)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rv.json"
             echo
@@ -4912,6 +4929,9 @@ jobs:
               --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" \
               --argjson over "${OVER_BUDGET_AUTHORS}" \
               --slurpfile reviews "${WORKDIR}/rv.json" '
+              def leading_critical:
+                gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
+                | startswith("**[Critical]**");
               add as $comments
               | ($reviews | add) as $reviews
               | $comments[]
@@ -4920,12 +4940,12 @@ jobs:
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
-                  or ((.body // "") | contains("**[Critical]**"))
+                  or ((.body // "") | leading_critical)
                   or ((.in_reply_to_id // null) as $root
                     | $root != null
                     and any($comments[];
                       .id == $root
-                      and ((.body // "") | contains("**[Critical]**"))))
+                      and ((.body // "") | leading_critical)))
                   or ((.pull_request_review_id // null) as $review
                     | $review != null
                     and any($reviews[];
@@ -4938,6 +4958,9 @@ jobs:
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson critical_only "${CRITICAL_ONLY}" --argjson trust "${TRUSTED_ASSOC}" \
               --argjson over "${OVER_BUDGET_AUTHORS}" '
+              def leading_critical:
+                gsub("^(?:(?:\\s|<!--[\\s\\S]*?(?:-->|$)|\\p{Cf}))+"; ""; "s")
+                | startswith("**[Critical]**");
               .[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
@@ -4947,7 +4970,7 @@ jobs:
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | select(($critical_only | not)
                   or (((.user.login // "") != $rb) and (((.user.login // "") | IN($over[])) | not))
-                  or ((.body // "") | contains("**[Critical]**")))
+                  or ((.body // "") | leading_critical))
               | "- [ic:\(.id)] @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
             if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
