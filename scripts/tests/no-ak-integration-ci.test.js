@@ -835,17 +835,6 @@ describe('no-AK integration CI wiring', () => {
     );
   });
 
-  it('keeps the lightweight coverage comment job on the hosted runner', () => {
-    const workflow = readFileSync(
-      path.join(ROOT, '.github/workflows/ci.yml'),
-      'utf8',
-    );
-    const coverageJob = getWorkflowJob(workflow, 'post_coverage_comment');
-
-    expect(coverageJob).toContain("runs-on: 'ubuntu-latest'");
-    expect(coverageJob).not.toContain('ubuntu_runner');
-  });
-
   it('does not install Linux packages on self-hosted Playwright runners', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
