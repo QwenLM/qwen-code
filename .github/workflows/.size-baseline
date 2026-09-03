@@ -19,13 +19,13 @@
 9256 build-and-publish-image.yml
 49610 cd-cua-driver.yml
 2076 cd-mobile-mcp.yml
-102891 ci.yml
+111021 ci.yml
 1482 codeql.yml
 9389 comment-attachment-guard.yml
 31677 desktop-release.yml
 2038 docs-page-action.yml
 10005 dsw-swe-verified-release.yml
-21437 e2e.yml
+25891 e2e.yml
 11394 finalize-release.yml
 16647 live-host-release.yml
 5950 live-host.yml
@@ -47,7 +47,7 @@
 22037 release-sdk-python.yml
 19094 release-sdk.yml
 14546 release-vscode-companion.yml
-62799 release.yml
+65361 release.yml
 43717 repo-hygiene.yml
 1079 scorecard-monthly.yml
 10691 sdk-java.yml
@@ -58,7 +58,7 @@
 2641 stale.yml
 10920 sync-desktop-to-oss.yml
 10018 sync-live-host-to-oss.yml
-10138 sync-release-to-oss.yml
+10988 sync-release-to-oss.yml
 2508 tui-parity.yml
 7187 update-ecs-runner-qwen.yml
 2307 web-shell-visuals-cleanup.yml

@@ -14,6 +14,7 @@ import { realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
+import { runInit } from './init.js';
 import { LiveDaemon } from './daemon.js';
 import { LiveLogger } from './logger.js';
 
@@ -109,5 +110,11 @@ if (process.argv[1] !== undefined) {
   }
 }
 if (invokedDirectly) {
-  void main();
+  // Subcommand dispatch: `qwen-live init` runs the setup wizard,
+  // everything else starts the daemon.
+  if (process.argv[2] === 'init') {
+    void runInit();
+  } else {
+    void main();
+  }
 }
