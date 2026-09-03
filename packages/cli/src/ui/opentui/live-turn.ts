@@ -15,6 +15,13 @@
  * boundary as genuine steering content (`drainSteering`), and whatever is
  * still queued when the turn ends becomes the next turn — so user input is
  * never silently dropped.
+ *
+ * `@path` mentions are expanded where a prompt enters the stream
+ * ({@link livePromptEvents}), never here: an idle submit, queued text that
+ * becomes the next turn, and text drained as in-flight steering all reach the
+ * model with file content, while the transcript keeps what was typed. A
+ * steering resolution the user interrupts mid-read hands its texts back to this
+ * queue instead of dropping them.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -90,6 +97,13 @@ export interface OpenTuiSubmitOptions {
   modelOverride?: string;
   refreshContextFilesOnWrite?: boolean;
   onComplete?: () => Promise<void>;
+  /**
+   * Raw typed text for `UserPromptSubmit` provenance. Set by the composer
+   * submit and by the follow-on turn built from the mid-turn queue; a slash
+   * command's `submit_prompt` outcome carries generated content, which ink
+   * also submits without provenance.
+   */
+  submittedPrompt?: string;
 }
 
 export interface OpenTuiLiveTurn {
@@ -173,6 +187,13 @@ export function useOpenTuiLiveTurn(
     return drained;
   }, []);
 
+  const restoreQueue = useCallback((texts: readonly string[]) => {
+    const restored = texts.map((text) => text.trim()).filter(Boolean);
+    if (restored.length === 0) return;
+    queueRef.current = [...restored, ...queueRef.current];
+    setQueueLength(queueRef.current.length);
+  }, []);
+
   const runTurn = useCallback(
     async (
       prompt: PartListUnion,
@@ -187,8 +208,10 @@ export function useOpenTuiLiveTurn(
         for await (const ev of livePromptEvents(config, prompt, abort.signal, {
           promptId,
           modelOverride: turnOptions?.modelOverride,
+          submittedPrompt: turnOptions?.submittedPrompt,
           refreshContextFilesOnWrite: turnOptions?.refreshContextFilesOnWrite,
           drainSteering: drainQueue,
+          restoreSteering: restoreQueue,
           onWaitingCall: (call) => {
             if (seq !== turnSeqRef.current) return;
             setWaitingCalls((prev) =>
@@ -222,19 +245,26 @@ export function useOpenTuiLiveTurn(
         if (abortRef.current === abort) abortRef.current = null;
         if (seq === turnSeqRef.current) {
           setBusy(false);
-          // Whatever survived the tool-boundary drain becomes the next turn.
+          // One queued submission per chained turn: a decline (e.g. an abort
+          // landing inside an @-expansion read) must consume only its own
+          // submission — the rest stay queued for the following boundaries,
+          // matching ink's pop-one-submission-per-settle drain.
           const rest = queueRef.current;
           if (rest.length > 0) {
-            const text = drainQueue().join('\n');
-            if (text.trim()) {
-              apply({ type: 'user', text });
-              void runTurn(text, nextLivePromptId(config));
-            }
+            const [text, ...remaining] = rest;
+            queueRef.current = remaining;
+            setQueueLength(remaining.length);
+            apply({ type: 'user', text });
+            // ink keeps provenance for a queued submission, and the raw text
+            // is what the stream layer expands `@path` mentions from.
+            void runTurn(text, nextLivePromptId(config), {
+              submittedPrompt: text,
+            });
           }
         }
       }
     },
-    [config, apply, drainQueue, setBusy],
+    [config, apply, drainQueue, restoreQueue, setBusy],
   );
 
   const submit = useCallback(
