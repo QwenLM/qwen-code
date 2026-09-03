@@ -229,19 +229,27 @@ describe('scripts suite timeout', () => {
     // heaviest case measures ~14s idle, and acp-serve-boundary-guard — neither
     // slow, both past 30s under contention. A per-file `vi.setConfig` cannot
     // fix it: these cases register their timeout at collection.
+    // The `''` arm is the one that matters and the one this pin used to
+    // discard: it stubbed the empty string and then immediately called
+    // `vi.unstubAllEnvs()`, so the assertion that followed measured the unset
+    // path twice and never saw an empty value at all. `''` is not a hypothetical
+    // spelling — `${{ cond && 'x' || '' }}` renders exactly that whenever the
+    // condition is false, so a workflow wiring this knob that way would ship 0
+    // here, and vitest reads 0 as no timeout at all.
     for (const [stub, expected] of [
       [undefined, 90_000],
+      ['', 90_000],
+      ['abc', 90_000],
+      ['0', 90_000],
       ['5000', 5_000],
     ] as const) {
-      if (stub === undefined) {
-        vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', '');
-        vi.unstubAllEnvs();
-      } else {
-        vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', stub);
-      }
+      vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', stub);
       vi.resetModules();
       const mod = await import('./vitest.config.js');
-      expect(mod.default.test?.testTimeout, `stub=${stub}`).toBe(expected);
+      expect(
+        mod.default.test?.testTimeout,
+        `stub=${stub === undefined ? '<unset>' : JSON.stringify(stub)}`,
+      ).toBe(expected);
       vi.unstubAllEnvs();
     }
   });
