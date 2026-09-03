@@ -2883,6 +2883,95 @@ describe('DwsChannel', () => {
     );
   });
 
+  it('routes a bare slash command after the leading bot mention', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    bridge.btw = vi.fn();
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'bare-btw-after-mention',
+        '@QwenBot(QwenBot) /btw',
+      ),
+    );
+
+    expect(bridge.btw).not.toHaveBeenCalled();
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendImMessage).toHaveBeenCalledWith(
+      { kind: 'group', conversationId: 'cid-1' },
+      'Usage: /btw <question>',
+      expect.any(String),
+    );
+  });
+
+  it('strips the leading bot mention from a namespaced slash command', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'namespaced-command-after-mention',
+        '@QwenBot(QwenBot) /git:commit',
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: '/git:commit' }),
+    ]);
+  });
+
+  it('keeps an ambient group mention before a slash command', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ groups: { '*': { requireMention: false } } }),
+    );
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_group_all',
+        'ambient-mention-before-command',
+        '@Alice /btw is this right?',
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: '@Alice /btw is this right?' }),
+    ]);
+  });
+
+  it('keeps a slash command addressed to another mentioned member as prose', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    bridge.btw = vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      answer: 'not expected',
+    });
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'command-after-other-mention',
+        '@Colleague /btw is this right? @QwenBot(QwenBot)',
+      ),
+    );
+
+    expect(bridge.btw).not.toHaveBeenCalled();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining(
+        '@Colleague /btw is this right? @QwenBot(QwenBot)',
+      ),
+      expect.any(Object),
+    );
+  });
+
   it('deduplicates a mention delivered by history and the live stream', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);

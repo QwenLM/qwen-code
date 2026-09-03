@@ -1768,13 +1768,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         : { kind: 'group', conversationId: message.conversationId };
     this.rememberImTarget(message.conversationId, target);
 
-    // DWS keeps the leading bot mention in group-message text. Remove it only
-    // when it prefixes a slash command so ChannelBase can parse the command.
+    // DWS identifies only that the bot was mentioned somewhere, not which text
+    // token is the bot. Remove a leading mention only when no later mention
+    // could be the one that caused the at-event.
     const text =
       source.kind === 'at'
         ? message.content
             .replace(
-              /^\s*@[^\s\p{Cf}]+\s+(?=\/[a-zA-Z0-9_:-]+(?:@\S+)?(?:\s|$))/u,
+              /^\s*@[^\s\p{Cf}]+\s+(?![\s\S]*\s@[^\s\p{Cf}]+)(?=\/[a-zA-Z0-9_:-]+(?:@\S+)?(?:\s|$))/u,
               '',
             )
             .trim()
