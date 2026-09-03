@@ -585,7 +585,7 @@ jobs:
               if [ "${status}" -lt 128 ] \
                 && grep -qE '^[[:space:]]*Tests[[:space:]]+[0-9]+ passed' "${log}" \
                 && ! grep -qE '^[[:space:]]*(Tests|Test Files)[[:space:]]+[0-9]+ failed' "${log}" \
-                && ! grep -E '^[[:space:]]*Error:' "${log}" | grep -qv 'Timeout calling'; then
+                && ! grep -E '^[[:space:]]*[A-Za-z_$]*Error:' "${log}" | grep -qv 'Timeout calling'; then
                 echo "::warning title=Workspace tests passed through a Vitest transport timeout::Every test passed and no other error was reported; Vitest's own worker RPC timed out. Treated as a pass."
                 exit 0
               fi

@@ -676,6 +676,23 @@ describe('release workflow', () => {
         1,
         '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
       ],
+      // Node prints an unhandled exception under its own class header, so
+      // anchoring the pass-through on a bare `Error:` let a real crash clear
+      // all four legs and ship as a green release.
+      [
+        'transport timeout beside a non-Error exception header',
+        'Error: [vitest-worker]: Timeout calling "x"\nTypeError: Cannot read properties of null (reading port)\n Tests  10614 passed (10614)',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
+      // The matcher is whole-file while the proof it demands is per-run, so a
+      // passing tally from one workspace must not cover a later crash.
+      [
+        'transport timeout, tally, then a later crash',
+        'Error: [vitest-worker]: Timeout calling "x"\n Tests  10614 passed (10614)\nAssertionError: expected 1 to equal 2',
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
+      ],
       [
         'transport timeout, no tally to back it',
         'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
