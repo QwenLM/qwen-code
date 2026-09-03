@@ -12,12 +12,20 @@ set -euo pipefail
 archive="${1:?usage: e2e-build-unpack.sh <archive-path>}"
 : "${GITHUB_SHA:?GITHUB_SHA must be set}"
 
-stamp="$(tar -xzOf "$archive" e2e-build.sha)"
+if ! stamp="$(tar -xzOf "$archive" e2e-build.sha 2>/dev/null)"; then
+  echo "::error::build artifact holds no e2e-build.sha stamp — not an archive e2e-build-pack.sh produced"
+  exit 1
+fi
 if [ "$stamp" != "${GITHUB_SHA}" ]; then
   echo "::error::build artifact was produced from ${stamp}, not ${GITHUB_SHA}"
   exit 1
 fi
-if ! tar -tzf "$archive" | grep -qx 'dist/cli.js'; then
+# The whole listing is read into a variable first. Piping tar into
+# `grep -q` would let grep exit at the first match while tar is still
+# writing: tar then dies of SIGPIPE, pipefail reports 141, and every real
+# archive (14k members, the bundle listed first) is refused.
+listing="$(tar -tzf "$archive")"
+if ! grep -qx 'dist/cli.js' <<< "$listing"; then
   echo "::error::build artifact holds no dist/cli.js — the pack step shipped an archive without the bundle"
   exit 1
 fi

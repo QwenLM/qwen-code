@@ -287,7 +287,18 @@ describe('e2e workflow', () => {
     });
 
     it('gates the build like the legs, so a skipped build skips them', () => {
-      expect(build.if).toBe(yml.jobs['e2e-test-linux'].if);
+      // The three fork-gated legs carry the build's exact gate; the nightly
+      // legs are narrower (schedule/dispatch only), which is a subset.
+      for (const job of [
+        'e2e-test-linux',
+        'e2e-test-macos',
+        'e2e-interactive-opentui',
+      ]) {
+        expect(yml.jobs[job].if, job).toBe(build.if);
+      }
+      expect(build.if).toContain(
+        'github.event.pull_request.head.repo.full_name == github.repository',
+      );
     });
 
     it.each(legs)('%s unpacks the shared build instead of building', (job) => {

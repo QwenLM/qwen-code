@@ -18,10 +18,11 @@ import { fileURLToPath } from 'node:url';
 const PACK = fileURLToPath(new URL('./e2e-build-pack.sh', import.meta.url));
 const UNPACK = fileURLToPath(new URL('./e2e-build-unpack.sh', import.meta.url));
 const SHA = 'a'.repeat(40);
-// Three roots, one negated entry: the script must scan every non-negated
-// root, not a list of its own.
+// Three roots, two entries sharing one of them, one negated entry: the
+// script must scan every non-negated root once, not a list of its own.
 const WORKSPACES = [
   'packages/*',
+  'packages/channels/base',
   'integrations/*',
   'plugins/*',
   '!packages/skip',
@@ -97,7 +98,13 @@ describe('e2e build archive', () => {
       'integrations/external-context/dist/index.js',
       'plugins/foo/dist/index.js',
     ]) {
-      assert.ok(list.includes(expected), `missing ${expected}`);
+      // Exactly once: two workspace entries share the `packages` root, and
+      // a root scanned twice would list every dist/ under it twice.
+      assert.equal(
+        list.filter((m) => m === expected).length,
+        1,
+        `expected ${expected} exactly once`,
+      );
     }
     assert.ok(
       !list.some((m) => m.includes('node_modules')),
@@ -135,7 +142,7 @@ describe('e2e build archive', () => {
     const target = join(scratch, 'never-nobundle.tar.gz');
     const result = run(PACK, [target], { cwd: noBundle });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /::error::dist\/cli\.js not found/);
+    assert.match(result.stdout, /::error::dist\/cli\.js not found/);
     assert.ok(!existsSync(target));
   });
 
@@ -151,7 +158,42 @@ describe('e2e build archive', () => {
     const target = join(scratch, 'never-bundleonly.tar.gz');
     const result = run(PACK, [target], { cwd: bundleOnly });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /::error::.*found no workspace dist\//);
+    assert.match(result.stdout, /::error::.*found no workspace dist\//);
+    assert.ok(!existsSync(target));
+  });
+
+  it('refuses to pack when package.json declares no workspaces', () => {
+    // Without this gate `find` runs with no path and defaults to `.`, so
+    // the under-pack check counts ./dist and a stamp+bundle-only archive
+    // ships silently.
+    const bare = mkdtempSync(join(scratch, 'noworkspaces-'));
+    writeWorkspaces(bare, []);
+    write(bare, 'dist/cli.js');
+    const target = join(scratch, 'never-noworkspaces.tar.gz');
+    const result = run(PACK, [target], { cwd: bare });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stdout,
+      /::error::package\.json declares no workspaces/,
+    );
+    assert.ok(!existsSync(target));
+  });
+
+  it('names a workspace root that is missing on disk', () => {
+    // npm installs fine with a glob whose directory is gone, and build.js
+    // walks its own list, so pack is the first step that would notice —
+    // as a bare `find:` error unless it checks first.
+    const gone = mkdtempSync(join(scratch, 'missingroot-'));
+    writeWorkspaces(gone, ['packages/*', 'missing/*']);
+    write(gone, 'dist/cli.js');
+    write(gone, 'packages/core/dist/index.js');
+    const target = join(scratch, 'never-missingroot.tar.gz');
+    const result = run(PACK, [target], { cwd: gone });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stdout,
+      /::error::.*workspace root 'missing' from package\.json does not exist/,
+    );
     assert.ok(!existsSync(target));
   });
 
@@ -219,6 +261,97 @@ describe('e2e build archive', () => {
     );
     assert.ok(!existsSync(join(leg, 'packages')), 'nothing is extracted');
     assert.ok(existsSync(copy), 'a refused archive is left for inspection');
+  });
+
+  it('accepts an archive whose listing outruns a pipe buffer', () => {
+    // The real archive lists ~14k members with dist/cli.js near the top. A
+    // `tar -t | grep -q` check would let grep exit at that first match
+    // while tar still writes; tar then dies of SIGPIPE, pipefail turns
+    // that into 141, and a valid archive is refused. A few thousand
+    // members with long names push the listing well past 64 KiB.
+    const big = mkdtempSync(join(scratch, 'big-'));
+    writeWorkspaces(big);
+    write(big, 'dist/cli.js');
+    mkdirSync(join(big, 'integrations'), { recursive: true });
+    mkdirSync(join(big, 'plugins'), { recursive: true });
+    for (let i = 0; i < 3000; i += 1) {
+      write(
+        big,
+        `packages/big/dist/chunk-${String(i).padStart(5, '0')}-${'x'.repeat(60)}.js`,
+      );
+    }
+    const bigArchive = join(scratch, 'big.tar.gz');
+    const packed = run(PACK, [bigArchive], { cwd: big });
+    assert.equal(packed.status, 0, packed.stdout + packed.stderr);
+    const listing = spawnSync('tar', ['-tzf', bigArchive], {
+      encoding: 'utf8',
+    }).stdout;
+    assert.ok(
+      listing.length > 65536,
+      'fixture listing must exceed a pipe buffer',
+    );
+    assert.ok(listing.indexOf('dist/cli.js\n') < 4096, 'bundle listed early');
+
+    const leg = mkdtempSync(join(scratch, 'big-leg-'));
+    const copy = join(leg, 'downloaded.tar.gz');
+    writeFileSync(copy, readFileSync(bigArchive));
+    const result = run(UNPACK, [copy], { cwd: leg });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.ok(existsSync(join(leg, 'dist/cli.js')));
+    assert.ok(
+      existsSync(
+        join(leg, `packages/big/dist/chunk-02999-${'x'.repeat(60)}.js`),
+      ),
+    );
+  });
+
+  it('refuses a workspace-level cli.js standing in for the bundle', () => {
+    // Correct stamp, no root dist/, but a member ending in dist/cli.js:
+    // only a whole-line match may pass the pre-extraction check.
+    const src = mkdtempSync(join(scratch, 'decoy-src-'));
+    write(src, 'e2e-build.sha', SHA);
+    write(src, 'packages/core/dist/cli.js');
+    write(src, 'packages/core/dist/index.js');
+    const decoy = join(scratch, 'decoy.tar.gz');
+    const packed = spawnSync(
+      'tar',
+      ['-czf', decoy, 'e2e-build.sha', 'packages/core/dist'],
+      { cwd: src, encoding: 'utf8' },
+    );
+    assert.equal(packed.status, 0, packed.stderr);
+
+    const leg = mkdtempSync(join(scratch, 'decoy-leg-'));
+    const copy = join(leg, 'downloaded.tar.gz');
+    writeFileSync(copy, readFileSync(decoy));
+    const result = run(UNPACK, [copy], { cwd: leg });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stdout,
+      /::error::build artifact holds no dist\/cli\.js/,
+    );
+    assert.ok(!existsSync(join(leg, 'packages')), 'nothing is extracted');
+  });
+
+  it('refuses an archive without a stamp, and says so', () => {
+    const src = mkdtempSync(join(scratch, 'nostamp-src-'));
+    write(src, 'dist/cli.js');
+    const nostamp = join(scratch, 'nostamp.tar.gz');
+    const packed = spawnSync('tar', ['-czf', nostamp, 'dist'], {
+      cwd: src,
+      encoding: 'utf8',
+    });
+    assert.equal(packed.status, 0, packed.stderr);
+
+    const leg = mkdtempSync(join(scratch, 'nostamp-leg-'));
+    const copy = join(leg, 'downloaded.tar.gz');
+    writeFileSync(copy, readFileSync(nostamp));
+    const result = run(UNPACK, [copy], { cwd: leg });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stdout,
+      /::error::build artifact holds no e2e-build\.sha stamp/,
+    );
+    assert.ok(!existsSync(join(leg, 'dist')), 'nothing is extracted');
   });
 
   it('requires the commit to compare against', () => {

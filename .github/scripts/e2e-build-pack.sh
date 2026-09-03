@@ -19,9 +19,12 @@ archive="${1:?usage: e2e-build-pack.sh <archive-path>}"
 : "${GITHUB_SHA:?GITHUB_SHA must be set}"
 
 if [ ! -f dist/cli.js ]; then
-  echo "::error::dist/cli.js not found — run e2e-build-pack.sh from the repository root after npm run build && npm run bundle" >&2
+  echo "::error::dist/cli.js not found — run e2e-build-pack.sh from the repository root after npm run build && npm run bundle"
   exit 1
 fi
+
+# Every refusal below prints its ::error:: on stdout: the runner only turns
+# workflow commands on stdout into annotations.
 
 # The workspace roots come from package.json, not from a copy kept here: a
 # new top-level root (say plugins/*) is scanned the day it is added to
@@ -34,9 +37,18 @@ roots="$(node -e '
   process.stdout.write([...roots].join("\n"));
 ')"
 if [ -z "$roots" ]; then
-  echo "::error::package.json declares no workspaces; nothing to pack" >&2
+  echo "::error::package.json declares no workspaces; nothing to pack"
   exit 1
 fi
+# npm tolerates a workspace glob whose directory is gone, and build.js walks
+# its own list, so a vanished root would first surface here as a bare
+# `find: No such file or directory`. Name it instead.
+for root in $roots; do
+  if [ ! -d "$root" ]; then
+    echo "::error::e2e-build-pack.sh: workspace root '$root' from package.json does not exist"
+    exit 1
+  fi
+done
 
 # The stamp sits at the archive root, so it is written into the tree for the
 # duration of the pack and removed afterwards; a local run leaves nothing
@@ -58,7 +70,7 @@ printf '%s' "${GITHUB_SHA}" > e2e-build.sha
 # outputs would surface as module-resolution errors on every leg instead
 # of here. Same contract as release.yml's Pack Build Outputs.
 if [ "$(wc -l < "$list")" -le 2 ]; then
-  echo "::error::e2e-build-pack.sh found no workspace dist/ under: $(tr '\n' ' ' < <(printf '%s' "$roots"))" >&2
+  echo "::error::e2e-build-pack.sh found no workspace dist/ under: $(tr '\n' ' ' < <(printf '%s' "$roots"))"
   exit 1
 fi
 tar -czf "$archive" -T "$list"
