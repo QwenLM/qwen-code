@@ -282,7 +282,12 @@ function buildSentCompletionNotification(
     taskId: sessionId,
     status,
     kind: 'agent' as const,
-    label: modelLabel,
+    // `subSessionName` strips bidi and control marks and trims, so a name that
+    // was only those characters leaves an empty label -- which the receiving
+    // gate rejects as invalid params. The acceptance wait treats that as
+    // retryable and gives up 30 minutes later, so the parent's completion turn
+    // never runs. An absent label is valid; an empty one is not.
+    ...(modelLabel.trim() ? { label: modelLabel } : {}),
   };
 }
 
