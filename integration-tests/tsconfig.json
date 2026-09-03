@@ -48,6 +48,7 @@
       "@qwen-code/qwen-code-core/noFollowOpen": [
         "../packages/core/src/utils/no-follow-open.ts"
       ],
+      "@qwen-code/qwen-code-core/*": ["../packages/core/src/*"],
       "@qwen-code/qwen-code-core/goalWire": [
         "../packages/core/src/goals/goal-wire.ts"
       ],

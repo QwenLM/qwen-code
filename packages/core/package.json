@@ -46,6 +46,7 @@
       "import": "./dist/src/utils/no-follow-open.js"
     },
     "./package.json": "./package.json",
+    "./*": "./dist/src/*",
     "./dist/*": "./dist/*",
     "./src/*": "./src/*"
   },
