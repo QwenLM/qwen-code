@@ -292,9 +292,12 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     //
     // The spy moves the comparison value rather than the directory's
     // owner, so this fires whether or not the runner is root.
-    const uid = vi
-      .spyOn(process, 'getuid')
-      .mockReturnValue((process.getuid?.() ?? 0) + 1);
+    // `process.getuid` is optional in the Node types (it does not exist
+    // on Windows), so it has to be narrowed before `vi.spyOn` can type
+    // the mock.
+    const withUid = process as NodeJS.Process & { getuid: () => number };
+    const uid = vi.spyOn(withUid, 'getuid');
+    uid.mockReturnValue((process.getuid?.() ?? 0) + 1);
     try {
       const started = await startPeerInbox({
         socketPath: path.join(tmpDir, 'socks', 'a.sock'),
