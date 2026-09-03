@@ -699,6 +699,15 @@ describe('settleSentPeerMessage', () => {
     const held = await sendOne();
     expect(settleSentPeerMessage(held, 'held')).toBeDefined();
     expect(settleSentPeerMessage(held, 'refused')).toBeUndefined();
+
+    // Nor after delivery. Any process that can reach this session's
+    // socket can write a receipt for any id, so a contradicting peer
+    // must not be able to flip a delivered message into "does not accept
+    // messages -- don't re-send it" and have the model abandon a send
+    // the recipient already has.
+    const delivered = await sendOne();
+    expect(settleSentPeerMessage(delivered, 'delivered')).toBeDefined();
+    expect(settleSentPeerMessage(delivered, 'refused')).toBeUndefined();
   });
 
   it('treats a terminal state as final', async () => {

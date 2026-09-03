@@ -231,6 +231,19 @@ const HELD_EXPIRY_VALUES: Record<string, number | null> = {
 };
 
 /**
+ * The accepted `crossSessionHeldExpiry` values, in schema order.
+ *
+ * Exported so the settings schema's option list can be asserted against
+ * this table rather than kept in step by hand. An option added there
+ * without an entry here does not fail anywhere: `parseHeldExpiry` takes
+ * its unrecognized branch, logs at debug level, and silently returns the
+ * five-minute default -- so a user who asked for thirty minutes gets a
+ * review window six times shorter, with no error and a green suite.
+ */
+export const HELD_EXPIRY_OPTIONS: readonly string[] =
+  Object.keys(HELD_EXPIRY_VALUES);
+
+/**
  * Turn the configured hold lifetime into milliseconds, or null for
  * "never".
  *

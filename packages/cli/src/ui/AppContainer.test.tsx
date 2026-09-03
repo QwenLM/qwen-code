@@ -7947,6 +7947,24 @@ describe('AppContainer State Management', () => {
         `Message to app-ab [ab12cd]: ${describeDeliveryStatus('denied')}`,
       );
 
+      // Refused is not declined: nobody looked at this one, the setting
+      // turned it away at admission. This transcript line is the only
+      // place that distinction reaches a person, so it is what makes the
+      // two answers different rather than two words for the same thing.
+      act(() => {
+        peer.emitReceipt({
+          status: 'refused',
+          address: 'app-ab [ab12cd]',
+          origMsgId: 'm3b',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(4);
+      expect(notices()[3]).toBe(
+        `Message to app-ab [ab12cd]: ${describeDeliveryStatus('refused')}`,
+      );
+      expect(notices()[3]).not.toContain('declined');
+
       // A stale address is named as such, never as a human's decision.
       act(() => {
         peer.emitReceipt({
@@ -7956,9 +7974,9 @@ describe('AppContainer State Management', () => {
           previous: 'pending',
         });
       });
-      expect(notices()).toHaveLength(4);
-      expect(notices()[3]).toContain('different session');
-      expect(notices()[3]).not.toContain('declined');
+      expect(notices()).toHaveLength(5);
+      expect(notices()[4]).toContain('different session');
+      expect(notices()[4]).not.toContain('declined');
 
       // An accepted message that expired was never held: the wire text
       // for 'expired' speaks of a held message and must not be reused.
@@ -7970,9 +7988,9 @@ describe('AppContainer State Management', () => {
           previous: 'delivered',
         });
       });
-      expect(notices()).toHaveLength(5);
-      expect(notices()[4]).toContain('exited before it read');
-      expect(notices()[4]).not.toContain('held');
+      expect(notices()).toHaveLength(6);
+      expect(notices()[5]).toContain('exited before it read');
+      expect(notices()[5]).not.toContain('held');
 
       act(() => {
         peer.emitReceipt({
@@ -7982,8 +8000,8 @@ describe('AppContainer State Management', () => {
           previous: 'held',
         });
       });
-      expect(notices()).toHaveLength(6);
-      expect(notices()[5]).toContain(describeDeliveryStatus('expired'));
+      expect(notices()).toHaveLength(7);
+      expect(notices()[6]).toContain(describeDeliveryStatus('expired'));
 
       // Expired with no delivery at all: the gate could not queue it
       // (accept backlog full) — the peer may be alive, so no exit claim.
@@ -7995,9 +8013,9 @@ describe('AppContainer State Management', () => {
           previous: 'pending',
         });
       });
-      expect(notices()).toHaveLength(7);
-      expect(notices()[6]).not.toContain('exited before');
-      expect(notices()[6]).toContain('too busy');
+      expect(notices()).toHaveLength(8);
+      expect(notices()[7]).not.toContain('exited before');
+      expect(notices()[7]).toContain('too busy');
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {

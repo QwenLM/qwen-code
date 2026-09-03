@@ -490,6 +490,25 @@ describe('/peers', () => {
     expect(fake.decide).not.toHaveBeenCalled();
   });
 
+  it('passes the configured lifetime through to the listing', async () => {
+    // Every remaining-time test above calls `formatHeldList` directly,
+    // and the fake's `getHeldExpiryMs` returns null -- which is exactly
+    // what omitting the second argument produces. Dropping the argument
+    // at the one production call site would leave all of those green
+    // while the /peers deadline disappeared.
+    messages = [
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        heldAt: Date.now() - 60_000,
+      }),
+    ];
+    fake.getHeldExpiryMs = () => 5 * 60_000;
+
+    const result = await run(fake, '');
+
+    expect(result.content).toContain('4 minutes left');
+  });
+
   it('still decides a survivor after the expiry timer removed the other', async () => {
     // The expiry timer removes entries with no peer or user activity --
     // a mover the guard's rationale never named. A removal can never make

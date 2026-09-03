@@ -31,6 +31,7 @@ interface Harness {
   setRawPolicy: (policy: unknown) => void;
   throwOnMode: () => void;
   throwOnPolicy: () => void;
+  throwOnExpiry: () => void;
   failDelivery: () => void;
   recoverDelivery: () => void;
 }
@@ -50,6 +51,7 @@ function harness(
       : initial.heldExpiryMs;
   let modeThrows = false;
   let policyThrows = false;
+  let expiryThrows = false;
   const delivered: PeerUserFrame[] = [];
   const deliveredAsSelfSent: boolean[] = [];
   const statuses: Array<{ msgId: string; status: string }> = [];
@@ -65,7 +67,10 @@ function harness(
       if (policyThrows) throw new Error('settings getter exploded');
       return policy as InboundPolicy | undefined;
     },
-    getHeldExpiryMs: () => heldExpiryMs,
+    getHeldExpiryMs: () => {
+      if (expiryThrows) throw new Error('settings read exploded');
+      return heldExpiryMs;
+    },
     deliver: (frame, origin) => {
       if (deliveryFails) throw new Error('accepted-message backlog is full');
       delivered.push(frame);
@@ -103,6 +108,9 @@ function harness(
     },
     throwOnPolicy: () => {
       policyThrows = true;
+    },
+    throwOnExpiry: () => {
+      expiryThrows = true;
     },
     failDelivery: () => {
       deliveryFails = true;
@@ -312,6 +320,23 @@ describe('duplicate msgId', () => {
 });
 
 describe('settled ids', () => {
+  it('refuses a re-sent id after a refusal even when the policy flips', () => {
+    // A refusal is terminal on the sender's ledger too, so re-admitting
+    // the id would leave the sending transcript saying "don't re-send
+    // it" while this session acts on the message: `settleSentPeerMessage`
+    // returns undefined for the follow-up `delivered` receipt, and the
+    // sender is never told.
+    const h = harness({ policy: 'refuse' });
+    const f = frame({ msgId: 'task-0002' });
+
+    expect(h.gate.admit(f)).toBe('refused');
+    h.setPolicy('accept');
+    expect(h.gate.admit(f)).toBe('refused');
+
+    expect(h.delivered).toHaveLength(0);
+    expect(h.statuses.map((s) => s.status)).toEqual(['refused', 'refused']);
+  });
+
   it('refuses a re-sent id after denial even when the policy flips', () => {
     // The user's denial is final: a peer re-sending the same id with a
     // swapped body must not get a second decision once modes change.
@@ -951,7 +976,14 @@ describe('held message expiry', () => {
     const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
     const f = frame();
     h.gate.admit(f);
-    vi.advanceTimersByTime(60_001);
+    // `setSystemTime`, not `advanceTimersByTime`: advancing fires the
+    // armed timer, which sweeps before `decide()` is even called, so the
+    // guard at the top of `decide()` would never run and deleting it
+    // would leave this test green. A suspended or starved clock is the
+    // case the guard exists for -- and the one where a user who ran
+    // /peers (which does not sweep) would otherwise have an overdue
+    // message injected and receipted 'delivered'.
+    vi.setSystemTime(Date.now() + 60_001);
     expect(h.gate.decide(f.msgId, 'approve')).toBe('gone');
     expect(h.delivered).toHaveLength(0);
   });
@@ -1086,6 +1118,32 @@ describe('held message expiry', () => {
       older.msgId,
       newer.msgId,
     ]);
+  });
+
+  it('falls back to the default lifetime when the setting cannot be read', () => {
+    // Fail-closed, matching the mode and policy getters beside it. A
+    // throw here would escape `getHeldExpiryMs` through `expireOverdue`
+    // into the first statement of `admit()` and drop every inbound frame
+    // with no receipt at all.
+    const h = harness({ policy: 'hold', heldExpiryMs: 10 * 60_000 });
+    h.throwOnExpiry();
+    expect(h.gate.getHeldExpiryMs()).toBe(DEFAULT_HELD_EXPIRY_MS);
+    // And a frame still gets through the gate rather than throwing.
+    const f = frame();
+    expect(h.gate.admit(f)).toBe('held');
+    expect(h.gate.getHeld()).toHaveLength(1);
+  });
+
+  it('falls back to the default lifetime when no getter is supplied', () => {
+    // Unreachable from the one production caller today, which always
+    // supplies it -- kept fail-closed so a future caller that omits it
+    // gets a bounded hold rather than one that never expires.
+    const gate = new InboundGate({
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPolicySetting: () => 'hold',
+      deliver: () => {},
+    });
+    expect(gate.getHeldExpiryMs()).toBe(DEFAULT_HELD_EXPIRY_MS);
   });
 
   it('takes a still-unexpired message through the gate normally', () => {

@@ -13,27 +13,38 @@ or missing:
 1. **A refusal reported itself as a decision.** A session whose
    `agents.crossSessionInbound` is `refuse` turns every peer message away
    at admission — nobody sees it. The sender was told `denied`, which
-   means "a person reviewed this and said no". The sending model cannot
-   tell those apart, and they call for opposite behaviour: a decision is
-   worth raising with that person, a policy refusal means stop.
+   means "a person reviewed this and said no". Those call for opposite
+   behaviour: a decision is worth raising with that person, a policy
+   refusal means stop.
+
+   The consumer of the distinction is the sending **user**, in their own
+   transcript. No receipt reaches any model: `send_message` tells the
+   model up front that it will not learn the outcome, and the only
+   subscriber to receipts is the transcript notice. Surfacing receipts
+   into model context is a separate change this one does not make.
+
 2. **A hold had no end.** A held message waited for a review that might
    never come — the user may not be at that terminal — and the sender had
    no way to distinguish "still waiting" from "never coming". The only
    thing that ever settled a hold was the session exiting, which sent
-   `expired` at shutdown.
+   `expired` at shutdown. As above, this reaches the sending user rather
+   than the sending model.
 
-Both leave the sending session's model reasoning about a message it can
-no longer learn anything about.
+Both leave the sending session's _user_ watching a message they can
+learn nothing more about. The model is not told either way, by design
+and by documentation — `send_message` says so in its own result.
 
 ## Design
 
 **A `refused` status.** Added to `PeerDeliveryStatus`, emitted by the gate
 where the policy refuses, and accepted by the frame parser so it survives
-the wire. Its description tells the sender not to re-send and to reach
-that user another way. `denied` keeps its meaning: a person decided.
+the wire. Its description tells the sending user not to re-send and to
+reach that person another way; it reaches them through the transcript
+notice, and through the `reason` field on the delivery-status frame that
+nothing reads today. `denied` keeps its meaning: a person decided.
 
 The distinction is drawn at the point of admission, which is the only
-place it exists. A message that was *already parked* when the user
+place it exists. A message that was _already parked_ when the user
 switches the setting to `refuse` is settled as `denied` — someone chose,
 just after the fact — and the receipt state machine reflects that:
 `refused` is reachable only from `pending`, never from `held`.
@@ -45,15 +56,15 @@ UI is notified.
 
 Three details matter:
 
-- *One timer, re-armed.* The gate arms a single unref'd timer for whichever
+- _One timer, re-armed._ The gate arms a single unref'd timer for whichever
   message expires first, rather than one timer per message. It is
   rescheduled after every change to the buffer.
-- *Swept at every entry point, not only on the timer.* `admit`, `decide`
+- _Swept at every entry point, not only on the timer._ `admit`, `decide`
   and `reevaluate` sweep overdue entries before reading the buffer,
   because timers can be starved or slept through — a laptop that
   suspends for an hour must not wake up and deliver a message from
   before it slept.
-- *Judged against the lifetime configured now.* Shortening the setting
+- _Judged against the lifetime configured now._ Shortening the setting
   expires a backlog that is already too old; lengthening it extends what
   is still waiting. Of the two defensible readings, this one has the
   property that what `/peers` shows as remaining is what actually
@@ -84,9 +95,23 @@ counting seconds nobody can act on.
   at `MAX_HELD_MESSAGES`, so this is bounded and small.
 - **Headless sessions are unaffected.** They bind no inbox today, so
   neither receipt reaches them; that arrives with headless participation.
-- **The wire gains a value, not a version.** An older sender that does
-  not know `refused` drops the receipt as unparseable and simply learns
-  nothing — the same position it was in before. Frame version stays 1.
+- **The wire gains a value, not a version, and older senders lose an
+  answer.** An older sender does not know `refused`: its parser's status
+  allowlist rejects the receipt, so it learns nothing and its ledger
+  stays `pending` until eviction. This is a regression for that sender,
+  not a neutral change — before this diff the same refusal arrived as
+  `denied`, which it parsed and rendered as "The recipient declined your
+  message". Wrong, but readable; now it is silence, and silence reads as
+  delivery.
+
+  Accepted anyway, because the alternative is worse for every sender
+  that _is_ current: keeping `denied` on the wire for a policy refusal
+  is the exact conflation this change exists to remove, and versioning
+  the frame to serve both would make the receiver decide which lie to
+  tell based on a version the sender asserts. The exposure is bounded to
+  two sessions on one machine at different versions — an installed
+  release alongside a `npm run dev` checkout — and ends when the older
+  one is upgraded. Frame version stays 1.
 
 ## Files
 
