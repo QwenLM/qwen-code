@@ -3069,7 +3069,7 @@ export class LlmClient {
   private restoreMemoryBodyStateFromHistory(): void {
     this.config
       .getMemoryManager()
-      .restoreMemoryBodiesPresentInHistory(
+      .reconcileMemoryBodiesPresentInHistory(
         collectResidentMemoryBodies(this.getHistoryShallow()),
       );
   }

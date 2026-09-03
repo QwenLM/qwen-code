@@ -132,6 +132,20 @@ describe('SearchMemoryTool', () => {
       tool.validateToolParams({
         mode: 'search',
         keywords: ['memory'],
+        scopes: [],
+      }),
+    ).toContain('must NOT have fewer than 1 items');
+    expect(
+      tool.validateToolParams({
+        mode: 'search',
+        keywords: ['memory'],
+        categories: [],
+      }),
+    ).toContain('must NOT have fewer than 1 items');
+    expect(
+      tool.validateToolParams({
+        mode: 'search',
+        keywords: ['memory'],
         limit: 20,
       }),
     ).toContain('must be <= 5');

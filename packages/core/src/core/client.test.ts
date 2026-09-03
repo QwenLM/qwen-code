@@ -490,6 +490,7 @@ describe('Gemini Client (client.ts)', () => {
     resetMemoryBodyStateForSession: ReturnType<typeof vi.fn>;
     resetExhaustedBodyRefsForCurrentTurn: ReturnType<typeof vi.fn>;
     restoreMemoryBodiesPresentInHistory: ReturnType<typeof vi.fn>;
+    reconcileMemoryBodiesPresentInHistory: ReturnType<typeof vi.fn>;
     markMemoryBodiesEvictedFromHistory: ReturnType<typeof vi.fn>;
     markAllMemoryBodiesEvictedFromHistory: ReturnType<typeof vi.fn>;
   };
@@ -550,6 +551,7 @@ describe('Gemini Client (client.ts)', () => {
       resetMemoryBodyStateForSession: vi.fn(),
       resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
       restoreMemoryBodiesPresentInHistory: vi.fn(),
+      reconcileMemoryBodiesPresentInHistory: vi.fn(),
       markMemoryBodiesEvictedFromHistory: vi.fn(),
       markAllMemoryBodiesEvictedFromHistory: vi.fn(),
     };
@@ -4356,6 +4358,8 @@ describe('Gemini Client (client.ts)', () => {
         setHistory,
       } as unknown as LlmChat;
       client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+      mockMemoryManager.restoreMemoryBodiesPresentInHistory.mockClear();
+      mockMemoryManager.reconcileMemoryBodiesPresentInHistory.mockClear();
 
       const stream = client.sendMessageStream(
         [{ text: 'tool result' }],
@@ -4371,6 +4375,12 @@ describe('Gemini Client (client.ts)', () => {
       expect(setHistory).not.toHaveBeenCalled();
       expect(clear).not.toHaveBeenCalled();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      expect(
+        mockMemoryManager.reconcileMemoryBodiesPresentInHistory,
+      ).toHaveBeenCalled();
+      expect(
+        mockMemoryManager.restoreMemoryBodiesPresentInHistory,
+      ).not.toHaveBeenCalled();
     });
 
     it('runs size-only microcompaction on SendMessageType.ToolResult with pending content counted', async () => {

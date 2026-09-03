@@ -605,8 +605,14 @@ describe('MemoryManager', () => {
     it('tracks resident body versions independently of read history', () => {
       const mgr = new MemoryManager();
       const versions = mgr.getBodyPresentVersionsInHistory();
+      const coverage = mgr.getBodyCoverageInHistory();
       versions.set('project:one.md', 1);
       versions.set('project:two.md', 2);
+      coverage.set('project:partial.md', {
+        version: 3,
+        total: 10,
+        ranges: [{ start: 0, end: 5 }],
+      });
 
       mgr.markMemoryBodiesEvictedFromHistory([
         { memoryRef: 'project:one.md', mtimeMs: 1 },
@@ -621,6 +627,26 @@ describe('MemoryManager', () => {
         { memoryRef: 'project:restored.md', mtimeMs: 3 },
       ]);
       expect([...versions]).toEqual([['project:restored.md', 3]]);
+      expect(coverage.size).toBe(0);
+    });
+
+    it('preserves partial body coverage when history only grows', () => {
+      const mgr = new MemoryManager();
+      const coverage = mgr.getBodyCoverageInHistory();
+      coverage.set('project:partial.md', {
+        version: 3,
+        total: 10,
+        ranges: [{ start: 0, end: 5 }],
+      });
+
+      mgr.reconcileMemoryBodiesPresentInHistory([]);
+
+      expect(mgr.getBodyPresentVersionsInHistory().size).toBe(0);
+      expect(coverage.get('project:partial.md')).toEqual({
+        version: 3,
+        total: 10,
+        ranges: [{ start: 0, end: 5 }],
+      });
     });
   });
 

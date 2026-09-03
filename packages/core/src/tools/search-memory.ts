@@ -158,6 +158,7 @@ const SEARCH_MEMORY_SCHEMA = {
       type: 'array',
       description: 'search/explore only: visible memory scopes',
       items: { type: 'string', enum: ['project', 'user', 'team'] },
+      minItems: 1,
     },
     categories: {
       type: 'array',
@@ -166,6 +167,7 @@ const SEARCH_MEMORY_SCHEMA = {
         type: 'string',
         enum: [...AUTO_MEMORY_TREE_CATEGORIES, AUTO_MEMORY_UNCATEGORIZED],
       },
+      minItems: 1,
     },
     limit: {
       type: 'integer',

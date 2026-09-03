@@ -2048,8 +2048,14 @@ export class MemoryManager {
   restoreMemoryBodiesPresentInHistory(
     bodies: ReadonlyArray<{ memoryRef: string; mtimeMs: number }>,
   ): void {
-    this.bodyPresentVersionsInHistory.clear();
     this.bodyCoverageInHistory.clear();
+    this.reconcileMemoryBodiesPresentInHistory(bodies);
+  }
+
+  reconcileMemoryBodiesPresentInHistory(
+    bodies: ReadonlyArray<{ memoryRef: string; mtimeMs: number }>,
+  ): void {
+    this.bodyPresentVersionsInHistory.clear();
     for (const { memoryRef, mtimeMs } of bodies) {
       this.bodyPresentVersionsInHistory.set(memoryRef, mtimeMs);
     }
