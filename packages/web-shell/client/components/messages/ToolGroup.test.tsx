@@ -1623,6 +1623,135 @@ describe('tool row rendering', () => {
     ).not.toBeNull();
   });
 
+  it('marks the summary icon while only a background agent is active', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        executionMode: 'background',
+      }),
+    ]);
+
+    // The icon marker is the only liveness cue a detached card gets, so it
+    // must not come with the shimmer or a timer the design keeps off it.
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[class*="chatSummaryTextActive"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toMatch(/\b\d+s\b/);
+  });
+
+  it('leaves the summary icon unmarked while a foreground tool animates it', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        executionMode: 'background',
+      }),
+      makeTool({
+        callId: 'foreground',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+      }),
+    ]);
+
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).toBeNull();
+  });
+
+  it('leaves the summary icon unmarked once the background agent settles', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'completed',
+        executionMode: 'background',
+      }),
+    ]);
+
+    expect(
+      container.querySelector('[class*="chatSummaryIconDetached"]'),
+    ).toBeNull();
+  });
+
+  it('shows a live elapsed and current activity for a running foreground agent', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'foreground-agent',
+        toolName: 'agent',
+        status: 'in_progress',
+        executionMode: 'foreground',
+        startTime: Date.now() - 45_000,
+        subTools: [
+          makeTool({
+            callId: 'sub-read',
+            toolName: 'read',
+            status: 'in_progress',
+            args: { file_path: 'src/app.ts' },
+          }),
+        ],
+      }),
+    ]);
+
+    expect(container.textContent).toContain('Running');
+    expect(container.textContent).toContain('(ReadFile src/app.ts)');
+    expect(container.textContent).toMatch(/\b45s\b/);
+  });
+
+  it('keeps the running foreground agent summary elapsed ticking', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
+
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'foreground-agent',
+          toolName: 'agent',
+          status: 'in_progress',
+          executionMode: 'foreground',
+          startTime: 1_000,
+        }),
+      ]);
+
+      expect(container.textContent).toContain('45s');
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+      expect(container.textContent).toContain('46s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not tick an elapsed on the background agent summary', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(46_000);
+
+    try {
+      const container = renderToolGroup([
+        makeTool({
+          callId: 'background',
+          toolName: 'agent',
+          status: 'pending',
+          executionMode: 'background',
+          startTime: 1_000,
+        }),
+      ]);
+
+      act(() => {
+        vi.advanceTimersByTime(5_000);
+      });
+      expect(container.textContent).not.toMatch(/\b\d+s\b/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('opens on-demand agent details without mounting inline content', () => {
     const onOpen = vi.fn();
     const tool = makeTool({

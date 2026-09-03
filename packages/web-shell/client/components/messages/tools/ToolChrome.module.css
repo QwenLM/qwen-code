@@ -288,6 +288,29 @@
   display: block;
 }
 
+/* Marks the row's only active work as a detached agent. The tint is not
+   motion, so it stays on under reduced motion — otherwise such a card would
+   remain indistinguishable from a finished one. */
+.chatSummaryIconDetached {
+  color: var(--agent-blue-500);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chatSummaryIconDetached {
+    animation: chat-summary-agent-pulse 2.4s ease-in-out infinite;
+  }
+
+  @keyframes chat-summary-agent-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.35;
+    }
+  }
+}
+
 .chatSummaryToolIcon {
   width: 14px;
   height: 14px;
