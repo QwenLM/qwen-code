@@ -159,6 +159,7 @@ import type {
   ServeSessionContextUsageStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
+  ServeSessionResourcesStatus,
   ServeSessionStatsStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
@@ -603,6 +604,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_monitor_tool_correlation',
   'session_stats',
   'session_lsp',
+  'session_resources',
   'session_status',
   'session_close',
   'session_archive',
@@ -963,6 +965,10 @@ interface FakeBridgeOpts {
     opts?: { includeWorkflows?: boolean },
   ) => Promise<ServeSessionTasksStatus>;
   sessionLspImpl?: (sessionId: string) => Promise<ServeSessionLspStatus>;
+  sessionResourcesImpl?: (
+    sessionId: string,
+  ) => Promise<ServeSessionResourcesStatus>;
+  sessionSavedWorkflowImpl?: AcpSessionBridge['getSessionSavedWorkflow'];
   sessionTranscriptImpl?: AcpSessionBridge['getSessionTranscriptPage'];
   cancelSessionTaskImpl?: (
     sessionId: string,
@@ -1271,6 +1277,8 @@ interface FakeBridge extends AcpSessionBridge {
   sessionTasksCalls: string[];
   sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined>;
   sessionLspCalls: string[];
+  sessionResourcesCalls: string[];
+  sessionSavedWorkflowCalls: Array<{ sessionId: string; name: string }>;
   sessionTranscriptCalls: Array<
     Parameters<AcpSessionBridge['getSessionTranscriptPage']>[0]
   >;
@@ -1485,6 +1493,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined> =
     [];
   const sessionLspCalls: string[] = [];
+  const sessionResourcesCalls: string[] = [];
+  const sessionSavedWorkflowCalls: FakeBridge['sessionSavedWorkflowCalls'] = [];
   const sessionTranscriptCalls: FakeBridge['sessionTranscriptCalls'] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const controlSessionWorkflowTaskCalls: FakeBridge['controlSessionWorkflowTaskCalls'] =
@@ -1809,6 +1819,22 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       now: 1_700_000_000_000,
       tasks: [],
     }));
+  const sessionSavedWorkflowImpl: AcpSessionBridge['getSessionSavedWorkflow'] =
+    opts.sessionSavedWorkflowImpl ??
+    (async (sessionId, name) => ({
+      v: 1 as const,
+      sessionId,
+      name,
+      workflow: {
+        v: 1 as const,
+        sessionId,
+        name,
+        source: 'project' as const,
+        scriptPath: `${WS_BOUND}/.qwen/workflows/${name}.js`,
+        script: `export const meta = { name: '${name}', description: 'd' }`,
+        meta: { name, description: 'd' },
+      },
+    }));
   const sessionLspImpl =
     opts.sessionLspImpl ??
     (async (sessionId) => ({
@@ -1822,6 +1848,26 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       inProgressServers: 0,
       notStartedServers: 0,
       servers: [],
+    }));
+  const sessionResourcesImpl =
+    opts.sessionResourcesImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      workspaceCwd: WS_BOUND,
+      skills: {
+        v: 1 as const,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        skills: [],
+      },
+      mcp: {
+        v: 1 as const,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        discoveryState: 'completed' as const,
+        servers: [],
+      },
     }));
   const sessionTranscriptImpl =
     opts.sessionTranscriptImpl ??
@@ -2106,6 +2152,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionTasksCalls,
     sessionTasksOptions,
     sessionLspCalls,
+    sessionResourcesCalls,
+    sessionSavedWorkflowCalls,
     sessionTranscriptCalls,
     cancelSessionTaskCalls,
     controlSessionWorkflowTaskCalls,
@@ -2404,6 +2452,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionLspStatus(sessionId) {
       sessionLspCalls.push(sessionId);
       return sessionLspImpl(sessionId);
+    },
+    async getSessionResourcesStatus(sessionId) {
+      sessionResourcesCalls.push(sessionId);
+      return sessionResourcesImpl(sessionId);
+    },
+    async getSessionSavedWorkflow(sessionId, name) {
+      sessionSavedWorkflowCalls.push({ sessionId, name });
+      return sessionSavedWorkflowImpl(sessionId, name);
     },
     async getSessionTranscriptPage(req) {
       sessionTranscriptCalls.push(req);
@@ -9811,12 +9867,31 @@ describe('createServeApp', () => {
           },
         ],
       };
+      const resources: ServeSessionResourcesStatus = {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: WS_BOUND,
+        skills: {
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          skills: [],
+        },
+        mcp: {
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          discoveryState: 'completed',
+          servers: [],
+        },
+      };
       const bridge = fakeBridge({
         sessionContextImpl: async () => context,
         sessionSupportedCommandsImpl: async () => commands,
         sessionStatsImpl: async () => stats,
         sessionTasksImpl: async () => tasks,
         sessionLspImpl: async () => lsp,
+        sessionResourcesImpl: async () => resources,
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -9842,6 +9917,9 @@ describe('createServeApp', () => {
       const lspRes = await request(app)
         .get('/session/s-1/lsp')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const resourcesRes = await request(app)
+        .get('/session/s-1/resources')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(200);
       expect(contextRes.body).toEqual(context);
@@ -9856,6 +9934,8 @@ describe('createServeApp', () => {
       expect(workflowTasksRes.body).toEqual(tasks);
       expect(lspRes.status).toBe(200);
       expect(lspRes.body).toEqual(lsp);
+      expect(resourcesRes.status).toBe(200);
+      expect(resourcesRes.body).toEqual(resources);
       expect(bridge.sessionContextCalls).toEqual(['s-1']);
       expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
       expect(bridge.sessionStatsCalls).toEqual(['s-1']);
@@ -9865,6 +9945,7 @@ describe('createServeApp', () => {
         { includeWorkflows: true },
       ]);
       expect(bridge.sessionLspCalls).toEqual(['s-1']);
+      expect(bridge.sessionResourcesCalls).toEqual(['s-1']);
     });
 
     it('dispatches read-only session snapshots through the live owner runtime', async () => {
@@ -9882,6 +9963,23 @@ describe('createServeApp', () => {
           sessionId,
           workspaceCwd: WS_DIFFERENT,
           state: { owner: 'secondary' },
+        }),
+        sessionResourcesImpl: async (sessionId) => ({
+          v: 1,
+          sessionId,
+          workspaceCwd: WS_DIFFERENT,
+          skills: {
+            v: 1,
+            workspaceCwd: WS_DIFFERENT,
+            initialized: true,
+            skills: [],
+          },
+          mcp: {
+            v: 1,
+            workspaceCwd: WS_DIFFERENT,
+            initialized: true,
+            servers: [],
+          },
         }),
       });
       const registry = createWorkspaceRegistry([
@@ -9907,6 +10005,9 @@ describe('createServeApp', () => {
       const res = await request(app)
         .get('/session/s-secondary/context')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const resourcesRes = await request(app)
+        .get('/session/s-secondary/resources')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
@@ -9916,6 +10017,10 @@ describe('createServeApp', () => {
       });
       expect(primaryBridge.sessionContextCalls).toEqual([]);
       expect(secondaryBridge.sessionContextCalls).toEqual(['s-secondary']);
+      expect(resourcesRes.status).toBe(200);
+      expect(resourcesRes.body.workspaceCwd).toBe(WS_DIFFERENT);
+      expect(primaryBridge.sessionResourcesCalls).toEqual([]);
+      expect(secondaryBridge.sessionResourcesCalls).toEqual(['s-secondary']);
     });
 
     it('surfaces live owner scan failures as structured bridge errors on owner-routed reads', async () => {
@@ -10061,6 +10166,9 @@ describe('createServeApp', () => {
         sessionLspImpl: async (sessionId) => {
           throw new SessionNotFoundError(sessionId);
         },
+        sessionResourcesImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -10083,6 +10191,9 @@ describe('createServeApp', () => {
       const lspRes = await request(app)
         .get('/session/missing/lsp')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const resourcesRes = await request(app)
+        .get('/session/missing/resources')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(404);
       expect(contextRes.body.sessionId).toBe('missing');
@@ -10094,6 +10205,8 @@ describe('createServeApp', () => {
       expect(tasksRes.body.sessionId).toBe('missing');
       expect(lspRes.status).toBe(404);
       expect(lspRes.body.sessionId).toBe('missing');
+      expect(resourcesRes.status).toBe(404);
+      expect(resourcesRes.body.sessionId).toBe('missing');
     });
 
     it('rejects task cancellation with invalid kind', async () => {
@@ -10146,6 +10259,53 @@ describe('createServeApp', () => {
           context: { clientId: 'client-1' },
         },
       ]);
+    });
+
+    it('reads a saved workflow definition and fails closed for an untrusted workspace', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .get('/session/s-1/saved-workflows/deep-review')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        v: 1,
+        sessionId: 's-1',
+        name: 'deep-review',
+        workflow: {
+          source: 'project',
+          scriptPath: `${WS_BOUND}/.qwen/workflows/deep-review.js`,
+          meta: { name: 'deep-review', description: 'd' },
+        },
+      });
+      expect(bridge.sessionSavedWorkflowCalls).toEqual([
+        { sessionId: 's-1', name: 'deep-review' },
+      ]);
+
+      const untrustedBridge = fakeBridge();
+      const untrustedApp = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge: untrustedBridge, primaryWorkspaceTrusted: false },
+      );
+      const closedRes = await request(untrustedApp)
+        .get('/session/s-1/saved-workflows/deep-review')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(closedRes.status).toBe(200);
+      expect(closedRes.body).toEqual({
+        v: 1,
+        sessionId: 's-1',
+        name: 'deep-review',
+        workflow: null,
+      });
+      expect(untrustedBridge.sessionSavedWorkflowCalls).toEqual([]);
     });
 
     it('controls live runs, saved definitions, and history through one route', async () => {
