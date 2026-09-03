@@ -621,6 +621,24 @@ describe('release workflow', () => {
     }
   });
 
+  it('lets an operator retune the workspace shard timeout without a PR', () => {
+    // A shard's runtime tracks how busy the reserved host is, not the suite:
+    // the same third measured 6.7 minutes on a quiet host and 36 on a
+    // contended one, and 45 killed shards at the boundary with every executed
+    // suite green (run 33713579913, both attempts). release.yml is
+    // code-owned, so a literal here costs a review every time the fleet
+    // moves; the variable is the same runtime knob QWEN_CI_VITEST_MAX_WORKERS
+    // and QWEN_RELEASE_VITEST_RETRY already use.
+    expect(workflow).toContain(
+      `timeout-minutes: "\${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}"`,
+    );
+    // fromJSON, not the bare variable: timeout-minutes takes a number, and an
+    // unset variable has to fall back rather than render an empty string.
+    expect(releaseYaml.jobs.workspace_tests['timeout-minutes']).toContain(
+      'fromJSON(',
+    );
+  });
+
   it('annotates a workspace test failure without changing its exit code', () => {
     const testStep = releaseYaml.jobs.workspace_tests.steps.find(
       (step) => step.name === 'Run Workspace Tests',
@@ -1362,7 +1380,10 @@ describe('release workflow', () => {
       quality_static: 30,
       quality_build: 45,
       quality_typecheck: 30,
-      workspace_tests: 45,
+      // The one bound an operator can retune without a PR; its default is
+      // pinned by its own test above.
+      workspace_tests:
+        "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}",
       quality_scripts: 30,
       quality: 5,
       integration_none: 120,
