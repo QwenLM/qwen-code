@@ -85,6 +85,30 @@ describe('package scripts', () => {
     ]);
   });
 
+  it('imports packages without hard links so patch-package cannot corrupt the store', () => {
+    const workspace = parse(
+      readFileSync(path.join(root, 'pnpm-workspace.yaml'), 'utf8'),
+    );
+
+    // The root postinstall rewrites node_modules files in place. Under
+    // 'auto' or 'hardlink' those files are hard links into the
+    // content-addressable store, so the rewrite corrupts the store entry and
+    // every later worktree misses its --offline stage.
+    expect(readPackageJson().scripts.postinstall).toBe('patch-package');
+    expect(['clone-or-copy', 'copy', 'clone']).toContain(
+      workspace.packageImportMethod,
+    );
+  });
+
+  it('keeps the pnpm lockfile out of prettier so formatting cannot fight pnpm', () => {
+    const ignored = readFileSync(path.join(root, '.prettierignore'), 'utf8')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '' && !line.startsWith('#'));
+
+    expect(ignored).toContain('pnpm-lock.yaml');
+  });
+
   it('keeps channel workspace lock entries independent of release versions', () => {
     const lockfile = parse(
       readFileSync(path.join(root, 'pnpm-lock.yaml'), 'utf8'),

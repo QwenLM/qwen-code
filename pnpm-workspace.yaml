@@ -7,6 +7,16 @@ packages:
   - '!packages/live-host'
 
 nodeLinker: 'hoisted'
+# The root postinstall runs patch-package, which rewrites files inside
+# node_modules in place. Under the default import method those files are
+# hard links into the content-addressable store, so the patch also rewrites
+# the store entry -- its contents stop matching the sha512 it is filed
+# under. Every later worktree then fails its --offline stage with
+# ERR_PNPM_NO_OFFLINE_TARBALL, falls back to the registry, and re-patches
+# the store, so the offline path never hits again. Cloning (copy-on-write
+# where the filesystem supports it, a plain copy elsewhere) keeps the store
+# entry untouched while patch-package edits only the worktree's own copy.
+packageImportMethod: 'clone-or-copy'
 linkWorkspacePackages: true
 verifyDepsBeforeRun: false
 
