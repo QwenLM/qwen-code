@@ -219,10 +219,11 @@ describe('verify-capture helper', () => {
     // the blend axis (#d4d4d4 over #1e1e1e) are neutral, so every blend of
     // them is neutral at any coverage, while a grossly tinted FG_DEFAULT or
     // the hardcoded #9cdcfe title fill is not and cannot satisfy the count
-    // in the fallback's place. The spread tolerance absorbs subpixel
-    // antialiasing, and the floor is strict to keep a mid-grey FG_DEFAULT
-    // (#808080) out. Deleting the guard ships fill="undefined", which
-    // librsvg paints black, and black on #1e1e1e never reaches this bright.
+    // in the fallback's place. The bound is tight because this pipeline never
+    // fringes (measured max spread 0) — slack would only let a tinted
+    // FG_DEFAULT (#d4d4c8) pass; the floor is strict to keep a mid-grey
+    // FG_DEFAULT (#808080) out. Deleting the guard ships fill="undefined",
+    // which librsvg paints black, never this bright on #1e1e1e.
     let fallbackPixels = 0;
     for (let i = 0; i + 2 < data.length; i += info.channels) {
       const spread =
@@ -232,7 +233,7 @@ describe('verify-capture helper', () => {
         data[i] > 0x80 &&
         data[i + 1] > 0x80 &&
         data[i + 2] > 0x80 &&
-        spread <= 12
+        spread <= 4
       ) {
         fallbackPixels += 1;
       }
