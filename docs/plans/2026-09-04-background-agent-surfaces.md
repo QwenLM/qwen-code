@@ -50,6 +50,21 @@ Two rules for whoever builds it:
 - **Do not add a fourth model.** If the daemon needs to remember something about a background agent, it belongs in the roster.
 - **Label by task state, not by display group.** The roster's group folds `ready`, `stopped` and `failed` into `completed`; the roster UI can afford that because it also paints an icon tone. Any surface without a second channel must not print "completed" beside a session that failed — see `managed-rows.ts`.
 
+## 3.1 Two terminal channels, and which one is which
+
+Attaching to a background agent is a surface too, and there are currently two ways to put an agent on a terminal:
+
+|                                    | Owner                     | Status                                                                                        |
+| ---------------------------------- | ------------------------- | --------------------------------------------------------------------------------------------- |
+| `TmuxBackend` (`agents/backends/`) | Agent Arena               | opt-in via `agents.displayMode: "tmux"`, falls back to in-process when tmux is missing or old |
+| `pty-host` (`agent-view/`)         | the Agent View supervisor | merged, and the thing `attach` will use                                                       |
+
+**Keep both, and keep them apart.** Arena's tmux path is small, opt-in, and degrades safely; it puts _arena competitors_ side by side in one terminal the user is already looking at. The supervisor's PTY host owns terminals for sessions that outlive the shell that started them — a different lifetime and a different owner.
+
+What must not happen is a third one. If Agent View attach ever wants tmux panes, it should drive them through the supervisor's PTY host rather than reaching into the Arena backend, whose `Backend` interface is a display abstraction with a semantic handle bolted on (`backends/types.ts`) and whose only wired implementation no-ops most of it.
+
+`ITermBackend` is the counter-example already in the tree: it exists, has never had a consumer, and `detectBackend` now reports it as unsupported rather than handing anyone an untested path.
+
 ## 4. Left to a human
 
 **Should daemon-owned sessions adopt into the roster?** `qwen serve` starts sessions of its own (scheduled tasks, channel workers). They are background agents by any user's definition, and under §0 they would be visible in `qwen sessions ps` too. The supervisor already has an `adopt` operation for exactly this shape. Doing it means the daemon writes to the roster as well as reads it, which is a larger change than the panel and should be decided on its own.
