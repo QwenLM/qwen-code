@@ -140,6 +140,11 @@ const configModules: Record<
   'packages/core': () => import('../../packages/core/vitest.config.js'),
   'packages/node-repl': () =>
     import('../../packages/node-repl/vitest.config.js'),
+  // qwen-live's ceiling is unconditional (its config carries a flat 60s), so
+  // it passes the on-pool floor from any runner name and stays out of the
+  // off-pool sample below.
+  'packages/qwen-live': () =>
+    import('../../packages/qwen-live/vitest.config.js'),
   'packages/sdk-typescript': () =>
     import('../../packages/sdk-typescript/vitest.config.js'),
   'packages/vscode-ide-companion': () =>
@@ -155,54 +160,92 @@ describe('shared-pool test timeout', () => {
   // (scripts/tests at 90s, sdk-typescript at E2E_TIMEOUT_MINUTES x 60s) pass
   // without pinning their own numbers here.
   const POOL_FLOOR_MS = 60_000;
+  // Two names that share only the documented prefix: a gate narrowed past
+  // `ecs-qwen-` (e.g. to the first stub itself) passes one name and fails the
+  // other. Real pool runners look like `ecs-qwen-runner-64c-23`.
+  const POOL_RUNNER_NAMES = ['ecs-qwen-parity', 'ecs-qwen-hk1-01'] as const;
 
   for (const [name, load] of Object.entries(configModules)) {
     it(`raises the ceiling on the shared pool in ${name}`, async () => {
-      // The configs read RUNNER_NAME at import time and the static imports at
-      // the top of this file already resolved the off-pool branch, so stub
-      // first and re-import.
-      vi.stubEnv('RUNNER_NAME', 'ecs-qwen-parity');
-      vi.resetModules();
-      try {
-        const mod = await load();
-        expect(mod.default.test?.testTimeout, name).toBeGreaterThanOrEqual(
-          POOL_FLOOR_MS,
-        );
-      } finally {
-        vi.unstubAllEnvs();
+      for (const runnerName of POOL_RUNNER_NAMES) {
+        // The configs read RUNNER_NAME at import time and the static imports
+        // at the top of this file already resolved the off-pool branch, so
+        // stub first and re-import. scripts/tests and sdk-typescript derive
+        // their ceiling from ambient env knobs rather than a literal, so pin
+        // those too — the test must read the configs' logic, not whatever
+        // the surrounding environment happens to carry. `?? 90_000` makes
+        // '' read as 0, so stub a real number at the documented default.
+        vi.stubEnv('RUNNER_NAME', runnerName);
+        vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', '90000');
+        vi.stubEnv('E2E_TIMEOUT_MINUTES', '3');
+        vi.resetModules();
+        try {
+          const mod = await load();
+          expect(
+            mod.default.test?.testTimeout,
+            `${name} (${runnerName})`,
+          ).toBeGreaterThanOrEqual(POOL_FLOOR_MS);
+        } finally {
+          vi.unstubAllEnvs();
+        }
       }
     });
   }
 
   it('raises the ceiling on the shared pool in packages/webui', async () => {
     // webui's vitest configuration is the function-form vite.config.ts.
-    vi.stubEnv('RUNNER_NAME', 'ecs-qwen-parity');
-    vi.resetModules();
-    try {
-      const mod = await import('../../packages/webui/vite.config.js');
-      const config = await mod.default({ command: 'serve', mode: 'test' });
-      expect(config.test?.testTimeout).toBeGreaterThanOrEqual(POOL_FLOOR_MS);
-    } finally {
-      vi.unstubAllEnvs();
+    for (const runnerName of POOL_RUNNER_NAMES) {
+      vi.stubEnv('RUNNER_NAME', runnerName);
+      vi.resetModules();
+      try {
+        const mod = await import('../../packages/webui/vite.config.js');
+        const config = await mod.default({ command: 'serve', mode: 'test' });
+        expect(
+          config.test?.testTimeout,
+          `packages/webui (${runnerName})`,
+        ).toBeGreaterThanOrEqual(POOL_FLOOR_MS);
+      } finally {
+        vi.unstubAllEnvs();
+      }
     }
   });
 
   it('leaves the off-pool default alone', async () => {
     // The point of the ternary is that only the pool lane moves. Off it these
     // configs must stay on vitest's own default, so a hang on a developer
-    // machine still fails in 5s rather than 60s.
+    // machine still fails in 5s rather than 60s. Sample every gated ternary:
+    // a flat `testTimeout: 60_000` in any of them must fail here. The other
+    // map entries stay out on purpose: cli/core/vscode-ide-companion pin a
+    // lower off-pool value (15s), node-repl/sdk-typescript/scripts/tests
+    // carry flat ceilings, and qwen-live's ceiling is unconditional.
     vi.stubEnv('RUNNER_NAME', 'ubuntu-latest-runner');
     vi.resetModules();
     try {
       for (const name of [
+        'integrations/external-context',
+        'integrations/external-context-mem0',
+        'packages/acp-bridge',
+        'packages/audio-capture',
         'packages/channels/base',
         'packages/channels/dingtalk',
+        'packages/channels/dws',
+        'packages/channels/feishu',
+        'packages/channels/github',
+        'packages/channels/gitlab',
+        'packages/channels/qqbot',
+        'packages/channels/telegram',
+        'packages/channels/wecom',
+        'packages/channels/weixin',
         'packages/chrome-extension',
-        'integrations/external-context',
+        'packages/web-shell',
       ]) {
         const mod = await configModules[name]!();
         expect(mod.default.test?.testTimeout, name).toBeUndefined();
       }
+      // webui's vitest configuration is the function-form vite.config.ts.
+      const webui = await import('../../packages/webui/vite.config.js');
+      const config = await webui.default({ command: 'serve', mode: 'test' });
+      expect(config.test?.testTimeout, 'packages/webui').toBeUndefined();
     } finally {
       vi.unstubAllEnvs();
     }
@@ -351,8 +394,10 @@ describe('scripts suite timeout', () => {
       ['5000', 5_000],
     ] as const) {
       if (stub === undefined) {
-        vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', '');
-        vi.unstubAllEnvs();
+        // `undefined` deletes the variable even when the ambient environment
+        // sets it, so `?? 90_000` gets its say; unstubAllEnvs below restores
+        // the ambient value for the next iteration.
+        vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', undefined);
       } else {
         vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', stub);
       }
