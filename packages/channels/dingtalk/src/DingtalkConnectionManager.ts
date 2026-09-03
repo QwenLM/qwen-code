@@ -19,6 +19,14 @@ export interface DingtalkConnectionManagerOptions<
   getSocket(client: T): DingtalkManagedSocket | undefined;
   onClientChanged(client: T): void;
   log(message: string): void;
+  /**
+   * Called when the manager abandons a connect attempt whose promise has not
+   * settled (connect timeout, or stop while connecting). The SDK's endpoint
+   * request configures no timeout, so an abandoned connect can stay pending
+   * indefinitely; this hook lets the caller release resources keyed to the
+   * attempt without waiting for it to settle.
+   */
+  onConnectAbandoned?(client: T): void;
 }
 
 const SOCKET_OPEN = 1;
@@ -277,6 +285,7 @@ export class DingtalkConnectionManager<T extends DingtalkManagedClient> {
       await Promise.race([connect, attemptEnded]);
     } catch (error) {
       if (abortAttempt) {
+        this.options.onConnectAbandoned?.(client);
         void connect.then(
           () => this.safeDisconnect(client, 'late connection client'),
           () => undefined,

@@ -316,6 +316,45 @@ describe('DingtalkConnectionManager', () => {
     await vi.advanceTimersByTimeAsync(0);
   });
 
+  it('reports a timed-out connect attempt as abandoned', async () => {
+    vi.useFakeTimers();
+    const pendingConnect = deferredPromise<void>();
+    const initialClient = new FakeClient();
+    initialClient.connect = vi.fn(() => pendingConnect.promise);
+    const onConnectAbandoned = vi.fn();
+    const manager = createManager(initialClient, { onConnectAbandoned });
+
+    void manager.start().catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(onConnectAbandoned).toHaveBeenCalledOnce();
+    expect(onConnectAbandoned).toHaveBeenCalledWith(initialClient);
+    pendingConnect.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('does not report settled connect attempts as abandoned', async () => {
+    const initialClient = new FakeClient();
+    const onConnectAbandoned = vi.fn();
+    const manager = createManager(initialClient, { onConnectAbandoned });
+
+    await manager.start();
+    manager.stop();
+
+    expect(onConnectAbandoned).not.toHaveBeenCalled();
+  });
+
+  it('does not report a rejected connect attempt as abandoned', async () => {
+    const initialClient = new FakeClient();
+    initialClient.connect = vi.fn().mockRejectedValue(new Error('offline'));
+    const onConnectAbandoned = vi.fn();
+    const manager = createManager(initialClient, { onConnectAbandoned });
+
+    await expect(manager.start()).rejects.toThrow('offline');
+
+    expect(onConnectAbandoned).not.toHaveBeenCalled();
+  });
+
   it('retries after a replacement connection attempt times out', async () => {
     vi.useFakeTimers();
     const initialClient = new FakeClient();

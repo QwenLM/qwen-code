@@ -813,27 +813,58 @@ let connectLogDepth = 0;
 let unsuppressedConsoleLog: typeof console.log | undefined;
 
 /**
- * Runs `connect` with `console.log` silenced. Nested connects share one depth
- * counter — the manager can start a replacement client while another connect is
- * still in flight, and either may settle first — so only the depth 1→0
- * transition restores logging, to the function the 0→1 transition saved.
- * Restoring from an inner call's own scope would put the no-op back and leave
- * `console.log` disabled process-wide.
+ * Adds one hold to the connect-logging suppression and returns its release.
+ * Nested connects share one depth counter — the manager can start a
+ * replacement client while another connect is still in flight, and either may
+ * settle first — so only the depth 1→0 transition restores logging, to the
+ * function the 0→1 transition saved. Restoring from an inner call's own scope
+ * would put the no-op back and leave `console.log` disabled process-wide.
+ * Each release runs at most once: an attempt is released by its own settle or
+ * by abandonment, whichever happens first.
  */
-async function withConnectLoggingSuppressed<T>(
-  connect: () => Promise<T>,
-): Promise<T> {
+function beginConnectLoggingSuppression(): () => void {
   if (connectLogDepth++ === 0) {
     unsuppressedConsoleLog = console.log;
     console.log = () => {};
   }
-  try {
-    return await connect();
-  } finally {
+  let released = false;
+  return () => {
+    if (released) {
+      return;
+    }
+    released = true;
     if (--connectLogDepth === 0 && unsuppressedConsoleLog) {
       console.log = unsuppressedConsoleLog;
       unsuppressedConsoleLog = undefined;
     }
+  };
+}
+
+/**
+ * Runs `connect` with `console.log` silenced and releases the hold when it
+ * settles. Suppression must stay up until settle because the SDK only prints
+ * the ticket-bearing gateway response when its endpoint request settles.
+ * Abandoned attempts can also be released early through `inFlightReleases`
+ * (see `releaseAbandonedConnectSuppression`): the SDK's endpoint request
+ * configures no timeout, so waiting for a promise the manager no longer owns
+ * could silence `console.log` process-wide until process restart — exactly
+ * the outage window where diagnostics matter most. The accepted tradeoff: the
+ * config line (with clientSecret) is printed when a connect starts and is
+ * always covered, but if an abandoned request settles after its hold was
+ * released, that one gateway-response line from a discarded connect can still
+ * surface. Bounded suppression beats an unbounded, possibly permanent one.
+ */
+async function withConnectLoggingSuppressed<T>(
+  connect: () => Promise<T>,
+  inFlightReleases?: Set<() => void>,
+): Promise<T> {
+  const release = beginConnectLoggingSuppression();
+  inFlightReleases?.add(release);
+  try {
+    return await connect();
+  } finally {
+    inFlightReleases?.delete(release);
+    release();
   }
 }
 /* eslint-enable no-console */
@@ -847,6 +878,11 @@ export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private readonly atSender: boolean;
   private connectionManager?: DingtalkConnectionManager<DWClient>;
+  /** Per-client releases of in-flight connect-logging suppression holds. */
+  private readonly connectSuppressionReleases = new Map<
+    DWClient,
+    Set<() => void>
+  >();
   private seenMessages: Map<string, number> = new Map();
   private mentionTargets = new Map<string, string>();
   private sessionMentionTargets = new Map<string, string>();
@@ -1021,6 +1057,9 @@ export class DingtalkChannel extends ChannelBase {
             `[DingTalk:${this.name}] ${sanitizeLogText(message, 200)}\n`,
           );
         },
+        onConnectAbandoned: (client) => {
+          this.releaseAbandonedConnectSuppression(client);
+        },
       });
     }
   }
@@ -1052,7 +1091,27 @@ export class DingtalkChannel extends ChannelBase {
     // than redact enumerated keys, which would stay open to any future SDK
     // debug output. console.error and console.warn keep surfacing failures.
     const sdkConnect = client.connect.bind(client);
-    client.connect = () => withConnectLoggingSuppressed(sdkConnect);
+    const inFlightReleases = new Set<() => void>();
+    this.connectSuppressionReleases.set(streamClient, inFlightReleases);
+    client.connect = () =>
+      withConnectLoggingSuppressed(sdkConnect, inFlightReleases);
+  }
+
+  /**
+   * Releases the suppression holds of connects on `client` that the caller
+   * abandoned (manager timeout/stop, or channel.disconnect while connecting).
+   * The SDK connect can stay pending forever, so without this an abandoned
+   * attempt would keep `console.log` silenced process-wide.
+   */
+  private releaseAbandonedConnectSuppression(client: DWClient): void {
+    const releases = this.connectSuppressionReleases.get(client);
+    if (!releases) {
+      return;
+    }
+    for (const release of releases) {
+      release();
+    }
+    releases.clear();
   }
 
   private registerMessageHandler(client: DWClient): void {
@@ -1978,6 +2037,7 @@ export class DingtalkChannel extends ChannelBase {
     if (this.connectionManager) {
       this.connectionManager.stop();
     } else {
+      this.releaseAbandonedConnectSuppression(this.client);
       this.client.disconnect();
     }
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);

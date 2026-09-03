@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { inspect } from 'node:util';
+import { DWClient } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import { BlockStreamer } from '@qwen-code/channel-base';
 import type {
@@ -5255,6 +5256,71 @@ describe('DingtalkChannel connect logging', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     console.log('logging works again');
     expect(logSpy).toHaveBeenCalledWith('logging works again');
+  });
+
+  it('models the ungated SDK connect logging the guards rely on', async () => {
+    // Control for the guard tests above: the mocked SDK client, bypassing the
+    // adapter's wrapping, must leak what the guards assert absent. Without
+    // this, deleting the mock's console.log lines would leave them green
+    // while guarding nothing.
+    const rawClient = new DWClient({
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await rawClient.connect();
+
+    const logged = formatLoggedArgs(logSpy.mock.calls);
+    expect(logged).toContain('client-secret');
+    expect(logged).toContain(dingtalkSdkMock.streamTicket);
+  });
+
+  it('restores console.log when connect rejects', async () => {
+    const channel = createChannel({ useConnectionManager: false });
+    dingtalkSdkMock.nextConnect = () =>
+      Promise.reject(new Error('gateway down'));
+    const originalConsoleLog = console.log;
+
+    try {
+      await expect(channel.connect()).rejects.toThrow('gateway down');
+    } finally {
+      channel.disconnect();
+    }
+
+    expect(console.log).toBe(originalConsoleLog);
+  });
+
+  it('restores console.log when disconnect cancels a pending connect', async () => {
+    const channel = createChannel({ useConnectionManager: false });
+    dingtalkSdkMock.nextConnect = () => new Promise<void>(() => {});
+    const originalConsoleLog = console.log;
+
+    void channel.connect();
+    channel.disconnect();
+
+    expect(console.log).toBe(originalConsoleLog);
+  });
+
+  it('restores console.log when the manager abandons a stalled connect', async () => {
+    const channel = createChannel();
+    dingtalkSdkMock.nextConnect = () => new Promise<void>(() => {});
+    const originalConsoleLog = console.log;
+
+    vi.useFakeTimers();
+    try {
+      const connect = channel.connect().catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await connect;
+
+      // The SDK connect is still pending — the gateway never answered — but
+      // the manager abandoned the attempt, so logging must work again instead
+      // of staying process-wide suppressed until process restart.
+      expect(console.log).toBe(originalConsoleLog);
+    } finally {
+      channel.disconnect();
+      vi.useRealTimers();
+    }
   });
 });
 /* eslint-enable no-console */
