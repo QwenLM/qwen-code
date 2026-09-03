@@ -366,7 +366,7 @@ export async function buildSessionAgentsStatus(
   }
 
   const limitAgentSidecarRead = pLimit(MAX_AGENT_SIDECAR_READ_CONCURRENCY);
-  let sidecarReadFailed = false;
+  let sidecarScanIncomplete = false;
   await Promise.all(
     files.map((fileName) =>
       limitAgentSidecarRead(async () => {
@@ -377,7 +377,7 @@ export async function buildSessionAgentsStatus(
             throwOnReadError: true,
           });
         } catch {
-          sidecarReadFailed = true;
+          sidecarScanIncomplete = true;
           return;
         }
         if (
@@ -408,13 +408,17 @@ export async function buildSessionAgentsStatus(
               meta.status,
             ))
         ) {
+          sidecarScanIncomplete = true;
           return;
         }
+        metaSignatures.set(meta.agentId, JSON.stringify(meta));
         const startTime = Date.parse(meta.createdAt);
-        if (!Number.isFinite(startTime) || !meta.status) return;
+        if (!Number.isFinite(startTime) || !meta.status) {
+          sidecarScanIncomplete = true;
+          return;
+        }
         if (meta.status === 'running' && meta.isBackgrounded !== true) return;
         const status = meta.status === 'running' ? 'paused' : meta.status;
-        metaSignatures.set(meta.agentId, JSON.stringify(meta));
         const endTime = Date.parse(meta.lastUpdatedAt ?? meta.createdAt);
         const subagentType = meta.subagentName ?? meta.agentType;
         agents.set(meta.agentId, {
@@ -450,17 +454,14 @@ export async function buildSessionAgentsStatus(
   if (
     directoryMtimeNs !== undefined &&
     files.length > 0 &&
-    !sidecarReadFailed
+    !sidecarScanIncomplete
   ) {
     const tasks = retainAgentTasks([...agents.values()]);
-    const retainedIds = new Set(tasks.map((task) => task.id));
     agentSidecarCache.delete(cacheKey);
     agentSidecarCache.set(cacheKey, {
       directoryMtimeNs,
       tasks,
-      metaSignatures: new Map(
-        [...metaSignatures].filter(([agentId]) => retainedIds.has(agentId)),
-      ),
+      metaSignatures,
     });
     while (agentSidecarCache.size > MAX_AGENT_SIDECAR_CACHE_ENTRIES) {
       const oldest = agentSidecarCache.keys().next().value;

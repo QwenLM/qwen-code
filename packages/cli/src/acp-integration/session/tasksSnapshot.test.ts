@@ -245,6 +245,54 @@ describe('buildSessionAgentsStatus', () => {
     }
   });
 
+  it('does not cache an invalid sidecar', async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-status-'));
+    const sessionDir = path.join(projectDir, 'subagents', 'session-1');
+    const repairedMetaPath = path.join(sessionDir, 'agent-repaired.meta.json');
+    const meta = (agentId: string) => ({
+      agentId,
+      agentType: 'general-purpose',
+      description: `${agentId} agent`,
+      parentSessionId: 'session-1',
+      parentAgentId: null,
+      createdAt: '2026-08-26T00:00:00.000Z',
+      status: 'completed',
+      isBackgrounded: true,
+    });
+    try {
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sessionDir, 'agent-stored.meta.json'),
+        JSON.stringify(meta('stored')),
+      );
+      fs.writeFileSync(repairedMetaPath, '{');
+
+      const first = await buildSessionAgentsStatus(
+        'session-1',
+        configWith([], [], projectDir),
+      );
+      const directoryMtimeNs = fs.statSync(sessionDir, {
+        bigint: true,
+      }).mtimeNs;
+      fs.writeFileSync(repairedMetaPath, JSON.stringify(meta('repaired')));
+      expect(fs.statSync(sessionDir, { bigint: true }).mtimeNs).toBe(
+        directoryMtimeNs,
+      );
+      const second = await buildSessionAgentsStatus(
+        'session-1',
+        configWith([], [], projectDir),
+      );
+
+      expect(first.tasks.map((task) => task.id)).toEqual(['stored']);
+      expect(second.tasks.map((task) => task.id).sort()).toEqual([
+        'repaired',
+        'stored',
+      ]);
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
   it('does not share cached sidecars between colliding session directories', async () => {
     const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agents-status-'));
     const sessionDir = path.join(projectDir, 'subagents', 'feat_x');

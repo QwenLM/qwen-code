@@ -5435,9 +5435,16 @@ describe('artifact panel fullscreen', () => {
     ).not.toBeNull();
 
     // Back to session-2: its saved state reopens the panel docked; the
-    // fullscreen flag must not leak across sessions.
+    // fullscreen flag must not leak across sessions, including through the
+    // normal transcript-loading window.
     act(() => {
       mockConnection.sessionId = 'session-2';
+      mockConnection.loadingTranscript = true;
+      rerender();
+    });
+    await flush();
+    act(() => {
+      mockConnection.loadingTranscript = false;
       rerender();
     });
     await flush();
@@ -5448,6 +5455,12 @@ describe('artifact panel fullscreen', () => {
       document.querySelector('[class*="artifactPanelFullscreen"]'),
     ).toBeNull();
     expect(container.querySelector('[role="separator"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).not.toContain('chatViewHidden');
+    expect(
+      container.querySelector('[class*="contextShell"]')?.className,
+    ).not.toContain('chatViewHidden');
   });
 
   it('expands the floating drawer to fullscreen without remounting the panel', async () => {

@@ -5573,6 +5573,19 @@ export function App({
       }
     }
 
+    if (previousSessionId !== nextSessionId) {
+      setReviewChanges([]);
+      setSelectedReviewPath(null);
+      setArtifactPanelExtraArtifacts([]);
+      setPaneArtifactSnapshots(new Map());
+      setArtifactPanelWidth(
+        (nextSessionId
+          ? artifactPanelStateBySessionRef.current.get(nextSessionId)?.width
+          : undefined) ?? getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelFullscreen(false);
+    }
+
     artifactPanelSessionIdRef.current = nextSessionId;
     if (!nextSessionId) {
       artifactPanelRestoredSessionKeyRef.current = undefined;
@@ -5666,11 +5679,6 @@ export function App({
         setArtifactPanelOpen(false);
         setArtifactPanelTabs([]);
         setActiveArtifactPanelTabId(null);
-        setReviewChanges([]);
-        setSelectedReviewPath(null);
-        setArtifactPanelExtraArtifacts([]);
-        setPaneArtifactSnapshots(new Map());
-        setArtifactPanelFullscreen(false);
       }
       return;
     }
@@ -5931,13 +5939,9 @@ export function App({
       setActiveArtifactPanelTabId(activeTabId);
       if (previousSessionId !== nextSessionId) {
         setReviewChanges(restoreInputs.latestReviewChanges);
-        setSelectedReviewPath(null);
-        setArtifactPanelExtraArtifacts([]);
-        setPaneArtifactSnapshots(new Map());
         setArtifactPanelWidth(
           savedState?.width ?? getDefaultReviewPanelWidth(),
         );
-        setArtifactPanelFullscreen(false);
       }
       void hydrateRestoredAttachmentTab(
         activatedTabs.find((tab) => tab.id === activeTabId),
