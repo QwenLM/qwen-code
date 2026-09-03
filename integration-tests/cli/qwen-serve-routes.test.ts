@@ -41,6 +41,10 @@ import {
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
 import { isNativeDirectoryPickerAvailable } from '../../packages/cli/src/serve/native-directory-picker.js';
+import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from '../../packages/cli/src/serve/local-path-open.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -54,6 +58,15 @@ const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'integration-test-token';
+// The ACP child's `initialize` handshake gets 10s by default, which is a
+// budget for an interactive desktop, not for a shard sharing a 128-core ECS
+// host with ~30 other jobs. Run 33633418567 lost `honors and reserves a
+// normalized caller-supplied session ID` to three ~10s
+// `AcpSessionBridge initialize timed out` attempts and a 504 on the
+// sandbox:docker leg while the same commit's sandbox:none shards passed —
+// the same signature #10605 diagnosed in run 33351032808. Nothing here
+// asserts the handshake budget, so raise it for the spawned daemon only.
+const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 let daemon: ChildProcess;
@@ -67,6 +80,10 @@ let client: DaemonClient;
 // assertion time minutes later diverged when the host's GUI session state
 // drifted mid-run (red macOS E2E runs after #9406, tracked in #10453).
 let nativeDirectoryPickerAtBoot = false;
+// Same boot-time probe pinning as above, for the workspace_local_open tag.
+let localPathOpenAtBoot = false;
+// Same boot-time probe pinning as above, for the workspace_local_terminal tag.
+let localTerminalOpenAtBoot = false;
 
 function writePersistedTranscript(
   sessionId: string,
@@ -119,6 +136,8 @@ function chatRecord(
 beforeAll(async () => {
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
   nativeDirectoryPickerAtBoot = isNativeDirectoryPickerAvailable();
+  localPathOpenAtBoot = isLocalPathOpenAvailable();
+  localTerminalOpenAtBoot = isLocalTerminalAvailable();
   daemon = spawn(
     process.execPath,
     [
@@ -138,6 +157,8 @@ beforeAll(async () => {
       // / IDE-launcher environments.
       '--workspace',
       REPO_ROOT,
+      '--initialize-timeout-ms',
+      String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -370,6 +391,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
+      'session_resources',
       'session_status',
       'session_close',
       'session_archive',
@@ -377,6 +399,8 @@ describe('qwen serve — capabilities envelope', () => {
       'session_metadata',
       'session_organization',
       'session_export',
+      'standalone_sessions_v1',
+      'standalone_session_options_v1',
       'session_transcript',
       'session_transcript_pagination',
       'mcp_guardrails',
@@ -398,6 +422,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_permissions',
       'workspace_voice',
       'workspace_trust',
+      'workspace_trust_hot_reload',
       'workspace_init',
       'workspace_github_setup',
       'workspace_github_prs',
@@ -412,6 +437,7 @@ describe('qwen serve — capabilities envelope', () => {
       'permission_mediation',
       'non_blocking_prompt',
       'session_language',
+      'user_language_sync',
       'session_rewind',
       'workspace_hooks',
       'session_hooks',
@@ -422,11 +448,15 @@ describe('qwen serve — capabilities envelope', () => {
       'channel_control',
       'channel_management',
       'workspace_channel_observed_contacts',
+      'dynamic_workspace_registration',
       'persistent_workspace_registration',
       'workspace_display_name',
+      'scratch_workspace_registration',
       'workspace_runtime_removal',
       ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
       'workspace_runtime',
+      ...(localPathOpenAtBoot ? ['workspace_local_open'] : []),
+      ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
       'extension_state',
@@ -438,6 +468,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_live_state',
       'workspace_session_metadata',
       'voice_transcribe',
+      'web_terminal',
     ]);
   });
 });

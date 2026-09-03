@@ -39,6 +39,10 @@ export default defineConfig({
         __dirname,
         '../core/src/services/tool-write-origin.ts',
       ),
+      '@qwen-code/qwen-code-core/envVarResolver': path.resolve(
+        __dirname,
+        '../core/src/utils/envVarResolver.ts',
+      ),
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
       // cli's daemon-status-provider.test.ts imports `FakeAgent` /
       // `makeChannel` from acp-bridge's package-private
@@ -167,7 +171,13 @@ export default defineConfig({
       : undefined,
     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)', 'config.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**', '**/cypress/**'],
-    environment: 'jsdom',
+    // Terminal app: run under node. Only files that need a document (the
+    // @testing-library/react renderHook suites and a few DOM-touching UI
+    // tests) opt into jsdom with a `// @vitest-environment jsdom` control
+    // comment; vitest reads it from the file itself. Creating a jsdom per
+    // file cost 0.2–0.5s each, a tenth of the suite, while nine files in
+    // ten never touched the DOM.
+    environment: 'node',
     globals: true,
     reporters: ['default', 'junit'],
     silent: true,
@@ -187,11 +197,13 @@ export default defineConfig({
     // RPC-timeout exemption; see scripts/tests/unit-vitest-configs.test.ts.
     dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
-      // CI consumes coverage only from the ubuntu lane (the upload and the
-      // coverage comment both pin coverage-reports-*-ubuntu-latest), and the
-      // report generation adds end-of-run main-thread work on the smaller
-      // Windows/macOS runners; skip it there. Local runs keep coverage.
-      enabled: !process.env.CI || process.platform === 'linux',
+      // CI collects coverage only where something keeps it: the post-merge
+      // run on main, which ci.yml marks with QWEN_CI_COVERAGE=1 and whose
+      // reports it uploads. Pull-request runs skip it — nothing read those
+      // reports, and v8 instrumentation plus the per-file merge on the main
+      // thread cost about a fifth of the suite's wall time. Local runs keep
+      // coverage.
+      enabled: !process.env.CI || process.env['QWEN_CI_COVERAGE'] === '1',
       provider: 'v8',
       reportsDirectory: './coverage',
       include: ['src/**/*'],

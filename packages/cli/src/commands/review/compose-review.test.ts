@@ -102,6 +102,7 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
   };
 });
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 const runComposeReviewCommand = (argv: unknown): Promise<void> =>
   Promise.resolve(composeReviewCommand.handler(argv as never) as void);
@@ -1394,6 +1395,9 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     );
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('Unresolved, please confirm:');
     expect(r.body).toContain('**[Critical]** SKILL.md:35');
     expect(r.body).not.toContain('no blockers');
@@ -1537,7 +1541,8 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
     // prefix filter must not let it swallow a DIFFERENT reverse-audit scope
     // reported with its own reason — a whiffed chunk from the rounds that
     // DID run is exactly what a partially-run audit still owes the author.
-    const plan = coveredPlan();
+    // han: the caller-prose zh assertion below needs the Chinese half rendered.
+    const plan = coveredPlan(['verify', 'reverse-audit'], { han: true });
     writeBudgetStop(
       plan,
       {
@@ -1547,19 +1552,30 @@ describe('composeReview — event caps (round-7 Critical #2: caps must reach eve
       },
       3,
     );
-    const r = composeReview(
-      base({
-        planPath: plan,
-        unreviewedDimensions: [
-          "reverse audit — chunk 2's auditor returned nothing substantive twice",
-        ],
-      }),
-    );
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would overwrite the han-stamped plan.
+    const r = composeReview({
+      planPath: plan,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [
+        "reverse audit — chunk 2's auditor returned nothing substantive twice",
+      ],
+    });
     expect(r.body).toContain(
       'Not reviewed: reverse audit — stopped before round 3 by the review time budget.',
     );
     expect(r.body).toContain(
       "Not reviewed: reverse audit — chunk 2's auditor returned nothing substantive twice.",
+    );
+    // Caller prose is untranslatable by construction, and the Chinese half
+    // SAYS so — an unmarked all-English sentence under 中文说明 read as a
+    // broken translation (#10567's posted body). The payload keeps its own
+    // English full stop.
+    expect(r.body).toContain(
+      "未审查（原文为英文）：reverse audit — chunk 2's auditor returned nothing substantive twice.",
     );
     // The marker's own disclosure still renders exactly once.
     expect(r.body.split('review time budget').length - 1).toBe(1);
@@ -2329,7 +2345,7 @@ describe('composeReview — presubmit downgrades', () => {
     expect(r.body).not.toContain('Downgraded');
   });
 
-  it('self-PR downgrade of an RC keeps the body Criticals after the downgrade sentence (round-3 bug: the only copy of a blocker vanished)', () => {
+  it('self-PR downgrade of an RC exposes a leading Critical header and keeps the body Criticals after the downgrade sentence (round-3 bug: the only copy of a blocker vanished)', () => {
     const r = composeReview(
       base({
         bodyCriticals: ['unmappable blocker'],
@@ -2341,11 +2357,32 @@ describe('composeReview — presubmit downgrades', () => {
     );
     expect(r.event).toBe('COMMENT');
     expect(r.downgraded).toBe(true);
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('⚠️ Downgraded from Request changes to Comment');
     expect(r.body).toContain('**[Critical]** unmappable blocker');
     const sentenceIdx = r.body.indexOf('Downgraded');
     const blockerIdx = r.body.indexOf('unmappable blocker');
     expect(sentenceIdx).toBeLessThan(blockerIdx);
+  });
+
+  it('self-PR downgrade with attribution off keeps the body Critical without a visible Critical header', () => {
+    const r = composeReview(
+      base({
+        bodyCriticals: ['unmappable blocker'],
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['self-PR'],
+        },
+      }),
+      '0.21.2',
+      false,
+    );
+
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('unmappable blocker');
+    expect(r.body).not.toContain('**[Critical]**');
   });
 
   it('body Criticals never leak into a plain COMMENT that was not downgraded from RC', () => {
@@ -5834,6 +5871,9 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     });
     expect(r.event).toBe('COMMENT');
     expect(r.cappedBy).toContain('criticals-unverified');
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
   });
 
@@ -5859,6 +5899,9 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(r.downgradedFrom).toBeNull();
     expect(r.cappedBy).toContain('findings-unverified-at-compose');
     expect(r.cappedBy).not.toContain('criticals-unverified');
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('**[Critical]** whole-PR blocker X');
   });
 
@@ -6819,8 +6862,38 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.criticals).toEqual([]);
     expect(g.unreviewed).toEqual([]);
     expect(g.disclosed).toHaveLength(1);
-    expect(g.disclosed[0]).toContain('.github/workflows/ci.yml');
-    expect(g.disclosed[0]).toContain('source mapping not yet supported');
+    expect(g.disclosed[0].en).toContain('.github/workflows/ci.yml');
+    expect(g.disclosed[0].en).toContain('source mapping not yet supported');
+    // No "the executable-script lint" prefix: the body wraps this in a
+    // sentence that already opens "Not linted:", and the prefix rendered as
+    // "Not linted: the executable-script lint" — a lint not linted.
+    expect(g.disclosed[0].en).not.toContain('executable-script lint');
+    // No `reasonZh` in this report — the Chinese half falls back to the
+    // English reason rather than dropping the sentence.
+    expect(g.disclosed[0].zh).toContain('source mapping not yet supported');
+  });
+
+  it('a deferred entry with a reasonZh renders it in the Chinese half', () => {
+    const p = writePlan({
+      files: [{ path: '.github/workflows/ci.yml', kind: 'source' }],
+    });
+    writeReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+          reasonZh: '尚未支持源映射',
+        },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.disclosed).toHaveLength(1);
+    expect(g.disclosed[0].en).toContain('source mapping not yet supported');
+    expect(g.disclosed[0].zh).toContain('尚未支持源映射');
+    expect(g.disclosed[0].zh).not.toContain('source mapping not yet supported');
+    // Both halves still carry the code-span path.
+    expect(g.disclosed[0].zh).toContain('.github/workflows/ci.yml');
   });
 
   it('ignores a cosmetic (style) or pre-existing (inDiff:false) finding', () => {
@@ -6873,12 +6946,14 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     });
     const g = scriptLintGate(p);
     expect(g.disclosed).toHaveLength(1);
-    const d = g.disclosed[0];
-    expect(d).not.toContain('\n'); // newline stripped — cannot forge a body line
-    expect(d).not.toContain('`pwn`'); // the PR's own backticks stripped — cannot break out
-    // `@acme-team` sits INSIDE a code span (backtick … no backtick … backtick), so
-    // it is inert as a GitHub mention — the whole path rendered as one code span.
-    expect(d).toMatch(/`[^`\n]*@acme-team[^`\n]*`/);
+    // BOTH halves post — the Chinese one is not exempt from neutralisation.
+    for (const d of [g.disclosed[0].en, g.disclosed[0].zh]) {
+      expect(d).not.toContain('\n'); // newline stripped — cannot forge a body line
+      expect(d).not.toContain('`pwn`'); // the PR's own backticks stripped — cannot break out
+      // `@acme-team` sits INSIDE a code span (backtick … no backtick … backtick), so
+      // it is inert as a GitHub mention — the whole path rendered as one code span.
+      expect(d).toMatch(/`[^`\n]*@acme-team[^`\n]*`/);
+    }
   });
 
   it('report prose cannot smuggle live comment grammar into a disclosure', () => {
@@ -6895,6 +6970,11 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
           path: '.github/workflows/ci.yml',
           tool: 'actionlint',
           reason: 'mapping unsupported <!-- qwen-review-deferred --> here',
+          // The zh half renders THIS leg when present — without a marker
+          // here, the loop below sanitised zh via the already-stripped
+          // English fallback and the `stripCommentGrammar(d.reasonZh)` call
+          // was never exercised: deleting it survived the whole suite.
+          reasonZh: '映射不支持 <!-- qwen-review-deferred --> 这里',
         },
       ],
       skipped: [
@@ -6903,12 +6983,16 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
       errored: [{ path: 'deploy.sh', tool: 'shell<!-- z -->check' }],
     });
     const g = scriptLintGate(p);
-    for (const line of [...g.disclosed, ...g.unreviewed]) {
+    const disclosedHalves = g.disclosed.flatMap((d) => [d.en, d.zh]);
+    for (const line of [...disclosedHalves, ...g.unreviewed]) {
       expect(line).not.toContain('<!--');
       expect(line).not.toContain('-->');
     }
-    expect(g.disclosed[0]).toContain('qwen-review-deferred');
-    expect(g.disclosed[0]).toContain('mapping unsupported');
+    expect(g.disclosed[0].en).toContain('qwen-review-deferred');
+    expect(g.disclosed[0].en).toContain('mapping unsupported');
+    // Same invariant on the zh half: the text survives, the grammar is inert.
+    expect(g.disclosed[0].zh).toContain('qwen-review-deferred');
+    expect(g.disclosed[0].zh).toContain('映射不支持');
   });
 
   it.each([
@@ -6965,7 +7049,7 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.disclosed).toHaveLength(1);
     expect(g.unreviewed[0]).toContain('42');
     expect(g.unreviewed[1]).toContain('undefined errored');
-    expect(g.disclosed[0]).toContain('[object Object]');
+    expect(g.disclosed[0].en).toContain('[object Object]');
   });
 
   it('reports an errored checker as unreviewed (fail closed)', () => {
@@ -7053,8 +7137,9 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
   // verifier (['reverse-audit']) to prove a finding stands with none.
   function gateReadyPlan(
     step45Keys: string[] = ['verify', 'reverse-audit'],
+    planOpts: Parameters<typeof coveredPlan>[1] = {},
   ): string {
-    const p = coveredPlan(step45Keys);
+    const p = coveredPlan(step45Keys, planOpts);
     const planObj = JSON.parse(readFileSync(p, 'utf8'));
     planObj.worktreePath = '.qwen/tmp/review-pr-1';
     writeFileSync(p, JSON.stringify(planObj));
@@ -7206,7 +7291,9 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     // but MUST be surfaced in the body so the reader knows that shell went unlinted.
     // The gate reads the report as the sole authority, so the deferral is disclosed
     // from the report itself; the plan stays fully covered so the Approve stands.
-    const p = gateReadyPlan();
+    // han: the Chinese half only renders for a han-audience PR, and this test
+    // pins that half's sentence too.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], { han: true });
     writeGateReport({
       deferred: [
         {
@@ -7224,10 +7311,58 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
-    expect(r.body).toContain('.github/workflows/ci.yml');
-    expect(r.body).toContain('source mapping not yet supported');
+    // The whole composed sentence, both halves — pinned against the stutter
+    // #10567's posted body carried ("Not linted: the executable-script lint —
+    // … — not linted"): the wrapper says "Not linted" once, then path and
+    // reason, nothing else.
+    expect(r.body).toContain(
+      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported.',
+    );
+    expect(r.body).toContain(
+      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——source mapping not yet supported。',
+    );
     // the clean-approve copy is still there — the disclosure augments, it doesn't replace
     expect(r.body).toContain('No issues found. LGTM! ✅');
+  });
+
+  it('two deferred entries join per language, the reasonZh branch rendered whole', () => {
+    // Every other deferred fixture holds ONE entry, and a one-element join
+    // emits no separator — so the en '; ' join, the zh full-width '；' join
+    // and the reasonZh-carrying branch (the primary case: every report the
+    // current CLI writes carries `reasonZh`) were pinned by nothing; the
+    // single-entry test above reaches only the English-fallback branch. Two
+    // entries, one translated and one not, pin both composed sentences
+    // whole, separators included.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], { han: true });
+    writeGateReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+          reasonZh: '尚未支持源映射',
+        },
+        {
+          path: '.github/workflows/release.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+        },
+      ],
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain(
+      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported; `.github/workflows/release.yml` — source mapping not yet supported.',
+    );
+    expect(r.body).toContain(
+      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——尚未支持源映射；`.github/workflows/release.yml`——source mapping not yet supported。',
+    );
   });
 });
 
@@ -9427,6 +9562,9 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
     });
     expect(r.event).toBe('COMMENT');
     expect(r.body.length).toBeLessThanOrEqual(LIMIT);
+    expect(
+      r.body.startsWith('**[Critical]** Blocking finding(s) follow.'),
+    ).toBe(true);
     expect(r.body).toContain('Downgraded from Request changes');
   });
 
@@ -10765,7 +10903,9 @@ describe('composeReview — unresolved-Critical rendering (#8388 readability)', 
     const wrapped = `comment 102 (b.ts) — body\n${' '.repeat(80_000)}truncated`;
     const t0 = performance.now();
     const r = composeReview(base({ cannotTellCriticals: [flat, wrapped] }));
-    expect(performance.now() - t0).toBeLessThan(2000);
+    expectWithinLatencyBudget(performance.now() - t0, 2000, {
+      poolMultiplier: 10,
+    });
     // 160k of model prose used to reach the body budget's last-resort
     // truncation; the per-entry char cap this account now shares bounds it
     // upstream of the budget instead, which is the better place for it. So
@@ -15710,6 +15850,1201 @@ describe('draftedFindingsOf — the drafts as the convergence diagnosis reads th
     // ...and the differential is not vacuously true because every arm is
     // undefined: the prescribed shape does carry its id.
     expect(idOf('**[Critical]** R1-2: (fix-induced) x')).toBe('R1-2');
+  });
+});
+
+describe('composeReview — the decided-stop re-rule', () => {
+  let cwd0: string;
+  beforeEach(() => {
+    cwd0 = process.cwd();
+    process.chdir(dir);
+    // A sidecar stamped by one test must not vouch for the next: the fence
+    // now binds every stop compose (run id or not), so a leftover stamp is
+    // cross-test state.
+    for (const stem of ['local', 'other']) {
+      rmSync(join(dir, `.qwen/tmp/qwen-review-${stem}-stop.json`), {
+        force: true,
+      });
+    }
+  });
+  afterEach(() => {
+    process.chdir(cwd0);
+  });
+
+  function stopPlan(
+    opts: {
+      stop?: boolean;
+      ledger?: unknown[];
+      name?: string;
+      reason?: string;
+      cacheFile?: string;
+      supersededPaths?: string[];
+      prNumber?: number;
+      /** `false` leaves the sidecar to the test — the fence-shape tests. */
+      sidecar?: boolean;
+    } = {},
+  ): string {
+    const cachePath = join(dir, `review-cache-${opts.name ?? 'default'}.json`);
+    writeFileSync(
+      cachePath,
+      JSON.stringify({
+        findings: opts.ledger ?? [
+          {
+            id: 'R1-1',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+          {
+            id: 'R1-2',
+            severity: 'Critical',
+            status: 'fixed',
+            title: 'the patched hole',
+          },
+          {
+            id: 'R1-3',
+            severity: 'Suggestion',
+            status: 'open',
+            title: 'the open suggestion',
+          },
+        ],
+      }),
+    );
+    const p = join(dir, `stop-plan-${opts.name ?? 'default'}.json`);
+    writeFileSync(
+      p,
+      JSON.stringify({
+        chunks: [],
+        files: [],
+        diffLines: 0,
+        srcDiffLines: 0,
+        skippedFiles: [],
+        target: 'local',
+        cachePath: opts.cacheFile ?? cachePath,
+        ...(opts.prNumber !== undefined ? { prNumber: opts.prNumber } : {}),
+        ...(opts.supersededPaths
+          ? {
+              incremental: {
+                scope: { supersededPaths: opts.supersededPaths },
+              },
+            }
+          : {}),
+        ...(opts.stop === false
+          ? {}
+          : {
+              nothingToReview: {
+                reason: opts.reason ?? 'unchanged-since-last-round',
+              },
+            }),
+      }),
+    );
+    // The capture always leaves its sidecar beside a decided stop — the
+    // fence requires it with or without a published run id — so the plan
+    // fixture stamps the matching one (run-id-less, the interactive shape)
+    // unless the test owns the stamp itself.
+    if (opts.sidecar !== false && opts.stop !== false) {
+      stampStopSidecar({
+        name: opts.name,
+        reason: opts.reason,
+        cacheFile: opts.cacheFile,
+        supersededPaths: opts.supersededPaths,
+      });
+    }
+    return p;
+  }
+
+  function reRule(over: Record<string, unknown> = {}) {
+    return composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      env: ENV,
+      modelId: MODEL,
+      stopReRule: {
+        dispositions: [{ id: 'R1-1', ruling: 'still-stands' }],
+      },
+      bodyCriticals: ['R1-1: the mechanism still fires — re-read at HEAD'],
+      // Built ONLY when the test does not bring its own: the default plan
+      // stamps the default sidecar, which would overwrite the stamp a
+      // caller-built plan (or the test itself) just wrote.
+      ...('planPath' in over ? {} : { planPath: stopPlan() }),
+      ...over,
+    });
+  }
+
+  function stampStopSidecar(
+    opts: {
+      name?: string;
+      reason?: string;
+      /** Omitted entirely when not given — the interactive capture's shape. */
+      runId?: string;
+      target?: string;
+      cacheFile?: string;
+      supersededPaths?: string[];
+    } = {},
+  ): string {
+    const cachePath =
+      opts.cacheFile === ''
+        ? null
+        : (opts.cacheFile ??
+          join(dir, `review-cache-${opts.name ?? 'default'}.json`));
+    let findingsHash: string | null = null;
+    try {
+      if (cachePath !== null) {
+        findingsHash = createHash('sha256')
+          .update(readFileSync(cachePath))
+          .digest('hex');
+      }
+    } catch {
+      // A cache that does not exist stamps null — the fence re-hashes.
+    }
+    mkdirSync(join(dir, '.qwen/tmp'), { recursive: true });
+    const sidecarPath = join(
+      dir,
+      `.qwen/tmp/qwen-review-${opts.target ?? 'local'}-stop.json`,
+    );
+    const reason = opts.reason ?? 'unchanged-since-last-round';
+    writeFileSync(
+      sidecarPath,
+      JSON.stringify({
+        reason,
+        ...(opts.runId !== undefined ? { runId: opts.runId } : {}),
+        cachePath,
+        findingsHash,
+        // The capture stamps the split on every scope-emptied stop — the
+        // fence fails closed on its absence for that reason.
+        ...(reason === 'scope-emptied'
+          ? { supersededPaths: opts.supersededPaths ?? [] }
+          : {}),
+      }),
+    );
+    return sidecarPath;
+  }
+
+  it('composes REQUEST_CHANGES from a standing re-rule, floors skipped', () => {
+    const r = reRule();
+    expect(r.event).toBe('REQUEEST_CHANGES'.replace('EE', 'E'));
+    expect(r.body).toContain('Decided-stop re-rule');
+    expect(r.cappedBy).not.toContain('chunk-nobody-read');
+  });
+
+  it('a re-rule that cleared every blocker COMMENTS, never approves', () => {
+    // A `fixed` ruling is licensed only under clean-tree — the judged stop —
+    // so the cleared shape rides one; over the deduced stops the same
+    // disposition is refused below.
+    const r = reRule({
+      planPath: stopPlan({ name: 'cleared', reason: 'clean-tree' }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+      bodyCriticals: [],
+    });
+    expect(r.event).toBe('COMMENT');
+    // The opener may not certify a review that never ran: the cleared
+    // stop's COMMENT once opened 'Reviewed — no blockers.' two paragraphs
+    // above its own 'no review agents ran this round' disclosure.
+    expect(r.body).not.toContain('Reviewed — no blockers.');
+    expect(r.body).not.toMatch(/^Reviewed\./);
+    expect(r.body).toContain(
+      'Re-rule of standing findings — no new review ran.',
+    );
+  });
+
+  it('refuses a full-round plan wearing the flag', () => {
+    expect(() =>
+      reRule({ planPath: stopPlan({ stop: false, name: 'full' }) }),
+    ).toThrow(/no nothingToReview decision/);
+  });
+
+  it('renders the round-kind disclosure on its own line, never under "Not linted"', () => {
+    // The disclosure used to ride gateDisclosed, whose only renderer wraps
+    // every entry in "Not linted (tool limitation…)" — a round kind is not
+    // a linting gap.
+    const r = reRule();
+    expect(r.body).toContain('Decided-stop re-rule');
+    expect(r.body).not.toMatch(/Not linted[^\n]*Decided-stop re-rule/);
+  });
+
+  it('says why a cleared stop is a Comment — no dangling colon', () => {
+    // The stop demotion is the one APPROVE→COMMENT mover with empty
+    // cappedBy and no presubmit downgrade; joining the empty reason list
+    // printed 'an Approve was NOT available: ' over nothing.
+    const r = reRule({
+      planPath: stopPlan({ name: 'cleared-line', reason: 'clean-tree' }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+      bodyCriticals: [],
+    });
+    const line = verdictLine(r);
+    expect(line).toContain('reviews nothing new');
+    expect(line).not.toMatch(/NOT available:\s*$/);
+  });
+
+  it('refuses a decided-stop plan composed WITHOUT stopReRule', () => {
+    // The mirror of the forged-flag refusal above: a stop plan walked
+    // through the regular floors would compose a non-blocking artifact,
+    // and `run.ts` reads any composed artifact as this round's completion
+    // — exit 0 over the ledger's standing blockers.
+    expect(() =>
+      composeReview({
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        planPath: stopPlan({ name: 'no-rerule' }),
+        env: ENV,
+        modelId: MODEL,
+      }),
+    ).toThrow(/composes only through its re-rule/);
+  });
+
+  it('refuses a null stopReRule with the designed refusal', () => {
+    expect(() => reRule({ stopReRule: null })).toThrow(
+      /must be an object carrying dispositions/,
+    );
+  });
+
+  it('refuses a ledger carrying two rows under one id', () => {
+    // Two open Criticals under ONE id collapse the set-based completeness
+    // check and the last-wins title/file maps into one disposition — the
+    // real blocker leaves the verdict lineage through its filler twin. A
+    // repeated id is an unreadable baseline like any other shape drift.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'dup-id',
+          ledger: [
+            {
+              id: 'R2-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'real blocker citing a.ts',
+            },
+            {
+              id: 'R2-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'filler citing b.ts',
+            },
+          ],
+        }),
+        stopReRule: { dispositions: [{ id: 'R2-1', ruling: 'still-stands' }] },
+        bodyCriticals: ['R2-1: filler citing b.ts'],
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('refuses the model-written census on a stop re-rule — no minted blocker', () => {
+    // No agents ran, so nothing this round could have measured a
+    // fresh/induced split — yet a supplied census satisfied the
+    // fresh <= reported cross-check through the carried-id re-assertions
+    // the grant itself proves are NOT fresh, and minted the
+    // non-convergence blocker over a round that measured nothing. Refused
+    // like the round-0 and context-unavailable unmeasurable states: the
+    // streak carries.
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, findings: [], round: 2, churnRounds: 1 }),
+    );
+    const ledger = [1, 2, 3, 4].map((i) => ({
+      id: `R1-${i}`,
+      severity: 'Critical',
+      status: 'open',
+      title: `standing blocker ${i}`,
+    }));
+    const r = reRule({
+      planPath: stopPlan({ name: 'census', ledger, prNumber: 8255 }),
+      stopReRule: {
+        dispositions: ledger.map((e) => ({ id: e.id, ruling: 'still-stands' })),
+      },
+      bodyCriticals: ledger.map((e) => `${e.id}: ${e.title}`),
+      convergence: { fresh: 4, induced: 2 },
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).not.toContain('is not converging');
+  });
+
+  it('refuses a ledger row whose status drifts from the vocabulary', () => {
+    // `status: 'oppn'` used to skip the row silently — the baseline shrank
+    // below what the ledger really held, the completeness check passed
+    // over the shrunken set, and the blocker never re-asserted. A drifted
+    // status is an unreadable baseline, exactly like a drifted severity.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'status-drift',
+          ledger: [{ id: 'R1-1', severity: 'Critical', status: 'oppn' }],
+        }),
+        stopReRule: { dispositions: [] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('refuses a Critical riding the deferral channel on a stop re-rule', () => {
+    // The floor's reroute moved a drafted Critical out of the inline set
+    // BEFORE the grant read the count, and the moved entry posted in the
+    // deferral list without ever reaching the body↔disposition bind. Both
+    // deferred legs — the reroute's and the model's own — are refused: on
+    // a stop round nothing new was reviewed, so a deferral-channel
+    // Critical can only be an unbound claim.
+    expect(() =>
+      reRule({
+        severityFloor: 'critical',
+        draftedComments: [
+          {
+            path: 'src/new.ts',
+            line: 3,
+            body: '**[Critical]** [fails-closed] [new-surface] a brand-new blocker',
+          },
+        ],
+        criticalsInline: 1,
+      }),
+    ).toThrow(/a Critical rides the deferral channel/);
+    expect(() =>
+      reRule({
+        severityFloor: 'critical',
+        deferredSuggestions: [
+          {
+            file: 'src/new.ts',
+            line: 3,
+            source: 'review',
+            severity: 'Critical',
+            direction: 'fails-closed',
+            baseline: 'new-surface',
+            title: 'a deferred blocker the bind cannot reach',
+          },
+        ],
+      }),
+    ).toThrow(/a Critical rides the deferral channel/);
+  });
+
+  it('does not let an unvouched relocated re-assertion’s source defeat the softening', () => {
+    // The relocated-leg twin of the tagged-unvouched test above: a
+    // title-less ledger entry re-asserted through the deferral channel
+    // with a deterministic `source` kept its deterministic credit, and an
+    // unverified blocker posted as an unsoftened REQUEST_CHANGES.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'reloc-unvouched',
+        ledger: [{ id: 'R1-1', severity: 'Critical', status: 'open' }],
+      }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+      bodyCriticals: [],
+      deferredSuggestions: [
+        {
+          file: 'src/wedge.ts',
+          line: 12,
+          source: 'test',
+          severity: 'Critical',
+          title: 'R1-1: the claim nobody recorded a title for',
+        },
+      ],
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('binds the relocated leg’s COLLAPSED title — a multi-line tail cannot smuggle', () => {
+    // First line matches the recorded claim verbatim; the tail carries a
+    // brand-new claim. A first-line-only readback passed it and the ledger
+    // builder recorded only line 1, so no future round would ever rule on
+    // the tail.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'reloc-tail',
+          reason: 'clean-tree',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+        }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+        bodyCriticals: [],
+        deferredSuggestions: [
+          {
+            file: 'src/wedge.ts',
+            line: 12,
+            source: 'review',
+            severity: 'Critical',
+            title:
+              'R1-1: the mechanism still fires — re-read at HEAD\n\nA brand-new claim nobody verified',
+          },
+        ],
+      }),
+    ).toThrow(/re-asserted with content that departs/);
+  });
+
+  it('keeps a granted stop’s REQUEST_CHANGES past a presubmit downgrade flag', () => {
+    // No presubmit ran on a stop round (no agents did), so the flag can
+    // only be stale or forged — it was the one softening channel the grant
+    // did not machine-check, and it moved a certified-standing blocker to
+    // COMMENT under `--fail-on request-changes`.
+    const r = reRule({
+      presubmit: { downgradeRequestChanges: true, reasons: [] },
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.downgraded).toBe(false);
+  });
+
+  it('refuses when an open ledger Critical has no disposition', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'two-open',
+          ledger: [
+            { id: 'R1-1', severity: 'Critical', status: 'open' },
+            { id: 'R2-9', severity: 'Critical', status: 'open' },
+          ],
+        }),
+      }),
+    ).toThrow(/R2-9 has no disposition/);
+  });
+
+  it('refuses a disposition that matches no open ledger Critical', () => {
+    expect(() =>
+      reRule({
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R9-9', ruling: 'fixed' },
+          ],
+        },
+      }),
+    ).toThrow(/R9-9 matches no open ledger Critical/);
+  });
+
+  it('refuses still-stands without its body Critical, and fixed with one', () => {
+    const cleared = () =>
+      stopPlan({ name: 'body-check', reason: 'clean-tree' });
+    expect(() => reRule({ planPath: cleared(), bodyCriticals: [] })).toThrow(
+      /still-stands but no body Critical/,
+    );
+    expect(() =>
+      reRule({
+        planPath: cleared(),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+      }),
+    ).toThrow(/ruled fixed yet a body Critical/);
+  });
+
+  it('honours the runId fence when a parent published one', () => {
+    const env = { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' };
+    const planPath = stopPlan({ sidecar: false });
+    expect(() => reRule({ env, planPath })).toThrow(/no stop sidecar/);
+    // A run-id-less stamp is not this run's stamp either.
+    stampStopSidecar({});
+    expect(() => reRule({ env, planPath })).toThrow(/no stop sidecar/);
+    stampStopSidecar({ runId: 'run-X' });
+    const r = reRule({ env, planPath });
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('binds the sidecar with no published run id — the interactive fence', () => {
+    // No run id waives only the run-id equality: the sidecar itself, its
+    // reason, cache path, and findings hash still bind. Skipping the fence
+    // outright left every interactive grant gated by nothing but
+    // model-supplied inputs — a hand-authored plan + ledger with no capture
+    // behind them composed a floor-exempt verdict.
+    const planPath = stopPlan({ sidecar: false });
+    expect(() => reRule({ planPath })).toThrow(/no stop sidecar/);
+    // A stamp for a departed reason does not vouch either.
+    stampStopSidecar({ reason: 'clean-tree' });
+    expect(() => reRule({ planPath })).toThrow(/records reason/);
+    // The capture's own stamp binds — a stamped run id is ignored here.
+    stampStopSidecar({ runId: 'run-ELSEWHERE' });
+    expect(reRule({ planPath }).event).toBe('REQUEST_CHANGES');
+    stampStopSidecar({});
+    expect(reRule({ planPath }).event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a fixed ruling under unchanged-since-last-round — a byte-identical tree can only still-stand', () => {
+    expect(() =>
+      reRule({
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/R1-1 is ruled fixed under unchanged-since-last-round/);
+  });
+
+  it('refuses a fixed ruling under scope-emptied, admits superseded', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'emptied', reason: 'scope-emptied' }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/R1-1 is ruled fixed under scope-emptied/);
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'emptied-ok',
+        reason: 'scope-emptied',
+        ledger: [
+          {
+            id: 'R1-1',
+            severity: 'Critical',
+            status: 'open',
+            file: 'src/gone.ts',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+        ],
+        supersededPaths: ['src/gone.ts'],
+      }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+      bodyCriticals: [],
+    });
+    expect(r.event).toBe('COMMENT');
+  });
+
+  it('machine-checks a superseded deduction against the published split', () => {
+    // `scope-emptied` licences `superseded` as a DEDUCED ruling, and the
+    // deduction's input is the capture's `supersededPaths`: a superseded
+    // whose cited file is still live — or whose row records no file at all
+    // — is a judgement wearing a deduction's licence, and retires a live
+    // blocker silently.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'emptied-live-file',
+          reason: 'scope-emptied',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              file: 'src/live.ts',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+          supersededPaths: [],
+        }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/not in the plan's supersededPaths/);
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'emptied-no-file',
+          reason: 'scope-emptied',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+          supersededPaths: ['src/gone.ts'],
+        }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/the ledger records no file for it/);
+  });
+
+  it('does not let an unvouched re-assertion’s tag defeat the unverified softening', () => {
+    // A title-less ledger entry binds on id alone; its re-assertion is
+    // unvouched, and on a granted stop no tool ran this round — so a
+    // `[test]` substring on it is prose, not provenance, and may not feed
+    // the deterministic exception that keeps a Request changes hard.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'tagged-unvouched',
+        ledger: [{ id: 'R1-1', severity: 'Critical', status: 'open' }],
+      }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+      bodyCriticals: ['R1-1: [test] the claim'],
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('keeps a vouched re-assertion’s deterministic tag', () => {
+    // The exception stays for entries the ledger's recorded title vouched
+    // for: they re-assert findings a full round verified, tag and all.
+    const title = '[test] the mechanism still fires — re-read at HEAD';
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'tagged-vouched',
+        ledger: [{ id: 'R1-1', severity: 'Critical', status: 'open', title }],
+      }),
+      stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+      bodyCriticals: [`R1-1: ${title}`],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses an unknown stop reason — the grant fails closed', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'odd', reason: 'model-invented' }),
+      }),
+    ).toThrow(/unknown stop reason/);
+  });
+
+  it('a still-stands re-assertion composes when a fixed sibling id prefixes it', () => {
+    // The old substring check matched `R1-1` inside `R1-10: …` and threw
+    // 'ruled fixed yet a body Critical still carries its id' on this fully
+    // compliant re-rule — every retry unsatisfiable. Per-entry id binding
+    // reads each entry's OWN leading token.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'prefix',
+        reason: 'clean-tree',
+        ledger: [
+          { id: 'R1-1', severity: 'Critical', status: 'open' },
+          {
+            id: 'R1-10',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+        ],
+      }),
+      stopReRule: {
+        dispositions: [
+          { id: 'R1-1', ruling: 'fixed' },
+          { id: 'R1-10', ruling: 'still-stands' },
+        ],
+      },
+      bodyCriticals: ['R1-10: the mechanism still fires — re-read at HEAD'],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a still-stands id present only inside another entry’s prose', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'prose',
+          reason: 'clean-tree',
+          ledger: [
+            { id: 'R2-5', severity: 'Critical', status: 'open' },
+            { id: 'R3-7', severity: 'Critical', status: 'open' },
+          ],
+        }),
+        stopReRule: {
+          dispositions: [
+            { id: 'R2-5', ruling: 'still-stands' },
+            { id: 'R3-7', ruling: 'still-stands' },
+          ],
+        },
+        bodyCriticals: ['R3-7: the gap remains — see R2-5 for context'],
+      }),
+    ).toThrow(/R2-5 is ruled still-stands but no body Critical/);
+  });
+
+  it('refuses a relocated Critical titled with an id ruled fixed', () => {
+    // The deferral channel's Criticals are relocated into the FINAL body
+    // set, so the cross-check must see them too: one titled with an id the
+    // re-rule judged fixed is exactly the blocker the grant would post
+    // against its own ruling.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'reloc', reason: 'clean-tree' }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'fixed' }] },
+        bodyCriticals: [],
+        deferredSuggestions: [
+          {
+            file: 'src/wedge.ts',
+            line: 12,
+            source: 'review',
+            severity: 'Critical',
+            title: 'R1-1: the blocker the deferral channel carried',
+          },
+        ],
+      }),
+    ).toThrow(/R1-1 is ruled fixed yet a body Critical/);
+  });
+
+  it('refuses an invented body Critical carrying no ledger id', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'invented',
+          reason: 'clean-tree',
+          ledger: [{ id: 'R1-1', severity: 'Critical', status: 'fixed' }],
+        }),
+        stopReRule: { dispositions: [] },
+        bodyCriticals: ['a brand-new blocker no round ever ruled on'],
+      }),
+    ).toThrow(/must carry exactly one still-stands ledger id/);
+  });
+
+  it('refuses two body entries re-asserting one still-stands id', () => {
+    // Both entries verbatim-match the recorded title, so the content
+    // binding admits them and the COUNT check is what refuses: two
+    // re-assertions of one still-stands ruling would post the blocker
+    // twice.
+    expect(() =>
+      reRule({
+        bodyCriticals: [
+          'R1-1: the mechanism still fires — re-read at HEAD',
+          'R1-1: the mechanism still fires — re-read at HEAD',
+        ],
+      }),
+    ).toThrow(/exactly one body Critical/);
+  });
+
+  it('refuses inline Criticals on a granted stop round', () => {
+    expect(() => reRule({ criticalsInline: 1 })).toThrow(
+      /inline Criticals cannot ride a stop re-rule/,
+    );
+  });
+
+  it('refuses a (fix-induced) marking riding a stop re-rule', () => {
+    // The marking says NEW work under an old id; a stop re-rule posts only
+    // re-assertions of verified findings — nothing was reviewed this round
+    // that could have induced a fix-induced defect.
+    expect(() =>
+      reRule({
+        bodyCriticals: [
+          'R1-1 (fix-induced): the mechanism still fires — re-read at HEAD',
+        ],
+      }),
+    ).toThrow(/carries the \(fix-induced\) marking/);
+  });
+
+  it('refuses a plan whose supersededPaths depart from the stamped split', () => {
+    // The fence bound reason/cache/hash but not the split — a plan edited
+    // AFTER the capture stamped could blanket-supersede a live blocker
+    // through the one ruling channel the fence did not bind.
+    const planPath = stopPlan({
+      name: 'forged-split',
+      reason: 'scope-emptied',
+      ledger: [
+        {
+          id: 'R1-1',
+          severity: 'Critical',
+          status: 'open',
+          file: 'src/live.ts',
+          title: 'the mechanism still fires — re-read at HEAD',
+        },
+      ],
+      supersededPaths: [],
+    });
+    // The model edits the PLAN's split after the stamp; the sidecar still
+    // certifies the empty one.
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    plan['incremental'] = { scope: { supersededPaths: ['src/live.ts'] } };
+    writeFileSync(planPath, JSON.stringify(plan));
+    expect(() =>
+      reRule({
+        planPath,
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/depart from the split the capture stamped/);
+  });
+
+  it('consumes an interactive sidecar on grant — a replay is refused', () => {
+    // #10654's interim hardening: nothing else ever reads a no-run-id
+    // sidecar, and left on disk it re-licences the same plan on a later,
+    // moved tree. Consumed only after the FULL grant — a refusal leaves it
+    // for the corrected retry — and never under a published run id, where
+    // the parent still reads it for completion.
+    const planPath = stopPlan({ name: 'consume' });
+    expect(reRule({ planPath }).event).toBe('REQUEST_CHANGES');
+    expect(() => reRule({ planPath })).toThrow(/no stop sidecar/);
+    // A refused grant leaves the sidecar in place for the retry.
+    const planPath2 = stopPlan({ name: 'consume-retry' });
+    expect(() =>
+      reRule({
+        planPath: planPath2,
+        stopReRule: { dispositions: [] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/has no disposition/);
+    expect(reRule({ planPath: planPath2 }).event).toBe('REQUEST_CHANGES');
+    // Under a published run id the sidecar stays for the parent.
+    const env = { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' };
+    const planPath3 = stopPlan({ name: 'consume-gated', sidecar: false });
+    stampStopSidecar({ name: 'consume-gated', runId: 'run-X' });
+    expect(reRule({ planPath: planPath3, env }).event).toBe('REQUEST_CHANGES');
+    expect(reRule({ planPath: planPath3, env }).event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a sidecar that parses to null with the designed refusal', () => {
+    const planPath = stopPlan({ name: 'null-sidecar', sidecar: false });
+    mkdirSync(join(dir, '.qwen/tmp'), { recursive: true });
+    writeFileSync(join(dir, '.qwen/tmp/qwen-review-local-stop.json'), 'null');
+    expect(() => reRule({ planPath })).toThrow(/no stop sidecar/);
+  });
+
+  it('refuses a cache file that APPEARED after a null-hash stamp', () => {
+    // Null is a stampable value — no cache existed at the stop — and the
+    // fence must fail closed on a file appearing since, not read it as an
+    // admitted empty baseline.
+    const missing = join(dir, 'appearing-cache.json');
+    rmSync(missing, { force: true });
+    const planPath = stopPlan({ name: 'appearing', cacheFile: missing });
+    writeFileSync(
+      missing,
+      JSON.stringify({
+        findings: [{ id: 'R9-9', severity: 'Critical', status: 'open' }],
+      }),
+    );
+    expect(() =>
+      reRule({ planPath, stopReRule: { dispositions: [] }, bodyCriticals: [] }),
+    ).toThrow(/not the ones the capture stamped/);
+  });
+
+  it('refuses a sidecar stamped by a different run', () => {
+    const planPath = stopPlan({ sidecar: false });
+    stampStopSidecar({ runId: 'run-OLD' });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' }, planPath }),
+    ).toThrow(/no stop sidecar/);
+  });
+
+  it('refuses a stamped sidecar whose stem differs from the plan’s target', () => {
+    // The fence reads the ONE sidecar the plan's target names — a stamp
+    // vouching for another target (the old family scan admitted it) must
+    // not vouch for this re-rule.
+    const planPath = stopPlan({ sidecar: false });
+    stampStopSidecar({ runId: 'run-X', target: 'other' });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' }, planPath }),
+    ).toThrow(/no stop sidecar/);
+  });
+
+  it('refuses a same-stem sidecar whose reason departs from the plan’s', () => {
+    // The licence-bearing reason is the capture's: a plan claiming a
+    // wider-licencing reason than the sidecar recorded must not ride it.
+    const planPath = stopPlan({ sidecar: false });
+    stampStopSidecar({ runId: 'run-X', reason: 'clean-tree' });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' }, planPath }),
+    ).toThrow(/records reason/);
+  });
+
+  it('refuses a sidecar naming a different cache than the plan', () => {
+    const planPath = stopPlan({ sidecar: false });
+    stampStopSidecar({
+      runId: 'run-X',
+      cacheFile: join(dir, 'another-cache.json'),
+    });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' }, planPath }),
+    ).toThrow(/names a different cache/);
+  });
+
+  it('refuses when the ledger moved between capture and compose', () => {
+    const env = { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' };
+    const planPath = stopPlan({ name: 'moved' });
+    stampStopSidecar({ name: 'moved', runId: 'run-X' });
+    // Control: the untouched ledger composes.
+    expect(reRule({ env, planPath }).event).toBe('REQUEST_CHANGES');
+    // Tamper: a phantom open Critical appended after the stamp.
+    const cachePath = join(dir, 'review-cache-moved.json');
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as {
+      findings: unknown[];
+    };
+    cache.findings.push({
+      id: 'R9-9',
+      severity: 'Critical',
+      status: 'open',
+      title: 'phantom',
+    });
+    writeFileSync(cachePath, JSON.stringify(cache));
+    expect(() => reRule({ env, planPath })).toThrow(
+      /not the ones the capture stamped/,
+    );
+  });
+
+  it('refuses a plan carrying no usable target under a published run id', () => {
+    const planPath = stopPlan({ name: 'no-target' });
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    delete plan['target'];
+    writeFileSync(planPath, JSON.stringify(plan));
+    stampStopSidecar({ name: 'no-target', runId: 'run-X' });
+    expect(() =>
+      reRule({ env: { ...ENV, QWEN_REVIEW_RUN_ID: 'run-X' }, planPath }),
+    ).toThrow(/no usable target/);
+  });
+
+  it('refuses a superseded ruling that re-asserts its body Critical', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'superseded-body', reason: 'clean-tree' }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+      }),
+    ).toThrow(/R1-1 is ruled superseded yet a body Critical/);
+  });
+
+  it('refuses when the plan names no readable ledger', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({ name: 'no-cache', cacheFile: '' }),
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('treats a cache that does not exist as an empty ledger, not an unreadable one', () => {
+    // A decided stop whose round never cached anything composes its
+    // no-event verdict over zero entries; the fence's findings hash binds
+    // the absence on the run-fenced path.
+    const planPath = stopPlan({
+      name: 'gone-cache',
+      cacheFile: join(dir, 'no-such-cache.json'),
+    });
+    expect(() => reRule({ planPath })).toThrow(
+      /R1-1 matches no open ledger Critical/,
+    );
+    const r = reRule({
+      planPath,
+      stopReRule: { dispositions: [] },
+      bodyCriticals: [],
+    });
+    expect(r.event).toBe('COMMENT');
+  });
+
+  it('refuses a duplicate disposition for one id', () => {
+    expect(() =>
+      reRule({
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R1-1', ruling: 'fixed' },
+          ],
+        },
+      }),
+    ).toThrow(/duplicate disposition for R1-1/);
+  });
+
+  it('refuses a cache whose findings field is present but not an array', () => {
+    // A parseable cache with a non-array `findings` is a baseline that
+    // could not be read, not an empty ledger: over it the completeness
+    // check would certify a ruling set of nothing.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'findings-not-array',
+          ledger: 'R1-1 open' as unknown as unknown[],
+        }),
+      }),
+    ).toThrow(/ledger the plan names cannot be read/);
+  });
+
+  it('refuses a ledger holding an entry that violates the schema', () => {
+    // The cache is model-written, so a drifting entry is an unreadable
+    // baseline, never a row to skip: skipping would shrink the open set
+    // below what the ledger really holds, and the grant would issue over
+    // Criticals it could not enumerate.
+    const drifts: unknown[][] = [
+      [{ id: 'R2-1', severity: 'critical', status: 'open' }],
+      [{ id: 'R2-1', severity: 'Critical' }],
+      [null],
+    ];
+    drifts.forEach((ledger, i) => {
+      expect(() =>
+        reRule({
+          planPath: stopPlan({ name: `schema-drift-${i}`, ledger }),
+        }),
+      ).toThrow(/ledger the plan names cannot be read/);
+    });
+  });
+
+  it('refuses a still-stands re-assertion whose content departs from the recorded title', () => {
+    // The id alone would let a brand-new claim wear a verified id's
+    // exemption; the content the ledger recorded under the id is the
+    // contract a re-assertion is bound by.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'fabricated',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+        }),
+        bodyCriticals: ['R1-1: a brand-new claim nobody ever verified'],
+      }),
+    ).toThrow(/re-asserted with content that departs/);
+  });
+
+  it('a re-assertion the ledger recorded no title for loses the verify-floor exemption', () => {
+    // No recorded content to bind against — the re-assertion cannot be
+    // SHOWN, so its Critical rides the regular floor: disclosed, not
+    // blocking.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'untitled',
+        ledger: [{ id: 'R1-1', severity: 'Critical', status: 'open' }],
+      }),
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('refuses a prototype-chain stop reason with the designed refusal', () => {
+    // A model-written reason indexes the ruling table: a prototype key
+    // must fail closed as an UNKNOWN reason, not crash on the prototype's
+    // members.
+    for (const reason of [
+      '__proto__',
+      'constructor',
+      'toString',
+      'hasOwnProperty',
+    ]) {
+      expect(() =>
+        reRule({ planPath: stopPlan({ name: `proto-${reason}`, reason }) }),
+      ).toThrow(/unknown stop reason/);
+    }
+  });
+
+  it('composes a stop round holding two still-standing Criticals', () => {
+    // The shape the grant exists for — open Criticals accumulate across
+    // rounds and every one re-asserts. N=1 alone would let a
+    // first-entry-only binding loop ship green.
+    const r = reRule({
+      planPath: stopPlan({
+        name: 'two-standing',
+        ledger: [
+          {
+            id: 'R1-1',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the mechanism still fires — re-read at HEAD',
+          },
+          {
+            id: 'R2-5',
+            severity: 'Critical',
+            status: 'open',
+            title: 'the second gap remains',
+          },
+        ],
+      }),
+      stopReRule: {
+        dispositions: [
+          { id: 'R1-1', ruling: 'still-stands' },
+          { id: 'R2-5', ruling: 'still-stands' },
+        ],
+      },
+      bodyCriticals: [
+        'R1-1: the mechanism still fires — re-read at HEAD',
+        'R2-5: the second gap remains',
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('R1-1');
+    expect(r.body).toContain('R2-5');
+  });
+
+  it('binds a re-assertion that opens with invisible residue', () => {
+    // The leading strip is what lets a ZWSP/BOM-class residue bind at
+    // all: without it the id readback fails and the grant refuses a
+    // valid re-rule.
+    const r = reRule({
+      bodyCriticals: [
+        '\u200bR1-1: the mechanism still fires — re-read at HEAD',
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+  });
+
+  it('refuses a superseded ruling under unchanged-since-last-round', () => {
+    // A byte-identical tree replaced nothing, so `superseded` is a
+    // forged disposition there — the licence table's refusal cell.
+    expect(() =>
+      reRule({
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'superseded' }] },
+        bodyCriticals: [],
+      }),
+    ).toThrow(/R1-1 is ruled superseded under unchanged-since-last-round/);
+  });
+
+  it('checks the per-reason licence for every disposition, not only the first', () => {
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'emptied-two',
+          reason: 'scope-emptied',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+            {
+              id: 'R2-2',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the second mechanism',
+            },
+          ],
+        }),
+        stopReRule: {
+          dispositions: [
+            { id: 'R1-1', ruling: 'still-stands' },
+            { id: 'R2-2', ruling: 'fixed' },
+          ],
+        },
+        bodyCriticals: ['R1-1: the mechanism still fires — re-read at HEAD'],
+      }),
+    ).toThrow(/R2-2 is ruled fixed under scope-emptied/);
+  });
+
+  it('binds the relocated leg by content, not by id alone', () => {
+    // The deferral channel's relocated Criticals bind through the SAME
+    // content check as the ingested entries: one carrying a still-stands
+    // id with fabricated text is refused exactly like its own-leg twin.
+    expect(() =>
+      reRule({
+        planPath: stopPlan({
+          name: 'reloc-fabricated',
+          reason: 'clean-tree',
+          ledger: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              status: 'open',
+              title: 'the mechanism still fires — re-read at HEAD',
+            },
+          ],
+        }),
+        stopReRule: { dispositions: [{ id: 'R1-1', ruling: 'still-stands' }] },
+        bodyCriticals: [],
+        deferredSuggestions: [
+          {
+            file: 'src/wedge.ts',
+            line: 12,
+            source: 'review',
+            severity: 'Critical',
+            title: 'R1-1: a different claim entirely',
+          },
+        ],
+      }),
+    ).toThrow(/re-asserted with content that departs/);
+  });
+
+  it('refuses a cache that is not an object at all', () => {
+    // A bare-array cache file is unreadable the same way: the grant must
+    // not read it as an empty ledger. Re-stamped after the rewrite so the
+    // fence passes and the SHAPE check is what refuses.
+    const planPath = stopPlan({ name: 'not-object' });
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      cachePath: string;
+    };
+    writeFileSync(plan.cachePath, JSON.stringify([1, 2]));
+    stampStopSidecar({ name: 'not-object' });
+    expect(() => reRule({ planPath })).toThrow(
+      /ledger the plan names cannot be read/,
+    );
   });
 });
 

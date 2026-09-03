@@ -22,7 +22,9 @@
 
 import type { CommandModule } from 'yargs';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { tmpFile } from './lib/paths.js';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
@@ -190,6 +192,338 @@ const BODY_MAX_CHARS = 65536;
  */
 const MARKER_RESERVE = LEDGER_MAX_BYTES + 2;
 const BODY_SAFETY_MARGIN = 512;
+
+/**
+ * Everything the decided-stop grant reads off the plan and the cache it
+ * names, taken in ONE read each. The grant used to re-read both files per
+ * consumer — the fence hashed the cache in one `readFileSync` and the
+ * ledger enumeration read it again in another — and nothing bound the bytes
+ * the fence certified to the bytes the grant enumerated: a writer
+ * alternating the model-writable cache between the stamped state and an
+ * emptied one won that race in a measured probe. The snapshot is the one
+ * owner of the bytes for the whole grant; the hash and the enumeration are
+ * projections of the same buffer.
+ *
+ * `reason` is the capture's own decided-stop reason — the
+ * `nothingToReview.reason` field `capture-local` writes when the round is
+ * one of the three decided stops — or null when the plan carries no
+ * decision. The FIELD is the capture's own: no full-round plan carries it,
+ * so a model-written `stopReRule` on a full round finds nothing here and is
+ * refused. (The path arrives through the model-written state — the same
+ * seam every other `planPath` reader here trusts.) The REASON certifies
+ * what could have moved since the ledger round, and the grant's per-reason
+ * ruling constraints read that certification.
+ */
+interface StopSnapshot {
+  reason: string | null;
+  target: string | null;
+  cachePath: string | null;
+  /**
+   * The scope-emptied split key the capture published — the paths whose
+   * recorded change is gone. A `superseded` disposition is deduced ONLY
+   * from membership here; absent or empty licences none.
+   */
+  supersededPaths: readonly string[];
+  cache:
+    | { kind: 'no-path' }
+    | { kind: 'missing' }
+    | { kind: 'unreadable' }
+    | { kind: 'bytes'; bytes: Buffer };
+}
+
+function readStopSnapshot(planPath: string | undefined): StopSnapshot {
+  const empty: StopSnapshot = {
+    reason: null,
+    target: null,
+    cachePath: null,
+    supersededPaths: [],
+    cache: { kind: 'no-path' },
+  };
+  if (!planPath) return empty;
+  let plan: {
+    nothingToReview?: unknown;
+    target?: unknown;
+    cachePath?: unknown;
+    incremental?: { scope?: { supersededPaths?: unknown } };
+  };
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8')) as typeof plan;
+  } catch {
+    return empty;
+  }
+  if (typeof plan !== 'object' || plan === null) return empty;
+  const stop = plan.nothingToReview;
+  const reason =
+    typeof stop === 'object' &&
+    stop !== null &&
+    typeof (stop as { reason?: unknown }).reason === 'string' &&
+    (stop as { reason: string }).reason !== ''
+      ? (stop as { reason: string }).reason
+      : null;
+  const target =
+    typeof plan.target === 'string' && plan.target !== '' ? plan.target : null;
+  const cachePath =
+    typeof plan.cachePath === 'string' && plan.cachePath !== ''
+      ? plan.cachePath
+      : null;
+  const rawSuperseded = plan.incremental?.scope?.supersededPaths;
+  const supersededPaths = Array.isArray(rawSuperseded)
+    ? rawSuperseded.filter((p): p is string => typeof p === 'string')
+    : [];
+  let cache: StopSnapshot['cache'] = { kind: 'no-path' };
+  if (cachePath !== null) {
+    try {
+      cache = { kind: 'bytes', bytes: readFileSync(cachePath) };
+    } catch (err) {
+      // A cache that does not exist recorded no findings — an EMPTY
+      // baseline, not an unreadable one. Every other read failure is
+      // unreadable: the grant must refuse, never enumerate a guess.
+      cache =
+        (err as NodeJS.ErrnoException).code === 'ENOENT'
+          ? { kind: 'missing' }
+          : { kind: 'unreadable' };
+    }
+  }
+  return { reason, target, cachePath, supersededPaths, cache };
+}
+
+/**
+ * The rulings each decided-stop reason licences — the capture's own
+ * certification of what could have moved since the ledger round (SKILL Step
+ * 1's stop branches prescribe the same split): `unchanged-since-last-round`
+ * certifies a byte-identical tree where every open finding stands VERBATIM
+ * (dispositions are DEDUCED, not judged); `scope-emptied` certifies each
+ * anchored path removed or byte-identical, so a finding stands or its bytes
+ * superseded it — nothing was reviewed that could fix; `clean-tree`
+ * certifies nothing moved since the findings were recorded, so the re-rule
+ * JUDGES them. A reason this table does not name licences nothing — the
+ * grant fails closed on it.
+ */
+const STOP_REASON_RULINGS: Record<string, readonly string[]> = {
+  'unchanged-since-last-round': ['still-stands'],
+  'scope-emptied': ['still-stands', 'superseded'],
+  'clean-tree': ['still-stands', 'fixed', 'superseded'],
+};
+
+/**
+ * Why a reason's licence is narrower than the full ruling set — the refusal
+ * line's second half. `clean-tree` carries no entry: every ruling is
+ * licensed there, so no refusal is ever built for it.
+ */
+const STOP_REASON_REFUSAL: Record<string, string> = {
+  'unchanged-since-last-round': 'a byte-identical tree can only still-stand',
+  'scope-emptied':
+    'an emptied scope still-stands or supersedes — nothing was reviewed that could fix',
+};
+
+/**
+ * The cache ledger's bytes bound into the stop fence — the SHA-256 of the
+ * snapshot's bytes, or null when there is no file to hash. A cache that
+ * does not exist holds no findings, so null IS a stampable value: the
+ * capture stamps it when nothing was cached, and the grant fails closed on
+ * a file that appeared since. Computed from the SNAPSHOT, never a second
+ * disk read: the hash the fence certifies and the ledger the grant
+ * enumerates must be projections of one buffer (the TOCTOU the snapshot
+ * exists to close).
+ */
+function cacheFindingsHash(cache: StopSnapshot['cache']): string | null {
+  if (cache.kind !== 'bytes') return null;
+  return createHash('sha256').update(cache.bytes).digest('hex');
+}
+
+/**
+ * The fence `run.ts` applies to the same decided-stop decision, read
+ * against the ONE sidecar the capture could have stamped for THIS plan —
+ * never the family: a family scan let a sidecar stamped for another target
+ * vouch for this one. The fence binds what it finds three ways — the run
+ * id the parent published (when one is), the plan's own stop reason (the
+ * licence-bearing field is the capture's, not the plan's; `run.ts`'s
+ * `readStopSidecar` reads it from the sidecar too), and the cache ledger's
+ * content hash the capture stamped at stop time, so the grant's baseline
+ * is the ledger the capture saw. With NO published id (an interactive
+ * round no `review run` gate reads) the run-id equality alone is waived —
+ * the sidecar itself is still required, and its reason, cache path, and
+ * findings hash still bind: `capture-local` stamps all three with or
+ * without a parent, so there is always something to match, and skipping
+ * the fence outright left every interactive grant gated by nothing but
+ * model-supplied inputs. Anything else — no usable target, a missing,
+ * unparsable, or foreign-stamped sidecar, a departed reason, cache path,
+ * or hash — fails closed. Returns null when the fence passes; the refusal
+ * line's second half otherwise.
+ */
+function stopSidecarFenceRefusal(
+  snap: StopSnapshot,
+  planStopReason: string,
+  env: NodeJS.ProcessEnv | undefined,
+): string | null {
+  const runIdRaw = (env ?? process.env)['QWEN_REVIEW_RUN_ID'];
+  const runId =
+    typeof runIdRaw === 'string' && runIdRaw !== '' ? runIdRaw : null;
+  if (snap.target === null) {
+    return (
+      'the plan carries no usable target — the sidecar the capture ' +
+      'stamped for this re-rule cannot be located.'
+    );
+  }
+  const noSidecar =
+    runId !== null
+      ? 'a run id is published but no stop sidecar carries its stamp — a ' +
+        'stale or foreign stop plan matches the shape but never the fence.'
+      : "no stop sidecar carries the capture's stamp for this plan — a " +
+        'stop plan without its capture-written sidecar is a shape, not a ' +
+        'decision.';
+  let stop: {
+    runId?: unknown;
+    reason?: unknown;
+    cachePath?: unknown;
+    findingsHash?: unknown;
+    supersededPaths?: unknown;
+  };
+  try {
+    const parsed: unknown = JSON.parse(
+      readFileSync(tmpFile(snap.target, 'stop.json'), 'utf8'),
+    );
+    // `JSON.parse('null')` succeeds — a null or non-object sidecar must be
+    // the designed refusal, never a bare TypeError off a property read.
+    if (typeof parsed !== 'object' || parsed === null) return noSidecar;
+    stop = parsed as typeof stop;
+  } catch {
+    return noSidecar;
+  }
+  if (runId !== null && stop.runId !== runId) {
+    return noSidecar;
+  }
+  if (stop.reason !== planStopReason) {
+    return (
+      `the stamped stop sidecar records reason '${String(stop.reason)}', ` +
+      `not the plan's '${planStopReason}' — the licence is the capture's ` +
+      'own decision, not a reason chosen for it.'
+    );
+  }
+  if (stop.cachePath !== snap.cachePath) {
+    return (
+      'the stamped stop sidecar names a different cache than the plan — ' +
+      "the grant's baseline must be the ledger the capture saw."
+    );
+  }
+  if (stop.findingsHash !== cacheFindingsHash(snap.cache)) {
+    return (
+      'the cache findings are not the ones the capture stamped — the ' +
+      'ledger moved between capture and compose.'
+    );
+  }
+  // The scope-emptied split binds too: the `superseded` deduction reads
+  // membership off the plan's `supersededPaths`, and the plan is
+  // model-editable after the capture wrote it — a split edited between
+  // capture and compose could blanket-supersede a live blocker past a
+  // fence that bound only reason/cache/hash. Only the capture-stamped
+  // copy certifies the split; a sidecar without one (older, or
+  // hand-written) fails closed for this reason.
+  if (planStopReason === 'scope-emptied') {
+    const stamped = stop.supersededPaths;
+    if (
+      !Array.isArray(stamped) ||
+      JSON.stringify(stamped) !== JSON.stringify(snap.supersededPaths)
+    ) {
+      return (
+        "the plan's supersededPaths depart from the split the capture " +
+        'stamped — a superseded deduction reads only the ' +
+        'capture-certified split.'
+      );
+    }
+  }
+  return null;
+}
+
+/**
+ * The status vocabulary a ledger row may carry — Step 6's own ruling
+ * discipline. Anything else is a DRIFTED row, and a drifted row is an
+ * unreadable baseline, never a skipped one: `status: 'oppn'` silently
+ * shrank the open set below what the ledger really held.
+ */
+const LEDGER_STATUS_VOCABULARY = new Set(['open', 'fixed', 'superseded']);
+
+/**
+ * The OPEN Critical entries in the cache ledger the snapshot read — the
+ * exact set a decided-stop re-rule owes a ruling for, each with the title
+ * the ledger recorded under its id when it carries one (the
+ * body↔disposition cross-check binds a re-assertion's content against it)
+ * and the file it cited (the scope-emptied `superseded` deduction reads
+ * membership in `supersededPaths` off it). Null when the plan names no
+ * cache or the ledger cannot be read: the completeness check then refuses,
+ * because a re-rule whose baseline cannot be read cannot be shown
+ * complete. One exception: a cache file that does not exist recorded no
+ * findings, so the baseline is EMPTY, not unreadable — that is the
+ * nothing-open stop's no-event compose. The cache is model-written (Step
+ * 8's prose rules), so every entry is re-validated, and a shape violation
+ * — a drifted `status` string included — is an unreadable baseline, never
+ * a skipped row: skipping shrinks the open set below what the ledger
+ * really holds, and the grant would issue over Criticals it could not
+ * enumerate. Enumerated from the SNAPSHOT's bytes — the same buffer the
+ * fence hashed — so no second read can race the certification.
+ */
+function openLedgerCriticalEntries(
+  snap: StopSnapshot,
+): Array<{ id: string; title?: string; file?: string }> | null {
+  if (snap.cache.kind === 'no-path' || snap.cache.kind === 'unreadable') {
+    return null;
+  }
+  if (snap.cache.kind === 'missing') return [];
+  try {
+    const cache = JSON.parse(snap.cache.bytes.toString('utf8')) as unknown;
+    if (typeof cache !== 'object' || cache === null || Array.isArray(cache)) {
+      return null;
+    }
+    // Older caches carry no findings — nothing to track.
+    if (!('findings' in cache)) return [];
+    // Present but not an array — the baseline is unreadable, not empty.
+    if (!Array.isArray(cache.findings)) return null;
+    const entries: Array<{ id: string; title?: string; file?: string }> = [];
+    // A repeated id is the same unreadable-baseline refusal as any other
+    // shape violation: two rows under one id collapse the grant's
+    // set-based completeness check and the last-wins title/file maps into
+    // ONE disposition — the "shrank the open set below what the ledger
+    // really holds" shape, from the ledger side (the disposition-side
+    // duplicate was already refused).
+    const seenIds = new Set<string>();
+    for (const f of cache.findings) {
+      const e = f as {
+        id?: unknown;
+        severity?: unknown;
+        status?: unknown;
+        title?: unknown;
+        file?: unknown;
+      };
+      if (
+        typeof e !== 'object' ||
+        e === null ||
+        typeof e.id !== 'string' ||
+        e.id === '' ||
+        (e.severity !== 'Critical' && e.severity !== 'Suggestion') ||
+        typeof e.status !== 'string' ||
+        !LEDGER_STATUS_VOCABULARY.has(e.status)
+      ) {
+        return null;
+      }
+      if (seenIds.has(e.id)) return null;
+      seenIds.add(e.id);
+      if (e.severity === 'Critical' && e.status === 'open') {
+        entries.push({
+          id: e.id,
+          ...(typeof e.title === 'string' && e.title.trim() !== ''
+            ? { title: e.title.trim() }
+            : {}),
+          ...(typeof e.file === 'string' && e.file !== ''
+            ? { file: e.file }
+            : {}),
+        });
+      }
+    }
+    return entries;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Does this plan name a pull request? The budget and the marker must not
@@ -988,6 +1322,36 @@ export interface ComposeReviewInput {
    */
   findingsPath?: string;
   /**
+   * The decided-stop re-rule (SKILL Step 1's stop branches): the capture
+   * decided there is nothing to review, and the orchestrator re-ruled the
+   * cache ledger's OPEN Criticals against the current tree. One entry per
+   * open ledger Critical, under its ledger id, with the Step 6 ruling.
+   *
+   * Machine-checked for completeness before anything is granted: the set of
+   * ids here must equal the set of open Critical ids in the ledger the
+   * plan's `cachePath` names — both directions — and every `still-stands`
+   * ruling must have a matching body Critical carrying its id while
+   * `fixed`/`superseded` ones must not. Any mismatch throws; a model cannot
+   * drop a blocker by omitting its row, and cannot resurrect one the ledger
+   * never held. The grant additionally requires the plan to carry the
+   * capture's own `nothingToReview` field (no full-round plan does) and —
+   * under a `review run` parent, which publishes a run id — the runId-fenced
+   * stop sidecar the same capture wrote.
+   *
+   * Granted, it exempts the round from the agent-transcript floors: no
+   * agents ran, so no transcripts, receipts, verifiers or script-lint
+   * evidence exist or CAN exist — demanding them is an unsatisfiable cap.
+   * The verify floor is covered by the completeness check itself: every
+   * posted blocker is a re-assertion, under its original id, of a finding a
+   * previous full round verified.
+   */
+  stopReRule?: {
+    dispositions: Array<{
+      id: string;
+      ruling: 'still-stands' | 'fixed' | 'superseded';
+    }>;
+  };
+  /**
    * Where to look for the harness's records. Defaults to the environment the CLI
    * exported. A test seam only — production never passes it, and a model cannot:
    * `compose-review` reads its input as JSON, and this is not serialisable into
@@ -1748,8 +2112,17 @@ export function composeReview(
   // defines "measured". SKILL tells the round to omit the field there; this
   // refusal is the module's half, symmetric with round 1 — absence then
   // carries the streak, exactly as an unmeasured round must.
+  // A stop re-rule is the THIRD unmeasurable state: no agents ran, so
+  // nothing this round could have derived a fresh/induced split — every
+  // posted entry is a carried-id re-assertion the grant itself proves is
+  // NOT fresh, which is exactly what let a model-written census satisfy
+  // the fresh <= reported cross-check and mint the non-convergence blocker
+  // over a round that measured nothing. Refused as null so the streak
+  // CARRIES rather than resets, like the other two.
   const readCensus =
-    prevRound === 0 || input.contextUnavailable === true
+    prevRound === 0 ||
+    input.contextUnavailable === true ||
+    input.stopReRule !== undefined
       ? null
       : churnCensusOf(input.convergence);
   const churnCensus =
@@ -3169,6 +3542,7 @@ function composeReviewBody(
   const {
     deferred: modelDeferred,
     relocated: relocatedCriticals,
+    relocatedEntries,
     relocatedDeterministic,
   } = splitDeferralChannel(
     input.deferredSuggestions,
@@ -3462,16 +3836,213 @@ function composeReviewBody(
   // the re-post out of the body while `modelBodyCriticals` still counted it
   // toward `criticalsNeedingVerify` — a blocker the linter proved would go on
   // pulling the unverified cap through a copy that no longer posts.
-  const gate = input.planPath
-    ? scriptLintGate(input.planPath)
-    : { criticals: [], unreviewed: [], disclosed: [] };
+  // The decided-stop re-rule grant — validated fail-closed BEFORE any floor
+  // is skipped. See ComposeReviewInput.stopReRule for the contract; every
+  // refusal here THROWS rather than degrading to the regular floors, because
+  // running transcript floors over a stop state composes garbage caps and
+  // the orchestrator needs the actual reason.
+  // The granted dispositions, captured for the body↔disposition
+  // cross-check below — that check runs over the FINAL body set, after the
+  // deferral channel's relocation push and the gate-repost dedup, so the
+  // grant records the rulings and the check binds them to what posts.
+  const stopRulings = new Map<string, string>();
+  // The titles the ledger recorded under each open Critical id, captured
+  // inside the grant below for the body↔disposition cross-check: a
+  // re-assertion binds by CONTENT against them, not by id alone.
+  const ledgerTitles = new Map<string, string>();
+  // Re-assertions the id binding admitted but no recorded title vouched
+  // for — they lose the verify-floor exemption below, and (on a granted
+  // stop, where no tool ran this round) a deterministic tag on one is
+  // prose, not provenance, so it loses the deterministic exception too.
+  let unvouchedReAssertions = 0;
+  let unvouchedTaggedReAssertions = 0;
+  let unvouchedRelocatedDeterministic = 0;
+  // The granted plan's own target, kept for the post-bind sidecar consume —
+  // re-reading the plan there would be the second read the snapshot
+  // doctrine exists to avoid.
+  let grantedStopTarget: string | null = null;
+  const stopReRuleGranted = (() => {
+    // Model-written state: the declared type promises an object, the file
+    // on disk can hand anything — a `null` here must be the designed
+    // refusal, never a bare TypeError off a property read.
+    const srrRaw: unknown = input.stopReRule;
+    // ONE plan read and ONE cache read for the whole grant — the fence's
+    // hash and the completeness check's enumeration are projections of the
+    // same snapshot, so nothing can move between certification and use.
+    const snap = readStopSnapshot(input.planPath);
+    if (srrRaw === undefined) {
+      // A decided stop composes ONLY through its re-rule: a stop plan
+      // walked through the regular floors would mint a non-blocking
+      // verdict over a ledger nobody re-ruled, and `run.ts` would read it
+      // as this round's completion — exit 0 over the standing blockers.
+      if (snap.reason !== null) {
+        throw new Error(
+          `compose-review refused: the plan carries a decided stop ` +
+            `('${snap.reason}') but no stopReRule — a decided stop ` +
+            'composes only through its re-rule.',
+        );
+      }
+      return false;
+    }
+    if (
+      srrRaw === null ||
+      typeof srrRaw !== 'object' ||
+      Array.isArray(srrRaw)
+    ) {
+      throw new Error(
+        'stopReRule refused: stopReRule must be an object carrying ' +
+          'dispositions — one entry per open ledger Critical.',
+      );
+    }
+    const srr = srrRaw as { dispositions?: unknown };
+    if (!Array.isArray(srr.dispositions)) {
+      throw new Error(
+        'stopReRule.dispositions must be an array — one entry per open ' +
+          'ledger Critical.',
+      );
+    }
+    if (criticalsInline > 0) {
+      throw new Error(
+        'stopReRule refused: inline Criticals cannot ride a stop re-rule — ' +
+          'a granted stop re-asserts only ledger ids a previous full round ' +
+          'verified, and no verifier ran this round.',
+      );
+    }
+    // The floor's reroute and the model's own deferral channel are the same
+    // hole from two sides: a Critical riding either leg posts in the body's
+    // deferral list without ever reaching the body↔disposition bind. On a
+    // stop round nothing new was reviewed, so a deferral-channel Critical
+    // can only be a rerouted draft or a claim the bind cannot reach —
+    // refuse both, before any floor is skipped.
+    if (
+      reroute.entries.some((e) => e.severity === 'Critical') ||
+      modelDeferred.some((e) => e.severity === 'Critical')
+    ) {
+      throw new Error(
+        'stopReRule refused: a Critical rides the deferral channel — every ' +
+          'Critical on a stop re-rule must be a bound re-assertion in ' +
+          'bodyCriticals, and the deferral channel is not bound.',
+      );
+    }
+    const stopReason = snap.reason;
+    if (stopReason === null) {
+      throw new Error(
+        'stopReRule refused: the plan carries no nothingToReview decision — ' +
+          'a full round takes the regular floors, never the stop re-rule.',
+      );
+    }
+    // Object.hasOwn, never a bare read: the reason arrives through
+    // model-written plan state, and a prototype-chain key (`__proto__`,
+    // `constructor`) resolves through the table's prototype instead of
+    // undefined — the refusal must name the reason, not throw a TypeError.
+    const allowedRulings = Object.hasOwn(STOP_REASON_RULINGS, stopReason)
+      ? STOP_REASON_RULINGS[stopReason]
+      : undefined;
+    if (allowedRulings === undefined) {
+      throw new Error(
+        `stopReRule refused: unknown stop reason '${stopReason}' — the ` +
+          'grant fails closed on a reason it cannot rule.',
+      );
+    }
+    const fenceRefusal = stopSidecarFenceRefusal(snap, stopReason, input.env);
+    if (fenceRefusal !== null) {
+      throw new Error(`stopReRule refused: ${fenceRefusal}`);
+    }
+    const ledger = openLedgerCriticalEntries(snap);
+    if (ledger === null) {
+      throw new Error(
+        'stopReRule refused: the ledger the plan names cannot be read — a ' +
+          're-rule whose baseline is unreadable cannot be shown complete.',
+      );
+    }
+    const ledgerFiles = new Map<string, string>();
+    for (const e of ledger) {
+      if (e.title !== undefined) ledgerTitles.set(e.id, e.title);
+      if (e.file !== undefined) ledgerFiles.set(e.id, e.file);
+    }
+    for (const dRaw of srr.dispositions as unknown[]) {
+      const d = dRaw as { id?: unknown; ruling?: unknown } | null;
+      if (
+        typeof d?.id !== 'string' ||
+        d.id === '' ||
+        !['still-stands', 'fixed', 'superseded'].includes(d?.ruling as string)
+      ) {
+        throw new Error(
+          'stopReRule refused: every disposition needs an id and a ruling ' +
+            'of still-stands, fixed, or superseded.',
+        );
+      }
+      if (stopRulings.has(d.id)) {
+        throw new Error(
+          `stopReRule refused: duplicate disposition for ${d.id}.`,
+        );
+      }
+      stopRulings.set(d.id, d.ruling as string);
+    }
+    const ledgerSet = new Set(ledger.map((e) => e.id));
+    for (const id of ledgerSet) {
+      if (!stopRulings.has(id)) {
+        throw new Error(
+          `stopReRule refused: open ledger Critical ${id} has no ` +
+            'disposition — a blocker cannot be dropped by omitting its row.',
+        );
+      }
+    }
+    for (const id of stopRulings.keys()) {
+      if (!ledgerSet.has(id)) {
+        throw new Error(
+          `stopReRule refused: disposition ${id} matches no open ledger ` +
+            'Critical — a ruling cannot invent its subject.',
+        );
+      }
+    }
+    for (const [id, ruling] of stopRulings) {
+      if (!allowedRulings.includes(ruling)) {
+        throw new Error(
+          `stopReRule refused: ${id} is ruled ${ruling} under ` +
+            `${stopReason} — ${STOP_REASON_REFUSAL[stopReason]}.`,
+        );
+      }
+      // `scope-emptied` licences `superseded` as a DEDUCED ruling, and the
+      // deduction's input is the capture-published split: the cited file's
+      // membership in `supersededPaths`. A ruling is only deduced when the
+      // machine reads the deduction's input — a `superseded` whose cited
+      // file the capture did not name as superseded (or whose row records
+      // no file at all) is a judgement wearing a deduction's licence.
+      // `clean-tree` is the JUDGED stop; its `superseded` needs no split.
+      if (ruling === 'superseded' && stopReason === 'scope-emptied') {
+        const cited = ledgerFiles.get(id);
+        if (cited === undefined || !snap.supersededPaths.includes(cited)) {
+          throw new Error(
+            `stopReRule refused: ${id} is ruled superseded but ` +
+              (cited === undefined
+                ? 'the ledger records no file for it'
+                : `its cited file '${cited}' is not in the plan's ` +
+                  'supersededPaths') +
+              ' — a deduced supersession must read its deduction from the ' +
+              "capture's published split.",
+          );
+        }
+      }
+    }
+    grantedStopTarget = snap.target;
+    // The body↔disposition cross-check is NOT here: it runs below, over the
+    // final local body set. Relocation pushes entries after this point and
+    // ingest transforms them, so a check over the raw input missed both.
+    return true;
+  })();
+  const gate =
+    input.planPath && !stopReRuleGranted
+      ? scriptLintGate(input.planPath)
+      : { criticals: [], unreviewed: [], disclosed: [] };
   const ownAfterGateDedup = withoutGateReposts(bodyCriticals, gate.criticals);
   bodyCriticals.length = 0;
   bodyCriticals.push(...ownAfterGateDedup);
   const modelBodyCriticals = [...bodyCriticals]; // input's, captured before the gate
   // Disclosed-but-non-capping notes from the gate (a deferred checker). Rendered
-  // in the body on every verdict, but never fed into the cap.
-  const gateDisclosed: string[] = [];
+  // in the body on every verdict, but never fed into the cap. Bilingual pairs —
+  // see `scriptLintGate` for why this channel can afford a real translation.
+  const gateDisclosed: Array<{ en: string; zh: string }> = [];
   // Test Plan rulings. Disclosed on every verdict and counted toward nothing —
   // see `testPlanGate` for why this one neither blocks nor caps.
   const testPlanNotes: string[] = [];
@@ -3480,7 +4051,146 @@ function composeReviewBody(
   // resolve one after a specialist inspects it, so capping here would make every
   // affected review impossible to approve.
   const repositoryContextNotes: string[] = [];
-  if (input.planPath) {
+  if (stopReRuleGranted) {
+    // No agents ran: the round IS the capture's stop decision plus the
+    // orchestrator's re-rule of the open ledger. Disclosed on every verdict
+    // so the body says what kind of round this was — through its OWN block
+    // (`stopRoundBlock` below), never `gateDisclosed`: that channel's one
+    // renderer wraps every entry in "Not linted (tool limitation…)", and a
+    // round kind is not a linting gap.
+    // The body↔disposition cross-check, over the FINAL local set — the
+    // ingested entries plus the deferral channel's relocated Criticals,
+    // past the gate-repost dedup — because that set is what the body posts.
+    // Ids bind PER ENTRY through the claim head's own leading token — the
+    // same readback the ledger builder applies — never by substring over
+    // the joined text: a prefix collision (`R1-1` ⊂ `R1-10`) or a sibling
+    // id quoted inside another entry's prose is not a re-assertion. The
+    // relocated leg reads the TYPED entry's title because its rendered
+    // line wraps the claim where no readback reaches.
+    const stillStands = new Set<string>();
+    for (const [id, ruling] of stopRulings) {
+      if (ruling === 'still-stands') stillStands.add(id);
+    }
+    const carriedIds = new Set<string>();
+    // A re-assertion binds by CONTENT, not by id alone: the claim title
+    // read back from the entry must equal the title the ledger recorded
+    // under that id — the SKILL's verbatim re-assertion contract makes
+    // the equality exact. An id alone would let a brand-new claim wear a
+    // verified id's exemption. An entry the ledger recorded no title for
+    // keeps its id binding but loses the verify-floor exemption below —
+    // returned to the caller, because the relocated leg must also strip
+    // such an entry's deterministic-source credit (its typed `source` is
+    // prose on a round no tool ran, exactly like an own-leg tag).
+    const bindEntry = (
+      claim: { id?: string; fixInduced: boolean; title: string },
+      scanText?: string,
+    ): boolean => {
+      if (claim.fixInduced) {
+        throw new Error(
+          `stopReRule refused: ${claim.id ?? 'a body Critical'} carries ` +
+            'the (fix-induced) marking — a stop re-rule posts only ' +
+            're-assertions of verified findings, never new work under ' +
+            'an old id.',
+        );
+      }
+      const id = claim.id;
+      if (id === undefined || !stopRulings.has(id)) {
+        throw new Error(
+          'stopReRule refused: a body Critical must carry exactly one ' +
+            'still-stands ledger id — an entry no re-rule ruled standing ' +
+            'posts a blocker no full round verified.',
+        );
+      }
+      const ruling = stopRulings.get(id);
+      if (ruling !== 'still-stands') {
+        throw new Error(
+          `stopReRule refused: ${id} is ruled ${ruling} yet a body ` +
+            'Critical still carries its id — one ruling per finding.',
+        );
+      }
+      const recorded = ledgerTitles.get(id);
+      let unvouched = false;
+      if (recorded === undefined) {
+        unvouched = true;
+        unvouchedReAssertions++;
+        if (scanText !== undefined && DETERMINISTIC_TAG_RE.test(scanText)) {
+          unvouchedTaggedReAssertions++;
+        }
+      } else if (recorded !== claim.title) {
+        throw new Error(
+          `stopReRule refused: ${id} is re-asserted with content that ` +
+            'departs from the title the ledger recorded — a standing ' +
+            'blocker re-asserts its verified claim, not a new claim ' +
+            'under an old id.',
+        );
+      }
+      carriedIds.add(id);
+      return unvouched;
+    };
+    const ownCount = bodyCriticals.length - relocatedCriticals.length;
+    for (const entry of bodyCriticals.slice(0, ownCount)) {
+      bindEntry(
+        readClaim(
+          stripForUnattributedPost(entry).replace(LEADING_INVISIBLE_RE, ''),
+        ),
+        entry,
+      );
+    }
+    for (const entry of relocatedEntries) {
+      // The relocated leg binds the COLLAPSED title, symmetric with the
+      // collapse the own leg's entries get at ingest: a multi-line title
+      // whose first line matches the recorded claim must not smuggle new
+      // claims in its tail past a first-line-only readback — the ledger
+      // builder records only the first line, so no future round would ever
+      // rule on the tail. The leading-invisible strip is the same symmetry.
+      const unvouched = bindEntry(
+        readClaim(collapseEntry(entry.title).replace(LEADING_INVISIBLE_RE, '')),
+      );
+      // An unvouched relocated re-assertion loses its deterministic-source
+      // credit: `relocatedDeterministic` counted it on the typed `source`
+      // alone, and on a granted stop no tool ran that could make that
+      // source provenance — without this the unverified softening below is
+      // defeated by exactly the entries nobody's recorded title vouched.
+      if (unvouched && DETERMINISTIC_SOURCES.has(entry.source)) {
+        unvouchedRelocatedDeterministic++;
+      }
+    }
+    for (const id of stillStands) {
+      if (!carriedIds.has(id)) {
+        throw new Error(
+          `stopReRule refused: ${id} is ruled still-stands but no body ` +
+            'Critical carries its id — a standing blocker must post.',
+        );
+      }
+    }
+    if (bodyCriticals.length !== stillStands.size) {
+      throw new Error(
+        `stopReRule refused: ${bodyCriticals.length} body Criticals ` +
+          `over ${stillStands.size} still-stands rulings — every ` +
+          'still-stands ruling re-asserts exactly one body Critical.',
+      );
+    }
+    // Interim hardening for the write-surface class (#10654): an
+    // interactive (no-run-id) sidecar is CONSUMED once every bind above
+    // passed — nothing else ever reads it (no parent is polling), and
+    // left on disk it re-licences this same plan on a later, moved tree
+    // (a replay clears a blocker no round re-verified). Consumed only
+    // AFTER the full grant, so a refusal above leaves the sidecar for the
+    // orchestrator's corrected retry. The gated sidecar stays: the parent
+    // still reads it for completion, and its runId fence already refuses
+    // replays across runs.
+    const grantRunId = (input.env ?? process.env)['QWEN_REVIEW_RUN_ID'];
+    if (
+      (typeof grantRunId !== 'string' || grantRunId === '') &&
+      grantedStopTarget !== null
+    ) {
+      try {
+        unlinkSync(tmpFile(grantedStopTarget, 'stop.json'));
+      } catch {
+        // already gone
+      }
+    }
+  } else if (input.planPath) {
     // The gate ran above, where its claims were needed to dedup the model's
     // re-posts before provenance was taken. ONE invocation, reused here.
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
@@ -3526,9 +4236,31 @@ function composeReviewBody(
   );
   const nonDeterministicBodyCriticals =
     ownBodyCriticals.filter((x) => !DETERMINISTIC_TAG_RE.test(x)).length +
-    (relocatedCount - relocatedDeterministic);
-  const criticalsNeedingVerify =
-    criticalsInline + nonDeterministicBodyCriticals;
+    (relocatedCount - relocatedDeterministic) +
+    // On a granted stop no tool ran this round, so an UNVOUCHED
+    // re-assertion's `[build]`/`[test]`/`[probe]` substring is prose, not
+    // provenance, and may not feed the deterministic exception the
+    // softening reads. Vouched re-assertions keep theirs — they re-assert
+    // findings a full round verified, tag and all — and the CLI-minted
+    // nonConvergence Critical is deterministic by provenance and never
+    // rides this term. The relocated term is the same correction on the
+    // other leg: an unvouched relocated entry was counted into
+    // `relocatedDeterministic` on its typed `source` alone, and adding it
+    // back here keeps its blocker unverified-softenable like its own-leg
+    // twin.
+    (stopReRuleGranted
+      ? unvouchedTaggedReAssertions + unvouchedRelocatedDeterministic
+      : 0);
+  const criticalsNeedingVerify = stopReRuleGranted
+    ? // Every posted blocker on a granted stop re-rule is a re-assertion,
+      // under its original id, of a finding a previous full round verified —
+      // and the completeness gate above already proved the set exact. But
+      // the exemption belongs to the entries the ledger's recorded title
+      // vouched for: a re-assertion nobody recorded content for cannot be
+      // SHOWN to be one, and rides the regular floor instead. No verifier
+      // ran this round because no agents did.
+      unvouchedReAssertions
+    : criticalsInline + nonDeterministicBodyCriticals;
   // Fail closed at every exit: this flag softens a Request changes below, and
   // it must end up true whenever the review posts non-deterministic Criticals
   // and CANNOT SHOW they were verified — verifier absent, transcripts
@@ -3548,7 +4280,14 @@ function composeReviewBody(
   //
   // What it supplies is `planPath` — a path, whose contents the CLI wrote. The
   // transcripts are found from the environment the CLI exported.
-  if (!input.planPath) {
+  if (stopReRuleGranted) {
+    // Nothing to recompute: no agents, no transcripts, no receipts. The
+    // grant's two-read gate (the plan's own nothingToReview plus the
+    // runId-fenced sidecar) is what stands where coverage proof would.
+    // The verify floor still reads the exemption: a re-assertion the
+    // recorded title could not vouch for leaves its Critical unverified.
+    criticalsUnverified = criticalsNeedingVerify >= 1;
+  } else if (!input.planPath) {
     coverageEntries.push({
       subject: 'coverage',
       reason:
@@ -4245,6 +4984,11 @@ function composeReviewBody(
 
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';
+  // A stop re-rule that cleared every blocker still reviewed NOTHING new —
+  // it re-ruled old findings on a tree the capture certified unchanged. A
+  // Comment passes `--fail-on request-changes` exactly like an Approve
+  // would, without claiming a review that never ran.
+  if (stopReRuleGranted && event === 'APPROVE') event = 'COMMENT';
   // The caps that reach a Request changes — because they remove the premise
   // the never-soften rule stands on. "A REQUEST_CHANGES earned by a
   // confirmed Critical is never softened" presumes CONFIRMED, and these
@@ -4282,9 +5026,15 @@ function composeReviewBody(
   // Presubmit downgrades apply after the caps and only when the verdict they
   // name was the one on the table — `baseEvent` is the row before every cap,
   // so a softening cap that ran first cannot erase the presubmit's reasons.
+  // Never on a granted stop re-rule: no presubmit ran this round (no agents
+  // did), so `input.presubmit` can only be stale or forged there — and a
+  // model-written `downgradeRequestChanges: true` was the one softening
+  // channel the grant did not machine-check, moving a certified-standing
+  // blocker to COMMENT and exit 0 under `--fail-on request-changes`.
   let downgraded = false;
   let downgradedFrom: 'Approve' | 'Request changes' | null = null;
   if (
+    !stopReRuleGranted &&
     (event === 'APPROVE' || (baseEvent === 'APPROVE' && event === 'COMMENT')) &&
     downgradeApprove
   ) {
@@ -4292,6 +5042,7 @@ function composeReviewBody(
     downgraded = true;
     downgradedFrom = 'Approve';
   } else if (
+    !stopReRuleGranted &&
     (event === 'REQUEST_CHANGES' ||
       (baseEvent === 'REQUEST_CHANGES' && event === 'COMMENT')) &&
     downgradeRequestChanges
@@ -4880,12 +5631,17 @@ function composeReviewBody(
     });
   }
   for (const d of explainedCaller) {
-    // Caller prose, untranslatable by construction — quoted as-is in both,
-    // its comment grammar inert.
+    // Caller prose, untranslatable by construction — quoted as-is in both
+    // halves, its comment grammar inert. The Chinese label SAYS so: without
+    // the parenthetical, the 中文说明 block presented an all-English sentence
+    // as its translation (#10567's posted body), and the reader is left
+    // wondering whether the translation machinery broke. The payload keeps
+    // its own English full stop — closing an English sentence with "。" is
+    // the other half of that mismatch.
     const disclosed = stripCommentGrammar(d);
     notReviewedParts.push({
       en: `Not reviewed: ${disclosed}.`,
-      zh: `未审查：${disclosed}。`,
+      zh: `未审查（原文为英文）：${disclosed}.`,
     });
   }
   // Budget-gap disclosures, one BOUNDED sentence for all of them. Four
@@ -5174,6 +5930,27 @@ function composeReviewBody(
         }
       : undefined;
 
+  // The round-kind disclosure, on its own line — never inside the lint
+  // gate's "Not linted" wrapper: a decided-stop re-rule is not a tool
+  // limitation, and a reader handed "Not linted: Decided-stop re-rule …"
+  // reads the round kind as a linting gap. Rendered on the two events a
+  // granted stop can produce (REQUEST_CHANGES and COMMENT; APPROVE is
+  // demoted before the body composes).
+  const stopRoundBlock: Bi[] = stopReRuleGranted
+    ? [
+        {
+          trim: 2,
+          en:
+            'Decided-stop re-rule: the verdict below is the re-rule of the ' +
+            "cache ledger's open Criticals against the current tree — no " +
+            'review agents ran this round.',
+          zh:
+            '决定性停止重裁：以下裁决是对 cache 台账中 open Critical 在当前' +
+            '树上的重裁——本轮没有任何评审 agent 运行。',
+        },
+      ]
+    : [];
+
   // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
   // including Approve — so the reader knows a workflow's shell was not linted, but
   // it does not cap the verdict (it is a tool limitation, not a finding or an
@@ -5182,8 +5959,8 @@ function composeReviewBody(
     ? [
         {
           trim: 2,
-          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.join('; ')}.`,
-          zh: `未检查（工具限制，非阻断）：${gateDisclosed.join('; ')}。`,
+          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.map((g) => g.en).join('; ')}.`,
+          zh: `未检查（工具限制，非阻断）：${gateDisclosed.map((g) => g.zh).join('；')}。`,
         },
       ]
     : [];
@@ -5586,6 +6363,7 @@ function composeReviewBody(
       ...cannotTellBlock,
       ...notReviewedForBody,
       ...unverifiedTagsBlock,
+      ...stopRoundBlock,
       ...deferredBlock,
       ...testPlanBlock,
       ...repositoryContextBlock,
@@ -5792,27 +6570,39 @@ function composeReviewBody(
     // untagged, a merge of only these defaulted to the weakest, and the tail
     // cut spent "Review incomplete — unverified findings disclosed." before
     // it spent a single blocker.
+    // The granted stop takes its own opener AHEAD of the whole certifying
+    // chain: no review ran, so neither 'Reviewed — no blockers.' nor the
+    // bare 'Reviewed.' fallback may open the body — a cleared stop's
+    // COMMENT opened exactly that way, two paragraphs above its own 'no
+    // review agents ran this round' disclosure. The wording matches
+    // `stopRoundBlock`'s frame: this round re-ruled standing findings.
     clauses.push(
-      coverageOpener ??
-        (canCertify
-          ? {
-              keep: 1,
-              en: 'Reviewed — no blockers.',
-              zh: '已审查——无阻断问题。',
-            }
-          : findingsFileUnreadable
-            ? {
-                keep: 1,
-                en: 'Review incomplete — findings unavailable.',
-                zh: '审查未完成——发现不可用。',
-              }
-            : findingsUnverifiedAtCompose
+      stopReRuleGranted
+        ? {
+            keep: 1,
+            en: 'Re-rule of standing findings — no new review ran.',
+            zh: '对既有发现的重裁——本轮未运行新的审查。',
+          }
+        : (coverageOpener ??
+            (canCertify
               ? {
                   keep: 1,
-                  en: 'Review incomplete — unverified findings disclosed.',
-                  zh: '审查未完成——未验证的发现已披露。',
+                  en: 'Reviewed — no blockers.',
+                  zh: '已审查——无阻断问题。',
                 }
-              : { keep: 1, en: 'Reviewed.', zh: '已审查。' }),
+              : findingsFileUnreadable
+                ? {
+                    keep: 1,
+                    en: 'Review incomplete — findings unavailable.',
+                    zh: '审查未完成——发现不可用。',
+                  }
+                : findingsUnverifiedAtCompose
+                  ? {
+                      keep: 1,
+                      en: 'Review incomplete — unverified findings disclosed.',
+                      zh: '审查未完成——未验证的发现已披露。',
+                    }
+                  : { keep: 1, en: 'Reviewed.', zh: '已审查。' })),
     );
   }
 
@@ -5875,6 +6665,10 @@ function composeReviewBody(
   // 6a. Verification outstanding at loop end — the findings file's surviving
   //     `— [unverified]` tags, machine-read.
   clauses.push(...unverifiedTagsBlock);
+
+  // 6b-. Round-kind disclosure (non-capping) — a decided-stop re-rule says
+  //      what kind of round this was, on its own line.
+  clauses.push(...stopRoundBlock);
 
   // 6b. Deferred-checker disclosure (non-capping) — a workflow whose embedded
   //     shell actionlint would lint but we do not yet trust.
@@ -5950,9 +6744,18 @@ function composeReviewBody(
     ...clauses.slice(openerCount),
   ];
   const body = render(paragraphs, '\n\n');
+  // Critical-only consumers use a body-leading marker. This must happen after
+  // rendering because budget notices can otherwise precede the marked details.
+  const visibleBody =
+    attribution &&
+    event === 'COMMENT' &&
+    (bodyCriticalBlock.length > 0 || cannotTellBlock.length > 0) &&
+    !body.startsWith(CRITICAL_PREFIX)
+      ? `${CRITICAL_PREFIX} Blocking finding(s) follow.\n\n${body}`
+      : body;
   return {
     event,
-    body,
+    body: visibleBody,
     baseEvent,
     cappedBy,
     downgraded,
@@ -6234,14 +7037,17 @@ function structurallyValidReport(report: unknown): boolean {
 export function scriptLintGate(planPath: string): {
   criticals: string[];
   unreviewed: string[];
-  disclosed: string[];
+  disclosed: Array<{ en: string; zh: string }>;
 } {
   const criticals: string[] = [];
   const unreviewed: string[] = [];
   // Disclosed-but-NOT-capping: a `deferred` checker (actionlint) is a known tool
   // limitation, not a finding and not an unrun-checker gap — the reader is told a
   // workflow's embedded shell was not linted, but the verdict is not capped on it.
-  const disclosed: string[] = [];
+  // Bilingual, unlike the capping lists: these strings are machine-built from the
+  // report (no model prose), so the body's Chinese half can carry a real
+  // translation instead of the English line verbatim.
+  const disclosed: Array<{ en: string; zh: string }> = [];
   let plan: {
     prNumber?: unknown;
     files?: unknown;
@@ -6356,10 +7162,19 @@ export function scriptLintGate(planPath: string): {
   // A deferred checker (actionlint) is disclosed but does not cap — the reader is
   // told the workflow's embedded shell was not linted, without making every
   // workflow PR un-Approvable on a checker we deliberately decline to run.
+  // No "the executable-script lint —" prefix here: the body's own wrapper opens
+  // with "Not linted:", and naming the lint after that header rendered as
+  // "Not linted: the executable-script lint" — a sentence about not running a
+  // lint on a lint (#10567's posted body). The path and reason carry the facts.
   for (const d of report.deferred ?? []) {
-    disclosed.push(
-      `the executable-script lint — ${mdField(d.path)}: ${stripCommentGrammar(d.reason ?? `${d.tool} deferred`)}`,
-    );
+    const reason = stripCommentGrammar(d.reason ?? `${d.tool} deferred`);
+    disclosed.push({
+      en: `${mdField(d.path)} — ${reason}`,
+      // An older CLI's report has no `reasonZh`; English both halves beats a
+      // half-empty sentence. Its comment grammar goes inert like the reason's —
+      // the report is agent-rewritable prose either way.
+      zh: `${mdField(d.path)}——${d.reasonZh ? stripCommentGrammar(d.reasonZh) : reason}`,
+    });
   }
   return { criticals, unreviewed, disclosed };
 }
@@ -6736,8 +7551,19 @@ export const composeReviewCommand: CommandModule = {
     // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
     // downgrade also depends on `downgraded`/`downgradedFrom` — and Step 8's
     // archived report copies this line rather than re-deriving a lossy one.
+    // The parent's run stamp is echoed into the artifact, mirroring the stop
+    // sidecar's fence: `run.ts` accepts only a verdict stamped by ITS run,
+    // so a leftover artifact from a concurrent same-stem run — or a file
+    // written around this command — never reads as this round's verdict.
+    // Absent when no parent published one (an interactive compose), which
+    // is exactly when no gate is reading.
+    const composedRunId = process.env['QWEN_REVIEW_RUN_ID'];
     const json = JSON.stringify(
-      { ...result, verdictLine: verdictLine(result) },
+      {
+        ...result,
+        verdictLine: verdictLine(result),
+        ...(composedRunId ? { runId: composedRunId } : {}),
+      },
       null,
       2,
     );
@@ -7189,7 +8015,13 @@ export function verdictLine(r: ComposeReviewResult): string {
   } else if (r.baseEvent === 'APPROVE' && r.event !== 'APPROVE') {
     const reasons = r.cappedBy.map((c) => why[c] ?? c);
     if (r.downgraded) reasons.push('a presubmit check failed');
-    line += ` — an Approve was NOT available: ${reasons.join('; ')}`;
+    // Empty reasons is a real state, not a gap: the decided-stop re-rule
+    // demotes a cleared round's APPROVE to COMMENT with no cap and no
+    // presubmit — joining an empty list printed a dangling colon there.
+    line += reasons.length
+      ? ` — an Approve was NOT available: ${reasons.join('; ')}`
+      : ' — a decided-stop re-rule reviews nothing new, so a cleared ' +
+        'round comments rather than approves';
   } else if (r.downgradedFrom === 'Request changes') {
     // The decisive case, and the one a review caught. A presubmit downgrade can
     // move a REQUEST_CHANGES — a review with **confirmed Criticals** — down to

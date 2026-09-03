@@ -44,6 +44,8 @@ import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
+  ServeSessionResourcesStatus,
+  ServeSessionSavedWorkflowStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
   ServeSessionWorkflowTaskStatus,
@@ -215,6 +217,15 @@ export interface BridgeSession {
   sourceId?: string;
   /** True iff the source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
+  /**
+   * Only present when the spawn carried a `modelServiceId`. `true` iff the
+   * model was actually applied via `unstable_setSessionModel`; `false` means
+   * the apply failed (surfaced via `model_switch_failed`) and the session is
+   * running on the agent's default model. Lets create callers distinguish a
+   * confirmed selection from a silent fallback instead of assuming the
+   * requested model is live.
+   */
+  modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: { slug: string; path: string; branch: string };
   /** Present when the session was created with a new branch. */
@@ -711,6 +722,7 @@ export interface BridgeSessionSummary {
   createdAt: string;
   updatedAt?: string;
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Id of the session that spawned this one (via `create_sub_session`), or
    * absent for a top-level session. Lets a UI link a sub-session back to its
    * parent. Immutable — set when the session is created. */
@@ -790,11 +802,21 @@ export interface SessionPrInfo {
   url: string;
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
+  /** Issues the PR closes, snapshotted by the daemon refresh; optional. */
+  issues?: SessionPrIssueInfo[];
+}
+
+export interface SessionPrIssueInfo {
+  number: number;
+  url: string;
+  state?: 'open' | 'completed' | 'not_planned';
 }
 
 export interface SessionMetadataUpdate {
   displayName?: string;
-  pr?: SessionPrInfo;
+  titleSource?: 'manual' | 'auto';
+  /** Issues are daemon-derived, never client-bound — the input omits them. */
+  pr?: Omit<SessionPrInfo, 'issues'>;
   /** Full binding list after the update (return value only; ignored on input). */
   prs?: SessionPrInfo[];
 }
@@ -1589,7 +1611,7 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
 
   /**
    * Replace the in-memory PR binding list of a live session with the
-   * persisted sidecar contents after a rewrite that can evict bindings
+   * authoritative persisted one after a rewrite that can evict bindings
    * (the backfill cap trim). Unlike {@link seedSessionPrs}, overwrites an
    * entry that already holds bindings, so the summary merge cannot
    * resurrect evicted numbers from a stale entry. No-op when the entry is
@@ -1806,6 +1828,21 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
 
+  /** Read sanitized Skill and MCP snapshots for a live session. */
+  getSessionResourcesStatus(
+    sessionId: string,
+  ): Promise<ServeSessionResourcesStatus>;
+
+  /**
+   * Read one saved workflow definition visible to a live session. The
+   * envelope's `workflow` is null when the name is unknown or Workflow
+   * controls are unavailable.
+   */
+  getSessionSavedWorkflow(
+    sessionId: string,
+    name: string,
+  ): Promise<ServeSessionSavedWorkflowStatus>;
+
   /**
    * Read a page of persisted transcript replay events through the ACP child.
    * This is workspace-scoped and read-only: implementations must not attach a
@@ -1948,6 +1985,29 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     language: string;
     outputLanguage: string | null;
     refreshed: boolean;
+  }>;
+
+  /**
+   * Sessionless user-level language sync (daemon `POST /language`). The
+   * daemon process has already persisted the user-scope settings and the
+   * global output-language file; the runtime only switches its own process
+   * UI language, reloads user-scope settings from disk, and — when
+   * `syncOutputLanguage` is true — refreshes every local session's system
+   * prompt. Project-bound output-language files are intentionally left
+   * alone: a session with its own registered path keeps its override.
+   *
+   * Runs on whatever ACP channel is already live; throws
+   * `SessionNotFoundError` when no channel is up, which callers must treat
+   * as "runtime skipped" (nothing to refresh — the next channel spawn
+   * reads the persisted files).
+   */
+  setUserLanguage(params: {
+    language: string;
+    syncOutputLanguage: boolean;
+  }): Promise<{
+    language: string;
+    sessions: number;
+    failed: number;
   }>;
 
   /** Apply Codex's realtime-active world-state transition to one session. */
