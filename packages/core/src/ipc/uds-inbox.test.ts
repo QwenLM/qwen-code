@@ -1266,7 +1266,12 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
         onFrame: () => {},
       });
       expect(started).toBeNull();
-      expect(getLastPeerInboxFailure()?.cause).toBe('path_too_long');
+      expect(getLastPeerInboxFailure()?.cause).toBe('sibling_too_long');
+      // Not the path_too_long sentence: this path fits, and claiming
+      // otherwise is something the user can measure and disprove.
+      const rendered = describePeerInboxFailure(getLastPeerInboxFailure()!);
+      expect(rendered).toContain('held by another live session');
+      expect(rendered).not.toMatch(/^"[^"]+" is longer than/);
       // The live listener is untouched either way.
       await expect(connectRaw(taken)).resolves.toBeInstanceOf(net.Socket);
     } finally {

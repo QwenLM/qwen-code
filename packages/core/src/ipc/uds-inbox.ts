@@ -102,6 +102,9 @@ export const LINE_DEADLINE_MS = 30_000;
  *   directory.
  * - `missing_ancestor`: a parent of the socket directory does not exist.
  * - `path_too_long`: the path exceeds what `sun_path` can hold.
+ * - `sibling_too_long`: the path is held by a live session, and the
+ *   `<pid>-<8hex>.sock` name we would move aside to does not fit
+ *   `sun_path`. The configured path itself is within the limit.
  * - `bind_failed`: `listen()` failed for another reason (the errno is in
  *   `detail`).
  * - `chmod_failed`: the socket could not be restricted to 0600.
@@ -115,6 +118,7 @@ export type PeerInboxFailureCause =
   | 'permission'
   | 'missing_ancestor'
   | 'path_too_long'
+  | 'sibling_too_long'
   | 'bind_failed'
   | 'chmod_failed'
   | 'unknown';
@@ -173,6 +177,12 @@ export function describePeerInboxFailure(
       return `a parent of "${where}" does not exist. ${failure.hint}${attempts}`;
     case 'path_too_long':
       return `"${failure.socketPath}" is longer than the ${MAX_SOCKET_PATH_BYTES}-byte socket path limit. ${failure.hint}${attempts}`;
+    case 'sibling_too_long':
+      // Deliberately not the path_too_long sentence: this path fits, and
+      // telling the user it is over a limit they can measure it against
+      // is a claim they can disprove. What does not fit is the name we
+      // would move aside to.
+      return `"${failure.socketPath}" is held by another live session, and the alternative name needed to work around it would exceed the ${MAX_SOCKET_PATH_BYTES}-byte socket path limit. ${failure.hint}${attempts}`;
     case 'bind_failed':
       return `the socket could not be bound at "${failure.socketPath}" (${failure.detail}). ${failure.hint}${attempts}`;
     case 'chmod_failed':
@@ -253,6 +263,25 @@ function pidOfSocketFilename(name: string): number | null {
   if (!SOCKET_FILENAME.test(name)) return null;
   const pid = Number.parseInt(name.split(/[-.]/)[0]!, 10);
   return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+/**
+ * The one classification for "the path is held by a live session and the
+ * sibling name we would move aside to does not fit `sun_path`".
+ *
+ * Both producers -- the pre-bind probe and the raced `EADDRINUSE` retry --
+ * go through here, so the two orderings cannot report the same condition
+ * differently.
+ */
+function siblingOverflowFailure(socketPath: string): PeerInboxStartFailure {
+  return classify(
+    new InboxSetupError(
+      'sibling_too_long',
+      `${socketPath} is held by a live session and a sibling name would exceed sun_path`,
+      'Set XDG_RUNTIME_DIR or TMPDIR to a shorter directory, then restart.',
+    ),
+    socketPath,
+  );
 }
 
 /**
@@ -666,16 +695,7 @@ async function bindAt(
     const sibling = siblingSocketPath(socketPath);
     if (sibling === null) {
       await dropDirIfEmpty();
-      return {
-        failure: classify(
-          new InboxSetupError(
-            'path_too_long',
-            `${socketPath} is held by a live session and a sibling name would exceed sun_path`,
-            'Set XDG_RUNTIME_DIR or TMPDIR to a shorter directory, then restart.',
-          ),
-          socketPath,
-        ),
-      };
+      return { failure: siblingOverflowFailure(socketPath) };
     }
     debugLogger.debug(
       `${socketPath} is held by a live session (a PID collision across namespaces); binding at ${sibling}`,
@@ -815,6 +835,19 @@ async function bindAt(
       (error as NodeJS.ErrnoException)?.code === 'EADDRINUSE'
         ? siblingSocketPath(socketPath)
         : null;
+    if (
+      (error as NodeJS.ErrnoException)?.code === 'EADDRINUSE' &&
+      sibling === null
+    ) {
+      // Identical condition to the probe branch above, reached by the
+      // raced ordering instead. Without this it fell through `classify`
+      // -- which has no EADDRINUSE case -- to `bind_failed`, telling the
+      // user to wait for a long-lived twin that will never exit and to
+      // take ownership of a directory that is already theirs, when the
+      // real blocker is a name length.
+      await dropDirIfEmpty();
+      return { failure: siblingOverflowFailure(socketPath) };
+    }
     let raced = error;
     // The path last handed to listen(), which is what a failure must
     // name. `socketPath` is only advanced on success, so reporting it
