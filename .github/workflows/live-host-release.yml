@@ -350,7 +350,7 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
 
       - name: 'Set up Node.js'
-        uses: 'actions/setup-node@49933f5360751b6f8e5e4b6c6f3a8c3c5c5c5c5c'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           registry-url: 'https://registry.npmjs.org'
