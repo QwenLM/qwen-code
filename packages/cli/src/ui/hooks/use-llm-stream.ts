@@ -610,7 +610,7 @@ export const useLlmStream = (
     async (
       binding: GoalTurnBinding,
       reason: string,
-      options?: { userCancelled?: boolean },
+      options?: { userCancelled?: boolean; pauseReason?: string },
     ): Promise<void> => {
       if (!binding.controller.signal.aborted) {
         binding.controller.abort(reason);
@@ -632,9 +632,16 @@ export const useLlmStream = (
               action: 'pause',
               expectedGoalId: binding.permit.goalId,
               expectedRevision: binding.permit.revision,
-              reason: options?.userCancelled
-                ? GOAL_PAUSE_REASON_USER_INTERRUPT
-                : goalPauseReasonForFailure(reason),
+              // `reason` is the abort cause, which sibling hosts compare
+              // against sentinel constants and which the debug log wants
+              // verbatim. A caller that has already framed a user-facing
+              // sentence passes it as `pauseReason` instead of having this
+              // one framed a second time.
+              reason:
+                options?.pauseReason ??
+                (options?.userCancelled
+                  ? GOAL_PAUSE_REASON_USER_INTERRUPT
+                  : goalPauseReasonForFailure(reason)),
             });
           } catch (error) {
             debugLogger.warn('Failed to pause invalid Goal tool batch', error);
@@ -5043,7 +5050,12 @@ export const useLlmStream = (
           bindings.set(binding.turnKey, binding);
         }
         for (const binding of bindings.values()) {
-          await failClosedGoalTurn(binding, reason);
+          // `reason` here is a scheduler diagnostic, not something a user
+          // reads. It stays the abort cause and the error item; the durable
+          // `lastReason` gets the builder's detail-free sentence.
+          await failClosedGoalTurn(binding, reason, {
+            pauseReason: goalPauseReasonForFailure(''),
+          });
         }
         addItem(
           {
@@ -5078,7 +5090,9 @@ export const useLlmStream = (
             llmTools.map((toolCall) => toolCall.request.callId),
           );
           const reason = 'ToolResult batch is missing the active Goal context';
-          await failClosedGoalTurn(active, reason);
+          await failClosedGoalTurn(active, reason, {
+            pauseReason: goalPauseReasonForFailure(''),
+          });
           addItem(
             {
               type: MessageType.ERROR,
@@ -5102,7 +5116,9 @@ export const useLlmStream = (
             llmTools.map((toolCall) => toolCall.request.callId),
           );
           const reason = 'ToolResult batch has a stale Goal context';
-          await failClosedGoalTurn(existing, reason);
+          await failClosedGoalTurn(existing, reason, {
+            pauseReason: goalPauseReasonForFailure(''),
+          });
           addItem(
             {
               type: MessageType.ERROR,
@@ -5372,10 +5388,16 @@ export const useLlmStream = (
         );
         markToolsAsSubmitted(callIdsToMarkAsSubmitted);
         if (toolGoalBinding) {
+          // Every cancellation that reaches here originates in a user action:
+          // either Esc through `cancelOngoingRequest`, or a declined tool
+          // confirmation, which the dialog consumes so `turnCancelledRef`
+          // stays false. Selecting the failure arm on that ref would tell a
+          // user who declined one command that their Goal stopped because a
+          // turn failed.
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation was cancelled',
-            { userCancelled: turnCancelledRef.current },
+            { userCancelled: true },
           );
         }
         endToolInteraction('cancelled');
@@ -5465,6 +5487,7 @@ export const useLlmStream = (
           await failClosedGoalTurn(
             toolGoalBinding,
             `Goal turn could not finish: ${errorMessage}`,
+            { pauseReason: goalPauseReasonForFailure(errorMessage) },
           );
         } finally {
           // Idempotent with the release inside failClosedGoalTurn; also covers the success path.
