@@ -37,10 +37,15 @@ const { mockRunExitCleanup } = vi.hoisted(() => ({
 const { mockStartNonInteractiveOpenAILogHousekeeping } = vi.hoisted(() => ({
   mockStartNonInteractiveOpenAILogHousekeeping: vi.fn(),
 }));
-const { mockMcpPoolDrainAll } = vi.hoisted(() => ({
+const { mockMcpPoolDrainAll, mockMcpPoolGetSnapshot } = vi.hoisted(() => ({
   mockMcpPoolDrainAll: vi
     .fn()
     .mockResolvedValue({ drained: 0, forced: 0, errors: [] }),
+  mockMcpPoolGetSnapshot: vi.fn().mockReturnValue({
+    total: 0,
+    subprocessCount: 0,
+    byName: {},
+  }),
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
@@ -644,11 +649,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   })),
   McpTransportPool: vi.fn().mockImplementation(() => ({
     drainAll: mockMcpPoolDrainAll,
-    getSnapshot: vi.fn().mockReturnValue({
-      total: 0,
-      subprocessCount: 0,
-      byName: {},
-    }),
+    getSnapshot: mockMcpPoolGetSnapshot,
     releaseSession: vi.fn(),
     restartByName: vi.fn().mockResolvedValue([]),
     getBudget: vi.fn().mockReturnValue(undefined),
@@ -2175,6 +2176,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockMcpPoolDrainAll
       .mockReset()
       .mockResolvedValue({ drained: 0, forced: 0, errors: [] });
+    mockMcpPoolGetSnapshot.mockReset().mockReturnValue({
+      total: 0,
+      subprocessCount: 0,
+      byName: {},
+    });
     mockExtensionManagerState.extensions = [];
     mockExtensionManagerState.refreshCache.mockResolvedValue(undefined);
     mockRunManagedAutoMemoryDream.mockReset();
@@ -4237,6 +4243,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      // Per-session folder-trust flag (security.folderTrust.enabled of the
+      // admission workspace), bound once at Config construction. Default off;
+      // bootRelocatableSession overrides it to reflect the fed workspace.
+      getFolderTrust: vi.fn().mockReturnValue(false),
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
@@ -4280,7 +4290,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setWorkflowsEnabled: vi.fn(),
       getBareMode: vi.fn().mockReturnValue(false),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
-      getFolderTrust: vi.fn().mockReturnValue(true),
       isTrustedFolder: vi.fn().mockReturnValue(true),
     };
   }
@@ -4680,6 +4689,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
+      // The gate reads config.getFolderTrust() (admission-workspace flag),
+      // so mirror the fed workspace's security.folderTrust.enabled here.
+      getFolderTrust: vi
+        .fn()
+        .mockReturnValue(
+          settings.merged.security?.folderTrust?.enabled ?? false,
+        ),
     });
     Object.assign(innerConfig.getLlmClient(), {
       addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
@@ -5351,6 +5367,67 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(workspaceDiscover).toHaveBeenCalledWith('aone');
     expect(sessionDiscover).toHaveBeenCalledWith('aone');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('uses the pool status for the top-level MCP server status', async () => {
+    const manager = {
+      getDiscoveryState: vi.fn().mockReturnValue(MCPDiscoveryState.COMPLETED),
+      getMcpClientAccounting: vi.fn().mockReturnValue({
+        total: 0,
+        reservedSlots: [],
+        refusedServerNames: [],
+      }),
+      getMcpClientBudget: vi.fn().mockReturnValue(undefined),
+      getMcpBudgetMode: vi.fn().mockReturnValue('off'),
+      getServerStatus: vi.fn().mockReturnValue(MCPServerStatus.DISCONNECTED),
+    };
+    mockConfig = {
+      ...mockConfig,
+      getMcpServers: vi
+        .fn()
+        .mockReturnValue({ code: { httpUrl: 'https://example.com/mcp' } }),
+      getWorkingDir: vi.fn().mockReturnValue('/tmp'),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      isMcpServerDisabled: vi.fn().mockReturnValue(false),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getMcpClientManager: vi.fn().mockReturnValue(manager),
+      }),
+    } as unknown as Config;
+    mockMcpPoolGetSnapshot.mockReturnValue({
+      total: 1,
+      subprocessCount: 0,
+      byName: {
+        code: {
+          entryCount: 1,
+          entrySummary: [
+            {
+              entryIndex: 0,
+              refs: 1,
+              status: MCPServerStatus.CONNECTED,
+            },
+          ],
+        },
+      },
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceMcp, {}),
+    ).resolves.toMatchObject({
+      servers: [
+        expect.objectContaining({
+          name: 'code',
+          status: 'ok',
+          mcpStatus: 'connected',
+          entrySummary: [
+            expect.objectContaining({ entryIndex: 0, status: 'connected' }),
+          ],
+        }),
+      ],
+    });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -6235,6 +6312,133 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const { agent, agentPromise, sessionId } = await bootRelocatableSession(
         settings,
         'expected-capability',
+      );
+
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: canonicalTarget,
+            allowedRoots: [canonicalRoot],
+          }),
+        ).rejects.toThrow('Directory not trusted');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+  });
+
+  it('resolves the cd trust gate from the session workspace, not the stale this.settings cache', async () => {
+    await withEmptyTrustedFolders(async (directory) => {
+      const root = path.join(directory, 'Conversations');
+      const target = path.join(root, 'conversation-cross-workspace');
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+      const canonicalRoot = await fs.realpath(root);
+      const canonicalTarget = await fs.realpath(target);
+      // Session A's workspace enables folder trust.
+      const aSettings = makeSessionSettings({
+        mcpServers: {},
+        security: { folderTrust: { enabled: true } },
+      });
+      const { agent, agentPromise, sessionId } = await bootRelocatableSession(
+        aSettings,
+        'expected-capability',
+      );
+      // A different workspace's activity has since refreshed the agent's
+      // "latest loaded" cache to a workspace that DISABLES folder trust.
+      // Reading that cache in the cd gate (the pre-fix bug) would switch off
+      // session A's trust check and admit the untrusted cd; the fix reads
+      // config.getFolderTrust() (A's admission-workspace flag), so the gate
+      // still enforces.
+      (agent as unknown as { settings: LoadedSettings }).settings =
+        makeSessionSettings({
+          mcpServers: {},
+          security: { folderTrust: { enabled: false } },
+        });
+
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: canonicalTarget,
+            allowedRoots: [canonicalRoot],
+          }),
+        ).rejects.toThrow('Directory not trusted');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+  });
+
+  it('does not gate cd when the session workspace disables folder trust, even if the stale cache enables it', async () => {
+    // Mirror of the test above. Session A's own workspace DISABLES folder
+    // trust, while the stale `this.settings` cache holds a trust-ENABLED
+    // workspace. The gate must follow A's own settings and NOT gate the cd —
+    // otherwise a gate that OR-combined both sources would fail closed and
+    // spuriously reject an ordinary cd for a session whose workspace never
+    // asked for trust enforcement.
+    await withEmptyTrustedFolders(async (directory) => {
+      const root = path.join(directory, 'Conversations');
+      const target = path.join(root, 'conversation-trust-disabled');
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+      const canonicalRoot = await fs.realpath(root);
+      const canonicalTarget = await fs.realpath(target);
+      // Session A's workspace disables folder trust.
+      const aSettings = makeSessionSettings({ mcpServers: {} });
+      const { agent, agentPromise, sessionId } = await bootRelocatableSession(
+        aSettings,
+        'expected-capability',
+      );
+      (agent as unknown as { settings: LoadedSettings }).settings =
+        makeSessionSettings({
+          mcpServers: {},
+          security: { folderTrust: { enabled: true } },
+        });
+
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: canonicalTarget,
+            allowedRoots: [canonicalRoot],
+          }),
+        ).resolves.toMatchObject({ newCwd: canonicalTarget });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+  });
+
+  it('keeps the cd trust gate armed after the cwd drifts into a settings-less subdirectory', async () => {
+    // The gate must bind folder-trust to the ADMISSION workspace, not re-read
+    // it from the current cwd: a prior cd moves targetDir into a subdirectory
+    // that carries no `.qwen/settings.json`, so a cwd-keyed read would resolve
+    // disabled (isFolderTrustEnabled defaults to false) and disarm the gate
+    // for the rest of the session. config.getFolderTrust() stays true, so an
+    // untrusted cd is still rejected.
+    await withEmptyTrustedFolders(async (directory) => {
+      const root = path.join(directory, 'Conversations');
+      const target = path.join(root, 'conversation-subtree-drift');
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+      const canonicalRoot = await fs.realpath(root);
+      const canonicalTarget = await fs.realpath(target);
+      const aSettings = makeSessionSettings({
+        mcpServers: {},
+        security: { folderTrust: { enabled: true } },
+      });
+      const { agent, agentPromise, sessionId, innerConfig } =
+        await bootRelocatableSession(aSettings, 'expected-capability');
+      // cwd has drifted into a subdirectory whose settings disable folder
+      // trust. A cwd-keyed gate would read this and skip; the admission-bound
+      // config.getFolderTrust() must not.
+      innerConfig.getTargetDir.mockReturnValue('/tmp/sub');
+      vi.mocked(loadSettings).mockImplementation((cwd?: string) =>
+        cwd === '/tmp/sub'
+          ? makeSessionSettings({ mcpServers: {} })
+          : aSettings,
       );
 
       try {
@@ -24861,6 +25065,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     };
     const runtimeServer = { command: 'runtime-server' };
     const forceDiscover = vi.fn().mockResolvedValue(undefined);
+    const setTools = vi.fn().mockResolvedValue(undefined);
     let finishDiscovery!: () => void;
     const discoveryPending = new Promise<void>((resolve) => {
       finishDiscovery = resolve;
@@ -24913,6 +25118,10 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       .mockReturnValue({ runtime: runtimeServer });
     mockConfig.getWorkingDir = vi.fn().mockReturnValue('/tmp');
     mockConfig.isMcpServerDisabled = vi.fn().mockReturnValue(false);
+    mockConfig.getLlmClient = vi.fn().mockReturnValue({
+      isInitialized: vi.fn().mockReturnValue(true),
+      setTools,
+    });
     mockConfig.getToolRegistry = vi.fn().mockReturnValue({
       discoverToolsForServer: forceDiscover,
       getMcpClientManager: vi.fn().mockReturnValue({
@@ -24986,6 +25195,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         discovery: discoveryServer,
       }),
     );
+    expect(setTools).toHaveBeenCalledOnce();
     expect(mockConfig.setExcludedMcpServers).toHaveBeenCalledWith(['disabled']);
     expect(mockConfig.setAllowedMcpServers).toHaveBeenCalledWith([
       'persisted',

@@ -13,6 +13,7 @@ import type {
 import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart-react';
 import type {
   DaemonInputAnnotation,
+  DaemonSessionArtifact,
   GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -225,6 +226,16 @@ export interface WebShellAssistantTurnFooterRenderInfo {
   /** User-message id for the head of the completed turn. */
   turnId: string;
   message: WebShellAssistantMessageInfo;
+}
+
+export type WebShellSessionArtifactsChangeReason = 'restore' | 'change';
+
+export interface WebShellSessionArtifactsChange {
+  reason: WebShellSessionArtifactsChangeReason;
+  sessionId: string;
+  sequence: number;
+  artifacts: readonly DaemonSessionArtifact[];
+  artifactsByTurn: ReadonlyMap<string, readonly DaemonSessionArtifact[]>;
 }
 
 export type AssistantTurnFooterRenderer = (
