@@ -58,6 +58,18 @@ export default defineConfig({
           __dirname,
           '../core/src/utils/envVarResolver.ts',
         ),
+        '@qwen-code/qwen-code-core/storage': path.resolve(
+          __dirname,
+          '../core/src/config/storage.ts',
+        ),
+        '@qwen-code/qwen-code-core/atomicFileWrite': path.resolve(
+          __dirname,
+          '../core/src/utils/atomicFileWrite.ts',
+        ),
+        '@qwen-code/qwen-code-core/debugLogger': path.resolve(
+          __dirname,
+          '../core/src/utils/debugLogger.ts',
+        ),
       }),
       // Mirrors `"@qwen-code/qwen-code-core/*": ["../core/src/*"]` from
       // packages/cli/tsconfig.json. esbuild reads that paths block when it
