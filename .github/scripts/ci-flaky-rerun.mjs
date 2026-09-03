@@ -584,7 +584,7 @@ export class GhClient {
   }
 
   async prList(search) {
-    return JSON.parse(
+    const prs = JSON.parse(
       await this.gh([
         'pr',
         'list',
@@ -597,11 +597,40 @@ export class GhClient {
         '--search',
         search,
         '--json',
-        'number,isDraft,baseRefName,headRefOid,statusCheckRollup',
+        'number,isDraft,baseRefName,headRefOid',
         '--limit',
         '1000',
       ]),
     );
+    // The rollup is fetched one PR at a time. Asking for it inside the list
+    // query makes a single GraphQL call whose cost grows with matched PRs
+    // times their check runs, and this repo outgrew it: with the rollup the
+    // search returns HTTP 504 above ~30 matches and failed 100 consecutive
+    // scheduled scans, while the same search without it answers in a second.
+    // A PR whose rollup cannot be read is skipped rather than failing the
+    // scan — the next run picks it up.
+    const detailed = [];
+    for (const pr of prs) {
+      try {
+        const { statusCheckRollup } = JSON.parse(
+          await this.gh([
+            'pr',
+            'view',
+            String(pr.number),
+            '--repo',
+            this.repo,
+            '--json',
+            'statusCheckRollup',
+          ]),
+        );
+        detailed.push({ ...pr, statusCheckRollup });
+      } catch (error) {
+        process.stderr.write(
+          `prList: skipping PR ${pr.number}: ${error.message}\n`,
+        );
+      }
+    }
+    return detailed;
   }
 
   async comments(prNumber) {

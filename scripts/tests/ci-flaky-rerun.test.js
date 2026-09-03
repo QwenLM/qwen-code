@@ -272,6 +272,34 @@ describe('ci flaky rerun patrol', () => {
     ]);
   });
 
+  it('keeps the status rollup out of the PR search query', async () => {
+    // With statusCheckRollup in the list query, the search is one GraphQL
+    // call costing matched PRs times their check runs. It began returning
+    // HTTP 504 above ~30 matches and failed 100 consecutive scheduled scans;
+    // the same search without the rollup answers in a second. Reading the
+    // rollup per PR keeps every call small.
+    const api = new GhClient('QwenLM/qwen-code');
+    const calls = [];
+    api.gh = async (args) => {
+      calls.push(args);
+      if (args[1] === 'list') {
+        return JSON.stringify([{ number: 7 }, { number: 8 }]);
+      }
+      if (args[2] === '8') {
+        throw new Error('HTTP 502');
+      }
+      return JSON.stringify({ statusCheckRollup: [run()] });
+    };
+    await expect(api.prList('status:failure')).resolves.toEqual([
+      { number: 7, statusCheckRollup: [run()] },
+    ]);
+    const listArgs = calls[0];
+    expect(listArgs[listArgs.indexOf('--json') + 1].split(',')).not.toContain(
+      'statusCheckRollup',
+    );
+    expect(calls).toHaveLength(3);
+  });
+
   it('requests the PR number when refreshing current PR state', async () => {
     const api = new GhClient('QwenLM/qwen-code');
     let args = [];
