@@ -242,6 +242,7 @@ export interface OpenDialogActionReturn {
     | 'permissions'
     | 'approval-mode'
     | 'effort'
+    | 'output-style'
     | 'resume'
     | 'delete'
     | 'branch'

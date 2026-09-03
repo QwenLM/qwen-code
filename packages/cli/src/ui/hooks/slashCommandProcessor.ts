@@ -125,6 +125,7 @@ const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
 const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
   'effort',
   'model',
+  'output-style',
   'statusline',
 ]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
@@ -188,6 +189,7 @@ export interface SlashCommandProcessorActions {
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
   openEffortDialog: () => void;
+  openOutputStyleDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
@@ -1306,6 +1308,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'effort':
                       actions.openEffortDialog();
+                      return { type: 'handled' };
+                    case 'output-style':
+                      actions.openOutputStyleDialog();
                       return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
