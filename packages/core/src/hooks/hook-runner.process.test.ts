@@ -548,7 +548,7 @@ const { HookRunner } = await import(process.argv[2]);
 const [tempDir, fixturePath, readyPath, pidPath] = process.argv.slice(3);
 const runner = new HookRunner();
 void runner.executeHook(
-  { type: 'command', command: \`exec \${JSON.stringify(process.execPath)} \${JSON.stringify(fixturePath)} \${JSON.stringify(readyPath)} \${JSON.stringify(pidPath)}\`, source: 'project', shell: 'bash', timeout: 300 },
+  { type: 'command', command: \`exec \${JSON.stringify(process.execPath)} \${JSON.stringify(fixturePath)} \${JSON.stringify(readyPath)} \${JSON.stringify(pidPath)}\`, source: 'project', shell: 'bash', timeout: ${HOOK_GROUP_TIMEOUT_MS} },
   'StopFailure',
   { session_id: 'surviving-timeout-test', transcript_path: \`\${tempDir}/transcript.jsonl\`, cwd: tempDir, hook_event_name: 'StopFailure', timestamp: new Date().toISOString() },
 );
