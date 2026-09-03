@@ -8,7 +8,10 @@ import type React from 'react';
 import { useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
-import type { ToolAskUserQuestionConfirmationDetails, ToolConfirmationPayload } from '@qwen-code/qwen-code-core/tools/tools.js';
+import type {
+  ToolAskUserQuestionConfirmationDetails,
+  ToolConfirmationPayload,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';

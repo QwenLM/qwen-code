@@ -6,7 +6,10 @@
 
 import { useMemo } from 'react';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
-import { isValidEditorType, allowEditorTypeInSandbox } from '@qwen-code/qwen-code-core/utils/editor.js';
+import {
+  isValidEditorType,
+  allowEditorTypeInSandbox,
+} from '@qwen-code/qwen-code-core/utils/editor.js';
 import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 

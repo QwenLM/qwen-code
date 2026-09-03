@@ -26,7 +26,10 @@ import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { buildSessionRecoveryPlan } from '@qwen-code/qwen-code-core/core/session-recovery.js';
 import { SessionStartSource } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
-import { SessionService, computeUniqueBranchTitle } from '@qwen-code/qwen-code-core/services/sessionService.js';
+import {
+  SessionService,
+  computeUniqueBranchTitle,
+} from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { ResumedSessionData } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import { MessageType } from '../types.js';

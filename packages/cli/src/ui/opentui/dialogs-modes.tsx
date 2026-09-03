@@ -19,7 +19,10 @@ import type { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mod
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { BUILT_IN_OUTPUT_STYLES } from '@qwen-code/qwen-code-core/core/output-styles.js';
 import type { OutputStyleDefinition } from '@qwen-code/qwen-code-core/core/output-styles.js';
-import { applyReasoningEffort, REASONING_EFFORT_TIERS } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
+import {
+  applyReasoningEffort,
+  REASONING_EFFORT_TIERS,
+} from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';

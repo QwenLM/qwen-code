@@ -38,7 +38,10 @@ import {
   type ReactNode,
 } from 'react';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
-import type { ToolCallConfirmationDetails, ToolConfirmationPayload } from '@qwen-code/qwen-code-core/tools/tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolConfirmationPayload,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import { useKeyboard } from '@opentui/react';
 import { C } from './theme.js';
 import { toOriginalKey } from './key-map.js';

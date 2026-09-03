@@ -12,7 +12,13 @@ import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { matchesAnyServerPattern } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
 import { MCPOAuthTokenStorage } from '@qwen-code/qwen-code-core/mcp/oauth-token-storage.js';
 import { mcpServerRequiresOAuth } from '@qwen-code/qwen-code-core/tools/mcp-client.js';
-import { getMCPServerStatus, removeMCPServerStatus, addMCPStatusChangeListener, removeMCPStatusChangeListener, MCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
+import {
+  getMCPServerStatus,
+  removeMCPServerStatus,
+  addMCPStatusChangeListener,
+  removeMCPStatusChangeListener,
+  MCPServerStatus,
+} from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import { DiscoveredMCPTool } from '@qwen-code/qwen-code-core/tools/mcp-tool.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { loadSettings, SettingScope } from '../../../../config/settings.js';

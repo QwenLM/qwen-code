@@ -17,8 +17,15 @@
 import type { TeammateApprovalRequestEvent } from '@qwen-code/qwen-code-core/agents/team/team-events.js';
 import type { WorkflowApproval } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
 import type { WaitingToolCall } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
-import type { ToolExecuteConfirmationDetails, ToolMcpConfirmationDetails, ToolConfirmationPayload } from '@qwen-code/qwen-code-core/tools/tools.js';
-import { ApprovalMode, APPROVAL_MODES } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type {
+  ToolExecuteConfirmationDetails,
+  ToolMcpConfirmationDetails,
+  ToolConfirmationPayload,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
+import {
+  ApprovalMode,
+  APPROVAL_MODES,
+} from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { InputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';

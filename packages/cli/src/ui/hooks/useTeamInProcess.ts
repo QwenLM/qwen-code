@@ -21,7 +21,10 @@ import type { InProcessBackend } from '@qwen-code/qwen-code-core/agents/backends
 import { DISPLAY_MODE } from '@qwen-code/qwen-code-core/agents/backends/types.js';
 import type { TeamManager } from '@qwen-code/qwen-code-core/agents/team/TeamManager.js';
 import { TeamEventType } from '@qwen-code/qwen-code-core/agents/team/team-events.js';
-import type { TeammateJoinedEvent, TeammateExitedEvent } from '@qwen-code/qwen-code-core/agents/team/team-events.js';
+import type {
+  TeammateJoinedEvent,
+  TeammateExitedEvent,
+} from '@qwen-code/qwen-code-core/agents/team/team-events.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { AgentViewActions } from '../contexts/AgentViewContext.js';
 import { theme } from '../semantic-colors.js';

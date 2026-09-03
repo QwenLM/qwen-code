@@ -21,7 +21,13 @@ import type { Extension } from '@qwen-code/qwen-code-core/extension/extensionMan
 import type { ExtensionScope } from '@qwen-code/qwen-code-core/extension/extensionPreferences.js';
 import { MCPOAuthTokenStorage } from '@qwen-code/qwen-code-core/mcp/oauth-token-storage.js';
 import { mcpServerRequiresOAuth } from '@qwen-code/qwen-code-core/tools/mcp-client.js';
-import { MCPServerStatus, getMCPServerStatus, removeMCPServerStatus, addMCPStatusChangeListener, removeMCPStatusChangeListener } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
+import {
+  MCPServerStatus,
+  getMCPServerStatus,
+  removeMCPServerStatus,
+  addMCPStatusChangeListener,
+  removeMCPStatusChangeListener,
+} from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import {
   loadSettings,

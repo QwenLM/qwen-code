@@ -18,7 +18,10 @@
 import { useEffect, useRef } from 'react';
 import type { ArenaManager } from '@qwen-code/qwen-code-core/agents/arena/ArenaManager.js';
 import { ArenaEventType } from '@qwen-code/qwen-code-core/agents/arena/arena-events.js';
-import type { ArenaAgentStartEvent, ArenaSessionCompleteEvent } from '@qwen-code/qwen-code-core/agents/arena/arena-events.js';
+import type {
+  ArenaAgentStartEvent,
+  ArenaSessionCompleteEvent,
+} from '@qwen-code/qwen-code-core/agents/arena/arena-events.js';
 import { ArenaSessionStatus } from '@qwen-code/qwen-code-core/agents/arena/types.js';
 import type { InProcessBackend } from '@qwen-code/qwen-code-core/agents/backends/InProcessBackend.js';
 import { DISPLAY_MODE } from '@qwen-code/qwen-code-core/agents/backends/types.js';

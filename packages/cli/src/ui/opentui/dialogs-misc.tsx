@@ -25,7 +25,11 @@ import { useRenderer, useKeyboard } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { SessionListItem } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
-import { allowEditorTypeInSandbox, checkHasEditorType, isEditorAvailable } from '@qwen-code/qwen-code-core/utils/editor.js';
+import {
+  allowEditorTypeInSandbox,
+  checkHasEditorType,
+  isEditorAvailable,
+} from '@qwen-code/qwen-code-core/utils/editor.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
   EDITOR_DISPLAY_NAMES,

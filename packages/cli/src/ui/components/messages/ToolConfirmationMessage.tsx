@@ -15,7 +15,11 @@ import { DiffRenderer } from './DiffRenderer.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { ToolCallConfirmationDetails, ToolExecuteConfirmationDetails, ToolMcpConfirmationDetails } from '@qwen-code/qwen-code-core/tools/tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolExecuteConfirmationDetails,
+  ToolMcpConfirmationDetails,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 import { IdeClient } from '@qwen-code/qwen-code-core/ide/ide-client.js';
 import { buildHumanReadableRuleLabel } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';

@@ -16,10 +16,25 @@ import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import { FindingsDisplay } from '../FindingsDisplay.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { TodoResultDisplay, FindingsResultDisplay, AgentResultDisplay, PlanResultDisplay, AnsiOutputDisplay, McpToolProgressData, FileDiff, TerminalImageDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
+import type {
+  TodoResultDisplay,
+  FindingsResultDisplay,
+  AgentResultDisplay,
+  PlanResultDisplay,
+  AnsiOutputDisplay,
+  McpToolProgressData,
+  FileDiff,
+  TerminalImageDisplay,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { AnsiOutput } from '@qwen-code/qwen-code-core/utils/terminalSerializer.js';
-import { formatVisionBridgeNoticeDisplay, isVisionBridgeNoticeDisplay } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
-import { ToolNames, ToolNamesMigration } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import {
+  formatVisionBridgeNoticeDisplay,
+  isVisionBridgeNoticeDisplay,
+} from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
+import {
+  ToolNames,
+  ToolNamesMigration,
+} from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { isTerminalImageDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';

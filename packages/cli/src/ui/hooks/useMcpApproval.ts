@@ -6,7 +6,10 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { MCPServerConfig, McpServerScope } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
+import type {
+  MCPServerConfig,
+  McpServerScope,
+} from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { isGatedMcpScope } from '@qwen-code/qwen-code-core/config/mcp-server-config.js';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';

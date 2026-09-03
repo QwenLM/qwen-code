@@ -22,8 +22,17 @@
  */
 
 import * as path from 'node:path';
-import { GitWorktreeService, readWorktreeSessionMarker, worktreeBranchForSlug, writeWorktreeSessionMarker } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
-import { readWorktreeSession, isSessionRuntimeActive, writeWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import {
+  GitWorktreeService,
+  readWorktreeSessionMarker,
+  worktreeBranchForSlug,
+  writeWorktreeSessionMarker,
+} from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import {
+  readWorktreeSession,
+  isSessionRuntimeActive,
+  writeWorktreeSession,
+} from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { WorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';

@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ModelMetrics, ModelMetricsCore } from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import type {
+  ModelMetrics,
+  ModelMetricsCore,
+} from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
 import { MAIN_SOURCE } from '@qwen-code/qwen-code-core/utils/subagentNameContext.js';
 
 /**

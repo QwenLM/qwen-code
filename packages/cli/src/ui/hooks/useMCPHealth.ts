@@ -14,7 +14,12 @@
  */
 
 import { useEffect, useState } from 'react';
-import { MCPServerStatus, addMCPStatusChangeListener, removeMCPStatusChangeListener, getAllMCPServerStatuses } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
+import {
+  MCPServerStatus,
+  addMCPStatusChangeListener,
+  removeMCPStatusChangeListener,
+  getAllMCPServerStatuses,
+} from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 
 export interface MCPHealthSnapshot {
   /** Total servers tracked by the registry (configured + discovered). */

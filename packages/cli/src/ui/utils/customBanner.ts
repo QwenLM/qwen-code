@@ -7,7 +7,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
-import { stripTerminalControlSequences, TERMINAL_OSC_REGEX, TERMINAL_CSI_REGEX, TERMINAL_SHIFT_DCS_REGEX } from '@qwen-code/qwen-code-core/utils/terminalSafe.js';
+import {
+  stripTerminalControlSequences,
+  TERMINAL_OSC_REGEX,
+  TERMINAL_CSI_REGEX,
+  TERMINAL_SHIFT_DCS_REGEX,
+} from '@qwen-code/qwen-code-core/utils/terminalSafe.js';
 import type { LoadedSettings, SettingsFile } from '../../config/settings.js';
 import type {
   AsciiArtSource,

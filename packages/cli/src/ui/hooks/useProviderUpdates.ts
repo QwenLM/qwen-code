@@ -6,11 +6,21 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { ProviderModelConfig } from '@qwen-code/qwen-code-core/models/types.js';
+import type { ProviderModelConfig } from '@qwen-code/qwen-code-core/providers/types.js';
 import type { ProviderConfig } from '@qwen-code/qwen-code-core/providers/types.js';
 import { ALL_PROVIDERS } from '@qwen-code/qwen-code-core/providers/all-providers.js';
 import { applyProviderInstallPlan } from '@qwen-code/qwen-code-core/providers/install.js';
-import { buildInstallPlan, buildProviderTemplate, computeModelListVersion, getDefaultModelIds, PROVIDER_METADATA_NS, providerMatchesCredentials, resolveBaseUrl, resolveMetadataKey, resolveOwnsModel } from '@qwen-code/qwen-code-core/providers/provider-config.js';
+import {
+  buildInstallPlan,
+  buildProviderTemplate,
+  computeModelListVersion,
+  getDefaultModelIds,
+  PROVIDER_METADATA_NS,
+  providerMatchesCredentials,
+  resolveBaseUrl,
+  resolveMetadataKey,
+  resolveOwnsModel,
+} from '@qwen-code/qwen-code-core/providers/provider-config.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';

@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, ConfigInitializeOptions } from '@qwen-code/qwen-code-core/config/config.js';
+import type {
+  Config,
+  ConfigInitializeOptions,
+} from '@qwen-code/qwen-code-core/config/config.js';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { buildSessionRecoveryPlanFromApiHistory } from '@qwen-code/qwen-code-core/core/session-recovery.js';
 import { TURN_INTERRUPTION_HISTORY_TAIL_COUNT } from '@qwen-code/qwen-code-core/core/turn-interruption.js';

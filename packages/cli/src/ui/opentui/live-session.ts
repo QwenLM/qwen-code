@@ -22,14 +22,31 @@
 
 import { appendFileSync } from 'node:fs';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import type { AgentResultDisplay, ToolCallConfirmationDetails, ToolResultDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
+import type {
+  AgentResultDisplay,
+  ToolCallConfirmationDetails,
+  ToolResultDisplay,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { CoreToolScheduler } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { clampInlineMediaPart } from '@qwen-code/qwen-code-core/core/inlineMediaLimit.js';
-import { didWriteProjectContextFile, refreshMemoryInstruction } from '@qwen-code/qwen-code-core/memory/refresh.js';
-import { hasImageParts, normalizeParts, splitImageParts } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
-import { formatFullTurnVisionNotice, formatVisionBridgeNotice, getFullTurnVisionModelSelector, runVisionBridge, shouldRunVisionBridge } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
+import {
+  didWriteProjectContextFile,
+  refreshMemoryInstruction,
+} from '@qwen-code/qwen-code-core/memory/refresh.js';
+import {
+  hasImageParts,
+  normalizeParts,
+  splitImageParts,
+} from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
+import {
+  formatFullTurnVisionNotice,
+  formatVisionBridgeNotice,
+  getFullTurnVisionModelSelector,
+  runVisionBridge,
+  shouldRunVisionBridge,
+} from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { isShellProgressData } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { parseAndFormatApiError } from '@qwen-code/qwen-code-core/utils/errorParsing.js';

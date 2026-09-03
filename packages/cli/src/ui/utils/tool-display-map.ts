@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ToolDisplayNames, ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import {
+  ToolDisplayNames,
+  ToolNames,
+} from '@qwen-code/qwen-code-core/tools/tool-names.js';
 
 /**
  * Internal-tool-name → user-facing display-name lookup
