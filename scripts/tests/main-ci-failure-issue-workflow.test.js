@@ -97,6 +97,24 @@ describe('main CI failure issue workflow', () => {
     // standing red lane undiagnosable from its own issue.
     expect(workflow).toContain('failed-jobs.tsv');
     expect(workflow).toContain('--jobs "${RUNNER_TEMP}/failed-jobs.tsv"');
+    // The two pins above are also satisfied by the `--jobs` flag line, so on
+    // their own they stay green when the producer goes: deleting the fetch
+    // returns the body to the contentless stub, and mutating the projection
+    // names a step as the job or lists every step as failed.
+    expect(
+      (workflow.match(/actions\/runs\/\$\{WORKFLOW_RUN_ID\}\/jobs/g) ?? [])
+        .length,
+    ).toBe(1);
+    expect(workflow).toContain('> "${RUNNER_TEMP}/failed-jobs.tsv"');
+    expect(workflow).toContain(
+      '.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv',
+    );
+    // `gh api` writes a non-2xx body to stdout before exiting non-zero, so the
+    // fetch has to stay non-fatal AND say so: an errored call that lands in the
+    // body renders a REST error object as a failed job.
+    expect(workflow).toContain(
+      '::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}',
+    );
   });
 
   it('re-reads an existing issue so recorded recurrences survive the update', () => {

@@ -507,14 +507,8 @@ test('runCli plan --existing merges recorded recurrences from the file', () => {
   writeFileSync(analysisPath, JSON.stringify(analysis));
   writeFileSync(existingPath, existing);
 
-  let output = '';
-  const original = process.stdout.write;
-  process.stdout.write = (chunk) => {
-    output += chunk;
-    return true;
-  };
-  try {
-    runCli([
+  const planned = JSON.parse(
+    captureStdout([
       'plan',
       '--analysis',
       analysisPath,
@@ -528,12 +522,9 @@ test('runCli plan --existing merges recorded recurrences from the file', () => {
       '302',
       '--at',
       '2026-07-27T03:20:00Z',
-    ]);
-  } finally {
-    process.stdout.write = original;
-  }
+    ]),
+  );
 
-  const planned = JSON.parse(output);
   // The existing body's run-301 line must survive: a broken --existing path
   // would produce a create-path body with only the new run.
   assert.ok(planned.body.includes('[run 301]'));
@@ -654,9 +645,8 @@ test('runCli analyze parses the failed-jobs TSV the workflow writes', () => {
     jobsPath,
     [
       'Test (windows-latest, Node 22.x)\tRun tests and generate reports',
-      // jq joins several failed steps with ", ", so every step after the
-      // first arrives with a leading space.
-      'Test (ubuntu-latest, Node 22.x)\tRun ESLint, Run Prettier',
+      // One field per failed step, so a name carrying a comma survives intact.
+      'Test (ubuntu-latest, Node 22.x)\tRun ESLint, Prettier and tsc\tRun tests',
       '\t',
       'Test (macos-latest, Node 22.x)\t',
       '',
@@ -680,7 +670,7 @@ test('runCli analyze parses the failed-jobs TSV the workflow writes', () => {
     },
     {
       name: 'Test (ubuntu-latest, Node 22.x)',
-      steps: ['Run ESLint', 'Run Prettier'],
+      steps: ['Run ESLint, Prettier and tsc', 'Run tests'],
     },
     { name: 'Test (macos-latest, Node 22.x)', steps: [] },
   ]);

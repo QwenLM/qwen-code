@@ -85,24 +85,20 @@ export function testKey(testId) {
 }
 
 /**
- * Parse the `name<TAB>step, step` lines the workflow writes from the run's
+ * Parse the `name<TAB>step<TAB>step` lines the workflow writes from the run's
  * failed-job list. A lane that dies before printing any test result still
  * reports which job and which step failed — the only identity left for the
- * per-commit issue to carry.
+ * per-commit issue to carry. One field per step, because step names contain
+ * commas — `Extract metadata (tags, labels) for Docker` — that a comma-joined
+ * wire shreds.
  */
 export function parseFailedJobs(tsv) {
   const jobs = [];
   for (const rawLine of String(tsv ?? '').split('\n')) {
     const line = rawLine.trim();
     if (!line) continue;
-    const [name, steps] = line.split('\t');
-    jobs.push({
-      name,
-      steps: (steps ?? '')
-        .split(',')
-        .map((step) => step.trim())
-        .filter(Boolean),
-    });
+    const [name, ...steps] = line.split('\t');
+    jobs.push({ name, steps });
   }
   return jobs;
 }
