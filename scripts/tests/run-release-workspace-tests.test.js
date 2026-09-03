@@ -26,7 +26,6 @@ import {
   createRunClassifier,
   createStreamConsumer,
   describeSilentFailure,
-  isTransportTimeoutOnly,
   runAndReport,
 } from '../run-release-workspace-tests.js';
 
@@ -64,25 +63,6 @@ const CLEAN_RUN = `
 
  Test Files  211 passed (211)
       Tests  9480 passed | 1 skipped (9481)
-`;
-
-// Trimmed from release run 33713579913, where this exact shape reddened
-// v0.23.0 twice: 10,614 tests passed and Vitest's own worker RPC gave up.
-const GREEN_WITH_TRANSPORT_TIMEOUT = `
- ✓ src/utils/env.test.ts (12 tests) 3ms
-⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯
-
-Vitest caught 1 unhandled error during the test run.
-This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.
-
-⎯⎯⎯⎯⎯ Unhandled Error ⎯⎯⎯⎯⎯
-Error: [vitest-worker]: Timeout calling "onTaskUpdate"
- ❯ Object.onTimeoutError ../../node_modules/vitest/dist/chunks/rpc.js:53:10
-⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
-
- Test Files  334 passed (334)
-      Tests  10614 passed | 72 skipped (10686)
-     Errors  1 error
 `;
 
 describe('classifyRunOutput', () => {
@@ -463,35 +443,6 @@ describe.skipIf(process.platform === 'win32')('CLI entry', () => {
   });
 });
 
-describe('isTransportTimeoutOnly', () => {
-  it('recognises Vitest giving up on its own worker RPC', () => {
-    const { unhandledBlocks } = classifyRunOutput(GREEN_WITH_TRANSPORT_TIMEOUT);
-    expect(isTransportTimeoutOnly(unhandledBlocks)).toBe(true);
-  });
-
-  it('does not excuse a product error', () => {
-    // #10842's Session.ts rejection is the class that MUST keep failing the
-    // run: every test green, one unhandled rejection, exit 1.
-    const { unhandledBlocks } = classifyRunOutput(GREEN_WITH_UNHANDLED_ERROR);
-    expect(isTransportTimeoutOnly(unhandledBlocks)).toBe(false);
-  });
-
-  it('does not excuse a run that leaked both', () => {
-    const both = `${GREEN_WITH_TRANSPORT_TIMEOUT}\n${GREEN_WITH_UNHANDLED_ERROR}`;
-    const { unhandledBlocks } = classifyRunOutput(both);
-    expect(isTransportTimeoutOnly(unhandledBlocks)).toBe(false);
-  });
-
-  it('is false with nothing to judge', () => {
-    // The "Vitest caught N unhandled error" preamble carries no `Error:` line;
-    // an absence of evidence must not read as a transport timeout.
-    expect(isTransportTimeoutOnly([])).toBe(false);
-    expect(
-      isTransportTimeoutOnly(['Unhandled Errors', 'Vitest caught 1']),
-    ).toBe(false);
-  });
-});
-
 describe('runAndReport', () => {
   // scripts/tests/test-setup.ts mocks appendFileSync repo-wide so script tests
   // cannot append to a real GITHUB_STEP_SUMMARY, so the job summary is asserted
@@ -536,32 +487,6 @@ describe('runAndReport', () => {
       summaryPath: summaryTarget,
     });
   }
-
-  it('passes a run whose only unhandled error is the transport timing out', async () => {
-    // Release run 33713579913 died twice on this and shipped nothing, while
-    // `--retry` could not help: retries re-run failing TESTS, and an unhandled
-    // error fails the run outright.
-    const exitCode = await fakeRun(
-      GREEN_WITH_TRANSPORT_TIMEOUT,
-      1,
-      summaryPath,
-    );
-
-    expect(exitCode).toBe(0);
-    expect(stdoutText).toContain(
-      '::warning title=Workspace tests exited 1 on a Vitest transport timeout::',
-    );
-    // The evidence still reaches the log; this reports, it does not hide.
-    expect(stdoutText).toContain('Timeout calling');
-    expect(stdoutText).toContain('Tests  10614 passed');
-    expect(vi.mocked(appendFileSync)).toHaveBeenCalled();
-  });
-
-  it("still fails a run whose unhandled error is the product's", async () => {
-    const exitCode = await fakeRun(GREEN_WITH_UNHANDLED_ERROR, 1, summaryPath);
-    expect(exitCode).toBe(1);
-    expect(stdoutText).toContain('::error title=');
-  });
 
   it('annotates a run that exited non-zero with everything green', async () => {
     const exitCode = await fakeRun(GREEN_WITH_UNHANDLED_ERROR, 1, summaryPath);
