@@ -283,6 +283,7 @@ export function getConnectionAfterSessionClear(
     delete next.sessionId;
     delete next.clientId;
     delete next.displayName;
+    delete next.titleSource;
     delete next.tokenUsage;
     delete next.tokenCount;
     delete next.goalState;
@@ -415,6 +416,28 @@ export function createDaemonSessionActions({
     );
   }
 
+  function discardsSlashCommandAttachments(text: string): boolean {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith('/')) return false;
+    if (trimmed.startsWith('//') || trimmed.startsWith('/*')) return false;
+    const name = trimmed.slice(1).trim().split(/\s+/, 1)[0];
+    if (!name) return false;
+    if (name.includes('/') || name.includes('\\')) return false;
+    // Keep this lexical gate and two-pass lookup aligned with the daemon's
+    // isSlashCommand/parseSlashCommand behavior. A built-in entry marks a
+    // fully loaded command snapshot; until then unresolved commands fail closed.
+    const connection = getConnection();
+    const command =
+      connection.commands?.find((candidate) => candidate.name === name) ??
+      connection.commands?.find((candidate) =>
+        candidate.altNames?.includes(name),
+      );
+    if (command) return command.source === 'builtin-command';
+    return !connection.commands?.some(
+      (candidate) => candidate.source === 'builtin-command',
+    );
+  }
+
   async function promptContentWithUploadedAttachments(
     session: DaemonSessionClient,
     text: string,
@@ -431,7 +454,7 @@ export function createDaemonSessionActions({
     references: DaemonSessionAttachmentReference[];
     fileReferences: DaemonSessionAttachmentReference[];
   }> {
-    if (text.trimStart().startsWith('/')) {
+    if (discardsSlashCommandAttachments(text)) {
       return {
         content: toDaemonPromptContent(text),
         references: [],
@@ -776,6 +799,7 @@ export function createDaemonSessionActions({
           standaloneSession: undefined,
           clientId: undefined,
           displayName: undefined,
+          titleSource: undefined,
           goalState: undefined,
           error: undefined,
           errorStatus: undefined,
@@ -855,9 +879,9 @@ export function createDaemonSessionActions({
             img.mimeType || img.mediaType || img.media_type || 'image/*',
         }));
         const normalizedFiles = normalizePromptFiles(options?.files);
-        const slashCommand = text.trimStart().startsWith('/');
-        const displayedImages = slashCommand ? [] : normalizedImages;
-        const displayedFiles = slashCommand ? [] : normalizedFiles;
+        const discardAttachments = discardsSlashCommandAttachments(text);
+        const displayedImages = discardAttachments ? [] : normalizedImages;
+        const displayedFiles = discardAttachments ? [] : normalizedFiles;
         const inputAnnotations =
           options?.inputAnnotations && options.inputAnnotations.length > 0
             ? options.inputAnnotations
@@ -1017,9 +1041,9 @@ export function createDaemonSessionActions({
         mimeType: img.mimeType || img.mediaType || img.media_type || 'image/*',
       }));
       const normalizedFiles = normalizePromptFiles(options?.files);
-      const slashCommand = text.trimStart().startsWith('/');
-      const displayedImages = slashCommand ? [] : normalizedImages;
-      const displayedFiles = slashCommand ? [] : normalizedFiles;
+      const discardAttachments = discardsSlashCommandAttachments(text);
+      const displayedImages = discardAttachments ? [] : normalizedImages;
+      const displayedFiles = discardAttachments ? [] : normalizedFiles;
       const inputAnnotations =
         options?.inputAnnotations && options.inputAnnotations.length > 0
           ? options.inputAnnotations
@@ -1753,11 +1777,16 @@ export function createDaemonSessionActions({
         await pendingPersistedReasoningAction.catch(() => undefined);
       }
       if (sessionRef.current === session) {
+        const refreshStandaloneOptions =
+          getConnection().sessionContext?.kind === 'standalone';
         clearActiveSessionState();
         sessionRef.current = undefined;
         setConnection((current) =>
           getConnectionAfterSessionClear(current, session?.sessionId),
         );
+        if (refreshStandaloneOptions) {
+          setRestoreSessionNonce((nonce) => nonce + 1);
+        }
       }
       if (session) {
         try {
