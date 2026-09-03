@@ -4754,6 +4754,32 @@ export function registerSessionRoutes(
   );
 
   app.get(
+    '/session/:id/saved-workflows/:name',
+    withOwnerReadSession(
+      'GET /session/:id/saved-workflows/:name',
+      async (req, res, sessionId, runtime) => {
+        const name = req.params['name'];
+        if (!name) {
+          res.status(400).json({
+            error: '`name` route parameter is required',
+          });
+          return;
+        }
+        // An untrusted workspace fails closed with the same envelope the
+        // child returns for an unknown name, mirroring the supported-commands
+        // redaction rather than leaking a distinguishable error.
+        res
+          .status(200)
+          .json(
+            runtime.trusted
+              ? await runtime.bridge.getSessionSavedWorkflow(sessionId, name)
+              : { v: 1, sessionId, name, workflow: null },
+          );
+      },
+    ),
+  );
+
+  app.get(
     '/session/:id/lsp',
     withOwnerReadSession(
       'GET /session/:id/lsp',
