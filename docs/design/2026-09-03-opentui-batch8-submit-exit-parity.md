@@ -75,10 +75,12 @@ Fix: the boundary drain stops being a synchronous `string[] → responseParts` p
 `live-session.ts` gains `resolveSteeredPromptParts(config, texts, signal, emit)`, the
 port of ink's `resolveSteeredMessages`, called from the boundary loop in
 `livePromptEvents` so the read cards can be yielded as events (a callback cannot yield).
-Per message: `@` expansion through the same `expandAtMentions` the fresh hop uses, under
-a 10 s timeout; on timeout or abort, that message and the ones behind it go back through
-a new `restoreSteering` seam (ink's `midTurnRestoreRef`) so nothing is lost; segments are
-joined with a blank-line separator as ink does.
+Per message: `@` expansion through the same `expandAtMentions` the fresh hop uses, under a
+10 s timeout. Only an abort requeues — that message and the ones behind it go back through a
+new `restoreSteering` seam (ink's `midTurnRestoreRef`) so nothing the turn never sent is
+lost. A timed-out or declined read is dropped with a warning instead, as ink drops it: the
+failed read is that message's problem, not the turn's, and requeueing it would retry forever.
+Segments are joined with a blank-line separator as ink does.
 
 Not ported, on purpose: ink's `GOAL_COMMAND_RE` slash interception, its two-phase
 `accept()` recording, and the `checkImageFormatsSupport` warning the steered hop adds
@@ -86,7 +88,7 @@ after the bridge. OpenTUI has no goal-permit seam at that boundary, and its fres
 already records through `handleAtCommand`; cloning the transaction would import a
 mechanism the renderer does not have. The format warning is a different case: OpenTUI's
 fresh hop never had it either, so adding it to the steering hop alone would make the two
-hops disagree about the same parts. It stays a renderer-wide gap, recorded below.
+hops disagree about the same parts. It stays a renderer-wide gap, registered as U-27.
 
 ### U-25 — no prompt-side vision bridge
 
