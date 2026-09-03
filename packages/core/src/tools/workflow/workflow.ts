@@ -232,6 +232,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     private readonly config: Config,
     private readonly toolOptions: WorkflowToolOptions,
     params: WorkflowParams,
+    private readonly workflowName?: string,
   ) {
     super(params);
   }
@@ -370,6 +371,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         config: this.config,
         signal,
         toolUseId: this.callId,
+        ...(this.workflowName ? { workflowName: this.workflowName } : {}),
         script: this.params.script,
         scriptPath: this.params.scriptPath,
         args: this.params.args,
@@ -513,14 +515,14 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       // successful run. Mitigation: WorkflowTool's failure message
       // already names the error; the banner is meta-documentation
       // about a separate env knob, not run-specific guidance.
-      const display =
-        phases || logs || meta
-          ? `Workflow failed: ${message}\n\n${safeStringifyDisplayPayload({
-              ...(meta ? { meta } : {}),
-              phases: phases ?? [],
-              logs: logs ?? [],
-            })}`
-          : `Workflow failed: ${message}`;
+      const display = `Workflow failed: ${message}\n\n${safeStringifyDisplayPayload(
+        {
+          runId: handle.runId,
+          ...(meta ? { meta } : {}),
+          phases: phases ?? [],
+          logs: logs ?? [],
+        },
+      )}`;
       return {
         llmContent: [{ text: `Workflow failed: ${message}` }],
         returnDisplay: display,
@@ -985,6 +987,7 @@ export class WorkflowTool extends BaseDeclarativeTool<
 
   buildSessionOwnedBackground(
     params: Omit<WorkflowParams, 'run_in_background'>,
+    workflowName?: string,
   ): ToolInvocation<WorkflowParams, WorkflowToolResult> {
     const validationError = this.validateToolParams(params);
     if (validationError) {
@@ -995,7 +998,12 @@ export class WorkflowTool extends BaseDeclarativeTool<
         'WorkflowTool: session-owned background runs require an active workflow completion channel.',
       );
     }
-    return this.createInvocation({ ...params, run_in_background: true });
+    return new WorkflowToolInvocation(
+      this.config,
+      this.toolOptions,
+      { ...params, run_in_background: true },
+      workflowName,
+    );
   }
 
   protected override validateToolParamValues(

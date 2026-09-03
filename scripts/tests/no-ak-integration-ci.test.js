@@ -148,6 +148,12 @@ describe('no-AK integration CI wiring', () => {
         `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
       );
     }
+    // The latency-budget skip shares this fleet predicate; if the line is
+    // dropped, renamed, or its expression altered, every millisecond budget
+    // silently dies on every lane while the helper tests stay green.
+    expect(testStep).toContain(
+      `QWEN_SKIP_LATENCY_BUDGETS: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+    );
   });
 
   it('defines a focused no-AK integration script', () => {
