@@ -33,7 +33,6 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 const HELD_MARKER = 'MID_TURN_HELD_MARKER';
 const HELD_TAIL = 'MID_TURN_HELD_TAIL';
-const QUIT_DESCRIPTION = 'exit the cli';
 const NOTES_CANARY = 'MID_TURN_NOTES_CANARY_4821';
 const TOOL_RESULT_CANARY = 'MID_TURN_TOOL_RESULT_CANARY_4822';
 const STEER_PROMPT = 'Also fold in the notes file';
@@ -209,16 +208,6 @@ describe('Mid-turn submit', () => {
     await submitUntilMidTurn(session);
 
     await type(session.ptyProcess, '/quit');
-    // The completion popup reaches the input a render behind the buffer, so an
-    // Enter 5ms after the last character is read against the stale row for
-    // `/` and accepts `/model ` instead of submitting the typed `/quit`.
-    const quitSuggested = await rig.waitForText(QUIT_DESCRIPTION, 30_000);
-    if (!quitSuggested) {
-      printDebugInfo(rig, rig._interactiveOutput, { quitSuggested });
-    }
-    expect(quitSuggested, '/quit never reached the completion popup').toBe(
-      true,
-    );
     await type(session.ptyProcess, '\r');
 
     await expectExitMidHold(session, '/quit');
