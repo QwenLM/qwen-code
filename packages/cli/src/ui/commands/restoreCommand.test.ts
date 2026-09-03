@@ -150,11 +150,15 @@ describe('restoreCommand', () => {
       });
     });
 
-    it('drops prompt identities from the restored history items', async () => {
+    it('keeps prompt ids as file keys but flags them file-key-only', async () => {
       // The checkpoint is JSON, so `clientHistory` comes back without the
-      // Symbol prompt marks. Restoring UI items that still claim identities
-      // would let a later prompt re-mint one of them and resolve a restored
-      // turn onto the wrong model entry, so both sides stay unidentified.
+      // Symbol prompt marks. The restored UI items keep their `promptId`s —
+      // file restore and the rewind selector's diff previews key on them,
+      // and stripping them made every code/both rewind after /restore fail
+      // with the false "created before file checkpointing" error (R24-1
+      // fix-induced) — but the ids are flagged so the rewind mapping never
+      // resolves them: a later prompt could re-mint one and resolve a
+      // restored turn onto the wrong model entry (R24-1).
       const toolCallData = {
         history: [
           { type: 'user', text: 'first', promptId: 'session########0' },
@@ -173,9 +177,19 @@ describe('restoreCommand', () => {
       await command?.action?.(mockContext, 'identified');
 
       expect(mockContext.ui.loadHistory).toHaveBeenCalledWith([
-        { type: 'user', text: 'first', promptId: undefined },
+        {
+          type: 'user',
+          text: 'first',
+          promptId: 'session########0',
+          promptIdFileKeyOnly: true,
+        },
         { type: 'gemini', text: 'answer' },
-        { type: 'user', text: 'second', promptId: undefined },
+        {
+          type: 'user',
+          text: 'second',
+          promptId: 'session########1',
+          promptIdFileKeyOnly: true,
+        },
       ]);
     });
 

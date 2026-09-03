@@ -155,6 +155,18 @@ export type HistoryItemUser = HistoryItemBase & {
   text: string;
   promptId?: string;
   /**
+   * Marks a restored-from-checkpoint item whose `promptId` is a
+   * file-history key only. `/restore` loads a JSON checkpoint, so the
+   * model-facing history it restores cannot carry the Symbol prompt marks;
+   * the item keeps its `promptId` because file restore and turn-diff
+   * previews key on it, but rewind mapping must never resolve the id —
+   * a later prompt can re-mint it, and a unique mark match would then
+   * point at the wrong model entry (R24-1). `computeApiTruncationIndex`
+   * skips the identity shortcut for these items and maps them
+   * positionally.
+   */
+  promptIdFileKeyOnly?: boolean;
+  /**
    * Whether this UI history item represents a user turn that reached the model.
    *
    * NOTE: This is set explicitly by slash command processing because visible

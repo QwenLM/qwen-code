@@ -953,6 +953,44 @@ describe('positional fallback when identity does not resolve', () => {
       ]),
     ).toBe(2);
   });
+
+  it('maps file-key-only restored turns positionally despite a twin match', () => {
+    // /restore keeps `promptId` on restored items (the file-history rewind
+    // key) but flags it file-key-only: the checkpoint's `clientHistory`
+    // cannot carry the Symbol marks, so the id must never resolve. Here a
+    // later prompt re-mints `session########1` and its marked entry is the
+    // only match for the restored turn's id; resolving it would keep model
+    // entries the UI deleted (R24-1).
+    const freshContent = userContent('fresh prompt');
+    markApiHistoryPrompt(freshContent, 'session########1');
+    const restored = userItemWithPromptId(
+      3,
+      'restored turn',
+      'session########1',
+    ) as HistoryItem & { promptId: string; promptIdFileKeyOnly?: boolean };
+    restored.promptIdFileKeyOnly = true;
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'restored first', 'session########0'),
+      llmItem(2),
+      restored,
+      llmItem(4),
+      userItemWithPromptId(5, 'fresh prompt', 'session########3'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      userContent('restored first'), // unmarked: restored from JSON
+      modelContent('response 1'),
+      userContent('restored turn'), // unmarked: restored from JSON
+      modelContent('response 2'),
+      freshContent, // marked with the SAME id as the restored turn
+      modelContent('response 3'),
+    ];
+
+    // Positional outcome: one real user turn precedes the restored turn.
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+    // The fresh turn still resolves through identity.
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+  });
 });
 
 describe('isRealUserTurn', () => {

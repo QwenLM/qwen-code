@@ -199,11 +199,16 @@ export function computeApiTruncationIndex(
   // Identity first for non-first turns: when the target turn and its
   // model-facing entry share a prompt identity, the boundary is an exact
   // lookup instead of a content-shape guess. Anything else — no identity on
-  // the target, an identity that reaches no entry, or one that reaches
-  // several — falls through to the positional walk below, which is the
-  // behavior that shipped before identities existed.
+  // the target, an identity that reaches no entry, one that reaches
+  // several, or one flagged file-key-only by `/restore` — falls through to
+  // the positional walk below, which is the behavior that shipped before
+  // identities existed.
   const target = uiHistory[targetIndex]!;
-  if (isRealUserTurn(target) && target.promptId) {
+  if (
+    isRealUserTurn(target) &&
+    target.promptId &&
+    !target.promptIdFileKeyOnly
+  ) {
     const identifiedIndex = findApiHistoryPromptIndex(
       apiHistory,
       target.promptId,
