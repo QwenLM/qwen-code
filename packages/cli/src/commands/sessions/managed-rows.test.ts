@@ -4,16 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
   AgentViewSessionSnapshot,
   AgentViewSessionState,
   AgentViewSessionStateFile,
+  AgentViewWorkerFile,
 } from '../../agent-view/protocol.js';
 import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
-import { managedSessionRows, mergeSessionRows } from './managed-rows.js';
+
+const isPidAlive = vi.fn((pid: number) => pid > 0);
+
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
+}));
+
+const { managedSessionRows, mergeSessionRows } = await import(
+  './managed-rows.js'
+);
 
 const NOW = Date.parse('2026-09-04T12:00:00Z');
+
+beforeEach(() => {
+  isPidAlive.mockReset();
+  isPidAlive.mockImplementation((pid: number) => pid > 0);
+});
 
 function state(
   over: Partial<AgentViewSessionStateFile> = {},
@@ -40,6 +55,18 @@ function snapshot(
 ): AgentViewSessionSnapshot {
   const base = over.state ?? state();
   return { sessionId: base.sessionId, state: base, ...over };
+}
+
+function workerFile(
+  over: Partial<AgentViewWorkerFile> = {},
+): AgentViewWorkerFile {
+  return {
+    schemaVersion: 1,
+    protocolVersion: 1,
+    platform: 'linux',
+    recentOutputBytes: 0,
+    ...over,
+  };
 }
 
 function record(
@@ -93,37 +120,37 @@ describe('managedSessionRows', () => {
 
   it('reports the worker pid, falling back to the host that owns the PTY', () => {
     const withWorker = managedSessionRows(
-      [
-        snapshot({
-          worker: {
-            schemaVersion: 1,
-            hostPid: 100,
-            workerPid: 200,
-            protocolVersion: 1,
-            platform: 'linux',
-            recentOutputBytes: 0,
-          },
-        }),
-      ],
+      [snapshot({ worker: workerFile({ hostPid: 100, workerPid: 200 }) })],
       NOW,
     );
     expect(withWorker[0].pid).toBe(200);
 
     const hostOnly = managedSessionRows(
-      [
-        snapshot({
-          worker: {
-            schemaVersion: 1,
-            hostPid: 100,
-            protocolVersion: 1,
-            platform: 'linux',
-            recentOutputBytes: 0,
-          },
-        }),
-      ],
+      [snapshot({ worker: workerFile({ hostPid: 100 }) })],
       NOW,
     );
     expect(hostOnly[0].pid).toBe(100);
+  });
+
+  it('drops a recorded pid that no longer resolves to a live process', () => {
+    // The store outlives the supervisor; after a crash or a reboot a
+    // recorded pid is dead or recycled to an unrelated process, and
+    // printing it would point a kill at the wrong target.
+    isPidAlive.mockImplementation(() => false);
+    const [row] = managedSessionRows(
+      [snapshot({ worker: workerFile({ hostPid: 100, workerPid: 200 }) })],
+      NOW,
+    );
+    expect(row.pid).toBeUndefined();
+  });
+
+  it('falls back to the PTY host only while the host still lives', () => {
+    isPidAlive.mockImplementation((pid: number) => pid === 100);
+    const [row] = managedSessionRows(
+      [snapshot({ worker: workerFile({ hostPid: 100, workerPid: 200 }) })],
+      NOW,
+    );
+    expect(row.pid).toBe(100);
   });
 
   it('leaves the pid unset when no process is recorded, rather than reporting 0', () => {

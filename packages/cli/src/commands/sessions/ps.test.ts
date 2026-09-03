@@ -10,9 +10,11 @@ import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
 
 const listLiveSessions = vi.fn();
 const listAgentViewSessionSnapshots = vi.fn();
+const isPidAlive = vi.fn();
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   listLiveSessions: (...args: unknown[]) => listLiveSessions(...args),
+  isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
 }));
 
 vi.mock('../../agent-view/supervisor-store.js', () => ({
@@ -99,6 +101,8 @@ beforeEach(() => {
   listLiveSessions.mockReset();
   listAgentViewSessionSnapshots.mockReset();
   listAgentViewSessionSnapshots.mockResolvedValue([]);
+  isPidAlive.mockReset();
+  isPidAlive.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -322,6 +326,21 @@ describe('qwen sessions ps', () => {
     expect(stdout[1].slice(NAME_COL, NAME_COL + PID_COL)).toBe(
       '-'.padEnd(PID_COL),
     );
+  });
+
+  it('does not render a managed pid that no process owns any more', async () => {
+    // The store is durable; a supervisor crash or a reboot can leave a
+    // recorded pid that is dead or recycled. The session stays listed,
+    // but the pid must not be printed for a process it no longer names.
+    listLiveSessions.mockResolvedValue([]);
+    listAgentViewSessionSnapshots.mockResolvedValue([managedSnapshot()]);
+    isPidAlive.mockReturnValue(false);
+    await run({ json: false });
+
+    expect(stdout[1].slice(NAME_COL, NAME_COL + PID_COL)).toBe(
+      '-'.padEnd(PID_COL),
+    );
+    expect(stdout[1]).not.toContain('777');
   });
 
   it('still lists interactive sessions when the supervisor store cannot be read', async () => {

@@ -15,11 +15,19 @@
  *
  * This module turns both sources into one row shape. It is deliberately
  * pure: the readers stay in the command, so the merge and the labelling
- * are testable without a filesystem or a supervisor.
+ * are testable without a filesystem or a supervisor. The one probe it
+ * makes — `isPidAlive`, which decides whether a recorded pid may still
+ * be printed — is an input the tests control like any other.
  */
 
-import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
-import type { AgentViewSessionSnapshot } from '../../agent-view/protocol.js';
+import {
+  isPidAlive,
+  type SessionRegistryRecord,
+} from '@qwen-code/qwen-code-core';
+import type {
+  AgentViewSessionSnapshot,
+  AgentViewWorkerFile,
+} from '../../agent-view/protocol.js';
 import {
   AGENT_VIEW_UNTITLED_TITLE,
   deriveAgentViewPresentation,
@@ -124,9 +132,7 @@ export function managedSessionRows(
           !presentation.title
             ? snapshot.state.sessionId
             : presentation.title,
-        // The worker is the process doing the work; the host only owns
-        // the PTY. Report whichever exists, worker first.
-        pid: snapshot.worker?.workerPid ?? snapshot.worker?.hostPid,
+        pid: liveWorkerPid(snapshot.worker),
         startedAt: Number.isNaN(createdAt) ? undefined : createdAt,
         cwd: snapshot.state.activeCwd,
         state: TASK_STATE[presentation.taskState],
@@ -134,6 +140,26 @@ export function managedSessionRows(
         managed: true,
       };
     });
+}
+
+/**
+ * The recorded pid a row may point at, or none.
+ *
+ * The worker is the process doing the work; the host only owns the PTY —
+ * report whichever lives, worker first, matching the supervisor's own
+ * two-pid liveness idiom. The store is durable and nothing reaps it when
+ * no supervisor runs, so a crash or a reboot leaves recorded pids behind
+ * that are dead, or recycled to an unrelated process; printing one would
+ * point a `kill` at the wrong target. When neither lives, the row prints
+ * `-`, exactly like a session that never had a worker.
+ */
+function liveWorkerPid(
+  worker: AgentViewWorkerFile | undefined,
+): number | undefined {
+  for (const pid of [worker?.workerPid, worker?.hostPid]) {
+    if (pid !== undefined && isPidAlive(pid)) return pid;
+  }
+  return undefined;
 }
 
 /** Row for one live registry record. */
