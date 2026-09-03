@@ -49,6 +49,7 @@ import {
   getStopHookContinuationReason,
   GOAL_HOOK_ID_OUTPUT_KEY,
 } from '../goals/goalHook.js';
+import { applyPendingGoalProposal } from '../goals/goal-tools.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import { DEFAULT_TOKEN_LIMIT, tokenLimit } from './tokenLimits.js';
@@ -71,7 +72,9 @@ import {
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
   resolveInteractionMode,
+  resolveMainSessionOutputStyle,
 } from './prompts.js';
+import { getOutputStyleTurnReminder } from './output-styles.js';
 import {
   CompressionStatus,
   LlmEventType,
@@ -126,9 +129,11 @@ import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
+  buildMcpServerInstructionsReminderFromEntries,
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
 import {
@@ -206,6 +211,8 @@ export interface SendMessageOptions {
   type: SendMessageType;
   /** User-submitted text captured before prompt expansion. */
   submittedPrompt?: string;
+  /** A UserQuery running beside an active turn, without replacing its state. */
+  isConcurrentSideQuery?: boolean;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -371,7 +378,11 @@ export function getMainSessionBaseSystemPrompt(
         config.getModel(),
         undefined,
         resolveInteractionMode(config),
-        config.getOutputStyle(),
+        // The prompt and the per-turn reminder must agree on which style is
+        // in force, so both read it from the same resolver rather than from
+        // `getOutputStyle()` directly — a prompt override carries no style
+        // section, and a session must not be reminded of one it lacks.
+        resolveMainSessionOutputStyle(config),
       );
 }
 
@@ -424,6 +435,8 @@ export class LlmClient {
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
+  private announcedMcpServerInstructions = new Map<string, string>();
+  private pendingMcpServerInstructions = new Map<string, string>();
   private warnedAboutUnreachableEagerTools = false;
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
@@ -831,6 +844,58 @@ export class LlmClient {
     return chat.getHistoryLength?.() ?? chat.getHistory().length;
   }
 
+  /**
+   * Applies a `propose_goal` approval at the true end of the turn that made it.
+   *
+   * Only when the model has stopped calling tools, and only in the turn
+   * that parked it (matched by prompt id): a proposal made mid-turn stays
+   * parked through the tool-result continuations, because creating the Goal
+   * earlier would leave those continuations without a permit. Tail
+   * continuations keep the proposal parked until their final boundary. An
+   * aborted turn drops the approval instead of starting a loop the user just
+   * cancelled; an abort during dispatch pauses the new Goal.
+   */
+  private async settlePendingGoalProposal(
+    turnEnded: boolean,
+    signal: AbortSignal,
+    loadGoalRuntime: (required: boolean) => Promise<GoalRuntime | undefined>,
+    turnKey: string,
+  ): Promise<void> {
+    const take = this.config.takePendingGoalProposal;
+    if (typeof take !== 'function') return;
+    if (!turnEnded && !signal.aborted) return;
+    const proposal = take.call(this.config, turnKey);
+    if (!proposal) return;
+    if (signal.aborted) return;
+    const runtime = await loadGoalRuntime(false);
+    if (!runtime) {
+      debugLogger.debug(
+        'Dropping an approved Goal proposal: the Goal runtime is unavailable',
+      );
+      return;
+    }
+    if (signal.aborted) return;
+    const result = await applyPendingGoalProposal(runtime, proposal);
+    if (signal.aborted && result.applied) {
+      try {
+        await runtime.dispatch({
+          action: 'pause',
+          expectedGoalId: result.goal.goalId,
+          expectedRevision: result.goal.revision,
+        });
+      } catch (error) {
+        debugLogger.warn(
+          'Failed to pause a Goal applied during cancellation',
+          error,
+        );
+      }
+      return;
+    }
+    if (!result.applied) {
+      debugLogger.debug(`Dropping an approved Goal proposal: ${result.reason}`);
+    }
+  }
+
   private getLastModelMessageText(): string | undefined {
     const chat = this.getChat();
     if (chat.getLastModelMessageText) {
@@ -1048,6 +1113,9 @@ export class LlmClient {
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
     this.queueAddedMcpToolsReminder(deferredTools ?? []);
+    this.queueMcpServerInstructionsReminder(
+      toolRegistry.getMcpServerInstructions(),
+    );
     recordStartupEvent('gemini_tools_updated', {
       toolCount: toolDeclarations.length,
       deferredCount: deferredTools?.length ?? 0,
@@ -1746,6 +1814,52 @@ export class LlmClient {
     this.pendingRemovedMcpToolNames.clear();
   }
 
+  private rememberAnnouncedMcpServerInstructions(
+    instructions: ReadonlyMap<string, string>,
+  ): void {
+    this.announcedMcpServerInstructions = new Map(instructions);
+    this.pendingMcpServerInstructions.clear();
+  }
+
+  private queueMcpServerInstructionsReminder(
+    instructions: ReadonlyMap<string, string>,
+  ): void {
+    this.pendingMcpServerInstructions.clear();
+    for (const serverName of this.announcedMcpServerInstructions.keys()) {
+      if (!instructions.has(serverName)) {
+        this.announcedMcpServerInstructions.delete(serverName);
+      }
+    }
+    for (const [serverName, text] of instructions) {
+      if (
+        text.trim().length > 0 &&
+        this.announcedMcpServerInstructions.get(serverName) !== text
+      ) {
+        this.pendingMcpServerInstructions.set(serverName, text);
+      }
+    }
+  }
+
+  private drainPendingMcpServerInstructionsReminder(): void {
+    if (this.pendingMcpServerInstructions.size === 0) {
+      return;
+    }
+    const reminder = buildMcpServerInstructionsReminderFromEntries(
+      this.pendingMcpServerInstructions,
+    );
+    if (!reminder) {
+      return;
+    }
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [{ text: reminder }],
+    });
+    for (const [serverName, text] of this.pendingMcpServerInstructions) {
+      this.announcedMcpServerInstructions.set(serverName, text);
+    }
+    this.pendingMcpServerInstructions.clear();
+  }
+
   private queueAddedMcpToolsReminder(
     deferredTools: readonly DeferredToolSummary[],
   ): void {
@@ -2105,6 +2219,9 @@ export class LlmClient {
       const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
         const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
         this.rememberAnnouncedDeferredTools(resolved);
+        this.rememberAnnouncedMcpServerInstructions(
+          toolRegistry.getMcpServerInstructions(),
+        );
         return resolved;
       });
       deferredReminderCount = deferredTools?.length ?? 0;
@@ -2959,6 +3076,17 @@ export class LlmClient {
       strippedRetryEntries = [];
     };
 
+    if (
+      (messageType === SendMessageType.UserQuery &&
+        !options?.isConcurrentSideQuery) ||
+      messageType === SendMessageType.Retry
+    ) {
+      // A propose_goal approval is applied when its own turn ends. One still
+      // parked when a new user/retry chain starts belongs to a turn that ended
+      // without settling, so clear it before the replacement chain can exit.
+      this.config.takePendingGoalProposal?.();
+    }
+
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
       // The matching dangling-`functionCall` repair runs inside
@@ -3077,6 +3205,19 @@ export class LlmClient {
           } else {
             endCurrentInteraction('cancelled');
           }
+          await this.settlePendingGoalProposal(
+            true,
+            signal,
+            async (required) => {
+              const runtime = await loadGoalRuntime(required);
+              if (runtime) bindGoalStateEvents(runtime);
+              return runtime;
+            },
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           yield {
             type: LlmEventType.UserPromptSubmitBlocked,
             value: {
@@ -3120,6 +3261,7 @@ export class LlmClient {
         signal.aborted ? undefined : userPromptSubmitFailureMessage,
         signal.aborted ? undefined : getErrorType(error),
       );
+      this.config.takePendingGoalProposal?.(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
@@ -3198,6 +3340,7 @@ export class LlmClient {
         signal.aborted ? undefined : 'Goal turn admission failed',
         signal.aborted ? undefined : getErrorType(error),
       );
+      this.config.takePendingGoalProposal?.(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
@@ -3564,6 +3707,14 @@ export class LlmClient {
           messageType === SendMessageType.Cron)
       ) {
         try {
+          this.drainPendingMcpServerInstructionsReminder();
+        } catch (error) {
+          debugLogger.warn(
+            'drainPendingMcpServerInstructionsReminder failed',
+            error,
+          );
+        }
+        try {
           this.drainPendingAddedMcpToolsReminder();
         } catch (error) {
           debugLogger.warn('drainPendingAddedMcpToolsReminder failed', error);
@@ -3646,6 +3797,16 @@ export class LlmClient {
           }
         }
 
+        // Remind the model of the style its system prompt carries: the
+        // section sits in the cached prompt and fades over a long
+        // conversation without a nudge next to the newest user text.
+        const outputStyle = resolveMainSessionOutputStyle(this.config);
+        if (outputStyle) {
+          systemReminders.push(
+            wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),
+          );
+        }
+
         const userQueryMemory =
           messageType === SendMessageType.UserQuery
             ? await this.consumeManagedAutoMemoryRecall('initial')
@@ -3696,6 +3857,43 @@ export class LlmClient {
       }
 
       if (messageType === SendMessageType.ToolResult) {
+        // Record executed tool results for stateful read tools (task_list)
+        // so the loop guards can distinguish productive re-polling — the
+        // shared task board changed between identical calls — from a stuck
+        // loop (issue #9450). A detection here (the result-aware global
+        // duplicate count) halts the turn exactly like the event-loop
+        // guards below.
+        for (const part of requestToSend) {
+          if (
+            typeof part !== 'object' ||
+            part === null ||
+            !('functionResponse' in part)
+          ) {
+            continue;
+          }
+          const functionResponseId = (part as Part).functionResponse?.id;
+          if (!functionResponseId) continue;
+          if (
+            this.loopDetector.recordToolResultByCallId(functionResponseId, [
+              part as Part,
+            ])
+          ) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
+            }
+            const loopType = this.loopDetector.getLastLoopType();
+            yield {
+              type: LlmEventType.LoopDetected,
+              ...(loopType && { value: { loopType } }),
+            };
+            await arenaAgentClient?.reportError('Loop detected');
+            this.lastApiCompletionTimestamp = Date.now();
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
+            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
+            return turn;
+          }
+        }
         const toolResultMemory =
           await this.consumeManagedAutoMemoryRecall('tool_result');
         if (toolResultMemory?.prompt) {
@@ -3794,6 +3992,15 @@ export class LlmClient {
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       let steerInputSettled = false;
+      // callIds already fed to the loop guards this attempt. Mirrors the
+      // execution-side dedup (coreToolScheduler.dedupeRequestsByCallId / the
+      // interactive duplicate-call-id suppression), which collapses
+      // provider-duplicate emissions into one executed call and one result:
+      // feeding the guards once per call id keeps request counts and result
+      // evidence on the same population (main-session twin of the agent-core
+      // fix, issue #9450). Id-less requests are never deduped. Cleared on
+      // retry/fallback alongside the attempt's accumulated state.
+      const loopGuardFedCallIds = new Set<string>();
       try {
         for await (const event of resultStream) {
           if (!steerInputSettled) {
@@ -3813,6 +4020,7 @@ export class LlmClient {
             event.type === LlmEventType.ModelFallback
           ) {
             hasToolCalls = false;
+            loopGuardFedCallIds.clear();
             agentOutput.restartAttempt(
               event.type === LlmEventType.Retry &&
                 event.isContinuation === true,
@@ -3832,11 +4040,28 @@ export class LlmClient {
             didUpdateIdeContextState = true;
           }
 
+          // A provider-duplicate emission of an already-fed call id executes
+          // once (the schedulers collapse it), so feed the loop guards once —
+          // counting both emissions would leave the request counters one ahead
+          // of the executed result evidence and fail-safe-halt a productive
+          // stateful poller (issue #9450). The event itself still flows to
+          // consumers below; only the guard feed is deduped.
+          let duplicateLoopGuardRequest = false;
+          if (event.type === LlmEventType.ToolCallRequest) {
+            const fedCallId = event.value.callId;
+            if (fedCallId) {
+              duplicateLoopGuardRequest = loopGuardFedCallIds.has(fedCallId);
+              loopGuardFedCallIds.add(fedCallId);
+            }
+          }
+
           // Always-on safety checks (consecutive-identical tool-call guard,
           // shell inspection stagnation, and per-turn tool-call cap). These fire
           // before the skipLoopDetection gate so they cannot be bypassed by
           // configuration.
-          const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
+          const alwaysOnLoop =
+            !duplicateLoopGuardRequest &&
+            this.loopDetector.checkAlwaysOnSafeties(event);
           if (alwaysOnLoop) {
             // Drop every tool call collected before the guard fired so the run
             // halts here instead of spawning a continuation that re-trips it.
@@ -3874,6 +4099,7 @@ export class LlmClient {
           // relaxes the heuristics (see nonInteractiveCli.ts).
           const skipLoopDetection = this.config.getSkipLoopDetection();
           const heuristicLoop =
+            !duplicateLoopGuardRequest &&
             !skipLoopDetection &&
             this.loopDetector.addAndCheckHeuristicLoops(event);
           if (heuristicLoop) {
@@ -4255,6 +4481,15 @@ export class LlmClient {
               value: warning,
             };
             debugLogger.warn(warning);
+            await this.settlePendingGoalProposal(
+              true,
+              signal,
+              loadGoalRuntime,
+              prompt_id,
+            );
+            for (const goalEvent of takePendingGoalEvents()) {
+              yield goalEvent;
+            }
             endCurrentInteraction('ok');
             return turn;
           }
@@ -4326,6 +4561,15 @@ export class LlmClient {
               ? response.nonGoalBlockingStopReason || 'No reason provided'
               : continueReason;
           if (!continuationReasonAfterSteer && !pendingSteer) {
+            await this.settlePendingGoalProposal(
+              true,
+              signal,
+              loadGoalRuntime,
+              prompt_id,
+            );
+            for (const goalEvent of takePendingGoalEvents()) {
+              yield goalEvent;
+            }
             endCurrentInteraction('ok');
             normalCompletion = true;
             return turn;
@@ -4373,6 +4617,15 @@ export class LlmClient {
           hasToolCalls = hookTurn.pendingToolCalls.length > 0;
           if (!hasToolCalls) {
             endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
+          }
+          await this.settlePendingGoalProposal(
+            !hasToolCalls,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
           }
           // Preserve the pending prefetch: the inner Hook turn we just
           // yielded may have produced tool calls, and the caller's next
@@ -4445,6 +4698,15 @@ export class LlmClient {
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
           }
+          await this.settlePendingGoalProposal(
+            true,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           endCurrentInteraction('ok');
           return turn;
         }
@@ -4493,6 +4755,15 @@ export class LlmClient {
           if (!hasToolCalls) {
             endCurrentInteraction(signal.aborted ? 'cancelled' : 'ok');
           }
+          await this.settlePendingGoalProposal(
+            !hasToolCalls,
+            signal,
+            loadGoalRuntime,
+            prompt_id,
+          );
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
           // Preserve the pending prefetch: same reasoning as the
           // `return hookTurn` site above — the recursive Hook turn may
           // have produced tool calls whose ToolResult turn still needs
@@ -4527,6 +4798,12 @@ export class LlmClient {
       if (!hasToolCalls) {
         this.finishManagedAutoMemoryRecall();
       }
+      await this.settlePendingGoalProposal(
+        turn.pendingToolCalls.length === 0,
+        signal,
+        loadGoalRuntime,
+        prompt_id,
+      );
       for (const goalEvent of takePendingGoalEvents()) {
         yield goalEvent;
       }
@@ -4586,6 +4863,7 @@ export class LlmClient {
       // `return turn`. Catches uncaught exceptions and guards against
       // future early-return sites that forget to call cancel.
       if (!normalCompletion) {
+        this.config.takePendingGoalProposal?.(prompt_id);
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );

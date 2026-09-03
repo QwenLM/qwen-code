@@ -42,8 +42,90 @@ describe('package scripts', () => {
         "  '@qwen-code/sdk',\n" +
         "  '@qwen-code/mobile-mcp',\n" +
         "  '@qwen-code/node-repl-mcp',\n" +
+        "  '@qwen-code/qwen-live',\n" +
         '];',
     );
+  });
+
+  it('builds the standalone qwen-live daemon in the root build order', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
+    );
+
+    // The qwen-live e2e harness spawns packages/qwen-live/dist/index.js and
+    // the workspace unit tests run from src, so this pin is what catches the
+    // root build silently dropping the package.
+    const startIndex = buildScript.indexOf('const buildOrder = [');
+    expect(startIndex).toBeGreaterThan(-1);
+    const buildOrder = buildScript.slice(
+      startIndex,
+      buildScript.indexOf('];', startIndex),
+    );
+    expect(buildOrder).toContain("'packages/qwen-live',");
+  });
+
+  it('keeps the Mem0 Extension manifest aligned with release versions', () => {
+    const versionScript = readFileSync(
+      path.join(root, 'scripts/version.js'),
+      'utf8',
+    );
+
+    expect(versionScript).toContain(
+      "'integrations/external-context-mem0/qwen-extension.json'",
+    );
+    expect(versionScript).toContain(
+      'const mem0Manifest = readJson(mem0ManifestPath);',
+    );
+    expect(versionScript).toContain('mem0Manifest.version = newVersion');
+    expect(versionScript).toContain(
+      'writeJson(mem0ManifestPath, mem0Manifest);',
+    );
+    expect(versionScript).toContain(
+      "'npx prettier --experimental-cli --write integrations/external-context-mem0/qwen-extension.json'",
+    );
+  });
+
+  it('lets the CI unit lane retry a contended attempt', () => {
+    // Identical work measures 6.7min or 36min on this fleet depending only on
+    // which host the job lands on, and the same commit run three times failed
+    // three disjoint test sets (#10490). A retry lets that pass; a real break
+    // still fails every attempt. The release lane already runs this way.
+    const packageJson = readPackageJson();
+    // `test:ci` ends in `&&`, so args appended to it would reach only
+    // `test:scripts`. The workspaces half is its own script, ending in `--`,
+    // so a flag appended to it reaches every workspace's vitest.
+    expect(packageJson.scripts['test:ci:workspaces']).toMatch(/--$/);
+    expect(packageJson.scripts['test:ci:workspaces']).toContain(
+      'npm run test:ci --workspaces --if-present',
+    );
+    expect(packageJson.scripts['test:ci']).toBe(
+      'npm run test:ci:workspaces && npm run test:scripts',
+    );
+
+    const step = getWorkflowStep(
+      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
+      'Run tests and generate reports',
+    );
+    expect(step).toContain(
+      'VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || \'2\' }}"',
+    );
+    // 'off' must omit the flag rather than pass --retry=0, which would
+    // outrank a workspace's own config-level retry (sdk-typescript).
+    expect(step).toContain('[ "${VITEST_RETRY}" != \'off\' ]');
+    expect(step).toContain('retry_arg=(--retry="${VITEST_RETRY}")');
+    expect(step).toContain('npm run test:ci:workspaces -- "${retry_arg[@]}"');
+    expect(step).toContain('npm run test:scripts -- "${retry_arg[@]}"');
+  });
+
+  it('bounds the CI unit step so a hang fails instead of stalling', () => {
+    // #10490's run 3 was cancelled at ~60 minutes, leaving behind
+    // orphaned test processes; a stall reads as a timeout, not a failure.
+    const step = getWorkflowStep(
+      getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
+      'Run tests and generate reports',
+    );
+    expect(step).toContain('timeout-minutes: 110');
   });
 
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
@@ -88,10 +170,12 @@ describe('package scripts', () => {
     const packageJson = readPackageJson();
 
     expect(packageJson.scripts['test:release']).toBe(
+      'npm run test:release:workspaces && npm run test:scripts',
+    );
+    expect(packageJson.scripts['test:release:workspaces']).toBe(
       [
         'cross-env NODE_OPTIONS="--max-old-space-size=3072"',
         'npm run test:ci --workspaces --if-present -- --coverage.enabled=false',
-        '&& npm run test:scripts',
       ].join(' '),
     );
 
@@ -395,24 +479,57 @@ describe('package scripts', () => {
 
   it('wires release quality checks to fast explicit validation steps', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
-    const qualityJob = getWorkflowJob(workflow, 'quality');
-    const buildStep = getWorkflowStep(qualityJob, 'Build Project');
+    const buildJob = getWorkflowJob(workflow, 'quality_build');
+    const workspaceTestJob = getWorkflowJob(workflow, 'workspace_tests');
+    const buildStep = getWorkflowStep(buildJob, 'Build Project');
     const serveFastPathStep = getWorkflowStep(
-      qualityJob,
+      buildJob,
       'Check Serve Fast Path Bundle',
     );
+    const packStep = getWorkflowStep(buildJob, 'Pack Build Outputs');
+    const uploadStep = getWorkflowStep(buildJob, 'Upload Build Outputs');
+    const verifyPackageStep = getWorkflowStep(
+      buildJob,
+      'Verify Prepared Package',
+    );
     const workspaceTestStep = getWorkflowStep(
-      qualityJob,
+      workspaceTestJob,
       'Run Workspace Tests',
     );
-
-    expect(qualityJob).toContain("name: 'Check Serve Fast Path Bundle'");
-    expect(qualityJob).toContain('npm run check:serve-fast-path-bundle');
-    expect(qualityJob.indexOf(serveFastPathStep)).toBeLessThan(
-      qualityJob.indexOf(buildStep),
+    const scriptsTestStep = getWorkflowStep(
+      getWorkflowJob(workflow, 'quality_scripts'),
+      'Run Script Tests',
     );
-    expect(workspaceTestStep).toContain('npm run test:release');
+
+    expect(buildJob).toContain("name: 'Check Serve Fast Path Bundle'");
+    expect(buildJob).toContain('npm run check:serve-fast-path-bundle');
+    expect(buildJob.indexOf(serveFastPathStep)).toBeLessThan(
+      buildJob.indexOf(buildStep),
+    );
+    expect(buildJob.indexOf(uploadStep)).toBeGreaterThan(
+      buildJob.indexOf(packStep),
+    );
+    expect(buildJob.indexOf(verifyPackageStep)).toBeGreaterThan(
+      buildJob.indexOf(uploadStep),
+    );
+    expect(verifyPackageStep).toContain('npm run bundle');
+    expect(verifyPackageStep).toContain('dist/review-sources.sha256');
+    expect(verifyPackageStep).toContain('npm run prepare:package');
+    expect(workspaceTestStep).toContain('npm run test:release:workspaces');
     expect(workspaceTestStep).not.toContain('npm run test:ci');
+    expect(scriptsTestStep).toContain('npm run test:scripts');
+    for (const cappedStep of [workspaceTestStep, scriptsTestStep]) {
+      for (const name of ['VITEST_MAX_THREADS', 'VITEST_MAX_FORKS']) {
+        expect(cappedStep).toContain(
+          `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"`,
+        );
+      }
+      for (const name of ['VITEST_MIN_THREADS', 'VITEST_MIN_FORKS']) {
+        expect(cappedStep).toContain(
+          `${name}: "\${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"`,
+        );
+      }
+    }
   });
 
   it('skips release install-time prepare and builds before publish bundling', () => {
@@ -422,10 +539,12 @@ describe('package scripts', () => {
     );
     const installSteps =
       workflow.match(
-        / {6}- name: 'Install Dependencies'[\s\S]*?(?=\n {6}- name: '|\n {4}[A-Za-z0-9_-]+:|$)/g,
+        / {6}- (?:&[^\n]+\n {8})?name: 'Install Dependencies'[\s\S]*?(?=\n {6}- (?:&[^\n]+\n {8})?name: '|\n {4}[A-Za-z0-9_-]+:|$)/g,
       ) || [];
 
-    expect(installSteps.length).toBe(5);
+    // The validation jobs reuse the anchored install step; only the anchor
+    // definition plus prepare and publish appear as full textual copies.
+    expect(installSteps.length).toBe(3);
     for (const installStep of installSteps) {
       expect(installStep).toContain(
         'npm ci --ignore-scripts --no-audit --progress=false',
@@ -481,6 +600,7 @@ describe('package scripts', () => {
     const publishJob = getWorkflowJob(workflow, 'publish');
 
     for (const stepName of [
+      'Publish @qwen-code/external-context-mem0',
       'Publish @qwen-code/audio-capture',
       'Publish @qwen-code/qwen-code',
       'Publish @qwen-code/channel-base',
@@ -523,6 +643,11 @@ describe('package scripts', () => {
       [
         '.github/workflows/release.yml',
         'publish',
+        'Publish @qwen-code/external-context-mem0',
+      ],
+      [
+        '.github/workflows/release.yml',
+        'publish',
         'Publish @qwen-code/audio-capture',
       ],
       [
@@ -555,6 +680,7 @@ describe('package scripts', () => {
     }
 
     for (const packageDirectory of [
+      'integrations/external-context-mem0',
       'packages/audio-capture',
       'packages/cli',
       'packages/channels/base',

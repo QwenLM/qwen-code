@@ -18,6 +18,7 @@ import {
   SessionService,
   SessionStorageEntryError,
   SessionTranscriptDurabilityError,
+  SessionWriterLostError,
   writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
 import { promises as fs } from 'node:fs';
@@ -26,6 +27,7 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import { ConversationRuntimeOwnershipError } from './conversation-runtime-errors.js';
 import {
   StandaloneSessionService,
   type StandaloneSessionServiceOptions,
@@ -109,6 +111,8 @@ interface Harness {
   restoreStagedStandaloneDirectory: ReturnType<typeof vi.fn>;
   removeStagedStandaloneDirectory: ReturnType<typeof vi.fn>;
   confirmStandaloneRootDurability: ReturnType<typeof vi.fn>;
+  getWorkspaceProvidersStatus: ReturnType<typeof vi.fn>;
+  assertExactRoot: ReturnType<typeof vi.fn>;
 }
 
 function createHarness(): Harness {
@@ -166,6 +170,15 @@ function createHarness(): Harness {
     deleteSessionAttachments: vi.fn(async () => undefined),
     markSessionCatalogChanged: vi.fn(),
   };
+  const getWorkspaceProvidersStatus = vi.fn(async () => ({
+    v: 1 as const,
+    workspaceCwd: root.canonicalRoot,
+    initialized: true,
+    acpChannelLive: false,
+    current: { authType: 'openai', modelId: 'qwen-test' },
+    approvalMode: 'default' as const,
+    providers: [],
+  }));
   const runtime = {
     workspaceId: 'conversations',
     workspaceCwd: root.canonicalRoot,
@@ -175,7 +188,8 @@ function createHarness(): Harness {
     trusted: true,
     removable: false,
     bridge: bridge as unknown as AcpSessionBridge,
-  } as WorkspaceRuntime;
+    workspaceService: { getWorkspaceProvidersStatus },
+  } as unknown as WorkspaceRuntime;
   const reservation = { release: vi.fn() };
   const restoreReservation = { release: vi.fn() };
   let runtimeQuarantined = false;
@@ -214,6 +228,7 @@ function createHarness(): Harness {
   const restoreStagedStandaloneDirectory = vi.fn(async () => identity);
   const removeStagedStandaloneDirectory = vi.fn(async () => undefined);
   const confirmStandaloneRootDurability = vi.fn(async () => undefined);
+  const assertExactRoot = vi.fn(async () => root);
   const lifecycle = new SessionArchiveCoordinator();
   const options: StandaloneSessionServiceOptions = {
     ensureRuntime,
@@ -227,7 +242,7 @@ function createHarness(): Harness {
     quarantineRuntime,
     runRuntimeActivity: async (_runtime, operation) => operation(),
     workspace: {
-      assertExactRoot: vi.fn(async () => root),
+      assertExactRoot,
       prepareStandaloneDirectory: vi.fn(async () => ({
         identity,
         created: true,
@@ -270,6 +285,8 @@ function createHarness(): Harness {
     restoreStagedStandaloneDirectory,
     removeStagedStandaloneDirectory,
     confirmStandaloneRootDurability,
+    getWorkspaceProvidersStatus,
+    assertExactRoot,
   };
 }
 
@@ -330,12 +347,14 @@ function mockArchivedStandalone(storageSessionId = sessionId): void {
 
 function mockWriterLease(): {
   assertOwnedAndUnchanged: ReturnType<typeof vi.fn>;
+  assertCleanupOwned: ReturnType<typeof vi.fn>;
   release: ReturnType<typeof vi.fn>;
   isReleased: boolean;
   isReleaseDurabilityPending: boolean;
 } {
   const lease = {
     assertOwnedAndUnchanged: vi.fn(async () => undefined),
+    assertCleanupOwned: vi.fn(),
     release: vi.fn(async () => undefined),
     isReleased: false,
     isReleaseDurabilityPending: false,
@@ -427,6 +446,61 @@ afterEach(() => {
 });
 
 describe('StandaloneSessionService', () => {
+  it('reads options from the exact runtime without exposing its cwd', async () => {
+    const harness = createHarness();
+
+    const options = await harness.service.getOptions();
+
+    expect(harness.ensureRuntime).toHaveBeenCalledOnce();
+    expect(harness.assertExactRoot).toHaveBeenCalledWith(root.canonicalRoot);
+    expect(harness.getWorkspaceProvidersStatus).toHaveBeenCalledWith({
+      route: 'GET /standalone/session-options',
+      workspaceCwd: root.canonicalRoot,
+    });
+    expect(options).toEqual({
+      v: 1,
+      initialized: true,
+      current: { authType: 'openai', modelId: 'qwen-test' },
+      approvalMode: 'default',
+      providers: [],
+    });
+    expect(options).not.toHaveProperty('workspaceCwd');
+    expect(options).not.toHaveProperty('acpChannelLive');
+    expect(harness.bridge.spawnStandaloneSession).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when provider status belongs to another runtime', async () => {
+    const harness = createHarness();
+    harness.getWorkspaceProvidersStatus.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/other',
+      initialized: true,
+      providers: [],
+    });
+
+    await expect(harness.service.getOptions()).rejects.toMatchObject({
+      code: 'conversation_runtime_ownership_compromised',
+      retryable: false,
+    });
+  });
+
+  it('fails closed when the runtime is quarantined during the read', async () => {
+    const harness = createHarness();
+    harness.getWorkspaceProvidersStatus.mockImplementationOnce(async () => {
+      await harness.quarantineRuntime(harness.runtime);
+      return {
+        v: 1,
+        workspaceCwd: root.canonicalRoot,
+        initialized: true,
+        providers: [],
+      };
+    });
+
+    await expect(harness.service.getOptions()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+    });
+  });
+
   it('creates a durable standalone session without admitting a prompt', async () => {
     mockDurableStandalone();
     const harness = createHarness();
@@ -445,6 +519,26 @@ describe('StandaloneSessionService', () => {
     expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
     expect(harness.bridge.spawnStandaloneSession).toHaveBeenCalledOnce();
     expect(harness.reservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces a failed spawn-time model apply as modelApplied false', async () => {
+    mockDurableStandalone();
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      attached: false,
+      sourceType: 'standalone',
+      sourcePersisted: true,
+      modelApplied: false,
+    });
+
+    const created = await harness.service.create({
+      sessionId,
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+    });
+
+    expect(created.session).toMatchObject({ modelApplied: false });
   });
 
   it('detaches a create response client from its origin runtime after rollover', async () => {
@@ -628,13 +722,15 @@ describe('StandaloneSessionService', () => {
     const archiveHarness = createHarness();
     mockActiveStandalone();
     const archiveLease = mockWriterLease();
-    vi.spyOn(SessionService.prototype, 'archiveSessions').mockResolvedValue({
-      archived: [sessionId],
-      alreadyArchived: [],
-      resolvedConflicts: [],
-      notFound: [],
-      errors: [],
-    });
+    const archive = vi
+      .spyOn(SessionService.prototype, 'archiveSessions')
+      .mockResolvedValue({
+        archived: [sessionId],
+        alreadyArchived: [],
+        resolvedConflicts: [],
+        notFound: [],
+        errors: [],
+      });
 
     await expect(archiveHarness.service.archive([sessionId])).resolves.toEqual({
       archived: [sessionId],
@@ -642,19 +738,30 @@ describe('StandaloneSessionService', () => {
       notFound: [],
       errors: [],
     });
+    const archiveOptions = archive.mock.calls[0]?.[1];
+    expect(archiveOptions).toEqual(
+      expect.objectContaining({
+        assertCanMutate: expect.any(Function),
+        assertCleanupOwned: expect.any(Function),
+      }),
+    );
+    archiveOptions?.assertCleanupOwned?.();
+    expect(archiveLease.assertCleanupOwned).toHaveBeenCalledOnce();
     expect(archiveLease.release).toHaveBeenCalledOnce();
 
     vi.restoreAllMocks();
     const unarchiveHarness = createHarness();
     mockArchivedStandalone();
     const unarchiveLease = mockWriterLease();
-    vi.spyOn(SessionService.prototype, 'unarchiveSessions').mockResolvedValue({
-      unarchived: [sessionId],
-      alreadyActive: [],
-      resolvedConflicts: [],
-      notFound: [],
-      errors: [],
-    });
+    const unarchive = vi
+      .spyOn(SessionService.prototype, 'unarchiveSessions')
+      .mockResolvedValue({
+        unarchived: [sessionId],
+        alreadyActive: [],
+        resolvedConflicts: [],
+        notFound: [],
+        errors: [],
+      });
 
     await expect(
       unarchiveHarness.service.unarchive([sessionId]),
@@ -664,6 +771,15 @@ describe('StandaloneSessionService', () => {
       notFound: [],
       errors: [],
     });
+    const unarchiveOptions = unarchive.mock.calls[0]?.[1];
+    expect(unarchiveOptions).toEqual(
+      expect.objectContaining({
+        assertCanMutate: expect.any(Function),
+        assertCleanupOwned: expect.any(Function),
+      }),
+    );
+    unarchiveOptions?.assertCleanupOwned?.();
+    expect(unarchiveLease.assertCleanupOwned).toHaveBeenCalledOnce();
     expect(unarchiveLease.release).toHaveBeenCalledOnce();
   });
 
@@ -686,6 +802,72 @@ describe('StandaloneSessionService', () => {
     });
   });
 
+  it('invalidates the catalog when archive cleanup fails after the move', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    mockWriterLease();
+    vi.mocked(SessionService.prototype.getSessionLocation)
+      .mockResolvedValueOnce('active')
+      .mockResolvedValueOnce('active')
+      .mockResolvedValue('archived');
+    vi.spyOn(SessionService.prototype, 'archiveSessions').mockResolvedValue({
+      archived: [],
+      alreadyArchived: [],
+      resolvedConflicts: [],
+      notFound: [],
+      errors: [{ sessionId, error: new SessionWriterLostError() }],
+    });
+
+    await expect(harness.service.archive([sessionId])).resolves.toMatchObject({
+      archived: [],
+      errors: [
+        {
+          sessionId,
+          code: 'standalone_session_operation_failed',
+        },
+      ],
+    });
+
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    expect(harness.invalidateSessionListCache).toHaveBeenCalledWith(
+      harness.runtime,
+    );
+  });
+
+  it('invalidates the catalog when unarchive cleanup fails after the move', async () => {
+    mockArchivedStandalone();
+    const harness = createHarness();
+    mockWriterLease();
+    vi.mocked(SessionService.prototype.getSessionLocation)
+      .mockResolvedValueOnce('archived')
+      .mockResolvedValueOnce('archived')
+      .mockResolvedValue('active');
+    vi.spyOn(SessionService.prototype, 'unarchiveSessions').mockResolvedValue({
+      unarchived: [],
+      alreadyActive: [],
+      resolvedConflicts: [],
+      notFound: [],
+      errors: [{ sessionId, error: new SessionWriterLostError() }],
+    });
+
+    await expect(harness.service.unarchive([sessionId])).resolves.toMatchObject(
+      {
+        unarchived: [],
+        errors: [
+          {
+            sessionId,
+            code: 'standalone_session_operation_failed',
+          },
+        ],
+      },
+    );
+
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    expect(harness.invalidateSessionListCache).toHaveBeenCalledWith(
+      harness.runtime,
+    );
+  });
+
   it('journals, stages, commits, and cleans a standalone deletion', async () => {
     mockActiveStandalone();
     const harness = createHarness();
@@ -694,10 +876,9 @@ describe('StandaloneSessionService', () => {
       SessionService.prototype,
       'removeSessionTranscriptForLifecycle',
     ).mockResolvedValue(true);
-    vi.spyOn(
-      SessionService.prototype,
-      'cleanupRemovedSessionStateForLifecycle',
-    ).mockResolvedValue();
+    const cleanupRemovedState = vi
+      .spyOn(SessionService.prototype, 'cleanupRemovedSessionStateForLifecycle')
+      .mockResolvedValue();
 
     await expect(harness.service.delete([sessionId])).resolves.toEqual({
       removed: [sessionId],
@@ -721,6 +902,13 @@ describe('StandaloneSessionService', () => {
       { assertCanCommit: expect.any(Function) },
     );
     expect(harness.deletionJournal.clear).toHaveBeenCalledOnce();
+    const cleanupOptions = cleanupRemovedState.mock.calls[0]?.[1];
+    expect(cleanupOptions).toEqual({
+      assertCanMutate: expect.any(Function),
+      assertCleanupOwned: expect.any(Function),
+    });
+    cleanupOptions?.assertCleanupOwned?.();
+    expect(lease.assertCleanupOwned).toHaveBeenCalledOnce();
     expect(lease.release).toHaveBeenCalledOnce();
   });
 
@@ -765,6 +953,61 @@ describe('StandaloneSessionService', () => {
 
     expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
     expect(harness.removeStagedStandaloneDirectory).toHaveBeenCalledOnce();
+  });
+
+  it('stops destructive cleanup when deletion loses writer ownership', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    mockWriterLease();
+    vi.spyOn(
+      SessionService.prototype,
+      'removeSessionTranscriptForLifecycle',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockRejectedValue(new SessionWriterLostError());
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    expect(harness.bridge.deleteSessionAttachments).not.toHaveBeenCalled();
+    expect(harness.removeStagedStandaloneDirectory).not.toHaveBeenCalled();
+    expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
+  });
+
+  it('stops destructive cleanup when deletion loses runtime ownership', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    mockWriterLease();
+    vi.spyOn(
+      SessionService.prototype,
+      'removeSessionTranscriptForLifecycle',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockRejectedValue(
+      new ConversationRuntimeOwnershipError(
+        'conversation_runtime_unavailable',
+        true,
+      ),
+    );
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    expect(harness.bridge.deleteSessionAttachments).not.toHaveBeenCalled();
+    expect(harness.removeStagedStandaloneDirectory).not.toHaveBeenCalled();
+    expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
   });
 
   it('retains deletion evidence when attachment cleanup fails', async () => {
@@ -842,6 +1085,124 @@ describe('StandaloneSessionService', () => {
     });
 
     expect(lease.release).toHaveBeenCalledTimes(4);
+    expect(harness.deletionJournal.clear).toHaveBeenCalledOnce();
+  });
+
+  it('does not park a lost lease before exact deletion recovery', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    const lostLease = mockWriterLease();
+    lostLease.release.mockRejectedValue(new SessionWriterLostError());
+    const nextLease = {
+      assertOwnedAndUnchanged: vi.fn(async () => undefined),
+      assertCleanupOwned: vi.fn(),
+      release: vi.fn(async () => undefined),
+      isReleased: false,
+      isReleaseDurabilityPending: false,
+    };
+    vi.mocked(SessionService.prototype.acquireSessionWriterLease)
+      .mockResolvedValueOnce(lostLease as never)
+      .mockResolvedValueOnce(nextLease as never);
+    vi.spyOn(
+      SessionService.prototype,
+      'removeSessionTranscriptForLifecycle',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockResolvedValue();
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    vi.mocked(
+      SessionService.prototype.findSessionIdIgnoringCase,
+    ).mockResolvedValue(undefined);
+    harness.deletionJournal.read.mockResolvedValueOnce(
+      deletionEntry() as never,
+    );
+    harness.inspectStandaloneDeletionPaths.mockResolvedValueOnce({
+      status: 'absent',
+    });
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [],
+    });
+
+    expect(
+      SessionService.prototype.acquireSessionWriterLease,
+    ).toHaveBeenCalledTimes(2);
+    expect(nextLease.release).toHaveBeenCalledOnce();
+    expect(harness.deletionJournal.clear).toHaveBeenCalledOnce();
+  });
+
+  it('evicts a parked lost lease before exact deletion recovery', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    const lostLease = mockWriterLease();
+    lostLease.release
+      .mockImplementationOnce(async () => {
+        lostLease.isReleased = true;
+        lostLease.isReleaseDurabilityPending = true;
+        throw new Error('release I/O failed');
+      })
+      .mockRejectedValueOnce(new Error('release I/O failed'))
+      .mockRejectedValueOnce(new SessionWriterLostError());
+    const nextLease = {
+      assertOwnedAndUnchanged: vi.fn(async () => undefined),
+      assertCleanupOwned: vi.fn(),
+      release: vi.fn(async () => undefined),
+      isReleased: false,
+      isReleaseDurabilityPending: false,
+    };
+    vi.mocked(SessionService.prototype.acquireSessionWriterLease)
+      .mockResolvedValueOnce(lostLease as never)
+      .mockResolvedValueOnce(nextLease as never);
+    vi.spyOn(
+      SessionService.prototype,
+      'removeSessionTranscriptForLifecycle',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockResolvedValue();
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    vi.mocked(
+      SessionService.prototype.findSessionIdIgnoringCase,
+    ).mockResolvedValue(undefined);
+    harness.deletionJournal.read.mockResolvedValueOnce(
+      deletionEntry() as never,
+    );
+    harness.inspectStandaloneDeletionPaths.mockResolvedValueOnce({
+      status: 'absent',
+    });
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [],
+    });
+
+    expect(lostLease.release).toHaveBeenCalledTimes(3);
+    expect(
+      SessionService.prototype.acquireSessionWriterLease,
+    ).toHaveBeenCalledTimes(2);
+    expect(nextLease.release).toHaveBeenCalledOnce();
     expect(harness.deletionJournal.clear).toHaveBeenCalledOnce();
   });
 
@@ -1107,6 +1468,69 @@ describe('StandaloneSessionService', () => {
     expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
   });
 
+  it('stops attachment cleanup when recovery loses writer ownership', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockRejectedValue(new SessionWriterLostError());
+    const harness = createHarness();
+    mockWriterLease();
+    harness.deletionJournal.read.mockResolvedValueOnce(
+      deletionEntry() as never,
+    );
+    harness.inspectStandaloneDeletionPaths.mockResolvedValueOnce({
+      status: 'absent',
+    });
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    expect(harness.bridge.deleteSessionAttachments).not.toHaveBeenCalled();
+    expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
+  });
+
+  it('stops attachment cleanup when recovery loses runtime ownership', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockRejectedValue(
+      new ConversationRuntimeOwnershipError(
+        'conversation_runtime_unavailable',
+        true,
+      ),
+    );
+    const harness = createHarness();
+    mockWriterLease();
+    harness.deletionJournal.read.mockResolvedValueOnce(
+      deletionEntry() as never,
+    );
+    harness.inspectStandaloneDeletionPaths.mockResolvedValueOnce({
+      status: 'absent',
+    });
+
+    await expect(harness.service.delete([sessionId])).resolves.toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+      fileCleanupPending: [sessionId],
+    });
+
+    expect(harness.bridge.deleteSessionAttachments).not.toHaveBeenCalled();
+    expect(harness.deletionJournal.clear).not.toHaveBeenCalled();
+  });
+
   it('reconfirms a restored normal directory before clearing recovery evidence', async () => {
     mockActiveStandalone();
     const harness = createHarness();
@@ -1138,12 +1562,11 @@ describe('StandaloneSessionService', () => {
       SessionService.prototype,
       'findSessionIdIgnoringCase',
     ).mockResolvedValue(undefined);
-    vi.spyOn(
-      SessionService.prototype,
-      'cleanupRemovedSessionStateForLifecycle',
-    ).mockResolvedValue();
+    const cleanupRemovedState = vi
+      .spyOn(SessionService.prototype, 'cleanupRemovedSessionStateForLifecycle')
+      .mockResolvedValue();
     const harness = createHarness();
-    mockWriterLease();
+    const lease = mockWriterLease();
     harness.deletionJournal.read
       .mockResolvedValueOnce(deletionEntry() as never)
       .mockResolvedValueOnce(deletionEntry() as never);
@@ -1169,6 +1592,14 @@ describe('StandaloneSessionService', () => {
       fileCleanupPending: [],
     });
     expect(harness.deletionJournal.clear).toHaveBeenCalledWith(sessionId, root);
+    const cleanupCalls = cleanupRemovedState.mock.calls;
+    const cleanupOptions = cleanupCalls[cleanupCalls.length - 1]?.[1];
+    expect(cleanupOptions).toEqual({
+      assertCanMutate: expect.any(Function),
+      assertCleanupOwned: expect.any(Function),
+    });
+    cleanupOptions?.assertCleanupOwned?.();
+    expect(lease.assertCleanupOwned).toHaveBeenCalledOnce();
   });
 
   it('keeps deletion outcome unknown when transcript directory sync fails after unlink', async () => {

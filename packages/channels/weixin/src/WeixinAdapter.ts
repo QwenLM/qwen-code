@@ -21,7 +21,12 @@ import type {
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
 import type { CdnRef, FileCdnRef } from './monitor.js';
-import { sendText, sendImage, detectImageMime } from './send.js';
+import {
+  sendText,
+  sendImage,
+  detectImageMime,
+  markdownToPlainText,
+} from './send.js';
 import { downloadAndDecrypt } from './media.js';
 import { getConfig, sendTyping, WeixinApiError } from './api.js';
 import { TypingStatus } from './types.js';
@@ -234,6 +239,23 @@ export class WeixinChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    await this.sendProjectedMessage(chatId, text);
+  }
+
+  protected override async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendProjectedMessage(chatId, text, sourceLabel);
+  }
+
+  private async sendProjectedMessage(
+    chatId: string,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
     const contextToken = getContextToken(chatId) || '';
 
     // Parse [IMAGE: /path/to/file.png] markers from text.
@@ -263,11 +285,18 @@ export class WeixinChannel extends ChannelBase {
     // Clean up double blank lines left by removed markers
     cleanedText = cleanedText.replace(/\n{3,}/g, '\n\n').trim();
 
+    const plainText = cleanedText ? markdownToPlainText(cleanedText) : '';
+    const visibleText = plainText
+      ? this.formatAttributedText(plainText, sourceLabel)
+      : parsedImages.length > 0
+        ? sourceLabel
+        : undefined;
+
     // Send text first if non-empty
-    if (cleanedText) {
+    if (visibleText) {
       await sendText({
         to: chatId,
-        text: cleanedText,
+        text: visibleText,
         baseUrl: this.baseUrl,
         token: this.token,
         contextToken,
@@ -300,7 +329,10 @@ export class WeixinChannel extends ChannelBase {
           try {
             await sendText({
               to: chatId,
-              text: '图片发送失败，请稍后重试',
+              text: this.formatAttributedText(
+                '图片发送失败，请稍后重试',
+                sourceLabel,
+              ),
               baseUrl: this.baseUrl,
               token: this.token,
               contextToken,

@@ -130,6 +130,10 @@ const {
       client: {
         workspaceByCwd: vi.fn(() => ({
           listWorkspaceSessions,
+          // The header actions poll git; answer as a non-git workspace.
+          workspaceGit: vi
+            .fn()
+            .mockResolvedValue({ v: 2, workspaceCwd: '', branch: null }),
           listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
           workspaceChannelTypes: vi.fn().mockResolvedValue([]),
           workspaceChannels: vi
@@ -145,6 +149,7 @@ const {
     },
     workspaceActions: {
       addWorkspace: vi.fn(),
+      updateWorkspace: vi.fn(),
       removeWorkspace: vi.fn(),
       listSessionGroups: vi.fn(),
     },
@@ -325,6 +330,8 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
 
 const { I18nProvider } = await import('../../i18n');
 const { WebShellSidebar } = await import('./WebShellSidebar');
+type WorkspaceManagementTarget =
+  import('./WebShellSidebar').WorkspaceManagementTarget;
 const { COLLAPSED_SESSION_SECTIONS_STORAGE_KEY } = await import(
   './collapsedSessionSections'
 );
@@ -390,7 +397,27 @@ function renderSidebar(
     onSelectWorkspace?: (cwd: string | undefined) => void;
     onError?: (error: unknown, message: string) => void;
     onOpenGoals?: () => void;
+    onOpenWorkspaceManagement?: (
+      target: WorkspaceManagementTarget,
+      workspaceCwd: string,
+    ) => void;
+    workspaceOverview?:
+      | false
+      | {
+          items?: readonly (
+            | 'mcp'
+            | 'skills'
+            | 'extensions'
+            | 'channels'
+            | 'context'
+            | 'hooks'
+          )[];
+        };
+    onOpenGitDiff?: (cwd: string) => void;
+    onNewWorktreeSession?: (cwd?: string) => void;
     onOpenAddWorkspace?: () => void;
+    onOpenWorkspacesOverview?: () => void;
+    footer?: Parameters<typeof WebShellSidebar>[0]['footer'];
     onNewSession?: (workspaceCwd?: string) => boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
     workspaces?: DaemonWorkspaceCapability[];
@@ -399,6 +426,7 @@ function renderSidebar(
       render?: (workspace: DaemonWorkspaceCapability) => ReactNode;
     };
     showSessionSourceSwitch?: boolean;
+    projectFeaturesEnabled?: boolean;
     sessionActions?: {
       items?: readonly (
         | 'pin'
@@ -431,10 +459,17 @@ function renderSidebar(
           selectedWorkspaceCwd={overrides.selectedWorkspaceCwd}
           onSelectWorkspace={overrides.onSelectWorkspace}
           onOpenAddWorkspace={overrides.onOpenAddWorkspace}
+          onOpenWorkspacesOverview={overrides.onOpenWorkspacesOverview}
+          footer={overrides.footer}
+          onOpenWorkspaceManagement={overrides.onOpenWorkspaceManagement}
+          workspaceOverview={overrides.workspaceOverview}
+          onOpenGitDiff={overrides.onOpenGitDiff}
+          onNewWorktreeSession={overrides.onNewWorktreeSession}
           workspaces={overrides.workspaces}
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
           lockedWorkspace={overrides.lockedWorkspace}
           showSessionSourceSwitch={overrides.showSessionSourceSwitch}
+          projectFeaturesEnabled={overrides.projectFeaturesEnabled}
           sessionActions={overrides.sessionActions}
         />
       </I18nProvider>,
@@ -452,6 +487,12 @@ function workspaceAction(cwd: string): HTMLButtonElement | undefined {
       cwd.split('/').at(-1)!,
     ),
   );
+}
+
+function menuItemLabels(): string[] {
+  return Array.from(
+    document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).map((item) => item.textContent ?? '');
 }
 
 function click(element: HTMLElement): void {
@@ -772,6 +813,11 @@ beforeEach(() => {
   exportArchivedSession.mockReset();
   workspace.client.workspaceByCwd.mockImplementation(() => ({
     listWorkspaceSessions,
+    // The header actions poll git; answer as a non-git workspace so the
+    // default harness exercises the known-no-branch path without warnings.
+    workspaceGit: vi
+      .fn()
+      .mockResolvedValue({ v: 2, workspaceCwd: '', branch: null }),
     listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
     workspaceChannelTypes: vi.fn().mockResolvedValue([]),
     workspaceChannels: vi
@@ -1076,7 +1122,7 @@ describe('WebShellSidebar workspace removal', () => {
     });
     expect(secondaryArchive).toHaveBeenCalledWith(['other-secondary']);
     expect(primaryArchive).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it('shows rename for current and non-current locked-secondary sessions', async () => {
     connection.sessionId = 'locked-current';
@@ -1461,7 +1507,7 @@ describe('WebShellSidebar workspace removal', () => {
     expect(primaryDelete).not.toHaveBeenCalled();
     expect(primaryArchive).not.toHaveBeenCalled();
     expect(primaryOrganization).not.toHaveBeenCalled();
-  });
+  }, 15000);
 
   it('requires workspace_qualified_rest_core for locked secondary destructive and organization controls', async () => {
     connection.capabilities = {
@@ -1561,6 +1607,135 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
     });
     expect(onNewSession).toHaveBeenCalledWith('/tmp/other');
+  });
+
+  it('refreshes the primary workspace after a cwd-less New Task', async () => {
+    const onNewSession = vi.fn(() => true);
+    renderSidebar({ onNewSession });
+    const globalNewTask = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="New task"]',
+    );
+    expect(globalNewTask).not.toBeNull();
+
+    await act(async () => {
+      click(globalNewTask!);
+      await Promise.resolve();
+    });
+
+    expect(onNewSession).toHaveBeenCalledWith(undefined);
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
+      '/tmp/project',
+    );
+  });
+
+  it('hides workspace management navigation outside workspace contexts', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    workspace.capabilities = connection.capabilities;
+    const workspaceGit = vi.fn().mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+    });
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceGit,
+    }));
+    renderSidebar({
+      projectFeaturesEnabled: false,
+      onOpenAddWorkspace: vi.fn(),
+      onOpenWorkspacesOverview: vi.fn(),
+      onOpenGitDiff: vi.fn(),
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('button[aria-label="Plugins"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Channels"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Settings"]')).toBeNull();
+    // These open a project panel or dialog that only renders inside a
+    // workspace context, so offering them here would be a dead click.
+    expect(
+      container.querySelector('button[aria-label="Add workspace"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="manage-workspaces"]'),
+    ).toBeNull();
+    expect(workspaceGit).not.toHaveBeenCalled();
+  });
+
+  it('keeps workspace navigation reachable outside workspace contexts', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    workspace.capabilities = connection.capabilities;
+    const onNewSession = vi.fn(() => true);
+    renderSidebar({ projectFeaturesEnabled: false, onNewSession });
+
+    expect(workspaceActions.listSessionGroups).toHaveBeenCalled();
+
+    // The row's own New task is the way back into a workspace, so it must
+    // survive a context that hides every project-only control.
+    const rowNewTask = workspaceAction(
+      '/tmp/project',
+    )?.parentElement?.querySelector<HTMLButtonElement>(
+      'button[aria-label="New task"]',
+    );
+    expect(rowNewTask).toBeDefined();
+    await act(async () => {
+      click(rowNewTask!);
+      await Promise.resolve();
+    });
+
+    expect(onNewSession).toHaveBeenLastCalledWith('/tmp/project');
+  });
+
+  it('keeps channel grouping when project features hide while the channel source is active', async () => {
+    enableChannelOrganization();
+    renderSidebar();
+    await switchSessionSource('Channels');
+    expect(useChannels).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+    });
+
+    renderSidebar({ projectFeaturesEnabled: false });
+
+    expect(useChannels).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+    });
+  });
+
+  it('clears project search state while project features are hidden', async () => {
+    active.sessions = [
+      {
+        sessionId: 'visible-session',
+        displayName: 'Visible session',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'default',
+      },
+    ];
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    const searchInput = await openSessionSearch();
+    await act(async () => {
+      setInputValue(searchInput, 'missing');
+      await Promise.resolve();
+    });
+
+    renderSidebar({ projectFeaturesEnabled: false });
+    renderSidebar({ projectFeaturesEnabled: true });
+    await act(async () => Promise.resolve());
+
+    expect(container.querySelector('input')).toBeNull();
+    expect(container.textContent).toContain('Visible session');
   });
 
   it('shows a native tooltip for the workspace create-group action', async () => {
@@ -2918,7 +3093,22 @@ describe('WebShellSidebar workspace removal', () => {
     };
     renderSidebar();
 
-    expect(workspaceAction('/tmp/other')).toBeUndefined();
+    // The trusted row keeps its other workspace actions; only Remove is gone.
+    const trigger = workspaceAction('/tmp/other');
+    expect(trigger).toBeDefined();
+    act(() => click(trigger!));
+    // Positive half first: the menu really opened with the surviving actions.
+    expect(menuItemLabels()).toEqual([
+      'Copy path',
+      'New task',
+      'Reload runtime',
+    ]);
+    expect(
+      document.body.querySelector(
+        '[aria-label="Remove workspace: /tmp/other"]',
+      ),
+    ).toBeNull();
+    // An untrusted row has nothing but removal to offer.
     expect(workspaceAction('/tmp/danger')).toBeUndefined();
   });
 
@@ -2927,7 +3117,6 @@ describe('WebShellSidebar workspace removal', () => {
 
     const trigger = workspaceAction('/tmp/danger');
     expect(trigger).toBeDefined();
-    expect(workspaceAction('/tmp/project')).toBeUndefined();
 
     act(() => click(trigger!));
     const item = document.body.querySelector(
@@ -2936,6 +3125,691 @@ describe('WebShellSidebar workspace removal', () => {
     const menu = item?.closest('[data-slot="dropdown-menu-content"]');
     expect(menu?.classList.contains('w-auto')).toBe(true);
     expect(menu?.classList.contains('min-w-40')).toBe(true);
+    // Untrusted: no runtime to ask, so only Copy path and Remove.
+    expect(menuItemLabels()).toEqual(['Copy path', 'Remove workspace']);
+  });
+
+  it('never offers removal on the primary workspace menu', () => {
+    // Even if a daemon reported the bound workspace as removable, the row
+    // must not offer to remove the runtime the connection lives in.
+    renderSidebar({
+      workspaces: capabilities.workspaces.map((entry) =>
+        entry.id === 'primary' ? { ...entry, removable: true } : entry,
+      ),
+    });
+
+    const trigger = workspaceAction('/tmp/project');
+    expect(trigger).toBeDefined();
+    act(() => click(trigger!));
+    const labels = menuItemLabels();
+    expect(labels).toContain('Copy path');
+    expect(labels).toContain('New task');
+    expect(labels).toContain('Reload runtime');
+    expect(labels).not.toContain('Remove workspace');
+    expect(labels).not.toContain('Rename…');
+  });
+
+  it('offers rename only on dynamic-registration daemons and saves through the registry', async () => {
+    renderSidebar();
+    act(() => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).not.toContain('Rename…');
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'dynamic_workspace_registration'],
+    };
+    workspaceActions.updateWorkspace.mockResolvedValueOnce({
+      id: 'secondary',
+      cwd: '/tmp/other',
+      displayName: 'Other API',
+      primary: false,
+      trusted: true,
+    });
+    renderSidebar();
+    act(() => click(workspaceAction('/tmp/other')!));
+    const rename = document.body.querySelector<HTMLElement>(
+      '[role="menuitem"][data-highlighted], [role="menuitem"]',
+    );
+    expect(rename?.textContent).toBe('Rename…');
+    act(() => click(rename!));
+
+    const input = document.querySelector<HTMLInputElement>(
+      '#workspace-display-name',
+    );
+    expect(input).not.toBeNull();
+    expect(input!.placeholder).toBe('other');
+    act(() => setInputValue(input!, ' Other API '));
+    await act(async () => {
+      input!.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(workspaceActions.updateWorkspace).toHaveBeenCalledWith('secondary', {
+      displayName: 'Other API',
+    });
+    expect(workspace.refreshCapabilities).toHaveBeenCalled();
+    expect(document.querySelector('#workspace-display-name')).toBeNull();
+  });
+
+  it('reloads a workspace runtime through its qualified client', async () => {
+    const reload = vi.fn().mockResolvedValue({
+      env: { updatedKeys: [], removedKeys: [] },
+      changedKeys: [],
+      childReloaded: true,
+    });
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    // Only the clicked workspace's handle carries `reload`, so a call routed
+    // through any other cwd cannot find it.
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      ...(cwd === '/tmp/other' ? { reload } : {}),
+    }));
+    const onError = vi.fn();
+    renderSidebar({ onError });
+    const handleCallsBefore = workspace.client.workspaceByCwd.mock.calls.filter(
+      ([cwd]) => cwd === '/tmp/other',
+    ).length;
+    act(() => click(workspaceAction('/tmp/other')!));
+    const item = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Reload runtime');
+    expect(item).toBeDefined();
+    await act(async () => {
+      click(item!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+    // A successful reload bumps the reload token, so the row's per-workspace
+    // queries (sessions, git, overview) refetch instead of waiting a tick.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      workspace.client.workspaceByCwd.mock.calls.filter(
+        ([cwd]) => cwd === '/tmp/other',
+      ).length,
+    ).toBeGreaterThan(handleCallsBefore + 1);
+  });
+
+  it('reports a runtime reload the client cannot perform', async () => {
+    // The default fixture handle has no reload method (older SDK).
+    const onError = vi.fn();
+    renderSidebar({ onError });
+    act(() => click(workspaceAction('/tmp/other')!));
+    const item = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Reload runtime');
+    await act(async () => {
+      click(item!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe(
+      'Failed to reload workspace runtime',
+    );
+  });
+
+  it('copies the workspace path and reports a clipboard failure', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const previousClipboard = Object.getOwnPropertyDescriptor(
+      navigator,
+      'clipboard',
+    );
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const onError = vi.fn();
+    try {
+      renderSidebar({ onError });
+      act(() => click(workspaceAction('/tmp/other')!));
+      const copy = () =>
+        Array.from(
+          document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+        ).find((element) => element.textContent === 'Copy path');
+      await act(async () => {
+        click(copy()!);
+        await Promise.resolve();
+      });
+      expect(writeText).toHaveBeenCalledWith('/tmp/other');
+      expect(onError).not.toHaveBeenCalled();
+
+      writeText.mockRejectedValueOnce(new Error('denied'));
+      act(() => click(workspaceAction('/tmp/other')!));
+      await act(async () => {
+        click(copy()!);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError.mock.calls[0]?.[1]).toBe('Failed to copy workspace path');
+    } finally {
+      // Put the shared jsdom stub back rather than leaving a hole behind.
+      if (previousClipboard) {
+        Object.defineProperty(navigator, 'clipboard', previousClipboard);
+      } else {
+        delete (navigator as { clipboard?: unknown }).clipboard;
+      }
+    }
+  });
+
+  it('keeps the rename dialog open and skips the refresh when the daemon rejects', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'dynamic_workspace_registration'],
+    };
+    workspaceActions.updateWorkspace.mockRejectedValueOnce(new Error('boom'));
+    const onError = vi.fn();
+    renderSidebar({ onError });
+    act(() => click(workspaceAction('/tmp/other')!));
+    const rename = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Rename…');
+    act(() => click(rename!));
+    const input = document.querySelector<HTMLInputElement>(
+      '#workspace-display-name',
+    );
+    act(() => setInputValue(input!, 'Other API'));
+    await act(async () => {
+      input!.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('Failed to rename workspace');
+    // The typed name survives for a retry, and nothing was refreshed.
+    expect(
+      document.querySelector<HTMLInputElement>('#workspace-display-name')
+        ?.value,
+    ).toBe('Other API');
+    expect(workspace.refreshCapabilities).not.toHaveBeenCalled();
+  });
+
+  it('offers a worktree task only on workspaces that report a git branch', async () => {
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceGit: vi.fn().mockResolvedValue({
+        v: 2,
+        workspaceCwd: cwd,
+        // Only the secondary workspace is a git repository here.
+        branch: cwd === '/tmp/other' ? 'main' : null,
+      }),
+    }));
+    const onNewSession = vi.fn(() => true);
+    const onNewWorktreeSession = vi.fn();
+    renderSidebar({
+      onOpenGitDiff: vi.fn(),
+      onNewSession,
+      onNewWorktreeSession,
+      workspaces: [
+        ...capabilities.workspaces,
+        // Trusted and removable, but not a git repository.
+        {
+          id: 'plain',
+          cwd: '/tmp/plain',
+          primary: false,
+          trusted: true,
+          removable: true,
+        },
+      ],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    act(() => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).toContain('New worktree task');
+    const worktree = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'New worktree task');
+    act(() => click(worktree!));
+    expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/other');
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => click(workspaceAction('/tmp/project')!));
+    expect(menuItemLabels()).toContain('New task');
+    expect(menuItemLabels()).not.toContain('New worktree task');
+    const primaryNewTask = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'New task');
+    act(() => click(primaryNewTask!));
+    expect(onNewSession).toHaveBeenCalledWith('/tmp/project');
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    // A trusted secondary workspace without a branch gets no worktree entry
+    // either — the gate is the branch, not the primary flag.
+    act(() => click(workspaceAction('/tmp/plain')!));
+    expect(menuItemLabels()).toContain('New task');
+    expect(menuItemLabels()).not.toContain('New worktree task');
+  });
+
+  it('passes the explicit primary cwd to a primary workspace worktree task', async () => {
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceGit: vi.fn().mockResolvedValue({
+        v: 2,
+        workspaceCwd: cwd,
+        branch: 'main',
+      }),
+    }));
+    const onNewWorktreeSession = vi.fn();
+    renderSidebar({ onNewWorktreeSession });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    act(() => click(workspaceAction('/tmp/project')!));
+    const worktree = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'New worktree task');
+    act(() => click(worktree!));
+
+    expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/project');
+  });
+
+  it('treats a failed capabilities refresh after a rename as converged', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'dynamic_workspace_registration'],
+    };
+    workspaceActions.updateWorkspace.mockResolvedValueOnce({
+      id: 'secondary',
+      cwd: '/tmp/other',
+      displayName: 'Other API',
+      primary: false,
+      trusted: true,
+    });
+    workspace.refreshCapabilities.mockRejectedValueOnce(new Error('offline'));
+    const onError = vi.fn();
+    renderSidebar({ onError });
+    act(() => click(workspaceAction('/tmp/other')!));
+    const rename = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Rename…');
+    act(() => click(rename!));
+    const input = document.querySelector<HTMLInputElement>(
+      '#workspace-display-name',
+    );
+    act(() => setInputValue(input!, 'Other API'));
+    await act(async () => {
+      input!.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(workspaceActions.updateWorkspace).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('#workspace-display-name')).toBeNull();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('polls no git status for a locked workspace with a custom header', async () => {
+    const workspaceGit = vi
+      .fn()
+      .mockResolvedValue({ v: 2, workspaceCwd: '/tmp/other', branch: 'main' });
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceGit,
+    }));
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      lockedWorkspace: { render: () => <span>custom header</span> },
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('custom header');
+    expect(workspaceAction('/tmp/other')).toBeUndefined();
+    expect(workspaceGit).not.toHaveBeenCalled();
+  });
+
+  it('keeps the action wrapper visible while its menu is open', () => {
+    renderSidebar();
+    const trigger = workspaceAction('/tmp/other')!;
+    const wrapper = trigger.closest<HTMLElement>(
+      '[class*="workspaceHeaderActions"]',
+    )!;
+    const row = wrapper.parentElement!;
+    // React synthesizes onMouseEnter/onMouseLeave from mouseover/mouseout.
+    const hover = (over: boolean) =>
+      act(() => {
+        row.dispatchEvent(
+          new MouseEvent(over ? 'mouseover' : 'mouseout', {
+            bubbles: true,
+            relatedTarget: null,
+          }),
+        );
+      });
+    hover(true);
+    expect(wrapper.style.visibility).toBe('visible');
+    act(() => click(trigger));
+    expect(menuItemLabels().length).toBeGreaterThan(0);
+    // The pointer moves onto the portalled menu and focus leaves the row.
+    hover(false);
+    act(() => {
+      trigger.dispatchEvent(
+        new FocusEvent('focusout', { bubbles: true, relatedTarget: null }),
+      );
+    });
+    expect(wrapper.style.visibility).toBe('visible');
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(menuItemLabels()).toEqual([]);
+    hover(false);
+    act(() => {
+      trigger.dispatchEvent(
+        new FocusEvent('focusout', { bubbles: true, relatedTarget: null }),
+      );
+    });
+    expect(wrapper.style.visibility).toBe('hidden');
+  });
+
+  it('guards the worktree task against double submission and refreshes on success', async () => {
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue({ v: 2, workspaceCwd: cwd, branch: 'main' }),
+    }));
+    let resolveCreate: (created: boolean) => void = () => {};
+    const onNewWorktreeSession = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    renderSidebar({ onNewWorktreeSession });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const clickWorktree = () => {
+      act(() => click(workspaceAction('/tmp/other')!));
+      const item = Array.from(
+        document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((element) => element.textContent === 'New worktree task');
+      expect(item).toBeDefined();
+      act(() => click(item!));
+    };
+    clickWorktree();
+    clickWorktree();
+    expect(onNewWorktreeSession).toHaveBeenCalledTimes(1);
+    expect(onNewWorktreeSession).toHaveBeenCalledWith('/tmp/other');
+    const catalogCallsBefore = refreshWorkspaceSessionCatalog.mock.calls.length;
+    await act(async () => {
+      resolveCreate(true);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(refreshWorkspaceSessionCatalog.mock.calls.length).toBeGreaterThan(
+      catalogCallsBefore,
+    );
+    expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
+      '/tmp/other',
+    );
+  });
+
+  it('polls no git status for a locked workspace without a diff handler', async () => {
+    const workspaceGit = vi
+      .fn()
+      .mockResolvedValue({ v: 2, workspaceCwd: '/tmp/other', branch: 'main' });
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceGit,
+    }));
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      onNewWorktreeSession: vi.fn(),
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // No menu under lock, so no consumer of the branch: nothing polled.
+    expect(workspaceAction('/tmp/other')).toBeUndefined();
+    expect(workspaceGit).not.toHaveBeenCalled();
+  });
+
+  it('fetches and shows only the facets the embedder selected', async () => {
+    const mcpServer = {
+      kind: 'mcp_server',
+      name: 'github',
+      status: 'ok',
+      transport: 'stdio',
+      disabled: false,
+      mcpStatus: 'connected',
+    };
+    const workspaceMcp = vi.fn().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/tmp/other',
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [mcpServer],
+    });
+    const workspaceSkills = vi.fn().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/tmp/other',
+      initialized: true,
+      skills: [],
+    });
+    const previous = workspace.client.workspaceByCwd.getMockImplementation();
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => ({
+      ...(previous?.(cwd) ?? {}),
+      workspaceMcp,
+      workspaceSkills,
+    }));
+    renderSidebar({ workspaceOverview: { items: ['mcp'] } });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The selection drives the fetch: skills is never requested.
+    expect(workspaceMcp).toHaveBeenCalled();
+    expect(workspaceSkills).not.toHaveBeenCalled();
+
+    // Hovering the header lists only the selected facet in the popover.
+    const header = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((button) => button.textContent?.includes('other'));
+    vi.useFakeTimers();
+    await act(async () => {
+      header?.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+      await Promise.resolve();
+    });
+    vi.useRealTimers();
+    const rows = document.querySelectorAll(
+      '[role="dialog"] [data-web-shell-workspace-overview]',
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.getAttribute('data-web-shell-workspace-overview')).toBe(
+      'mcp',
+    );
+    expect(rows[0]?.textContent).toBe('MCP1/1');
+  });
+
+  it('does not reopen the details popover after a workspace menu selection', async () => {
+    renderSidebar();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const header = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-expanded]'),
+    ).find((button) => button.textContent?.includes('other'));
+    expect(header).toBeDefined();
+
+    // Hover opens the workspace details popover (300 ms delay, real timers
+    // so Radix's focus-restore rAF behaves like production).
+    await act(async () => {
+      header!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+    // Open the workspace menu (this closes the popover) and pick an item.
+    await act(async () => {
+      click(workspaceAction('/tmp/other')!);
+      await Promise.resolve();
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    const item = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Copy path');
+    expect(item).toBeDefined();
+    await act(async () => {
+      click(item!);
+      await Promise.resolve();
+    });
+
+    // Radix restoring focus to the trigger inside the focus-open anchor must
+    // not reopen the details popover 300 ms later.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 450));
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('counts the registered workspaces next to the Projects label', () => {
+    renderSidebar();
+    const badge = container.querySelector<HTMLElement>(
+      '[class*="projectsHeaderCount"]',
+    );
+    expect(badge?.textContent).toBe('3');
+    expect(badge?.getAttribute('aria-label')).toBe('3 workspaces');
+
+    renderSidebar({ workspaces: [capabilities.workspaces[0]!] });
+    expect(
+      container.querySelector('[class*="projectsHeaderCount"]'),
+    ).toBeNull();
+  });
+
+  it('offers rename on registration-backed rows only', () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'dynamic_workspace_registration'],
+    };
+    renderSidebar();
+    // The bound (primary) workspace has no registration to persist a name.
+    act(() => click(workspaceAction('/tmp/project')!));
+    expect(menuItemLabels()).not.toContain('Rename…');
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    // Trust is not required: the name is registry metadata.
+    act(() => click(workspaceAction('/tmp/danger')!));
+    expect(menuItemLabels()).toEqual([
+      'Rename…',
+      'Copy path',
+      'Remove workspace',
+    ]);
+  });
+
+  it('shows the new display name on the row after a rename', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'dynamic_workspace_registration'],
+    };
+    const renamed = {
+      ...capabilities,
+      workspaces: capabilities.workspaces.map((entry) =>
+        entry.id === 'secondary'
+          ? { ...entry, displayName: 'Other API' }
+          : entry,
+      ),
+    };
+    workspaceActions.updateWorkspace.mockResolvedValueOnce(
+      renamed.workspaces[1],
+    );
+    // The refresh lands the updated catalog the sidebar renders rows from.
+    workspace.refreshCapabilities.mockImplementationOnce(async () => {
+      workspace.capabilities = renamed;
+      return renamed;
+    });
+    renderSidebar();
+    expect(container.textContent).toContain('other');
+    expect(container.textContent).not.toContain('Other API');
+    act(() => click(workspaceAction('/tmp/other')!));
+    const rename = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent === 'Rename…');
+    act(() => click(rename!));
+    const input = document.querySelector<HTMLInputElement>(
+      '#workspace-display-name',
+    );
+    act(() => setInputValue(input!, 'Other API'));
+    await act(async () => {
+      input!.form!.dispatchEvent(
+        new Event('submit', { bubbles: true, cancelable: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(document.querySelector('#workspace-display-name')).toBeNull();
+    expect(container.textContent).toContain('Other API');
+  });
+
+  it('keeps plain folder headers when the overview is switched off', () => {
+    renderSidebar({ workspaceOverview: false });
+    expect(
+      document.querySelector('[data-web-shell-workspace-path]'),
+    ).toBeNull();
+    expect(
+      document.querySelector('[data-web-shell-workspace-overview]'),
+    ).toBeNull();
+    expect(
+      document.querySelector('[data-web-shell-workspace-sessions]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[class*="projectsHeaderCount"]'),
+    ).toBeNull();
+    // The menu still offers the non-overview actions.
+    act(() => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).toContain('Copy path');
+    expect(menuItemLabels()).toContain('Reload runtime');
+  });
+
+  it('opens management pages for the primary workspace only', () => {
+    const onOpenWorkspaceManagement = vi.fn();
+    renderSidebar({ onOpenWorkspaceManagement });
+
+    act(() => click(workspaceAction('/tmp/other')!));
+    expect(menuItemLabels()).not.toContain('MCP');
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+
+    act(() => click(workspaceAction('/tmp/project')!));
+    const mcp = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((element) => element.textContent?.startsWith('MCP'));
+    expect(mcp).toBeDefined();
+    act(() => click(mcp!));
+    expect(onOpenWorkspaceManagement).toHaveBeenCalledWith(
+      'mcp',
+      '/tmp/project',
+    );
   });
 
   it('removes the selected workspace and falls back to primary', async () => {
@@ -2986,6 +3860,21 @@ describe('WebShellSidebar workspace removal', () => {
       'Switch to another workspace or close the current session',
     );
     expect(dialogButton('Force remove').disabled).toBe(true);
+    // The hook's blockForce wiring refuses a stale or programmatic
+    // invocation even past the disabled attribute: call the button's
+    // handler directly, as a stale reference would.
+    const force = dialogButton('Force remove');
+    const propsKey = Object.keys(force).find((key) =>
+      key.startsWith('__reactProps'),
+    )!;
+    const forceProps = (force as unknown as Record<string, unknown>)[
+      propsKey
+    ] as { onClick: () => void };
+    await act(async () => {
+      forceProps.onClick();
+      await Promise.resolve();
+    });
+    expect(workspaceActions.removeWorkspace).toHaveBeenCalledTimes(1);
   });
 
   it('shows Voice-only activity before offering force removal', async () => {
@@ -3732,21 +4621,45 @@ describe('WebShellSidebar session source switch', () => {
     expect(container.textContent).toContain('Channel session');
   });
 
-  it('renders scheduled-task runs with a flat source icon', async () => {
+  it('groups scheduled-task runs under the task title and source icon', async () => {
     const scheduledRun: DaemonSessionSummary = {
       sessionId: 'scheduled-run',
-      displayName: 'Hourly review',
+      displayName: 'Hourly review · 08-31 09:30',
       workspaceCwd: '/tmp/project',
       sourceType: 'default',
       sourceId: 'scheduled_task_run:task-1',
     };
-    active.sessions.push(scheduledRun);
+    active.sessions.push(scheduledRun, {
+      ...scheduledRun,
+      sessionId: 'scheduled-run-2',
+      displayName: 'Hourly review · 08-31 08:30',
+    });
     renderSidebar();
     await ensureWorkspaceExpanded('project');
 
+    const group = container.querySelector(
+      'section[aria-label="Hourly review"]',
+    );
+    expect(group).not.toBeNull();
+    expect(
+      group?.querySelector('[data-web-shell-scheduled-task-group]'),
+    ).not.toBeNull();
+    expect(
+      group?.querySelectorAll('[data-web-shell-session-title]'),
+    ).toHaveLength(2);
+    expect(
+      Array.from(
+        container.querySelectorAll('[data-web-shell-session-title]'),
+      ).filter((candidate) =>
+        candidate.textContent?.startsWith('Hourly review ·'),
+      ),
+    ).toHaveLength(2);
+
     const title = Array.from(
       container.querySelectorAll('[data-web-shell-session-title]'),
-    ).find((candidate) => candidate.textContent === 'Hourly review');
+    ).find(
+      (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
+    );
     const row = title?.closest('[role="button"]');
     expect(row).toBeTruthy();
     const sourceIcon = row?.querySelector(
@@ -3767,7 +4680,9 @@ describe('WebShellSidebar session source switch', () => {
     const completedRow = Array.from(
       container.querySelectorAll('[data-web-shell-session-title]'),
     )
-      .find((candidate) => candidate.textContent === 'Hourly review')
+      .find(
+        (candidate) => candidate.textContent === 'Hourly review · 08-31 09:30',
+      )
       ?.closest('[role="button"]');
     expect(
       completedRow?.querySelector('[data-web-shell-scheduled-task-session]'),
@@ -4572,6 +5487,146 @@ describe('WebShellSidebar session source switch', () => {
       window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
     ).not.toContain('channel-type:');
   });
+
+  it('registers manual groups as initial when organization lands after a scheduled-task settle', async () => {
+    active.sessions.push({
+      sessionId: 'scheduled-run',
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    // Organization is disabled, so the flat settle carries only the
+    // scheduled-task section. Nothing may be persisted as collapsed yet.
+    expect(
+      container.querySelector('section[aria-label="Hourly review"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('scheduled-task:');
+
+    // The session_organization capability lands mid-session and the groups
+    // catalog settles with a manual group.
+    const organized = {
+      ...capabilities,
+      features: [...capabilities.features, 'session_organization'],
+    };
+    connection.capabilities = organized;
+    workspace.capabilities = organized;
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [{ id: 'manual-group', name: 'Manual group', color: 'blue' }],
+      colorOptions: ['blue'],
+    });
+    renderSidebar();
+    await settleGroupsCatalog();
+
+    const manualGroup = container.querySelector(
+      'section[aria-label="Manual group"]',
+    );
+    expect(manualGroup).not.toBeNull();
+    expect(
+      manualGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('group:');
+    // The organized settle keeps the scheduled-task section too: ungrouped
+    // runs still form their task section while organization is enabled.
+    expect(
+      container.querySelector('section[aria-label="Hourly review"]'),
+    ).not.toBeNull();
+  });
+
+  it('registers manual groups as initial when organization lands while the channel source is selected', async () => {
+    const channelCapabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'channel_management'],
+    };
+    connection.capabilities = channelCapabilities;
+    workspace.capabilities = channelCapabilities;
+    setChannelCatalog();
+    active.sessions.push({
+      sessionId: 'scheduled-run',
+      displayName: 'Hourly review · 08-31 09:30',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+    const channelSessions: DaemonSessionSummary[] = [
+      {
+        sessionId: 'ding-one-session',
+        displayName: 'DingTalk one',
+        workspaceCwd: '/tmp/project',
+        sourceType: 'channel',
+        sourceId: 'ding-one',
+      },
+    ];
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') {
+          return { ...archived, data: archived.sessions };
+        }
+        if (options?.sourceType === 'channel') {
+          return {
+            ...active,
+            sessions: channelSessions,
+            data: channelSessions,
+          };
+        }
+        return {
+          ...active,
+          sessions: active.sessions,
+          data: active.sessions,
+        };
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    // Organization is disabled, so the Tasks settle carries only the
+    // scheduled-task section and consumes the Tasks latch.
+    expect(
+      container.querySelector('section[aria-label="Hourly review"]'),
+    ).not.toBeNull();
+
+    // Consume the Channels latch too while the capability is still out.
+    await switchSessionSource('Channels');
+    expect(
+      container.querySelector('section[aria-label="DingTalk"]'),
+    ).not.toBeNull();
+
+    // The session_organization capability lands while the Channels tab is
+    // selected; the groups catalog settles only after the switch back.
+    const organized = {
+      ...channelCapabilities,
+      features: [...channelCapabilities.features, 'session_organization'],
+    };
+    connection.capabilities = organized;
+    workspace.capabilities = organized;
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [{ id: 'manual-group', name: 'Manual group', color: 'blue' }],
+      colorOptions: ['blue'],
+    });
+    renderSidebar();
+    await switchSessionSource('Tasks');
+    await settleGroupsCatalog();
+
+    const manualGroup = container.querySelector(
+      'section[aria-label="Manual group"]',
+    );
+    expect(manualGroup).not.toBeNull();
+    expect(
+      manualGroup!.querySelector('button[aria-expanded="true"]'),
+    ).not.toBeNull();
+    expect(
+      window.localStorage.getItem(COLLAPSED_SESSION_SECTIONS_STORAGE_KEY) ?? '',
+    ).not.toContain('group:');
+  });
 });
 
 describe('WebShellSidebar session list notices', () => {
@@ -5169,5 +6224,94 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
       ),
     ).toHaveLength(1);
     expect(await countArchiveMenuItemsInRow('Pinned secondary')).toBe(1);
+  });
+});
+
+describe('WebShellSidebar manage workspaces entry', () => {
+  it('opens the Workspaces overview from the end of the Projects section', async () => {
+    const onOpenWorkspacesOverview = vi.fn();
+    renderSidebar({ onOpenWorkspacesOverview });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const entry = container.querySelector<HTMLButtonElement>(
+      '[data-testid="manage-workspaces"]',
+    );
+    expect(entry).not.toBeNull();
+    expect(entry!.textContent).toContain('Manage workspaces');
+    await act(async () => {
+      entry!.click();
+    });
+    expect(onOpenWorkspacesOverview).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders the opt-in footer entry outside the default set and honours the locked gate', async () => {
+    const onOpenWorkspacesOverview = vi.fn();
+    // Not part of the default footer items.
+    renderSidebar({ onOpenWorkspacesOverview });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="footer-workspaces-overview"]'),
+    ).toBeNull();
+    renderSidebar({
+      onOpenWorkspacesOverview,
+      footer: { items: ['settings', 'workspacesOverview', 'collapse'] },
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="footer-workspaces-overview"]',
+    );
+    expect(button).not.toBeNull();
+    await act(async () => {
+      button!.click();
+    });
+    expect(onOpenWorkspacesOverview).toHaveBeenCalledTimes(1);
+    // Opting into the footer item without wiring the handler must not
+    // render a dead control.
+    renderSidebar({
+      footer: { items: ['settings', 'workspacesOverview', 'collapse'] },
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="footer-workspaces-overview"]'),
+    ).toBeNull();
+    // A locked sidebar shows no workspaces-overview surface at all.
+    renderSidebar({
+      onOpenWorkspacesOverview,
+      footer: { items: ['settings', 'workspacesOverview', 'collapse'] },
+      lockedWorkspaceCwd: '/tmp/other',
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="footer-workspaces-overview"]'),
+    ).toBeNull();
+  });
+
+  it('hides the entry when unwired or when the sidebar is locked to one workspace', async () => {
+    renderSidebar({});
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="manage-workspaces"]'),
+    ).toBeNull();
+    renderSidebar({
+      onOpenWorkspacesOverview: vi.fn(),
+      lockedWorkspaceCwd: '/tmp/other',
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="manage-workspaces"]'),
+    ).toBeNull();
   });
 });

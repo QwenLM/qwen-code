@@ -12,7 +12,6 @@ const { workspaceMock, openTextDocument, executeCommand, tabGroups } =
   vi.hoisted(() => ({
     workspaceMock: {
       workspaceFolders: [] as Array<{ uri: { fsPath: string } }>,
-      openTextDocument: vi.fn(),
     },
     openTextDocument: vi.fn(),
     executeCommand: vi.fn(),
@@ -49,7 +48,7 @@ vi.mock('vscode', () => ({
     tabGroups,
   },
   commands: { executeCommand },
-  ViewColumn: { Beside: -2 },
+  ViewColumn: { Active: -1, Beside: -2 },
   Uri: {
     file: (fsPath: string) => makeUri(fsPath),
     joinPath: (base: { fsPath: string }, filePath: string) =>
@@ -172,5 +171,115 @@ describe('DiffManager path resolution', () => {
     await diffManager.closeDiff('src/foo.ts', true);
 
     expect(notifications).toHaveLength(0);
+  });
+});
+
+const WRITABLE_COMMAND =
+  'workbench.action.files.setActiveEditorWriteableInSession';
+
+describe('DiffManager.showDiff writability', () => {
+  beforeEach(() => {
+    executeCommand.mockClear();
+  });
+
+  function createManager(): InstanceType<typeof DiffManager> {
+    return new DiffManager(() => {}, new DiffContentProvider());
+  }
+
+  it('makes regular diffs editable so IDE-mode approvals can round-trip edits', async () => {
+    const manager = createManager();
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new');
+
+    expect(executeCommand).toHaveBeenCalledWith(WRITABLE_COMMAND);
+  });
+
+  it('keeps read-only diffs locked for flows that cannot round-trip edits', async () => {
+    const manager = createManager();
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+    });
+
+    expect(executeCommand).not.toHaveBeenCalledWith(WRITABLE_COMMAND);
+    // The diff itself still opens.
+    expect(executeCommand).toHaveBeenCalledWith(
+      'vscode.diff',
+      expect.anything(),
+      expect.anything(),
+      expect.stringContaining('foo.ts'),
+      expect.anything(),
+    );
+  });
+});
+
+describe('DiffManager.showDiff reuse', () => {
+  beforeEach(() => {
+    executeCommand.mockClear();
+  });
+
+  function createManager(): InstanceType<typeof DiffManager> {
+    return new DiffManager(() => {}, new DiffContentProvider());
+  }
+
+  function diffOpenCount(): number {
+    return executeCommand.mock.calls.filter(
+      ([command]) => command === 'vscode.diff',
+    ).length;
+  }
+
+  it('opens a fresh diff instead of reusing a writable twin for a read-only request', async () => {
+    const manager = createManager();
+
+    // IDE-mode flow opens a writable diff for this (path, old, new) triple.
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new');
+    executeCommand.mockClear();
+
+    // A web-shell approval for the same triple must get its own read-only
+    // diff; reusing the writable one would invite hand-edits that the
+    // approving tool then silently discards (and inside the dedupe window
+    // the request would otherwise be suppressed outright).
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+    });
+
+    expect(diffOpenCount()).toBe(1);
+    expect(executeCommand).not.toHaveBeenCalledWith(WRITABLE_COMMAND);
+  });
+
+  it('opens a fresh diff instead of reusing a read-only twin for a writable request', async () => {
+    const manager = createManager();
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+    });
+    executeCommand.mockClear();
+
+    // The IDE-mode flow needs an editable right side to round-trip edits;
+    // refocusing the locked diff would take that away.
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new');
+
+    expect(diffOpenCount()).toBe(1);
+    expect(executeCommand).toHaveBeenCalledWith(WRITABLE_COMMAND);
+  });
+
+  it('still dedupes repeat requests with matching writability', async () => {
+    const manager = createManager();
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new');
+    executeCommand.mockClear();
+
+    // Same writability inside the dedupe window: suppressed entirely.
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new');
+    expect(diffOpenCount()).toBe(0);
+
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+    });
+    executeCommand.mockClear();
+    await manager.showDiff('/workspace/foo.ts', 'old', 'new', {
+      readOnly: true,
+    });
+    expect(diffOpenCount()).toBe(0);
   });
 });

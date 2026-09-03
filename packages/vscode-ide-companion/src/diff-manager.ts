@@ -44,6 +44,20 @@ export class DiffContentProvider implements vscode.TextDocumentContentProvider {
   }
 }
 
+/** Options controlling how a diff editor is opened. */
+export interface ShowDiffOptions {
+  /**
+   * Open the right-hand (proposed) side as read-only. Use this when the
+   * approval flow cannot round-trip user edits: the approving daemon tool
+   * applies its own proposed content, so an editable right side would
+   * silently discard anything the user typed (e.g. web-shell permission
+   * diffs opened while IDE mode is off).
+   */
+  readOnly?: boolean;
+  /** WebShell permission request represented by this native diff. */
+  permissionRequestId?: string;
+}
+
 // Information about a diff view that is currently open.
 interface DiffInfo {
   // The path exactly as the caller supplied it (normalized only). The CLI keys
@@ -58,6 +72,13 @@ interface DiffInfo {
   newContent: string;
   leftDocUri: vscode.Uri;
   rightDocUri: vscode.Uri;
+  permissionRequestId?: string;
+  /**
+   * Whether the right-hand side was opened read-only. Reuse must match on
+   * this too: refocusing a writable twin for a read-only approval (or vice
+   * versa) would hand one flow the other flow's edit semantics.
+   */
+  readOnly: boolean;
 }
 
 /**
@@ -80,6 +101,40 @@ export class DiffManager {
   private shouldSuppress?: () => boolean;
   // Timed suppression window (e.g. immediately after permission allow)
   private suppressUntil: number | null = null;
+
+  private getTargetViewColumn(
+    leftDocUri?: vscode.Uri,
+    rightDocUri?: vscode.Uri,
+  ): vscode.ViewColumn {
+    if (leftDocUri && rightDocUri) {
+      const leftUri = leftDocUri.toString();
+      const rightUri = rightDocUri.toString();
+      for (const group of vscode.window.tabGroups.all) {
+        const containsDiff = group.tabs.some((tab) => {
+          const input = tab.input as
+            | {
+                original?: vscode.Uri;
+                modified?: vscode.Uri;
+              }
+            | undefined;
+          return (
+            input?.original?.toString() === leftUri &&
+            input?.modified?.toString() === rightUri
+          );
+        });
+        if (containsDiff) {
+          return group.viewColumn;
+        }
+      }
+    }
+
+    return (
+      findLeftGroupOfChatWebview() ??
+      findRightGroupOfChatWebview() ??
+      vscode.window.activeTextEditor?.viewColumn ??
+      vscode.ViewColumn.Active
+    );
+  }
 
   constructor(
     private readonly log: (message: string) => void,
@@ -108,18 +163,24 @@ export class DiffManager {
    * @param filePath Path to the file being diffed
    * @param oldContent The original content (left side)
    * @param newContent The modified content (right side)
+   * @param readOnly Writability the requester needs; only diffs with the
+   * same writability are reusable
    * @returns True if a diff view with the same content already exists, false otherwise
    */
   private hasExistingDiff(
     filePath: string,
     oldContent: string,
     newContent: string,
+    readOnly: boolean,
+    permissionRequestId?: string,
   ): boolean {
     for (const diffInfo of this.diffDocuments.values()) {
       if (
         diffInfo.resolvedFilePath === filePath &&
         diffInfo.oldContent === oldContent &&
-        diffInfo.newContent === newContent
+        diffInfo.newContent === newContent &&
+        diffInfo.readOnly === readOnly &&
+        diffInfo.permissionRequestId === permissionRequestId
       ) {
         return true;
       }
@@ -130,12 +191,21 @@ export class DiffManager {
   /**
    * Finds an existing diff view for the given file path and focuses it
    * @param filePath Path to the file being diffed
+   * @param readOnly Only diffs opened with the same writability are eligible
    * @returns True if an existing diff view was found and focused, false otherwise
    */
-  private async focusExistingDiff(filePath: string): Promise<boolean> {
+  private async focusExistingDiff(
+    filePath: string,
+    readOnly: boolean,
+    permissionRequestId?: string,
+  ): Promise<boolean> {
     const resolvedPath = resolveWorkspacePath(path.normalize(filePath));
     for (const [, diffInfo] of this.diffDocuments.entries()) {
-      if (diffInfo.resolvedFilePath === resolvedPath) {
+      if (
+        diffInfo.resolvedFilePath === resolvedPath &&
+        diffInfo.readOnly === readOnly &&
+        diffInfo.permissionRequestId === permissionRequestId
+      ) {
         const rightDocUri = diffInfo.rightDocUri;
         const leftDocUri = diffInfo.leftDocUri;
 
@@ -148,7 +218,7 @@ export class DiffManager {
             rightDocUri,
             diffTitle,
             {
-              viewColumn: vscode.ViewColumn.Beside,
+              viewColumn: this.getTargetViewColumn(leftDocUri, rightDocUri),
               preview: false,
               preserveFocus: true,
             },
@@ -170,24 +240,46 @@ export class DiffManager {
    * If only newContent is provided, the old content will be read from the
    * filesystem (empty string when file does not exist).
    */
-  async showDiff(filePath: string, newContent: string): Promise<void>;
+  async showDiff(
+    filePath: string,
+    newContent: string,
+    options?: ShowDiffOptions,
+  ): Promise<void>;
   async showDiff(
     filePath: string,
     oldContent: string,
     newContent: string,
+    options?: ShowDiffOptions,
   ): Promise<void>;
-  async showDiff(filePath: string, a: string, b?: string): Promise<void> {
+  async showDiff(
+    filePath: string,
+    a: string,
+    b?: string | ShowDiffOptions,
+    options?: ShowDiffOptions,
+  ): Promise<void> {
     const normalizedPath = path.normalize(filePath);
     const resolvedPath = resolveWorkspacePath(normalizedPath);
     const haveOld = typeof b === 'string';
+    const resolvedOptions = haveOld ? options : b;
+    const readOnly = resolvedOptions?.readOnly === true;
     const oldContent = haveOld
       ? a
       : await this.readOldContentFromFs(resolvedPath);
     const newContent = haveOld ? (b as string) : a;
     const key = this.makeKey(resolvedPath, oldContent, newContent);
 
-    // Check if a diff view with the same content already exists
-    if (this.hasExistingDiff(resolvedPath, oldContent, newContent)) {
+    // Check if a diff view with the same content, writability, and permission
+    // owner already exists. A read-only approval must never be deduped onto a
+    // writable diff, and two permission requests must not share a diff.
+    if (
+      this.hasExistingDiff(
+        resolvedPath,
+        oldContent,
+        newContent,
+        readOnly,
+        resolvedOptions?.permissionRequestId,
+      )
+    ) {
       const last = this.recentlyShown.get(key) || 0;
       const now = Date.now();
       if (now - last < DiffManager.DEDUPE_WINDOW_MS) {
@@ -198,7 +290,11 @@ export class DiffManager {
         return;
       }
       // Outside the dedupe window: softly focus the existing diff
-      await this.focusExistingDiff(resolvedPath);
+      await this.focusExistingDiff(
+        resolvedPath,
+        readOnly,
+        resolvedOptions?.permissionRequestId,
+      );
       this.recentlyShown.set(key, now);
       return;
     }
@@ -225,6 +321,8 @@ export class DiffManager {
       newContent,
       leftDocUri,
       rightDocUri,
+      readOnly,
+      permissionRequestId: resolvedOptions?.permissionRequestId,
     });
 
     const diffTitle = `${path.basename(resolvedPath)} (Before ↔ After)`;
@@ -236,12 +334,9 @@ export class DiffManager {
 
     // Prefer opening the diff in the group to the left of the chat webview.
     // When that isn't available (e.g. chat is in the leftmost group), try the
-    // group to the right so we reuse existing layout. Only fall back to
-    // ViewColumn.Beside when neither neighbor exists or the webview is missing.
-    const targetViewColumn =
-      findLeftGroupOfChatWebview() ??
-      findRightGroupOfChatWebview() ??
-      vscode.ViewColumn.Beside;
+    // group to the right so we reuse existing layout. Sidebar chat has no
+    // editor group, so fall back to the active group rather than creating one.
+    const targetViewColumn = this.getTargetViewColumn();
 
     await vscode.commands.executeCommand(
       'vscode.diff',
@@ -254,9 +349,15 @@ export class DiffManager {
         preserveFocus: true,
       },
     );
-    await vscode.commands.executeCommand(
-      'workbench.action.files.setActiveEditorWriteableInSession',
-    );
+    // The writeable-in-session flag exists so users can adjust the proposed
+    // content before accepting; that only round-trips when an IDE-mode
+    // resolver consumes the edited text. Read-only callers (web-shell
+    // permission approvals) would silently lose edits, so keep them locked.
+    if (!readOnly) {
+      await vscode.commands.executeCommand(
+        'workbench.action.files.setActiveEditorWriteableInSession',
+      );
+    }
 
     this.recentlyShown.set(key, Date.now());
   }
@@ -264,11 +365,19 @@ export class DiffManager {
   /**
    * Closes an open diff view for a specific file.
    */
-  async closeDiff(filePath: string, suppressNotification = false) {
+  async closeDiff(
+    filePath: string,
+    suppressNotification = false,
+    permissionRequestId?: string,
+  ) {
     const resolvedPath = resolveWorkspacePath(path.normalize(filePath));
     let openDiff: DiffInfo | undefined;
     for (const [, diffInfo] of this.diffDocuments.entries()) {
-      if (diffInfo.resolvedFilePath === resolvedPath) {
+      if (
+        diffInfo.resolvedFilePath === resolvedPath &&
+        (permissionRequestId === undefined ||
+          diffInfo.permissionRequestId === permissionRequestId)
+      ) {
         openDiff = diffInfo;
         break;
       }
@@ -323,6 +432,14 @@ export class DiffManager {
         },
       }),
     );
+  }
+
+  getPermissionRequestId(rightDocUri: vscode.Uri): string | undefined {
+    return this.diffDocuments.get(rightDocUri.toString())?.permissionRequestId;
+  }
+
+  hasDiff(rightDocUri: vscode.Uri): boolean {
+    return this.diffDocuments.has(rightDocUri.toString());
   }
 
   /**

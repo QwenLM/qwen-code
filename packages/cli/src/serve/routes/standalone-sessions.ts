@@ -19,6 +19,7 @@ import type {
   StandaloneSessionService,
 } from '../conversations/standalone-session-service.js';
 import { omitSkillDetailsFromReplayArrays } from '../skill-details-redaction.js';
+import { redactWorkflowsFromReplayArrays } from '../workflow-session-gate.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import { InvalidCursorError } from '../server/session-list.js';
 import {
@@ -33,6 +34,7 @@ export interface RegisterStandaloneSessionRoutesDeps {
   service: StandaloneSessionService;
   mutate: (options?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
+  isWorkspaceTrusted: () => boolean;
 }
 
 function sendInvalidRequest(res: Response, message: string): void {
@@ -264,6 +266,16 @@ export function registerStandaloneSessionRoutes(
     }
   };
 
+  app.get('/standalone/session-options', (req, res) =>
+    handle('GET /standalone/session-options', req, res, async () => {
+      if (Object.keys(req.query).length > 0) {
+        sendInvalidRequest(res, 'The request query contains unknown fields.');
+        return;
+      }
+      res.status(200).json(await deps.service.getOptions());
+    }),
+  );
+
   app.post('/standalone/sessions', deps.mutate({ strict: true }), (req, res) =>
     handle('POST /standalone/sessions', req, res, async () => {
       const body = requireExactBody(req, res, [
@@ -426,7 +438,14 @@ export function registerStandaloneSessionRoutes(
               await cleanupRestore()?.catch(() => undefined);
               return;
             }
-            res.status(200).json(omitSkillDetailsFromReplayArrays(restored));
+            const shaped = omitSkillDetailsFromReplayArrays(restored);
+            res
+              .status(200)
+              .json(
+                deps.isWorkspaceTrusted()
+                  ? shaped
+                  : redactWorkflowsFromReplayArrays(shaped),
+              );
           },
         ),
     );
