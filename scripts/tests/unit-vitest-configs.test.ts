@@ -42,6 +42,7 @@ import scriptsTestsConfig from './vitest.config.js';
 type ExemptionConfig = {
   test?: {
     dangerouslyIgnoreUnhandledErrors?: boolean;
+    testTimeout?: number;
     pool?: 'threads' | 'forks' | 'vmThreads';
     poolOptions?: { threads?: { maxThreads?: number } };
   };
@@ -89,6 +90,122 @@ describe('unhandled-error exemption on the platform lanes', () => {
     expect(config.test?.dangerouslyIgnoreUnhandledErrors).toBe(
       process.platform !== 'linux',
     );
+  });
+});
+
+// Every workspace that `npm run test:ci --workspaces` runs lands on the same
+// shared ECS pool, where the identical suite takes ~5x longer depending only on
+// which host it draws (#10490). Five configs were given a raised ceiling there
+// one at a time; the other fifteen were still on vitest's 5s default, so a
+// contended host — not a defect — was enough to fail them. Three tests had
+// already been hand-patched past 5s individually (auto-recall 12s,
+// provider-extension-local 20s/30s, ChannelBase 8s), which is the shape this
+// pin replaces. It sweeps the whole map so a new workspace cannot quietly join
+// the lane on the 5s default.
+const configModules: Record<
+  string,
+  () => Promise<{ default: ExemptionConfig }>
+> = {
+  'integrations/external-context': () =>
+    import('../../integrations/external-context/vitest.config.js'),
+  'integrations/external-context-mem0': () =>
+    import('../../integrations/external-context-mem0/vitest.config.js'),
+  'packages/acp-bridge': () =>
+    import('../../packages/acp-bridge/vitest.config.js'),
+  'packages/audio-capture': () =>
+    import('../../packages/audio-capture/vitest.config.js'),
+  'packages/channels/base': () =>
+    import('../../packages/channels/base/vitest.config.js'),
+  'packages/channels/dingtalk': () =>
+    import('../../packages/channels/dingtalk/vitest.config.js'),
+  'packages/channels/dws': () =>
+    import('../../packages/channels/dws/vitest.config.js'),
+  'packages/channels/feishu': () =>
+    import('../../packages/channels/feishu/vitest.config.js'),
+  'packages/channels/github': () =>
+    import('../../packages/channels/github/vitest.config.js'),
+  'packages/channels/gitlab': () =>
+    import('../../packages/channels/gitlab/vitest.config.js'),
+  'packages/channels/qqbot': () =>
+    import('../../packages/channels/qqbot/vitest.config.js'),
+  'packages/channels/telegram': () =>
+    import('../../packages/channels/telegram/vitest.config.js'),
+  'packages/channels/wecom': () =>
+    import('../../packages/channels/wecom/vitest.config.js'),
+  'packages/channels/weixin': () =>
+    import('../../packages/channels/weixin/vitest.config.js'),
+  'packages/chrome-extension': () =>
+    import('../../packages/chrome-extension/vitest.config.js'),
+  'packages/cli': () => import('../../packages/cli/vitest.config.js'),
+  'packages/core': () => import('../../packages/core/vitest.config.js'),
+  'packages/node-repl': () =>
+    import('../../packages/node-repl/vitest.config.js'),
+  'packages/sdk-typescript': () =>
+    import('../../packages/sdk-typescript/vitest.config.js'),
+  'packages/vscode-ide-companion': () =>
+    import('../../packages/vscode-ide-companion/vitest.config.js'),
+  'packages/web-shell': () =>
+    import('../../packages/web-shell/vitest.config.js'),
+  'scripts/tests': () => import('./vitest.config.js'),
+};
+
+describe('shared-pool test timeout', () => {
+  // 60s is the ceiling the five already-raised configs settled on. Assert a
+  // floor rather than equality so the configs that legitimately sit higher
+  // (scripts/tests at 90s, sdk-typescript at E2E_TIMEOUT_MINUTES x 60s) pass
+  // without pinning their own numbers here.
+  const POOL_FLOOR_MS = 60_000;
+
+  for (const [name, load] of Object.entries(configModules)) {
+    it(`raises the ceiling on the shared pool in ${name}`, async () => {
+      // The configs read RUNNER_NAME at import time and the static imports at
+      // the top of this file already resolved the off-pool branch, so stub
+      // first and re-import.
+      vi.stubEnv('RUNNER_NAME', 'ecs-qwen-parity');
+      vi.resetModules();
+      try {
+        const mod = await load();
+        expect(mod.default.test?.testTimeout, name).toBeGreaterThanOrEqual(
+          POOL_FLOOR_MS,
+        );
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  }
+
+  it('raises the ceiling on the shared pool in packages/webui', async () => {
+    // webui's vitest configuration is the function-form vite.config.ts.
+    vi.stubEnv('RUNNER_NAME', 'ecs-qwen-parity');
+    vi.resetModules();
+    try {
+      const mod = await import('../../packages/webui/vite.config.js');
+      const config = await mod.default({ command: 'serve', mode: 'test' });
+      expect(config.test?.testTimeout).toBeGreaterThanOrEqual(POOL_FLOOR_MS);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('leaves the off-pool default alone', async () => {
+    // The point of the ternary is that only the pool lane moves. Off it these
+    // configs must stay on vitest's own default, so a hang on a developer
+    // machine still fails in 5s rather than 60s.
+    vi.stubEnv('RUNNER_NAME', 'ubuntu-latest-runner');
+    vi.resetModules();
+    try {
+      for (const name of [
+        'packages/channels/base',
+        'packages/channels/dingtalk',
+        'packages/chrome-extension',
+        'integrations/external-context',
+      ]) {
+        const mod = await configModules[name]!();
+        expect(mod.default.test?.testTimeout, name).toBeUndefined();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
