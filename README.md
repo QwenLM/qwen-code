@@ -140,7 +140,7 @@ If you know Claude Code, you already know Qwen Code — and then some. We've put
 - [**Qwen Code Desktop**](https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest) — Official desktop app for macOS, Windows, and Linux
 - [**AionUi**](https://github.com/iOfficeAI/AionUi) — A modern GUI for command-line AI tools including Qwen Code
 - [**Gemini CLI Desktop**](https://github.com/Piebald-AI/gemini-cli-desktop) — A cross-platform desktop/web/mobile UI for Qwen Code
-- [**ClawMetry**](https://github.com/vivekchand/clawmetry) — Open-source, zero-config observability dashboard that tracks Qwen Code sessions, tokens, and costs locally
+- [**ClawMetry**](https://github.com/vivekchand/clawmetry) ([website](https://clawmetry.com)) — Open-source, zero-config observability dashboard that tracks Qwen Code sessions, tokens, and costs locally
 
 - [**🦞 Qwen Code Claw**](https://github.com/openclaw/acpx) — Let other agents (Claude, Codex, etc.) delegate coding tasks to Qwen Code via ACP. Paste this prompt into your agent:
 
