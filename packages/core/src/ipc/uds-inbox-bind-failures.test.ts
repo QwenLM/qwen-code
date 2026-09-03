@@ -6,15 +6,18 @@
 
 /**
  * The bind-time failures no real filesystem can be made to produce: a
- * socket `chmod` that fails after `listen()` already succeeded, and a
+ * socket `chmod` that fails after `listen()` already succeeded, a
+ * directory that disappears between its own `mkdir` and `chmod`, and a
  * `listen()` that fails twice over.
  *
  * Every other failure in `bindAt` has a fixture that produces it -- a
  * file where a directory belongs, a path over `sun_path`, a live
- * squatter. These two do not. The socket is created by `listen()` a
+ * squatter. These do not. The socket is created by `listen()` a
  * microsecond before the chmod, inside a directory this process just
- * chmod'd to 0700 and owns; and a sibling name is eight random bytes, so
- * nothing can be planted in its way. Stubbing is the only way in.
+ * chmod'd to 0700 and owns; the window in which a sweeper or a tmpfs
+ * cleaner can remove that directory is two syscalls wide; and a sibling
+ * name is eight random bytes, so nothing can be planted in its way.
+ * Stubbing is the only way in.
  *
  * They live in their own file because the stubs have to be module-level,
  * and routing the real-socket suite in `uds-inbox.test.ts` through a
@@ -27,8 +30,8 @@ import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-/** Set to a path suffix whose `chmod` should fail; null lets every one through. */
-let failChmodSuffix: string | null = null;
+/** A `chmod` to fail: which path suffix, and with which errno. */
+let chmodFailure: { suffix: string; code: string } | null = null;
 
 /** Set to an errno every `listen()` should fail with; null binds for real. */
 let failListenWith: string | null = null;
@@ -36,10 +39,10 @@ let failListenWith: string | null = null;
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   const chmod: typeof actual.chmod = async (target, mode) => {
-    if (failChmodSuffix !== null && String(target).endsWith(failChmodSuffix)) {
+    if (chmodFailure !== null && String(target).endsWith(chmodFailure.suffix)) {
       throw Object.assign(
-        new Error(`EPERM: operation not permitted, chmod '${String(target)}'`),
-        { code: 'EPERM' },
+        new Error(`${chmodFailure.code}: chmod '${String(target)}'`),
+        { code: chmodFailure.code },
       );
     }
     return actual.chmod(target, mode);
@@ -77,22 +80,21 @@ vi.mock('node:net', async (importOriginal) => {
 });
 
 const fs = await import('node:fs/promises');
-const { getLastPeerInboxFailure, startPeerInbox } = await import(
-  './uds-inbox.js'
-);
+const { describePeerInboxFailure, getLastPeerInboxFailure, startPeerInbox } =
+  await import('./uds-inbox.js');
 
 const isWindows = process.platform === 'win32';
 
 let tmpDir: string;
 
 beforeEach(async () => {
-  failChmodSuffix = null;
+  chmodFailure = null;
   failListenWith = null;
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-bindfail-'));
 });
 
 afterEach(async () => {
-  failChmodSuffix = null;
+  chmodFailure = null;
   failListenWith = null;
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
@@ -120,7 +122,7 @@ describe.skipIf(isWindows)('a socket that cannot be locked down', () => {
     // bound socket and its directory are orphaned where no sweep derives
     // a parent from.
     const socketPath = path.join(tmpDir, 'socks', '4242.sock');
-    failChmodSuffix = '.sock';
+    chmodFailure = { suffix: '.sock', code: 'EPERM' };
 
     const started = await startPeerInbox({ socketPath, onFrame: () => {} });
 
@@ -142,7 +144,7 @@ describe.skipIf(isWindows)('a socket that cannot be locked down', () => {
     // reader wants it.
     const requested = path.join(tmpDir, 'socks', '4242.sock');
     const squatter = await occupy(requested);
-    failChmodSuffix = '.sock';
+    chmodFailure = { suffix: '.sock', code: 'EPERM' };
     try {
       const started = await startPeerInbox({
         socketPath: requested,
@@ -189,5 +191,30 @@ describe.skipIf(isWindows)('a listen that fails at both names', () => {
     expect(failure?.socketPath).not.toMatch(/-[0-9a-f]{8}\.sock$/);
     // The directory the failed candidate created is not left behind.
     await expect(fs.stat(path.dirname(requested))).rejects.toThrow();
+  });
+});
+
+describe.skipIf(isWindows)('a socket directory that vanishes mid-setup', () => {
+  it('names the missing ancestor rather than an unknown error', async () => {
+    // `mkdir` is recursive, so it creates the ancestors it needs and
+    // ENOENT never comes from there -- which left `missing_ancestor` with
+    // no producer at all. It is still reachable: `mkdir`, `lstat` and
+    // `chmod` are three syscalls, and a sweeper or a tmpfs cleaner
+    // removing the directory in between makes the next one fail ENOENT.
+    // Stubbing the directory chmod reproduces that window exactly.
+    //
+    // Drop the ENOENT case from `classify` and this renders as `unknown`,
+    // which hands the user a raw errno string instead of naming the
+    // parent that is gone.
+    const socketPath = path.join(tmpDir, 'socks', '4242.sock');
+    chmodFailure = { suffix: `${path.sep}socks`, code: 'ENOENT' };
+
+    const started = await startPeerInbox({ socketPath, onFrame: () => {} });
+
+    expect(started).toBeNull();
+    const failure = getLastPeerInboxFailure();
+    expect(failure?.cause).toBe('missing_ancestor');
+    expect(failure?.socketPath).toBe(socketPath);
+    expect(describePeerInboxFailure(failure!)).toContain('does not exist');
   });
 });

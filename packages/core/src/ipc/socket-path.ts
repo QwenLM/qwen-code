@@ -27,7 +27,15 @@ export const MAX_SOCKET_PATH_BYTES = 103;
 export const SOCKET_DIR_NAME = 'qwen-socks';
 
 /**
- * Resolve this process's socket path.
+ * The socket path this process would prefer.
+ *
+ * The first candidate, not the address the inbox ends up on: the bind
+ * walks the whole chain and may settle on a fallback directory or on a
+ * `<pid>-<8hex>.sock` sibling. Nothing in this repository calls it, and
+ * nothing should read a running session's address from it -- peers take
+ * `ipcPath` from the session registry record. Kept exported, and pinned
+ * by its own suite, for callers outside this package that only want the
+ * preference.
  *
  * Prefers `$XDG_RUNTIME_DIR` — a per-user tmpfs that the OS cleans up on
  * logout, which is exactly the lifetime a session socket wants. Already

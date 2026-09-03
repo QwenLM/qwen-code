@@ -43,6 +43,16 @@ import {
   type PeerInbox,
 } from './uds-inbox.js';
 
+/**
+ * A PID no process can ever hold.
+ *
+ * `pid_max` is at most 2^22 on 64-bit Linux, so 4194303 -- used here
+ * before -- is `pid_max - 1`: allocatable, and on a busy machine
+ * eventually allocated, which would quietly turn "provably dead" fixtures
+ * into live ones. 2^31-1 is above every `pid_max` the kernel accepts.
+ */
+const UNALLOCATABLE_PID = 2_147_483_647;
+
 let tmpDir: string;
 let inbox: PeerInbox | null = null;
 let received: PeerFrame[];
@@ -945,10 +955,9 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
   it('removes sockets whose process is provably dead and keeps the rest', async () => {
     const dir = path.join(tmpDir, 'qwen-socks');
     await fs.mkdir(dir);
-    // 2^22-1 is above the default pid_max on Linux, so nothing owns it.
-    const dead = path.join(dir, '4194303.sock');
+    const dead = path.join(dir, `${UNALLOCATABLE_PID}.sock`);
     const live = path.join(dir, `${process.pid}.sock`);
-    const self = path.join(dir, '4194302.sock');
+    const self = path.join(dir, `${UNALLOCATABLE_PID - 1}.sock`);
     const foreign = path.join(dir, 'notes.sock');
     for (const file of [dead, live, self, foreign])
       await fs.writeFile(file, '');
@@ -958,7 +967,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
       expect.arrayContaining([
         'notes.sock',
         `${process.pid}.sock`,
-        '4194302.sock',
+        path.basename(self),
       ]),
     );
     await expect(fs.stat(dead)).rejects.toThrow();
@@ -969,16 +978,50 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     await fs.mkdir(dir);
     // Sized from the constant so the fixture spans two batches however
     // the fd-pressure knob is tuned.
+    const firstPid = 2_147_483_000;
     const sockets = Array.from({ length: SWEEP_BATCH_SIZE + 4 }, (_, index) =>
-      path.join(dir, `${2_147_483_600 + index}.sock`),
+      path.join(dir, `${firstPid + index}.sock`),
     );
     await Promise.all(sockets.map((socket) => fs.writeFile(socket, '')));
 
-    expect(
-      await sweepOrphanSockets(dir, path.join(dir, '2147483647.sock')),
-    ).toBe(sockets.length);
+    // Below the fixture range, not inside it: a self path that lands on
+    // one of the fixtures is skipped as this session's own socket, and
+    // the count then comes up one short for a reason that has nothing to
+    // do with batching. That happens once SWEEP_BATCH_SIZE is tuned past
+    // the gap the fixture leaves.
+    const selfPath = path.join(dir, `${firstPid - 1}.sock`);
+    expect(sockets).not.toContain(selfPath);
+
+    expect(await sweepOrphanSockets(dir, selfPath)).toBe(sockets.length);
     expect(await fs.readdir(dir)).toEqual([]);
   });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'leaves a fallback directory another uid owns',
+    async () => {
+      // The guard that stops this sweep from reaching into a directory
+      // someone else minted in a shared temp dir. Nothing exercised it:
+      // removing it left the whole suite green while the sweep deleted
+      // another user's sockets and their directory. As in the bind-side
+      // uid test, the spy moves the comparison value rather than the
+      // directory's owner, so it fires whether or not the runner is root.
+      const parent = path.join(tmpDir, 'tmp');
+      const theirs = path.join(parent, `qwen-socks-${'a'.repeat(16)}`);
+      await fs.mkdir(theirs, { recursive: true });
+      await fs.writeFile(path.join(theirs, `${UNALLOCATABLE_PID}.sock`), '');
+      const withUid = process as NodeJS.Process & { getuid: () => number };
+      const uid = vi.spyOn(withUid, 'getuid');
+      uid.mockReturnValue((process.getuid?.() ?? 0) + 1);
+      try {
+        expect(
+          await sweepOrphanSocketDirs(parent, path.join(parent, 'self')),
+        ).toBe(0);
+        await expect(fs.stat(theirs)).resolves.toBeDefined();
+      } finally {
+        uid.mockRestore();
+      }
+    },
+  );
 
   it('sweeps every batch when more than one batch of fallback directories accumulates', async () => {
     // One nonce directory per crashed session: 17+ of them span two
@@ -992,7 +1035,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     await Promise.all(
       dirs.map(async (dir, index) => {
         await fs.mkdir(dir);
-        await fs.writeFile(path.join(dir, `${2_147_483_600 + index}.sock`), '');
+        await fs.writeFile(path.join(dir, `${2_147_483_000 + index}.sock`), '');
       }),
     );
 
@@ -1005,13 +1048,16 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
 
   it('keeps a listening socket even when its filename PID is absent', async () => {
     const dir = path.join(tmpDir, 'qwen-socks');
-    const live = path.join(dir, '4194303.sock');
+    const live = path.join(dir, `${UNALLOCATABLE_PID}.sock`);
     await fs.mkdir(dir);
     const server = net.createServer((socket) => socket.end());
     await new Promise<void>((resolve) => server.listen(live, resolve));
     try {
       expect(
-        await sweepOrphanSockets(dir, path.join(dir, '4194302.sock')),
+        await sweepOrphanSockets(
+          dir,
+          path.join(dir, `${UNALLOCATABLE_PID - 1}.sock`),
+        ),
       ).toBe(0);
       await expect(fs.stat(live)).resolves.toBeDefined();
     } finally {
@@ -1029,16 +1075,19 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     async () => {
       const dir = path.join(tmpDir, 'qwen-socks');
       await fs.mkdir(dir);
-      // Above the default pid_max, so `isPidAlive` reports dead -- which is
-      // also what it reports for a live PID from another namespace. The
-      // probe is the only thing left between this file and the unlink.
-      const live = path.join(dir, '4194303.sock');
+      // `isPidAlive` reports dead for it -- which is also what it reports
+      // for a live PID from another namespace. The probe is the only
+      // thing left between this file and the unlink.
+      const live = path.join(dir, `${UNALLOCATABLE_PID}.sock`);
       const server = net.createServer((socket) => socket.end());
       await new Promise<void>((resolve) => server.listen(live, resolve));
       await fs.chmod(live, 0o000);
       try {
         expect(
-          await sweepOrphanSockets(dir, path.join(dir, '4194302.sock')),
+          await sweepOrphanSockets(
+            dir,
+            path.join(dir, `${UNALLOCATABLE_PID - 1}.sock`),
+          ),
         ).toBe(0);
         await expect(fs.stat(live)).resolves.toBeDefined();
       } finally {
@@ -1054,7 +1103,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
       const parent = path.join(tmpDir, 'tmp');
       const dir = path.join(parent, `qwen-socks-${'a'.repeat(16)}`);
       await fs.mkdir(dir, { recursive: true });
-      const live = path.join(dir, '4194303.sock');
+      const live = path.join(dir, `${UNALLOCATABLE_PID}.sock`);
       const server = net.createServer((socket) => socket.end());
       await new Promise<void>((resolve) => server.listen(live, resolve));
       await fs.chmod(live, 0o000);
@@ -1084,8 +1133,8 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     const oldEmpty = nonce('e');
     for (const d of [dead, mixed, freshEmpty, own, oldEmpty])
       await fs.mkdir(d, { recursive: true });
-    await fs.writeFile(path.join(dead, '4194303.sock'), '');
-    await fs.writeFile(path.join(mixed, '4194303.sock'), '');
+    await fs.writeFile(path.join(dead, `${UNALLOCATABLE_PID}.sock`), '');
+    await fs.writeFile(path.join(mixed, `${UNALLOCATABLE_PID}.sock`), '');
     await fs.writeFile(path.join(mixed, 'keep.txt'), '');
     const old = new Date(Date.now() - 120_000);
     await fs.utimes(oldEmpty, old, old);
@@ -1106,7 +1155,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     // (b) Kept only by the self-exclusion: aged, correctly named, and
     // holding nothing but a provably dead socket, so every other guard
     // would let it go.
-    await fs.writeFile(path.join(own, '4194303.sock'), '');
+    await fs.writeFile(path.join(own, `${UNALLOCATABLE_PID}.sock`), '');
     await fs.utimes(own, old, old);
 
     // (c) Kept only by the PID liveness check: a socket file named for
@@ -1136,7 +1185,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     const parent = await fs.mkdtemp('/tmp/qwen-inbox-sweep-');
     const liveDir = path.join(parent, `qwen-socks-${'a'.repeat(16)}`);
     const ownDir = path.join(parent, `qwen-socks-${'b'.repeat(16)}`);
-    const live = path.join(liveDir, '4194303.sock');
+    const live = path.join(liveDir, `${UNALLOCATABLE_PID}.sock`);
     await fs.mkdir(liveDir, { recursive: true });
     await fs.mkdir(ownDir);
     const server = net.createServer((socket) => socket.end());
@@ -1154,7 +1203,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     const runtime = path.join(tmpDir, 'runtime');
     const dir = path.join(runtime, 'qwen-socks');
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, '4194303.sock'), '');
+    await fs.writeFile(path.join(dir, `${UNALLOCATABLE_PID}.sock`), '');
     vi.stubEnv('XDG_RUNTIME_DIR', runtime);
     try {
       const started = await startPeerInbox({ onFrame: () => {} });
@@ -1162,9 +1211,49 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
       inbox = started;
       expect(path.dirname(started.socketPath)).toBe(dir);
       await settle();
-      await expect(fs.stat(path.join(dir, '4194303.sock'))).rejects.toThrow();
+      await expect(
+        fs.stat(path.join(dir, `${UNALLOCATABLE_PID}.sock`)),
+      ).rejects.toThrow();
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+
+  it('sweeps only the directory shapes this code mints', async () => {
+    // The sweep is scoped by directory name -- `qwen-socks/` and the
+    // nonce directories -- and nothing pinned that. An explicit
+    // socketPath can point anywhere, and a stale `<pid>.sock` sitting
+    // beside it belongs to whoever put it there; without the guard a
+    // bind deletes files out of a directory this code never created.
+    //
+    // The control binds into a directory the guard does admit, with the
+    // same fixture and the same wait, so a wait too short to observe any
+    // sweep at all cannot pass this test by doing nothing.
+    const foreign = path.join(tmpDir, 'my-sockets');
+    const mine = path.join(tmpDir, 'qwen-socks');
+    await fs.mkdir(foreign);
+    await fs.mkdir(mine);
+    const untouched = path.join(foreign, `${UNALLOCATABLE_PID}.sock`);
+    const swept = path.join(mine, `${UNALLOCATABLE_PID}.sock`);
+    await fs.writeFile(untouched, '');
+    await fs.writeFile(swept, '');
+
+    const outside = await startPeerInbox({
+      socketPath: path.join(foreign, 'a.sock'),
+      onFrame: () => {},
+    });
+    const insideDir = await startPeerInbox({
+      socketPath: path.join(mine, 'b.sock'),
+      onFrame: () => {},
+    });
+    if (!outside || !insideDir) throw new Error('inbox failed to start');
+    inbox = insideDir;
+    try {
+      await settle();
+      await expect(fs.stat(swept)).rejects.toThrow();
+      await expect(fs.stat(untouched)).resolves.toBeDefined();
+    } finally {
+      await outside.close();
     }
   });
 
@@ -1174,7 +1263,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     const temp = await fs.mkdtemp('/tmp/qwen-inbox-bind-');
     const stale = path.join(temp, `qwen-socks-${'a'.repeat(16)}`);
     await fs.mkdir(stale, { recursive: true });
-    await fs.writeFile(path.join(stale, '4194303.sock'), '');
+    await fs.writeFile(path.join(stale, `${UNALLOCATABLE_PID}.sock`), '');
     vi.stubEnv('XDG_RUNTIME_DIR', runtime);
     vi.stubEnv('TMPDIR', temp);
     try {
@@ -1462,10 +1551,9 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
   it('sweeps a sibling-named socket whose process is dead', async () => {
     const dir = path.join(tmpDir, 'qwen-socks');
     await fs.mkdir(dir);
-    // 2^22-1 is above the default pid_max on Linux, so nothing owns it.
-    const deadSibling = path.join(dir, '4194303-0123abcd.sock');
+    const deadSibling = path.join(dir, `${UNALLOCATABLE_PID}-0123abcd.sock`);
     const liveSibling = path.join(dir, `${process.pid}-0123abcd.sock`);
-    const malformed = path.join(dir, '4194303-XYZ.sock');
+    const malformed = path.join(dir, `${UNALLOCATABLE_PID}-XYZ.sock`);
     for (const file of [deadSibling, liveSibling, malformed]) {
       await fs.writeFile(file, '');
     }
