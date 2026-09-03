@@ -715,6 +715,11 @@ jobs:
           QWEN_API_KEY: ''
           GEMINI_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
+          # A millisecond budget written on a developer machine measures the
+          # code; on the shared pool it measures the neighbours, where the same
+          # work runs 5x apart depending on placement (#10490). Skip those
+          # assertions here — they still run locally and on the hosted lanes.
+          QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           # ENOSPC has failed test steps mid-suite while the host looks
