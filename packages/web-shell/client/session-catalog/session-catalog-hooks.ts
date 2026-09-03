@@ -7,6 +7,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 import {
+  useActions,
   useSessions,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
@@ -247,22 +248,51 @@ export function useSessionActivePromptState(
   if (liveActivePrompt !== undefined) {
     return { hasActivePrompt: liveActivePrompt, known: true };
   }
+  const row = page
+    ? sessions.find((session) => session.sessionId === sessionId)
+    : undefined;
   return {
-    hasActivePrompt: sessions.some(
-      (session) => session.sessionId === sessionId && session.hasActivePrompt,
-    ),
-    // A page that has not loaded yet says nothing about this session.
-    known: page !== undefined,
+    hasActivePrompt: row?.hasActivePrompt === true,
+    // Only a row actually on the page is an answer. The catalog page is
+    // bounded, so a session missing from it may simply have fallen off a
+    // fresher first page — unlike the live-state response, which lists every
+    // live session regardless of paging and whose absence therefore does mean
+    // "not running".
+    known: row !== undefined,
   };
 }
 
-export function useSessionHasActivePrompt(
+/**
+ * Read the daemon's live prompt state for the surrounding
+ * `DaemonSessionProvider`'s session, and publish it back into that provider.
+ *
+ * Every view that owns a provider needs its own bridge: a split pane, a side
+ * task and a subagent detail each mount one, and each is an observer of a turn
+ * it did not submit — the case where the event stream alone cannot tell a long
+ * silent tool call from a finished turn (#9487). Publishing `undefined` while
+ * the answer is unknown leaves that provider's pre-existing heuristics alone.
+ *
+ * Returns the plain boolean for rendering, so a caller needs only this hook.
+ */
+export function useDaemonActivePromptBridge(
   client: DaemonClient,
   workspaceCwd: string | undefined,
   sessionId: string | undefined,
 ): boolean {
-  return useSessionActivePromptState(client, workspaceCwd, sessionId)
-    .hasActivePrompt;
+  const { hasActivePrompt, known } = useSessionActivePromptState(
+    client,
+    workspaceCwd,
+    sessionId,
+  );
+  // Idempotent, so the main view and its ChatPane sharing one provider both
+  // publishing the same value is harmless; a split pane, which renders a
+  // ChatPane without an App around it, needs its own.
+  const { setDaemonActivePrompt } = useActions();
+  const daemonActivePrompt = known ? hasActivePrompt : undefined;
+  useEffect(() => {
+    setDaemonActivePrompt(daemonActivePrompt);
+  }, [daemonActivePrompt, setDaemonActivePrompt]);
+  return hasActivePrompt;
 }
 
 export function useSessionCatalogPolling(

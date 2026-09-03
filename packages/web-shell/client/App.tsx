@@ -98,7 +98,7 @@ import {
 import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
 import {
   useSessionCatalogController,
-  useSessionActivePromptState,
+  useDaemonActivePromptBridge,
 } from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
@@ -2496,12 +2496,11 @@ export function App({
   // Daemon-authoritative "turn is running" signal for the connected session:
   // keeps the conversation indicator (and its cancel affordances) alive
   // through >3s silent tool gaps where streamingState drops to idle (#9487).
-  const sessionActivePromptState = useSessionActivePromptState(
+  const sessionHasActivePrompt = useDaemonActivePromptBridge(
     workspace.client,
     connection.workspaceCwd,
     connection.sessionId,
   );
-  const sessionHasActivePrompt = sessionActivePromptState.hasActivePrompt;
   const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
   sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
@@ -2581,19 +2580,6 @@ export function App({
     [lockedWorkspaceCwd, ordinaryWorkspaces],
   );
   const sessionActions = useActions();
-  // Hand the daemon's live prompt state back to the session provider so
-  // `promptStatus` (and every `useStreamingState()` consumer, not just the
-  // components that read `sessionHasActivePrompt` directly) stops settling a
-  // still-running turn to idle after a silent tool gap (#9487). `undefined`
-  // when nothing authoritative covers this workspace, which leaves the
-  // provider's pre-existing silence heuristics in charge.
-  const setDaemonActivePrompt = sessionActions.setDaemonActivePrompt;
-  const daemonActivePrompt = sessionActivePromptState.known
-    ? sessionActivePromptState.hasActivePrompt
-    : undefined;
-  useEffect(() => {
-    setDaemonActivePrompt(daemonActivePrompt);
-  }, [daemonActivePrompt, setDaemonActivePrompt]);
   const reloadTranscript = useCallback(
     async (signal: AbortSignal) => {
       if (!connection.sessionId) return;

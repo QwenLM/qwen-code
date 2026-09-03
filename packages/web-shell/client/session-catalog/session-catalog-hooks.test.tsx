@@ -61,7 +61,6 @@ const {
   useSessionCatalogQuery,
   useSessionCatalogController,
   useSessionActivePromptState,
-  useSessionHasActivePrompt,
   useWebShellSessions,
 } = await import('./session-catalog-hooks');
 
@@ -257,7 +256,7 @@ describe('session catalog hooks', () => {
   });
 });
 
-describe('useSessionHasActivePrompt (#9487)', () => {
+describe('useSessionActivePromptState (#9487)', () => {
   function setQualifiedPage(sessions: unknown[]): ReturnType<typeof vi.fn> {
     const listPage = vi.fn().mockResolvedValue({ sessions });
     (mocks.workspace.client as { workspaceByCwd: unknown }).workspaceByCwd =
@@ -266,12 +265,12 @@ describe('useSessionHasActivePrompt (#9487)', () => {
   }
 
   function ActivePromptProbe({ sessionId = 'sess-1' }: { sessionId?: string }) {
-    const value = useSessionHasActivePrompt(
+    const { hasActivePrompt } = useSessionActivePromptState(
       mocks.workspace.client as DaemonClient,
       '/work',
       sessionId,
     );
-    return <span>{String(value)}</span>;
+    return <span>{String(hasActivePrompt)}</span>;
   }
 
   it('does not load the catalog while live-state is retained', async () => {
@@ -408,6 +407,27 @@ describe('useSessionHasActivePrompt (#9487)', () => {
       store.applyLiveState('/work', live(true));
     });
     expect(container.textContent).toBe('true');
+  });
+
+  it('does not answer for a session the bounded fallback page omits', async () => {
+    // The page is bounded, so "not on it" may just mean the session fell off a
+    // fresher first page. Reporting that as a known `false` would let a caller
+    // settle a turn that is still running.
+    setQualifiedPage([
+      { sessionId: 'other', workspaceCwd: '/work', hasActivePrompt: true },
+    ]);
+    const client = mocks.workspace.client as DaemonClient;
+
+    function KnownProbe() {
+      const state = useSessionActivePromptState(client, '/work', 'sess-1');
+      return <span>{`${state.hasActivePrompt}/${state.known}`}</span>;
+    }
+
+    await act(async () => {
+      root.render(<KnownProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    expect(container.textContent).toBe('false/false');
   });
 
   it('sees an active prompt the loaded catalog page does not contain', async () => {

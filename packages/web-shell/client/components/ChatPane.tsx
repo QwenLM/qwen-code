@@ -91,7 +91,7 @@ import {
 import { mergeCommands } from '../hooks/daemonSessionMappers';
 import {
   useSessionCatalogController,
-  useSessionHasActivePrompt,
+  useDaemonActivePromptBridge,
 } from '../session-catalog/session-catalog-hooks';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
@@ -271,7 +271,9 @@ export function ChatPane({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
-  const sessionHasActivePrompt = useSessionHasActivePrompt(
+  // Each pane owns its DaemonSessionProvider, so each publishes the daemon's
+  // live prompt state into its own provider (#9487).
+  const sessionHasActivePrompt = useDaemonActivePromptBridge(
     workspace.client,
     workspaceCwd ?? connection.workspaceCwd,
     connection.sessionId,
