@@ -53,9 +53,12 @@ describe('ci.yml disk-pressure evidence', () => {
     // which host it lands on (#10490), and nothing in the logs said how busy
     // that host was. `cpus` sizes the machine, `load` and `hosttests` say how
     // many neighbours were competing for it at each 10-second tick.
+    // The pattern is bracketed so the sampler's own shell — whose command
+    // line contains this very script — does not match itself and inflate
+    // the count on every runner.
     assert.match(tests, /echo "DISKCONTEXT [^"]*cpus\[\$\(nproc /);
     assert.match(tests, /load\[\$\(cut -d' ' -f1-3 \/proc\/loadavg /);
-    assert.match(tests, /hosttests\[\$\(pgrep -fc vitest /);
+    assert.match(tests, /hosttests\[\$\(pgrep -fc '\[v\]itest' /);
 
     const sampleFormat = (script) => {
       const match = script.match(
