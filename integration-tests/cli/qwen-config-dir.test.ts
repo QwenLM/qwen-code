@@ -160,6 +160,14 @@ describe('QWEN_HOME environment variable', () => {
 
     /**
      * 1d. Default behaviour is preserved when QWEN_HOME is unset.
+     *
+     * HOME is redirected to a writable temp dir so the unset-QWEN_HOME default
+     * (~/.qwen, resolved via os.homedir()) lands hermetically. On the shared
+     * pool the real $HOME can retain root-owned files from an earlier
+     * containerized job — the contamination globalSetup already isolates
+     * QWEN_HOME against (#10085, #10325) — and an unwritable ~/.qwen crashes
+     * the CLI at startup. That is an environment property, not the fallback
+     * routing under test.
      */
     it('1d: CLI functions normally when QWEN_HOME is not set', async () => {
       await rig.setup('qwen-home-1d-default-behaviour');
@@ -167,9 +175,24 @@ describe('QWEN_HOME environment variable', () => {
       // Explicitly ensure QWEN_HOME is absent for this test
       delete process.env['QWEN_HOME'];
 
-      // A simple prompt run should succeed without errors
-      const result = await rig.run('say hello');
-      expect(result).toBeTruthy();
+      // Resolve the default ~/.qwen into a writable dir so the run never
+      // depends on the real $HOME being writable (see the note above).
+      const homeDir = join(rig.testDir!, 'home');
+      mkdirSync(homeDir, { recursive: true });
+      const originalHome = process.env['HOME'];
+      process.env['HOME'] = homeDir;
+
+      try {
+        // A simple prompt run should succeed without errors
+        const result = await rig.run('say hello');
+        expect(result).toBeTruthy();
+      } finally {
+        if (originalHome === undefined) {
+          delete process.env['HOME'];
+        } else {
+          process.env['HOME'] = originalHome;
+        }
+      }
     });
   });
 
