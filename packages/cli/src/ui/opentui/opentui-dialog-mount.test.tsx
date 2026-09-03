@@ -10,7 +10,7 @@
  * stubbed to a text marker that also records the props it received, so the
  * wiring is observable without booting a renderer:
  *
- *  - each of the 24 OpenTuiDialogRequest kinds renders its own dialog marker;
+ *  - each of the 25 OpenTuiDialogRequest kinds renders its own dialog marker;
  *  - the callbacks the mount hands a dialog do the real thing — persist through
  *    the data helpers, reach the composer owner, or report a seam this shell
  *    does not wire rather than closing over a no-op;
@@ -163,6 +163,7 @@ vi.mock('./dialogs-memory-status.js', () => ({
 vi.mock('./dialogs-modes.js', () => ({
   OpenTuiApprovalModeDialog: mocks.stub('approval-mode'),
   OpenTuiEffortDialog: mocks.stub('effort'),
+  OpenTuiOutputStyleDialog: mocks.stub('output-style'),
 }));
 vi.mock('./dialogs-stats-skills.js', () => ({
   OpenTuiStatsDialog: mocks.stub('stats'),
@@ -227,6 +228,7 @@ const REQUESTS: Array<[string, OpenTuiDialogRequest]> = [
   ['permissions', { dialog: 'permissions' }],
   ['approval-mode', { dialog: 'approval-mode' }],
   ['effort', { dialog: 'effort' }],
+  ['output-style', { dialog: 'output-style' }],
   ['delete', { dialog: 'delete' }],
   ['resume', { dialog: 'resume' }],
   ['extensions_manage', { dialog: 'extensions_manage' }],
@@ -250,7 +252,7 @@ describe('OpenTuiDialogMount routing', () => {
   });
 
   it('routes every dialog request to its own component', () => {
-    expect(REQUESTS).toHaveLength(24);
+    expect(REQUESTS).toHaveLength(25);
     for (const [expected, request] of REQUESTS) {
       const { unmount } = mount(request);
       expect(screen.getByText(expected)).toBeTruthy();

@@ -45,7 +45,10 @@ import {
   type BridgeEvent,
 } from '@qwen-code/acp-bridge/eventBus';
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
-import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
+import type {
+  NdJsonMessageObservation,
+  NdJsonQueueSaturationInfo,
+} from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
   consumeServeFastPathRejectedLoaderKeys,
@@ -4926,6 +4929,21 @@ async function runQwenServeImpl(
       daemonLog,
       emitTelemetryLog: core.emitDaemonLog,
     });
+    // Saturation now backpressures the agent pipe for a bounded grace
+    // window instead of tearing the channel down immediately (#10162).
+    // Warn at episode start so field diagnosis doesn't begin at the
+    // `channel exited` breadcrumb.
+    // `callHook` in ndJsonStream already isolates hook throws from the
+    // transport, so this needs no guard of its own.
+    const warnAcpQueueSaturated = (info: NdJsonQueueSaturationInfo): void => {
+      daemonLog.warn('ACP NDJSON decoded queue saturated', {
+        requiredBytes: info.requiredBytes,
+        availableBytes: info.availableBytes,
+        maxQueuedMessages: info.maxQueuedMessages,
+        maxQueuedBytes: info.maxQueuedBytes,
+        queueSaturationGraceMs: info.graceMs,
+      });
+    };
     const recordPromptQueueWait = (durationMs: number): void => {
       promptQueueWaitStats.count += 1;
       promptQueueWaitStats.totalMs += durationMs;
@@ -5097,6 +5115,7 @@ async function runQwenServeImpl(
             bytes,
             message,
           }),
+        onQueueSaturated: warnAcpQueueSaturated,
       },
       ...(acpChildExtraArgs(opts)
         ? { extraArgs: acpChildExtraArgs(opts) }
@@ -5140,6 +5159,17 @@ async function runQwenServeImpl(
         runtimeEpochSources.set(workspaceCwd, source);
       }
       return source;
+    };
+    let mcpAuthenticationActive = false;
+    const acquireMcpAuthentication = () => {
+      if (mcpAuthenticationActive) return undefined;
+      mcpAuthenticationActive = true;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        mcpAuthenticationActive = false;
+      };
     };
     const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
       {
@@ -5534,6 +5564,7 @@ async function runQwenServeImpl(
           : {}),
         boundWorkspace,
         runtimeEpochSource: runtimeEpochSourceFor(boundWorkspace),
+        acquireMcpAuthentication,
         // Prompt terminal ledger: persisted beside the transcript so a
         // restarted daemon can reconcile dangling prompts on cold load.
         promptLedger: runtime.createPromptLedgerSink(
@@ -6003,6 +6034,7 @@ async function runQwenServeImpl(
               bytes,
               message,
             }),
+          onQueueSaturated: warnAcpQueueSaturated,
         },
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
@@ -6103,6 +6135,7 @@ async function runQwenServeImpl(
           : {}),
         boundWorkspace: workspaceInput.cwd,
         runtimeEpochSource: runtimeEpochSourceFor(workspaceInput.cwd),
+        acquireMcpAuthentication,
         promptLedger: runtime.createPromptLedgerSink(
           workspaceInput.cwd,
           secondaryEnv.sessionRuntimeBaseDir,
@@ -6661,6 +6694,7 @@ async function runQwenServeImpl(
               bytes,
               message,
             }),
+          onQueueSaturated: warnAcpQueueSaturated,
         },
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
@@ -6777,6 +6811,7 @@ async function runQwenServeImpl(
             : {}),
           boundWorkspace: cwd,
           runtimeEpochSource: runtimeEpochSourceFor(cwd),
+          acquireMcpAuthentication,
           // Live-conversation workspaces keep transcripts outside the
           // runtime storage layout, so no ledger sink is wired there.
           ...(provenance === 'live-conversation'
@@ -7244,7 +7279,9 @@ async function runQwenServeImpl(
             runtimeToDrain.provenance !== 'live-conversation'
           ) {
             await channelWorkerManager
-              .removeWorkspace(runtimeToDrain.workspaceCwd)
+              .removeWorkspace(runtimeToDrain.workspaceCwd, {
+                permanent: reason === 'workspace_removed',
+              })
               .catch((err) => {
                 daemonLog.error(
                   'workspace channel worker cleanup error',
