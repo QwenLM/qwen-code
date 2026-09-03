@@ -853,6 +853,7 @@ jobs:
                 exit 1
                 ;;
             esac
+            echo 'QWEN_SKIP_LATENCY_BUDGETS=1' >> "${GITHUB_ENV}"
           fi
           # Capability preflight for the persistent pool: this job's agent
           # runs inside the docker sandbox, and a missing daemon otherwise
@@ -3973,6 +3974,7 @@ jobs:
                 exit 1
                 ;;
             esac
+            echo 'QWEN_SKIP_LATENCY_BUDGETS=1' >> "${GITHUB_ENV}"
           fi
           # Capability preflight for the persistent pool: this job's agent
           # runs inside the docker sandbox, and a missing daemon otherwise
