@@ -300,6 +300,34 @@ describe('ci flaky rerun patrol', () => {
     expect(calls).toHaveLength(3);
   });
 
+  it('bounds how many PR detail reads run at once', async () => {
+    // The patrol job has a ten-minute budget and this cost grows with the
+    // open-PR count, so the fan-out is capped rather than unbounded.
+    const api = new GhClient('QwenLM/qwen-code');
+    let inFlight = 0;
+    let peak = 0;
+    api.gh = async (args) => {
+      if (args[1] === 'list') {
+        return JSON.stringify(
+          Array.from({ length: 12 }, (_, i) => ({ number: i + 1 })),
+        );
+      }
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight -= 1;
+      return JSON.stringify({ statusCheckRollup: [run()] });
+    };
+    const result = await api.prList('status:failure');
+    expect(result).toHaveLength(12);
+    // Order survives the fan-out: the caller pairs rollups with PR numbers.
+    expect(result.map((pr) => pr.number)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(5);
+  });
+
   it('requests the PR number when refreshing current PR state', async () => {
     const api = new GhClient('QwenLM/qwen-code');
     let args = [];

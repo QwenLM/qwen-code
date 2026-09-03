@@ -12,6 +12,9 @@ const TARGET_WORKFLOW = 'Qwen Code CI';
 const MARKER = 'qwen-ci-flaky-rerun';
 const DEFAULT_STALE_MINUTES = 30;
 const DEFAULT_ACTIVE_DAYS = 7;
+// How many PR detail reads run at once. Five keeps a 66-PR scan near ten
+// seconds without turning the patrol into a burst against the API.
+const PR_DETAIL_CONCURRENCY = 5;
 const DEFAULT_MAX_CANDIDATES = 5;
 const MAX_ACTIONS = 3;
 const ACTIONS = new Set(['rerun', 'comment', 'no_action']);
@@ -609,28 +612,40 @@ export class GhClient {
     // scheduled scans, while the same search without it answers in a second.
     // A PR whose rollup cannot be read is skipped rather than failing the
     // scan — the next run picks it up.
-    const detailed = [];
-    for (const pr of prs) {
-      try {
-        const { statusCheckRollup } = JSON.parse(
-          await this.gh([
-            'pr',
-            'view',
-            String(pr.number),
-            '--repo',
-            this.repo,
-            '--json',
-            'statusCheckRollup',
-          ]),
-        );
-        detailed.push({ ...pr, statusCheckRollup });
-      } catch (error) {
-        process.stderr.write(
-          `prList: skipping PR ${pr.number}: ${error.message}\n`,
-        );
+    // Bounded fan-out: one call per PR is fine, 66 of them in series is not.
+    // The patrol job has a ten-minute budget and this cost grows with the
+    // open-PR count — the same growth that broke the single bulk query.
+    const detailed = new Array(prs.length);
+    let next = 0;
+    const worker = async () => {
+      for (let i = next++; i < prs.length; i = next++) {
+        const pr = prs[i];
+        try {
+          const { statusCheckRollup } = JSON.parse(
+            await this.gh([
+              'pr',
+              'view',
+              String(pr.number),
+              '--repo',
+              this.repo,
+              '--json',
+              'statusCheckRollup',
+            ]),
+          );
+          detailed[i] = { ...pr, statusCheckRollup };
+        } catch (error) {
+          process.stderr.write(
+            `prList: skipping PR ${pr.number}: ${error.message}\n`,
+          );
+        }
       }
-    }
-    return detailed;
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(PR_DETAIL_CONCURRENCY, prs.length) }, () =>
+        worker(),
+      ),
+    );
+    return detailed.filter(Boolean);
   }
 
   async comments(prNumber) {
