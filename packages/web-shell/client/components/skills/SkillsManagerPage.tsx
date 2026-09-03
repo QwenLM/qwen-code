@@ -208,8 +208,11 @@ export function SkillsManagerPage({
     [displayedSkills, selectedName],
   );
   const targetWorkspaceCwd = workspaceCwd ?? workspace.workspaceCwd;
-  const activeWorkspaceCwd = connection.workspaceCwd ?? workspace.workspaceCwd;
-  const targetsActiveWorkspace = targetWorkspaceCwd === activeWorkspaceCwd;
+  const targetsActiveWorkspace =
+    connection.workspaceCwd !== undefined
+      ? targetWorkspaceCwd === connection.workspaceCwd
+      : connection.sessionId === undefined &&
+        targetWorkspaceCwd === workspace.workspaceCwd;
   const filteredSkills = useMemo(
     () => filterSkills(displayedSkills, query, levelFilter, statusFilter),
     [displayedSkills, levelFilter, query, statusFilter],

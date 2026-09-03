@@ -15,7 +15,11 @@ Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const { connectionState, skillsState, workspaceState } = vi.hoisted(() => ({
   connectionState: {
-    current: { clientId: 'client-1', workspaceCwd: '/workspace/demo' },
+    current: {
+      clientId: 'client-1',
+      sessionId: undefined as string | undefined,
+      workspaceCwd: '/workspace/demo' as string | undefined,
+    },
   },
   skillsState: {
     current: {
@@ -154,6 +158,7 @@ beforeEach(() => {
   workspaceState.current.capabilities.features = [
     'workspace_skill_settings_toggle',
   ];
+  connectionState.current.sessionId = undefined;
   connectionState.current.workspaceCwd = '/workspace/demo';
 });
 
@@ -336,6 +341,51 @@ describe('SkillsManagerPage', () => {
     expect(onUseSkill).not.toHaveBeenCalled();
     await renderPage('/workspace/secondary', onUseSkill);
     expect(runButton()?.disabled).toBe(false);
+  });
+
+  it('does not target the primary workspace from a live session', async () => {
+    const onUseSkill = vi.fn();
+    connectionState.current.sessionId = 'live-session';
+    connectionState.current.workspaceCwd = undefined;
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'ok',
+        name: 'deploy',
+        description: 'Deploy from the primary workspace',
+        level: 'project',
+        modelInvocable: true,
+      },
+    ];
+
+    await renderPage(undefined, onUseSkill);
+    await openSkill('deploy');
+
+    expect(runButton()?.disabled).toBe(true);
+    runButton()?.click();
+    expect(onUseSkill).not.toHaveBeenCalled();
+
+    const actions = container.querySelector<HTMLElement>(
+      '[data-testid="skill-actions"]',
+    );
+    await act(async () => {
+      actions!.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    const disable = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.trim() === 'Disable');
+    expect(disable).toBeDefined();
+    await act(async () => {
+      disable!.click();
+      await Promise.resolve();
+    });
+    expect(skillsState.current.setEnabled).toHaveBeenCalledWith(
+      'deploy',
+      false,
+      { clientId: undefined },
+    );
   });
 
   it('shows the authoritative enabled state after a normal toggle', async () => {

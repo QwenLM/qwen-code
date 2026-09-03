@@ -198,7 +198,9 @@ export function useDaemonSkills(options: DaemonSkillsOptions = {}) {
   }, [ensureRuntime, reloadConfig, splitRuntimeAvailable]);
   const signals = useDaemonWorkspaceEventSignals();
   const version = signals
-    ? signals.settingsVersion + signals.extensionsVersion
+    ? signals.settingsVersion +
+      signals.extensionsVersion +
+      signals.skillsVersion
     : undefined;
   useWorkspaceEventReload(version, reloadConfig, config.data !== undefined);
   useWorkspaceEventReload(version, reloadRuntime, runtime.data !== undefined);

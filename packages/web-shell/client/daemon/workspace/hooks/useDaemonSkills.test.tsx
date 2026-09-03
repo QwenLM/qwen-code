@@ -51,6 +51,15 @@ const mocks = vi.hoisted(() => {
       },
     },
     legacyStatus,
+    signals: {
+      current: undefined as
+        | undefined
+        | {
+            settingsVersion: number;
+            skillsVersion: number;
+            extensionsVersion: number;
+          },
+    },
     workspaceClient,
   };
 });
@@ -59,7 +68,7 @@ vi.mock('../DaemonWorkspaceProvider.js', () => ({
   useDaemonWorkspace: () => mocks.context.current,
 }));
 vi.mock('../../session/DaemonSessionProvider.js', () => ({
-  useDaemonWorkspaceEventSignals: () => undefined,
+  useDaemonWorkspaceEventSignals: () => mocks.signals.current,
 }));
 
 const { useDaemonSkills } = await import('./useDaemonSkills.js');
@@ -83,6 +92,7 @@ describe('useDaemonSkills', () => {
     document.body.appendChild(container);
     root = createRoot(container);
     result = undefined;
+    mocks.signals.current = undefined;
     mocks.context.current.capabilities.features = [];
     for (const fn of [
       ...Object.values(mocks.actions),
@@ -195,6 +205,25 @@ describe('useDaemonSkills', () => {
     mocks.context.current.capabilities.features = [];
     await renderHook();
     expect(result?.skills.map((skill) => skill.name)).toEqual(['legacy']);
+  });
+
+  it('reloads Skills when the workspace skill version changes', async () => {
+    mocks.signals.current = {
+      settingsVersion: 0,
+      skillsVersion: 0,
+      extensionsVersion: 0,
+    };
+
+    await renderHook();
+    expect(mocks.actions.loadSkillsStatus).toHaveBeenCalledOnce();
+
+    mocks.signals.current = {
+      ...mocks.signals.current,
+      skillsVersion: 1,
+    };
+    await renderHook();
+
+    expect(mocks.actions.loadSkillsStatus).toHaveBeenCalledTimes(2);
   });
 
   it('drops a stopped runtime catalog and prepares a new epoch', async () => {
