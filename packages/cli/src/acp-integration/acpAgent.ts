@@ -6395,10 +6395,11 @@ class QwenAgent implements Agent {
   private async buildWorkspaceMcpStatus(
     config: Config,
     scope: 'workspace' | 'session' = 'workspace',
+    sessionSettings?: LoadedSettings,
   ): Promise<ServeWorkspaceMcpStatus> {
     try {
       const workspaceCwd = this.workspaceCwd(config);
-      const settings = loadSettings(config.getTargetDir());
+      const settings = sessionSettings ?? loadSettings(config.getTargetDir());
       const userServers = settings.user?.settings.mcpServers ?? {};
       const systemDefaultServers =
         settings.systemDefaults?.settings.mcpServers ?? {};
@@ -7183,11 +7184,12 @@ class QwenAgent implements Agent {
   private async buildSessionResourcesStatus(
     sessionId: string,
   ): Promise<ServeSessionResourcesStatus> {
-    const config = this.sessionOrThrow(sessionId).getConfig();
-    const settings = loadSettingsCached(config.getTargetDir());
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    const settings = session.getSettings();
     const [skills, mcp] = await Promise.all([
       this.buildWorkspaceSkillsStatus(config, settings),
-      this.buildWorkspaceMcpStatus(config, 'session'),
+      this.buildWorkspaceMcpStatus(config, 'session', settings),
     ]);
     return {
       v: STATUS_SCHEMA_VERSION,

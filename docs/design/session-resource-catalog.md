@@ -55,8 +55,10 @@ pool, budget, and discovery-error fields because those sources are not keyed by
 the selected session.
 
 The route is observational. It does not initialize MCP discovery, attach a
-client, reload settings, or create a runtime. Unknown, persisted-only, draining,
-or otherwise unavailable sessions retain the existing owner-routed failure
+client, reload settings, or create a runtime. It reuses the `LoadedSettings`
+captured when the selected live Session was assembled instead of loading from a
+possibly relocated target directory. Unknown, persisted-only, draining, or
+otherwise unavailable sessions retain the existing owner-routed failure
 semantics. Virtual subagent sessions are out of scope.
 
 ## Ownership and transport

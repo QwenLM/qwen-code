@@ -7038,6 +7038,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         disabled: ['session-locked-skill'],
       },
     });
+    Object.assign(agentSettings, {
+      systemDefaults: {
+        settings: { mcpServers: { 'session-mcp': {} } },
+      },
+    });
+    Object.assign(sessionSettings, {
+      user: {
+        settings: { mcpServers: { 'session-mcp': {} } },
+      },
+    });
     vi.mocked(sessionSettings.forScope).mockImplementation((scope) => {
       const scopedSettings = {
         mcpServers: {},
@@ -7051,9 +7061,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         path: `/settings/${scope}.json`,
       };
     });
-    vi.mocked(loadSettings).mockImplementation((cwd?: string) =>
-      cwd === '/work/session-only' ? sessionSettings : agentSettings,
-    );
+    vi.mocked(loadSettings).mockReturnValue(agentSettings);
     const workspaceMcpManager = {
       getServerStatus: vi.fn((name: string) =>
         name === 'disabled' || name === 'session-mcp'
@@ -7381,7 +7389,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sessions: Map<string, unknown>;
       }
     ).sessions;
-    agentSessions.set('session-only', { getConfig: () => sessionConfig });
+    agentSessions.set('session-only', {
+      getConfig: () => sessionConfig,
+      getSettings: () => sessionSettings,
+    });
     agentSessions.set('other-session', {
       getConfig: () =>
         ({
@@ -7713,6 +7724,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           expect.objectContaining({
             name: 'session-mcp',
             mcpStatus: 'disconnected',
+            configOrigin: 'user_settings',
             resourceCount: 0,
             promptCount: 0,
           }),
@@ -7744,6 +7756,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'authenticationError',
     );
     expect(vi.mocked(MCPOAuthTokenStorage)).toHaveBeenCalledTimes(1);
+    expect(loadSettings).toHaveBeenCalledWith('/work/status');
+    expect(loadSettings).not.toHaveBeenCalledWith('/work/session-only');
     expect(JSON.stringify(sessionResources)).not.toContain('docs');
     expect(JSON.stringify(sessionResources)).not.toContain('review');
     expect(JSON.stringify(sessionResources)).not.toContain('session-secret');

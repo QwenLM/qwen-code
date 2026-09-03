@@ -1969,6 +1969,14 @@ export interface DaemonSessionResourcesStatus {
   sessionId: string;
   workspaceCwd: string;
   skills: DaemonWorkspaceSkillsStatus;
+  /**
+   * Session-scoped MCP snapshot. Status, discovery, and accounting come from
+   * the selected session's manager; workspace-owned pool, budget, and
+   * discovery-error enrichments are absent. The name-keyed `hasOAuthTokens`,
+   * `requiresAuth`, `authenticationState`, and `authenticationError` fields
+   * are always absent; consumers must not treat their absence as a negative
+   * authentication state.
+   */
   mcp: DaemonWorkspaceMcpStatus;
 }
 
