@@ -60,8 +60,6 @@ if (process.env.CI && process.platform !== 'win32' && !zipAvailable) {
 const itWithZip = zipAvailable ? it : it.skip;
 const itOnUnixWithZip = zipAvailable ? itOnUnix : it.skip;
 
-vi.setConfig({ testTimeout: 30_000 });
-
 describe('installation scripts', () => {
   it('keeps the Linux/macOS installer lightweight', () => {
     const script = readScript(

@@ -23763,8 +23763,7 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // Eight runGate arms, each a fixture repo plus a full gate-script
     // replay under bash — this outgrows vitest's 5s default on slow
     // runners (it timed out at ~6.4s on the PR head), so it runs on the
-    // suite ceiling in scripts/tests/vitest.config.ts like every other
-    // subprocess-spawning test here.
+    // suite ceiling in scripts/tests/vitest.config.ts.
   });
 
   it('rejects a handoff written over a dirty workspace, non-retryably', () => {

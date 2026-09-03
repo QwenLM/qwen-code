@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -227,18 +227,38 @@ describe('scripts suite timeout ceiling', () => {
     // The bash-spawning workflow suites are the leg that kept a flat ceiling
     // on the shared pool. Re-imported under each stub: the config reads
     // RUNNER_NAME at import time and the static import above already
-    // resolved the ambient branch.
+    // resolved the ambient branch. The unset arm is the config's only witness
+    // for its optional chaining: CI always sets RUNNER_NAME, so without that
+    // arm dropping the `?` stays green here and breaks every local load.
     for (const [runnerName, expected] of [
       ['ecs-qwen-parity', 60_000],
       ['ubuntu-latest-runner', 30_000],
+      [undefined, 30_000],
     ] as const) {
       vi.stubEnv('RUNNER_NAME', runnerName);
       vi.resetModules();
       const mod = await import('./vitest.config.js');
-      expect(mod.default.test?.testTimeout, `RUNNER_NAME=${runnerName}`).toBe(
-        expected,
-      );
+      expect(
+        mod.default.test?.testTimeout,
+        `RUNNER_NAME=${runnerName ?? '<unset>'}`,
+      ).toBe(expected);
       vi.unstubAllEnvs();
     }
+  });
+
+  it('leaves no file-level runtime override shadowing that ceiling', () => {
+    // The pin above re-imports the config module, so it cannot see an override
+    // a suite applies to itself: that lands after the project config resolves,
+    // outranks it, and quietly holds the suite at the old flat ceiling on the
+    // shared pool while this file reads green.
+    const here = new URL('.', import.meta.url);
+    const shadowing = readdirSync(fileURLToPath(here))
+      .filter((name) => /\.test\.[jt]s$/.test(name))
+      .filter((name) =>
+        /vi\.setConfig\(\s*\{\s*testTimeout/.test(
+          readFileSync(fileURLToPath(new URL(name, here)), 'utf8'),
+        ),
+      );
+    expect(shadowing).toEqual([]);
   });
 });
