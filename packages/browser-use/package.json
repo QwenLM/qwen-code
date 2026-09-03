@@ -23,6 +23,8 @@
     "dist/index.d.ts",
     "dist/core/primitives.d.ts",
     "dist/sdk/types.d.ts",
+    "dist/native-host.js",
+    "dist/scripts/native-host-setup.js",
     "NOTICE"
   ],
   "engines": {
@@ -30,6 +32,9 @@
   },
   "scripts": {
     "build": "node build.mjs && tsc -p tsconfig.declarations.json",
+    "native-host:install": "node dist/scripts/native-host-setup.js install",
+    "native-host:status": "node dist/scripts/native-host-setup.js status",
+    "native-host:uninstall": "node dist/scripts/native-host-setup.js uninstall",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

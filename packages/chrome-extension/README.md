@@ -1,16 +1,19 @@
 # @qwen-code/chrome-bridge
 
 A Chrome extension that brings Qwen Code into the browser as a thin client of a
-local [`qwen serve`](../../docs/users/qwen-serve.md) daemon — no Native
-Messaging host to install.
+local [`qwen serve`](../../docs/users/qwen-serve.md) daemon and provides the
+Chrome side of Browser Use.
 
-It does two things:
+It provides:
 
 - **Side panel** — frames the daemon's Web Shell (chat + tools), the same UI the
   daemon serves to the browser. The panel has no UI of its own.
 - **Service worker** — a CDP-tunnel pipe. It connects to the daemon's `/acp`
   WebSocket and bridges `cdp_*` frames into `chrome.debugger`, so the agent can
   drive the real browser when an external CDP MCP adapter is configured.
+- **Browser Use bridge** — connects to the local `com.qwen.browser` Native
+  Messaging host, lists open HTTP(S) tabs, and forwards Playwright CDP traffic
+  for tabs claimed by Browser Use.
 - **Readiness warning** — the framed Web Shell stays usable for chat while a
   small status message distinguishes a disabled CDP tunnel from a missing
   browser automation adapter.
@@ -45,11 +48,24 @@ Do not replace this command with `--open-with-auth`. That mode delivers its gene
 Once the daemon is reachable and permits framing, the side panel swaps the
 welcome screen for the chat UI automatically.
 
-## Browser Automation Tools
+## Browser Use
 
-The command above only makes the side panel and Web Shell available. Browser
-automation tools such as console/network inspection, screenshots, and page
-clicking require an explicit external MCP adapter command:
+Browser Use uses the separate `@qwen-code/browser-use` package and Qwen's
+standard Node REPL. On macOS and Linux, its first initialization registers the
+local Native Messaging host. It does not require `qwen serve`, does not expose
+a Chrome debugging port, and supports one active Browser Use session in this
+release.
+
+Installing the Chrome extension authorizes Browser Use to list and claim open
+top-level HTTP(S) tabs. Its declared `history` permission supports explicit,
+bounded history queries. The existing toolbar action and side panel continue to
+open the Qwen UI.
+
+## Web Shell CDP tunnel
+
+The `qwen serve` command above only makes the side panel and Web Shell
+available. Browser automation through the Web Shell's older CDP tunnel still
+requires an explicit external MCP adapter command:
 
 ```bash
 QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \

@@ -156,17 +156,32 @@ describe('ChromeExtensionTransport', () => {
       for (const message of decoder.push(chunk)) {
         const request = message as { id: string; method: string };
         socket.write(
-          encodeFrame({
-            type: 'response',
-            id: request.id,
-            ok: true,
-            result: { method: request.method },
-          }),
+          encodeFrame(
+            request.method === 'conflict'
+              ? {
+                  type: 'response',
+                  id: request.id,
+                  ok: false,
+                  error: {
+                    code: 'TAB_DEBUGGER_CONFLICT',
+                    message: 'Another debugger is already attached',
+                  },
+                }
+              : {
+                  type: 'response',
+                  id: request.id,
+                  ok: true,
+                  result: { method: request.method },
+                },
+          ),
         );
       }
     });
     await expect(transport.request('ping')).resolves.toEqual({
       method: 'ping',
+    });
+    await expect(transport.request('conflict')).rejects.toMatchObject({
+      code: 'TAB_DEBUGGER_CONFLICT',
     });
     const events: unknown[] = [];
     transport.onEvent((event) => events.push(event));

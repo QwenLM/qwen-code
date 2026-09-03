@@ -92,6 +92,8 @@ styles:
 `tab.playwright` is used when an element can be described semantically.
 `tab.dom_cua` is used when the model identifies an element in a DOM snapshot.
 `tab.cua` is used when the target is identified visually in a screenshot.
+The extension renders a transient pointer overlay for coordinate mouse input,
+but that decoration is best-effort and never delays the input command itself.
 
 Input actions and navigation waits have separate deadlines. Locator clicks,
 locator key presses, and DOM CUA clicks disable Playwright's implicit
@@ -182,6 +184,10 @@ does not maintain a separate download state machine.
 The Qwen control plane retains operations that are not CDP, including
 `openTabs`, `claimTab`, `session.name`, and `history.query`.
 
+Native Host messages sent to Chrome are limited to 1 MiB. Larger
+backend-to-extension messages are split into bounded protocol chunks and
+reassembled by the extension before dispatch.
+
 ## Session model
 
 The Node Kernel directly owns the local Chrome extension transport:
@@ -196,11 +202,19 @@ The Node Kernel directly owns the local Chrome extension transport:
 - closing and reinitializing Browser Use creates a new SDK object generation;
   handles retained from the closed generation remain stale.
 
-When the backend session disappears, Native Host socket loss is reported to the
-extension even if the Chrome Native Messaging port remains connected for
-retry. The extension detaches the session's controlled tabs, removes Browser
-Use overlays, clears ownership and derived-tab state, and ungroups managed tabs
-without closing them.
+Browser Use does not add a polling heartbeat to the extension service worker.
+The active `runtime.connectNative()` port keeps the worker alive on Chrome 105
+and later, and an active `chrome.debugger` session provides an additional
+keepalive on Chrome 118 and later. This differs from the separate `/cdp`
+WebSocket bridge and follows Chrome's documented extension service-worker
+lifecycle. A real-Chrome session must remain usable after more than 60 seconds
+without Browser Use traffic.
+
+When the backend socket disappears after connecting, the Native Host exits and
+Chrome closes its Native Messaging port. The extension handles that port
+disconnect by detaching the session's controlled tabs, removing Browser Use
+overlays, clearing ownership and derived-tab state, ungrouping managed tabs
+without closing them, and reconnecting the Native Host for a future backend.
 
 The first release adds no separate Browser Use authorization or process
 authentication layer.

@@ -578,6 +578,8 @@ function bridgeRuntimeErrorCode(code: string | undefined): RuntimeErrorCode {
       return 'UNSUPPORTED_TAB';
     case 'PERMISSION_REQUIRED':
       return 'PERMISSION_REQUIRED';
+    case 'TAB_DEBUGGER_CONFLICT':
+      return 'TAB_DEBUGGER_CONFLICT';
     default:
       return 'OPERATION_FAILED';
   }
