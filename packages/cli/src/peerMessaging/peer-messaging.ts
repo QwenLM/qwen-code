@@ -26,6 +26,7 @@ import {
 } from './env.js';
 import {
   type ApprovalMode,
+  canonicalizeMsgId,
   createDebugLogger,
   formatPeerDisplay,
   formatPeerEnvelope,
@@ -95,6 +96,11 @@ export interface PeerReceipt {
 export interface PeerMessagingOptions {
   getApprovalMode: () => ApprovalMode | null;
   getPolicySetting: () => InboundPolicy | undefined;
+  /**
+   * How long a held message waits, in milliseconds, or null for "until
+   * the session ends". Omitted in tests, which take the default.
+   */
+  getHeldExpiryMs?: () => number | null;
   updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
     ipcToken?: string,
@@ -186,6 +192,9 @@ export class PeerMessaging {
     const gate = new InboundGate({
       getApprovalMode: options.getApprovalMode,
       getPolicySetting: options.getPolicySetting,
+      ...(options.getHeldExpiryMs !== undefined
+        ? { getHeldExpiryMs: options.getHeldExpiryMs }
+        : {}),
       getSessionId: options.getSessionId,
       deliver: (frame, origin) => messaging.deliver(frame, origin.selfSent),
       reportStatus: (frame, status) => {
@@ -297,6 +306,14 @@ export class PeerMessaging {
   }
 
   /**
+   * How long a held message has to live, in milliseconds, or null when
+   * holds do not expire. Used by `/peers` to show what is left.
+   */
+  getHeldExpiryMs(): number | null {
+    return this.gate?.getHeldExpiryMs() ?? null;
+  }
+
+  /**
    * Remember the held entries the `/peers` listing just showed the user.
    *
    * Accept/deny decisions are bound to this snapshot: the held set moves
@@ -315,20 +332,56 @@ export class PeerMessaging {
     }));
   }
 
-  /** True when the held set no longer matches the last recorded listing. */
+  /**
+   * True when the held set no longer matches the last recorded listing.
+   *
+   * Entries *leaving* the set are not a change. The expiry timer removes
+   * them with no peer or user activity -- a fourth mover the rationale
+   * above does not name -- and a shrinking set can never make a printed
+   * handle resolve to a different message: `resolveHeld` prefix-matches
+   * over the current set, so removing entries only narrows it. Bouncing
+   * those refuses a decision that would have been correct, and tells the
+   * user the list changed when what they can still uniquely name is
+   * exactly what they reviewed.
+   *
+   * Dropping an expired entry is safe because the gate tombstones it
+   * before it leaves the set, so a re-admitted id arrives with a fresh
+   * `heldAt` and still mismatches the pin below.
+   *
+   * What must still bounce: an arrival, and a re-sent id whose body may
+   * have been swapped, which the `heldAt` pin is what catches.
+   */
   heldSetChangedSinceListing(): boolean {
     const listed = this.listedHeld;
     if (listed === null) return true;
-    const held = this.getHeld();
-    return (
-      held.length !== listed.length ||
-      held.some((entry, index) => {
-        const snapshot = listed[index];
-        return (
-          entry.frame.msgId !== snapshot.id || entry.heldAt !== snapshot.heldAt
-        );
-      })
+    const pinned = new Map(listed.map((entry) => [entry.id, entry.heldAt]));
+    const current = this.getHeld();
+    if (current.some((entry) => pinned.get(entry.frame.msgId) !== entry.heldAt))
+      return true;
+
+    // A departure is normally harmless -- `resolveHeld` prefix-matches
+    // over the current set, so a smaller set only narrows what a printed
+    // handle can mean. The exception is an id that *extends* the departed
+    // one: `msgId` is peer-chosen and only shape-checked, so a peer can
+    // park `abc` beside `abc12345`. While both are held the handles are
+    // distinct, and `resolveHeld`'s exact-match tier gives `abc` to the
+    // shorter. Once `abc` expires, that same handle falls through to
+    // prefix-matching and silently decides `abc12345` -- a different
+    // message than the one the user reviewed, released under the reviewed
+    // one's handle.
+    //
+    // Canonicalized the way `resolveHeld` canonicalizes, or the check
+    // would miss the dashed forms it matches on.
+    const liveIds = current.map((entry) =>
+      canonicalizeMsgId(entry.frame.msgId),
     );
+    const liveSet = new Set(liveIds);
+    for (const id of pinned.keys()) {
+      const departed = canonicalizeMsgId(id);
+      if (liveSet.has(departed)) continue;
+      if (liveIds.some((live) => live.startsWith(departed))) return true;
+    }
+    return false;
   }
 
   decide(
