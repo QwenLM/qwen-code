@@ -9886,10 +9886,12 @@ describe('DaemonSessionProvider', () => {
     // scheduler. It only has the event stream to go on, and a single tool call
     // routinely runs far longer than the passive settle window without
     // emitting anything.
-    function createObservedSparseTurnSession(silentToolGap: {
-      promise: Promise<void>;
-    }) {
+    function createObservedSparseTurnSession(
+      silentToolGap: { promise: Promise<void> },
+      sessionId?: string,
+    ) {
       return createMockSession({
+        sessionId,
         events: async function* observedSparseTurn(
           opts: { signal?: AbortSignal } = {},
         ) {
@@ -10139,6 +10141,125 @@ describe('DaemonSessionProvider', () => {
         });
         expect(promptStatus).toBe('idle');
         expect(streamingState).toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('settles a restored prompt when the daemon reports the turn finished', async () => {
+      vi.useFakeTimers();
+      try {
+        // Refreshing mid-turn re-attaches to the running prompt via /load. If
+        // the terminal event then never arrives (dropped stream, daemon
+        // restart mid-turn), the daemon's live-state flip is the only settle
+        // signal left — it must settle the restored prompt too, not just the
+        // pure-observer case (#9487).
+        const session = createMockSession({
+          hasActivePrompt: true,
+          events: async function* restoredTurnNeverCompletes(
+            opts: { signal?: AbortSignal } = {},
+          ) {
+            yield {
+              id: 9,
+              v: 1,
+              type: 'session_update',
+              originatorClientId: 'client-other',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'starting' },
+                },
+              },
+            };
+            await new Promise<void>((resolve) => {
+              if (opts.signal?.aborted) {
+                resolve();
+                return;
+              }
+              opts.signal?.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+            });
+          },
+        });
+        sdkMocks.sessions.push(session);
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(false);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
+        expect(streamingState).toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps daemon authority across a switch to another running turn', async () => {
+      vi.useFakeTimers();
+      try {
+        // The host bridge publishes per-session live values and only
+        // re-publishes on change. Switching between two sessions that are
+        // both running keeps the published value `true`, so the provider must
+        // carry its authority across the switch instead of resetting it
+        // (#9487).
+        const gapA = createDeferred<void>();
+        const gapB = createDeferred<void>();
+        sdkMocks.sessions.push(
+          createObservedSparseTurnSession(gapA, 'session-a'),
+        );
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+
+        // Session B is running too, so the bridge's published value does not
+        // change across the switch and nothing re-publishes.
+        sdkMocks.sessions.push(
+          createObservedSparseTurnSession(gapB, 'session-b'),
+        );
+        let switched: Promise<void> | undefined;
+        act(() => {
+          switched = requireActions(actions).loadSession('session-b');
+        });
+        if (!switched) throw new Error('Session switch was not started');
+        await act(async () => {
+          await switched;
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        // A silent tool gap long past the passive settle window on B.
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+        expect(streamingState).not.toBe('idle');
       } finally {
         vi.useRealTimers();
       }

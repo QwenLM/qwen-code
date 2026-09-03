@@ -329,13 +329,74 @@ describe('createDaemonSessionActions', () => {
     it('leaves a locally submitted prompt alone', () => {
       // This browser owns the prompt, so its own terminal handling settles it;
       // a lagging live-state sample must not cut the turn short.
+      const session = createMockSession('session-local');
       const { actions, setPromptStatus } = createActionsHarness({
+        session,
+        activePrompts: new Map([
+          [session.sessionId, { controller: new AbortController() }],
+        ]),
         hasSessionActivePrompt: () => true,
       });
 
       actions.setDaemonActivePrompt(true);
       actions.setDaemonActivePrompt(false);
       expect(setPromptStatus).not.toHaveBeenCalled();
+    });
+
+    it('settles a restored prompt the event stream can no longer settle', () => {
+      // A refreshed page re-attached to a running prompt has no local terminal
+      // handling for it — the event stream is its only settle path. When the
+      // daemon reports the turn finished, the backstop must settle the prompt
+      // instead of deferring to a terminal event that never arrived (#9487).
+      const session = createMockSession('session-restored');
+      const settleRestoredActivePrompt = vi.fn();
+      const { actions, setPromptStatus } = createActionsHarness({
+        session,
+        hasSessionActivePrompt: () => true,
+        settleRestoredActivePrompt,
+      });
+
+      actions.setDaemonActivePrompt(true);
+      actions.setDaemonActivePrompt(false);
+      expect(settleRestoredActivePrompt).toHaveBeenCalledTimes(1);
+      expect(setPromptStatus).toHaveBeenCalledWith('idle');
+    });
+
+    it('keeps the armed passive timer when no assistant block is active', () => {
+      // The transcript batch can still flush a block after this settle; the
+      // armed passive timer is then the only closer left, so the backstop
+      // must not cancel it (#9487).
+      const passiveAssistantDoneTimerRef = {
+        current: 123 as ReturnType<typeof setTimeout>,
+      };
+      const { actions, setPromptStatus, store } = createActionsHarness({
+        passiveAssistantDoneTimerRef,
+      });
+
+      actions.setDaemonActivePrompt(true);
+      actions.setDaemonActivePrompt(false);
+      expect(setPromptStatus).toHaveBeenCalledWith('idle');
+      expect(store.dispatch).not.toHaveBeenCalled();
+      expect(passiveAssistantDoneTimerRef.current).toBe(123);
+    });
+
+    it('closes the active assistant block when settling', () => {
+      const passiveAssistantDoneTimerRef = {
+        current: 123 as ReturnType<typeof setTimeout>,
+      };
+      const { actions, setPromptStatus, store } = createActionsHarness({
+        getSnapshot: () => ({ activeAssistantBlockId: 'block-1' }),
+        passiveAssistantDoneTimerRef,
+      });
+
+      actions.setDaemonActivePrompt(true);
+      actions.setDaemonActivePrompt(false);
+      expect(store.dispatch).toHaveBeenCalledWith({
+        type: 'assistant.done',
+        reason: 'daemon_idle',
+      });
+      expect(passiveAssistantDoneTimerRef.current).toBeUndefined();
+      expect(setPromptStatus).toHaveBeenCalledWith('idle');
     });
   });
 
@@ -4085,9 +4146,14 @@ function createActionsHarness(
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
     daemonActivePromptRef?: { current: boolean | undefined };
+    getSnapshot?: () => { activeAssistantBlockId: string | undefined };
     hasSessionActivePrompt?: () => boolean;
     manualSessionClearRef?: { current: boolean };
+    passiveAssistantDoneTimerRef?: {
+      current: ReturnType<typeof setTimeout> | undefined;
+    };
     pendingSessionLoadRef?: { current: PendingSessionLoad | undefined };
+    settleRestoredActivePrompt?: ReturnType<typeof vi.fn>;
     restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
@@ -4115,11 +4181,19 @@ function createActionsHarness(
       current: PendingSessionLoad | undefined;
     });
   const setPromptStatus = vi.fn();
+  const settleRestoredActivePrompt = opts.settleRestoredActivePrompt ?? vi.fn();
+  const passiveAssistantDoneTimerRef =
+    opts.passiveAssistantDoneTimerRef ??
+    ({ current: undefined } as {
+      current: ReturnType<typeof setTimeout> | undefined;
+    });
   const store = {
     reset: vi.fn(),
     appendLocalUserMessage: vi.fn(),
     dispatch: vi.fn(),
-    getSnapshot: vi.fn(() => ({ activeAssistantBlockId: undefined })),
+    getSnapshot: vi.fn(
+      opts.getSnapshot ?? (() => ({ activeAssistantBlockId: undefined })),
+    ),
   };
   const actions = createDaemonSessionActions({
     store: store as never,
@@ -4132,8 +4206,9 @@ function createActionsHarness(
     heartbeatSupportedRef: { current: false },
     manualSessionClearRef: opts.manualSessionClearRef ?? { current: false },
     skipNextCleanupDetachSessionRef: { current: undefined },
-    passiveAssistantDoneTimerRef: { current: undefined },
+    passiveAssistantDoneTimerRef,
     daemonActivePromptRef: opts.daemonActivePromptRef ?? { current: undefined },
+    settleRestoredActivePrompt,
     getCreateSessionRequest: () => ({ workspaceCwd: '/workspace' }),
     createDetachedSession: (opts.createDetachedSession ??
       vi.fn(
@@ -4172,9 +4247,11 @@ function createActionsHarness(
     actions,
     activePromptsRef,
     getConnection: () => connection,
+    passiveAssistantDoneTimerRef,
     pendingSessionLoadRef,
     replaceConnection,
     sessionRef,
+    settleRestoredActivePrompt,
     setPromptStatus,
     store,
   };

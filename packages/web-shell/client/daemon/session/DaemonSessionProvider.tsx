@@ -1181,6 +1181,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [workspaceEventSignals, setWorkspaceEventSignals] =
     useState<DaemonWorkspaceEventSignals>(INITIAL_WORKSPACE_EVENT_SIGNALS);
   const hasCurrentSessionActivePromptRef = useRef<() => boolean>(() => false);
+  const settleCurrentSessionRestoredPromptRef = useRef<() => void>(() => {});
   const mountedRef = useRef(false);
 
   useEffect(() => {
@@ -1979,9 +1980,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ) {
               setPromptStatus('idle');
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-              // The hint describes the session we are leaving; a stale `true`
-              // must not keep the next session's indicator alive.
-              daemonActivePromptRef.current = undefined;
+              // Do not reset daemonActivePromptRef here: the host bridge only
+              // re-publishes when the live value changes, so switching between
+              // two sessions with the same value (e.g. both running) would
+              // leave the entered session without daemon authority — the
+              // exact mid-turn indicator loss this PR removes. The value is
+              // per-session, so carrying it across the switch is correct for
+              // the session being entered (#9487).
               needsStoreReset = true;
             } else if (previousSessionId !== undefined) {
               const replaySnapshotEventCount =
@@ -2066,6 +2071,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             activePromptsRef.current.has(`${activeSession.sessionId}:shell`);
           hasCurrentSessionActivePrompt = hasSessionActivePrompt;
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
+          settleCurrentSessionRestoredPromptRef.current =
+            settleRestoredActivePrompt;
           setPromptStatus((current) =>
             hasSessionActivePrompt()
               ? 'streaming'
@@ -2881,6 +2888,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
+            settleCurrentSessionRestoredPromptRef.current = () => {};
             setConnection((current) => ({
               ...current,
               status: 'connecting',
@@ -3224,6 +3232,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   session = undefined;
                   sessionRef.current = undefined;
                   hasCurrentSessionActivePromptRef.current = () => false;
+                  settleCurrentSessionRestoredPromptRef.current = () => {};
                   setConnection((current) => ({
                     ...current,
                     status: 'connecting',
@@ -3328,6 +3337,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
+            settleCurrentSessionRestoredPromptRef.current = () => {};
             return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
@@ -3341,7 +3351,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 // observers. When a local/restored prompt is still active, the
                 // daemon may continue running while we reconnect via
                 // Last-Event-ID, so keep the prompt in streaming state until a
-                // real turn_complete/turn_error/prompt_cancelled arrives.
+                // real turn_complete/turn_error/prompt_cancelled arrives. The
+                // daemon's live prompt state is the same authority: while it
+                // reports the turn in flight, a dropped stream (proxy idle
+                // timeout mid silent tool gap) must not settle the pane — the
+                // resume finds no new events inside the gap to revive it
+                // (#9487).
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 setPromptStatus('idle');
                 dispatchTranscriptNow({
@@ -3489,7 +3504,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           }
           // Retriable transport failures are not prompt terminal events. Keep
           // restored/local prompts in streaming state until the daemon sends
-          // turn_complete, turn_error, or prompt_cancelled.
+          // turn_complete, turn_error, or prompt_cancelled — and likewise an
+          // observed turn the daemon still reports in flight: the reconnect
+          // resumes into the same silent gap with no events to revive a
+          // settled indicator (#9487).
           if (isAuthFailure || isTerminal || !hasCurrentSessionActivePrompt()) {
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
@@ -3743,6 +3761,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
         hasCurrentSessionActivePromptRef.current = () => false;
+        settleCurrentSessionRestoredPromptRef.current = () => {};
         setPromptStatus('idle');
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       }
@@ -3974,8 +3993,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         daemonActivePromptRef,
         hasSessionActivePrompt: () =>
           hasCurrentSessionActivePromptRef.current(),
+        settleRestoredActivePrompt: () =>
+          settleCurrentSessionRestoredPromptRef.current(),
         resetCurrentSessionActivePrompt: () => {
           hasCurrentSessionActivePromptRef.current = () => false;
+          settleCurrentSessionRestoredPromptRef.current = () => {};
         },
         restartEventStream: (sessionId: string) => {
           const eventStream = eventStreamRef.current;

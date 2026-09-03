@@ -193,6 +193,14 @@ export interface CreateDaemonSessionActionsArgs {
    * silence-based heuristics stay in charge.
    */
   daemonActivePromptRef: RefBox<boolean | undefined>;
+  /**
+   * Settle the current session's restored-prompt snapshot (the `hasActivePrompt`
+   * flag `/load` returned). A restored prompt has no terminal handling in this
+   * browser — it can only be settled by the event stream — so the
+   * `setDaemonActivePrompt` backstop settles it when the daemon reports the
+   * turn finished. No-op when nothing is restored.
+   */
+  settleRestoredActivePrompt: () => void;
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
     workspaceCwd?: string,
@@ -348,6 +356,7 @@ export function createDaemonSessionActions({
   skipNextCleanupDetachSessionRef,
   passiveAssistantDoneTimerRef,
   daemonActivePromptRef,
+  settleRestoredActivePrompt,
   getCreateSessionRequest,
   createDetachedSession,
   createDetachedStandaloneSession,
@@ -870,11 +879,25 @@ export function createDaemonSessionActions({
       // backstop for the ones that never arrive (dropped stream, daemon
       // restart mid-turn), so a pane held alive through silent tool gaps
       // cannot stay stuck on a turn the daemon already finished (#9487).
-      if (hasSessionActivePrompt()) return;
-      clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      // A prompt this browser submitted settles via its own terminal handling;
+      // a lagging live-state sample must not cut it short. A *restored* prompt
+      // (the /load snapshot after a refresh) has no local terminal handling —
+      // the event stream is its only settle path, which is exactly the failure
+      // this backstop covers — so settle it here rather than deferring to it.
+      const backstopSessionId = sessionRef.current?.sessionId;
+      const locallySubmitted =
+        backstopSessionId !== undefined &&
+        (activePromptsRef.current.has(backstopSessionId) ||
+          activePromptsRef.current.has(`${backstopSessionId}:shell`));
+      if (locallySubmitted) return;
+      settleRestoredActivePrompt();
       if (store.getSnapshot().activeAssistantBlockId) {
         store.dispatch({ type: 'assistant.done', reason: 'daemon_idle' });
+        clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       }
+      // No active block: the transcript batch (16ms) may still flush one after
+      // this settle. An armed passive timer is then the only closer left, so
+      // keep it; it sees the ref flipped to false and settles normally.
       setPromptStatus('idle');
     },
 
