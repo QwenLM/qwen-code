@@ -95,6 +95,7 @@ class PreparedResponseBudget {
       charge > availableBytes
     ) {
       throw new NdJsonQueueLimitError(
+        'prepared_response',
         this.limits.maxQueuedMessages,
         this.limits.maxQueuedBytes,
         charge,
@@ -180,6 +181,7 @@ class OutboundOperationBudget {
       charge > availableBytes
     ) {
       throw new NdJsonQueueLimitError(
+        'outbound_operation',
         this.limits.maxQueuedMessages,
         this.limits.maxQueuedBytes,
         charge,
