@@ -243,21 +243,44 @@ runtime can host, including standalone, Live, scheduled-task controller, and
 scheduled-task run sessions. A source-based override would miss background
 sessions whose persisted source is not `standalone`.
 
-The default `runQwenServe` runtime factory owns this wiring.
-`createAcpSessionBridge` exposes one private immutable attestation derived from
-its frozen child-environment overrides. The attestation is true only when the
-bridge will inject both the private parent capability and the exact
-Conversations marker into every ACP child it creates.
-`ConversationRuntimeManager` includes that attestation in its owned-runtime
-validation before it accepts an existing registered runtime or publishes a new
-candidate. A missing or false attestation rejects and disposes or quarantines
-the runtime as `conversation_runtime_unavailable`; it is never exposed to
-standalone, Live, scheduled-task, lifecycle, or maintenance callers.
+The default `runQwenServe` runtime factory owns this wiring. Its per-runtime
+channel factory is produced by `createSpawnChannelFactory`, which merges the
+factory's second argument into the actual child environment through
+`scrubChildEnv`. `createSpawnChannelFactory` marks every returned factory with
+a package-owned, immutable child-environment-forwarding capability;
+`defaultSpawnChannelFactory` carries the same capability because that helper
+creates it. The check uses the capability, not reference equality with the
+default factory, because `runQwenServe` supplies a separately configured
+factory to every runtime.
 
-An embedded runtime factory supplied through `createServeApp` must construct a
-bridge with the same attestation. Setting `provenance: 'live-conversation'`
-alone is insufficient. Test fakes may expose the attestation directly without
-spawning a child, but publication tests must still exercise the same check.
+`createAcpSessionBridge` derives one private immutable mandatory-lease
+attestation from the conjunction of two conditions: the frozen child-environment
+overrides carry the exact Conversations marker, and the selected
+`channelFactory` carries the forwarding capability. Immediately before each
+spawn, the bridge combines the frozen overrides with the fresh private parent
+capability in the factory-argument map, so an attested factory forwards both
+values to the child. A marker-shaped override map paired with an unattested
+custom factory that ignores the second argument does not attest.
+
+`ConversationRuntimeManager` includes the bridge attestation in its
+owned-runtime validation before it accepts an existing registered runtime or
+publishes a new candidate. A missing or false attestation is a static runtime
+contract violation: it rejects and disposes or quarantines the runtime as the
+existing non-retryable `conversation_root_compromised`, and the runtime is never
+exposed to standalone, Live, scheduled-task, lifecycle, or maintenance callers.
+
+An embedded runtime factory supplied through `createServeApp` must either use a
+factory returned by `createSpawnChannelFactory` or explicitly attest an
+equivalent custom factory at the factory level through the trusted embedding
+seam, then construct its bridge with the exact marker. An unattested custom
+factory remains valid for ordinary bridges but fails Conversations publication;
+setting `provenance: 'live-conversation'` or supplying a marker-shaped override
+map alone is insufficient. A test fake may deliberately attest its factory
+through the dedicated test seam without spawning a child, but publication tests
+must still exercise the conjunction rather than infer it from the bridge
+options' shape. This is a contract against accidental same-process miswiring,
+not a security boundary against embedding code that already has authority to
+construct arbitrary runtime objects.
 
 The ACP session must acquire the lease during config initialization before it
 reports successful creation or restore. It retains the lease until session
@@ -494,7 +517,7 @@ mixed-mode compatibility problem without serving the requested default.
 | The writer record is malformed or non-regular, or a transition claim remains     | `503 session_writer_unavailable` for that session                                                    |
 | A valid sealed record has matching transcript proof                              | Certified takeover, authoritative reload, then continue                                              |
 | A sealed record's transcript proof no longer matches                             | `409 session_transcript_changed` for that session                                                    |
-| A Conversations bridge lacks the mandatory-lease attestation                     | Reject and dispose or quarantine the runtime; `503 conversation_runtime_unavailable`                 |
+| A Conversations bridge lacks the mandatory-lease attestation                     | Reject and dispose or quarantine the runtime; non-retryable `503 conversation_root_compromised`      |
 | A live legacy runtime-owner record exists                                        | `503 conversation_runtime_in_use` for the standalone surface during migration                        |
 | Legacy ownership state is malformed, unsafe, or uncertain                        | Existing `conversation_runtime_ownership_compromised` or `conversation_runtime_unavailable` response |
 
@@ -589,15 +612,21 @@ for an ordinary runtime, and on for all runtimes; Conversations selects
 rejection without a private parent capability, capture before environment-file
 loading, user-level and project-level environment scrubbing, sandbox
 propagation, and isolation between primary, secondary, and Conversations bridge
-child environments. Runtime-publication coverage accepts the default
-Conversations bridge and a conforming test fake, rejects and disposes a new
-`live-conversation` candidate whose bridge does not attest to the mandatory
-marker, and rejects and quarantines an equivalent existing registered runtime.
-Standalone parent lifecycle and maintenance acquisitions must select the same
-`local` policy. Scheduler coverage verifies that the captured Conversations
-marker installs the unbound-durable-task skip before loading or catch-up
-detection, allows a task after it is bound to that session, and leaves ordinary
-workspace lock-owner behavior unchanged.
+child environments. Factory coverage verifies that both the default factory
+and each configured factory returned by `createSpawnChannelFactory` carry the
+forwarding capability and merge the bridge's second argument through
+`scrubChildEnv`. Bridge-attestation coverage accepts the exact marker with such
+a factory or a deliberately attested test fake, rejects the marker with an
+unattested factory that ignores its second argument, and rejects a capable
+factory when the marker is absent or wrong. Runtime-publication coverage accepts
+the conforming Conversations bridge, rejects and disposes a non-conforming new
+`live-conversation` candidate, and rejects and quarantines an equivalent
+existing registered runtime with non-retryable
+`conversation_root_compromised`. Standalone parent lifecycle and maintenance
+acquisitions must select the same `local` policy. Scheduler coverage verifies
+that the captured Conversations marker installs the unbound-durable-task skip
+before loading or catch-up detection, allows a task after it is bound to that
+session, and leaves ordinary workspace lock-owner behavior unchanged.
 
 Core lease coverage records and validates the Linux PID namespace, treats a
 missing reclaim identity as live, reclaims dead and PID-reused owners only in
