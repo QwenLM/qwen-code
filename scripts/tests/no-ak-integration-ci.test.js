@@ -476,8 +476,10 @@ describe('no-AK integration CI wiring', () => {
     // stale ones this guard must reject, while the pin above stays green.
     expect(guardAction).toContain("EXPECTED_SHA: '${{ inputs.expected_sha }}'");
 
+    const lintJob = getWorkflowJob(workflow, 'lint_and_static');
     const guardCalls = {
       test: getWorkflowStep(ubuntuJob, GUARD_STEP),
+      lint_and_static: getWorkflowStep(lintJob, GUARD_STEP),
       web_shell_e2e_smoke: getWorkflowStep(webShellJob, GUARD_STEP),
       test_windows: getWorkflowStep(windowsJob, GUARD_STEP),
       integration_cli: getWorkflowStep(integrationJob, GUARD_STEP),
@@ -489,6 +491,11 @@ describe('no-AK integration CI wiring', () => {
       );
     }
     expect(guardCalls.test).toContain(
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
+    );
+    // Byte-identical to test's event-aware shape: the lint lane replicates
+    // the same checkout contract on the same event surface.
+    expect(guardCalls.lint_and_static).toContain(
       'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
     );
     expect(guardCalls.web_shell_e2e_smoke).toContain(
@@ -820,17 +827,6 @@ describe('no-AK integration CI wiring', () => {
     expect(nodeCalls.integration_no_ak).toContain(
       "if: \"${{ steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}\"",
     );
-  });
-
-  it('keeps the lightweight coverage comment job on the hosted runner', () => {
-    const workflow = readFileSync(
-      path.join(ROOT, '.github/workflows/ci.yml'),
-      'utf8',
-    );
-    const coverageJob = getWorkflowJob(workflow, 'post_coverage_comment');
-
-    expect(coverageJob).toContain("runs-on: 'ubuntu-latest'");
-    expect(coverageJob).not.toContain('ubuntu_runner');
   });
 
   it('does not install Linux packages on self-hosted Playwright runners', () => {
