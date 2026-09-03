@@ -7642,7 +7642,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect.objectContaining({
           kind: 'skill',
           status: 'disabled',
-          name: 'gsd-config-only',
+          name: 'gsd-core:gsd-config-only',
           description: 'Config-only extension skill',
           level: 'extension',
           extensionName: 'gsd-core',
@@ -7653,7 +7653,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect.objectContaining({
           kind: 'skill',
           status: 'disabled',
-          name: 'gsd-config-only',
+          name: 'gsd-tools:gsd-config-only',
           description: 'Colliding config-only extension skill',
           level: 'extension',
           extensionName: 'gsd-tools',
@@ -7683,7 +7683,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ),
     ).toHaveLength(1);
     expect(
-      skills.skills.filter((skill) => skill.name === 'gsd-config-only'),
+      skills.skills.filter(
+        (skill) =>
+          skill.name === 'gsd-core:gsd-config-only' ||
+          skill.name === 'gsd-tools:gsd-config-only',
+      ),
     ).toHaveLength(2);
     expect(skillsAgain).toEqual(skills);
     expect(getCachedSkills).toHaveBeenCalledTimes(2);
