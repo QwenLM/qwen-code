@@ -28,6 +28,17 @@ describe('stripMessagePrefix', () => {
   });
 
   it.each([
+    ['@Qwen @bot hello', '@bot', 'hello'],
+    ['<@U1> <@BOT> hi', '<@BOT>', 'hi'],
+    ['@bot hello', '@bot', 'hello'],
+  ])('accepts %j under the @-leading prefix %j', (text, prefix, expected) => {
+    // Nothing rejects a prefix that itself starts with `@`, so the
+    // mention loop must stop at the prefix rather than eat it as one
+    // more mention token.
+    expect(stripMessagePrefix(text, prefix)).toBe(expected);
+  });
+
+  it.each([
     'please review 123',
     '/review',
     '/review   ',
@@ -71,6 +82,38 @@ describe('applyMessagePrefix', () => {
     expect(input.text).toBe(
       '[atMention=false] [Alice(abc)]: inspect this\n机器人 OPENID: BOT',
     );
+  });
+
+  it('strips the user segment, not a sender tag that repeats it', () => {
+    // Both the nick and the body are attacker-controlled on QQ, so a nick
+    // equal to the message body puts the first occurrence of displayText
+    // inside the sender tag. Splicing there would leave the prefix on the
+    // dispatched message and corrupt the tag.
+    const input = envelope({
+      text: '[atMention=false] [review: inspect this(abc)]: review: inspect this\n机器人 OPENID: BOT',
+      displayText: 'review: inspect this',
+      displayTextOffset: '[atMention=false] [review: inspect this(abc)]: '
+        .length,
+      alreadyPrefixed: true,
+    });
+
+    expect(applyMessagePrefix(input, 'review:')).toBe(true);
+    expect(input.text).toBe(
+      '[atMention=false] [review: inspect this(abc)]: inspect this\n机器人 OPENID: BOT',
+    );
+  });
+
+  it('refuses to guess when the display text appears twice and no offset is given', () => {
+    // Same shape without the adapter-supplied position: two candidate
+    // locations and no way to tell them apart, so the message is refused
+    // rather than rewritten at the wrong one.
+    const input = envelope({
+      text: '[atMention=false] [review: inspect this(abc)]: review: inspect this\n机器人 OPENID: BOT',
+      displayText: 'review: inspect this',
+      alreadyPrefixed: true,
+    });
+
+    expect(applyMessagePrefix(input, 'review:')).toBe(false);
   });
 
   it('uses the adapter-normalized prefix text without guessing mention boundaries', () => {

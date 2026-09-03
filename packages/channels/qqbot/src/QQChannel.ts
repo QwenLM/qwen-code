@@ -2450,6 +2450,7 @@ export class QQChannel extends ChannelBase {
     cleanText: string;
     text: string;
     displayText: string;
+    displayTextOffset?: number;
     messagePrefixText: string;
     senderName: string;
   } | null {
@@ -2471,10 +2472,6 @@ export class QQChannel extends ChannelBase {
       )
       .trim();
     // Strip trusted tags that could be forged by users
-    const safeContent = content
-      .replace(/\[atMention=[^\]]*]/g, '')
-      .replace(/\[botOpenId:[^\]]*]/g, '')
-      .replace(/\[bot]/g, '');
     const safeCleanText = cleanText
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
@@ -2574,10 +2571,26 @@ export class QQChannel extends ChannelBase {
       : senderIdentity
         ? `(${truncateCodePoints(sanitizeSenderName(senderIdentity), 8)}…)`
         : '';
+    const head = `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: `;
+    // The prompt body and `displayText` are the same string by
+    // construction. The base prefix filter rewrites the user-authored
+    // segment inside `text`, which it can only do if it can find it
+    // there -- and deriving the two from different mention-stripping
+    // passes made `<@other> <@bot> /review hi` unlocatable, costing the
+    // whole `[atMention=…] [sender]:` wrapper and the OPENID suffix.
+    // With `allowMention` off, every mention token is dropped from both
+    // rather than leaving raw openids in the prompt.
+    const displayText = sanitizePromptText(
+      this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText,
+    );
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
-      : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
-    const displayText = sanitizePromptText(safeDisplayText);
+      : `${head}${displayText}${suffixFromBotOpenId}`;
+    // Where that segment sits, so the filter splices at an exact range
+    // instead of searching: both the nick and the body are
+    // attacker-controlled here, and a nick equal to the body would
+    // otherwise put the first match inside the sender tag.
+    const displayTextOffset = isSlash ? undefined : head.length;
 
     return {
       isAtBot: effectiveIsAtBot,
@@ -2586,6 +2599,7 @@ export class QQChannel extends ChannelBase {
       cleanText,
       text,
       displayText,
+      ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
       messagePrefixText: sanitizePromptText(safeCleanText),
       senderName,
     };
@@ -2698,6 +2712,7 @@ export class QQChannel extends ChannelBase {
       isSlash,
       text,
       displayText,
+      displayTextOffset,
       messagePrefixText,
       senderName,
       safeName,
@@ -2737,6 +2752,7 @@ export class QQChannel extends ChannelBase {
       chatId,
       text,
       displayText,
+      ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
       messagePrefixText,
       messageId: event.id,
       isGroup: true,
@@ -2787,6 +2803,7 @@ export class QQChannel extends ChannelBase {
       isSlash,
       text,
       displayText,
+      displayTextOffset,
       senderName,
       isAtBot,
       safeName,
@@ -2890,6 +2907,7 @@ export class QQChannel extends ChannelBase {
       chatId,
       text,
       displayText,
+      ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
       messagePrefixText: result.messagePrefixText,
       senderId,
       senderName,

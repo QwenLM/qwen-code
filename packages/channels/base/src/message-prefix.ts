@@ -7,18 +7,51 @@ export function stripMessagePrefix(
   if (!prefix) return text;
 
   let candidate = text.trim();
-  if (!candidate.startsWith(prefix)) {
-    while (candidate.startsWith('@') || candidate.startsWith('<@')) {
-      const mention = candidate.match(/^(?:@[^@\s]+|<@[^>]{1,64}>)\s+/u)?.[0];
-      if (!mention) return undefined;
-      candidate = candidate.slice(mention.length);
-    }
+  // The prefix is re-checked every iteration, not once before the loop: a
+  // configured prefix may itself start with `@` or `<@` (nothing rejects
+  // `@qwen_bot` as a prefix), and consuming it as a mention token would
+  // reject every correctly-prefixed message that carries a leading
+  // mention of someone else.
+  while (
+    !candidate.startsWith(prefix) &&
+    (candidate.startsWith('@') || candidate.startsWith('<@'))
+  ) {
+    const mention = candidate.match(/^(?:@[^@\s]+|<@[^>]{1,64}>)\s+/u)?.[0];
+    if (!mention) return undefined;
+    candidate = candidate.slice(mention.length);
   }
   if (!candidate.startsWith(prefix)) return undefined;
 
   const suffix = candidate.slice(prefix.length);
   if (!/^\s+\S[\s\S]*$/u.test(suffix)) return undefined;
   return suffix.trim();
+}
+
+/**
+ * Where to splice the stripped payload into an adapter-composed `text`.
+ *
+ * An adapter-supplied `displayTextOffset` is authoritative, and validated
+ * before use so a stale one cannot corrupt the text. Otherwise the
+ * segment is located by search, and a second occurrence makes the
+ * location ambiguous: on QQ both the sender nick and the body are
+ * attacker-controlled, so a nick equal to the body would put the first
+ * occurrence inside the sender tag, leaving the prefix on the dispatched
+ * message and corrupting the tag. Ambiguity fails closed rather than
+ * picking one.
+ */
+function locateDisplayText(
+  envelope: Envelope,
+  displayText: string,
+): number | 'ambiguous' {
+  const offset = envelope.displayTextOffset;
+  if (offset !== undefined && envelope.text.startsWith(displayText, offset)) {
+    return offset;
+  }
+  const first = envelope.text.indexOf(displayText);
+  if (first === -1) return -1;
+  return envelope.text.indexOf(displayText, first + 1) === -1
+    ? first
+    : 'ambiguous';
 }
 
 export function applyMessagePrefix(
@@ -45,7 +78,8 @@ export function applyMessagePrefix(
   } else if (envelope.text.endsWith(displayText)) {
     envelope.text = envelope.text.slice(0, -displayText.length) + stripped;
   } else {
-    const at = envelope.text.indexOf(displayText);
+    const at = locateDisplayText(envelope, displayText);
+    if (at === 'ambiguous') return false;
     envelope.text =
       at === -1
         ? stripped

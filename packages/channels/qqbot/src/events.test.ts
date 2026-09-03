@@ -121,14 +121,37 @@ vi.mock('@qwen-code/channel-base', () => ({
     return cp.length > max ? cp.slice(0, max).join('') : str;
   },
   // QQChannel decides `isSlash` from the payload *after* the configured
-  // prefix, so it imports the real helper. Mirrors the shared contract:
-  // undefined when the text does not carry the prefix, the text itself
-  // when no prefix is configured.
-  stripMessagePrefix: (text: string, prefix: string | undefined) =>
-    prefix ? undefined : text,
+  // prefix, so it imports the real helper. This mirrors the shared
+  // implementation rather than stubbing it away: a fake that answered
+  // `undefined` for every prefixed text would make `isSlash` read the
+  // raw content and quietly invert the behaviour under test.
+  stripMessagePrefix: (text: string, prefix: string | undefined) => {
+    if (!prefix) return text;
+    let candidate = text.trim();
+    while (
+      !candidate.startsWith(prefix) &&
+      (candidate.startsWith('@') || candidate.startsWith('<@'))
+    ) {
+      const mention = candidate.match(/^(?:@[^@\s]+|<@[^>]{1,64}>)\s+/u)?.[0];
+      if (!mention) return undefined;
+      candidate = candidate.slice(mention.length);
+    }
+    if (!candidate.startsWith(prefix)) return undefined;
+    const suffix = candidate.slice(prefix.length);
+    if (!/^\s+\S[\s\S]*$/u.test(suffix)) return undefined;
+    return suffix.trim();
+  },
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
+// The real filter, not the bare-factory mock above: this file needs to
+// run a produced envelope through the base's actual prefix rewrite.
+// Reached by path rather than through the package: the barrel does not
+// re-export it, and the package alias resolves to the barrel.
+type Envelope = import('@qwen-code/channel-base').Envelope;
+const { applyMessagePrefix } = (await vi.importActual(
+  '../../base/src/message-prefix.js',
+)) as { applyMessagePrefix: (e: Envelope, p?: string) => boolean };
 import type {
   QQMessageEvent,
   QQGroupMessageEvent,
@@ -426,7 +449,7 @@ describe('handleGroup', () => {
     expect(env['chatId']).toBe('group-openid-1');
     // allowMention defaults to true
     expect(env['text']).toBe(
-      '[atMention=true] [Bob(ABCDEF0123456789ABCDEF0123456789)]: <@OPENID_BOT> 你好',
+      '[atMention=true] [Bob(ABCDEF0123456789ABCDEF0123456789)]: 你好',
     );
     expect(env['displayText']).toBe('你好');
   });
@@ -535,6 +558,37 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
     const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
     expect(env['text']).toBe('/status');
+  });
+
+  it('keeps the sender wrapper when the prefix filter rewrites the body', async () => {
+    // The three fields have to agree or the base filter cannot find the
+    // user segment inside `text` and falls back to replacing the whole
+    // message with the stripped payload -- losing the
+    // `[atMention=…] [sender]:` wrapper and the OPENID suffix, with
+    // `alreadyPrefixed` stopping the base from re-attributing it.
+    //
+    // A member mentioned before the bot is the natural ordering that
+    // exposed it: the bot's token sat between the two, so `displayText`
+    // was not a substring of `text`.
+    const ch = makeChannel({ messagePrefix: '/review' });
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_OTHER> <@OPENID_BOT> /review hello',
+        mentions: [
+          { member_openid: 'other-openid', is_you: false },
+          { member_openid: 'bot-openid', is_you: true },
+        ],
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+
+    const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
+    expect(applyMessagePrefix(env, '/review')).toBe(true);
+    expect(env.text).toContain('[atMention=');
+    expect(env.text).toContain('[Bob(');
+    expect(env.text).toContain('hello');
+    expect(env.text).not.toContain('/review');
   });
 
   it('其他成员 mention 后的斜杠命令仍被识别', async () => {

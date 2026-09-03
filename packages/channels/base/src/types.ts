@@ -113,6 +113,19 @@ export interface Envelope {
   text: string;
   /** User-authored text to display when `text` contains model-only context. */
   displayText?: string;
+  /**
+   * Where `displayText` begins inside `text`, for adapters that compose
+   * the two.
+   *
+   * The prefix filter rewrites the user-authored segment in place. Both
+   * the sender nick and the message body are attacker-controlled on some
+   * platforms, so a nick equal to the body would make a search for
+   * `displayText` land in the sender tag and leave the prefix on the
+   * dispatched message. An adapter that knows where it put the segment
+   * says so here; without it the filter refuses to guess between two
+   * occurrences.
+   */
+  displayTextOffset?: number;
   /** User-authored text with platform mention tokens removed for prefix matching. */
   messagePrefixText?: string;
   /** System event, or adapter input whose prefix was already checked. */

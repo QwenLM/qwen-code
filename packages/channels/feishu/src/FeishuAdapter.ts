@@ -2673,6 +2673,12 @@ export class FeishuChannel extends ChannelBase {
         chatId,
         ...(chatName ? { chatName } : {}),
         text: cleanText,
+        // A media message carries only an adapter-synthesized placeholder,
+        // which no user action can prefix -- gating it would drop every
+        // image, file, audio and video with the prefix configured.
+        ...(!content.userAuthoredText
+          ? { bypassMessagePrefix: true as const }
+          : {}),
         messagePrefixText: messagePrefixText.trim(),
         messageId: msgId,
         threadId: msg.root_id || undefined,
@@ -2873,13 +2879,27 @@ export class FeishuChannel extends ChannelBase {
     imageKey?: string;
     fileKey?: string;
     fileName?: string;
+    /**
+     * Whether `text` is something the user typed.
+     *
+     * Feishu delivers media as its own message type with no caption
+     * field, so an image or file carries only an adapter-synthesized
+     * placeholder. Gating that on `messagePrefix` would drop every media
+     * message with no action the user could take, so the caller bypasses
+     * the filter when this is false -- the same contract DingTalk and
+     * WeCom already implement.
+     */
+    userAuthoredText: boolean;
   } {
     try {
       const content = JSON.parse(contentJson);
 
       switch (messageType) {
         case 'text':
-          return { text: (content.text as string) || '' };
+          return {
+            text: (content.text as string) || '',
+            userAuthoredText: true,
+          };
 
         case 'post': {
           // Rich text (post) format: extract text from nested structure
@@ -2918,13 +2938,17 @@ export class FeishuChannel extends ChannelBase {
               lines.push(parts.join(''));
             }
           }
-          return { text: lines.join('\n').trim() || '' };
+          return {
+            text: lines.join('\n').trim() || '',
+            userAuthoredText: true,
+          };
         }
 
         case 'image':
           return {
             text: '(image)',
             imageKey: (content.image_key as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'file':
@@ -2932,29 +2956,34 @@ export class FeishuChannel extends ChannelBase {
             text: `(file: ${(content.file_name as string) || 'file'})`,
             fileKey: (content.file_key as string) || undefined,
             fileName: (content.file_name as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'audio':
-          return { text: '(audio)' };
+          return { text: '(audio)', userAuthoredText: false };
 
         case 'media':
           return {
             text: '(video)',
             fileKey: (content.file_key as string) || undefined,
             fileName: (content.file_name as string) || undefined,
+            userAuthoredText: false,
           };
 
         case 'interactive':
-          return { text: '(card message — not supported)' };
+          return {
+            text: '(card message — not supported)',
+            userAuthoredText: false,
+          };
 
         default:
-          return { text: '' };
+          return { text: '', userAuthoredText: false };
       }
     } catch (err) {
       process.stderr.write(
         `[Feishu:${this.name}] extractContent parse error (type=${messageType}): ${err instanceof Error ? err.message : err}\n`,
       );
-      return { text: '' };
+      return { text: '', userAuthoredText: false };
     }
   }
 }

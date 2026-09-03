@@ -495,6 +495,76 @@ describe('TelegramChannel', () => {
     });
   });
 
+  it('runs a captionless voice message despite a configured prefix', async () => {
+    // Standard Telegram clients cannot caption a voice message, so the
+    // envelope text is always the `(voice message)` placeholder -- there
+    // is no action the user could take to get it past the prefix gate.
+    // The bypass skips stripping entirely, so the placeholder also has to
+    // be cleared or it reaches the model as prompt text.
+    const channel = createChannel({ messagePrefix: '/review' });
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'voice.ogg' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:voice',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        voice: { file_id: 'voice-1', mime_type: 'audio/ogg' },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    expect(preparation.envelope.bypassMessagePrefix).toBe(true);
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'audio',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
+  it('still gates a captioned photo on the configured prefix', async () => {
+    // The narrowness control: a caption IS user-authored, so it must
+    // still carry the prefix.
+    const channel = createChannel({ messagePrefix: '/review' });
+    const bot = installFakeBot(channel);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:photo',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        caption: 'no prefix here',
+        photo: [{ file_id: 'photo-1' }],
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+
+    expect(
+      channel.inboundPreparations[0]?.envelope.bypassMessagePrefix,
+    ).toBeUndefined();
+  });
+
   it('continues startup when Telegram command menu registration fails', async () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);
@@ -594,6 +664,43 @@ describe('TelegramChannel', () => {
       );
 
       expect(built.bypassMessagePrefix).toBe(true);
+    },
+  );
+
+  it.each([
+    ['/cancel@qwen_bot', true, 'addressed to us'],
+    ['/cancel@OtherBot', false, 'addressed to another bot'],
+    ['/notregistered', false, 'not a registered menu command'],
+    ['please /cancel later', false, 'no bot_command entity at offset 0'],
+  ])(
+    'grants the command-menu bypass for %j only when %s',
+    (text, expected, _why) => {
+      // `parseCommand` strips the `@suffix`, so a command addressed to a
+      // different bot would otherwise skip the prefix gate and run here
+      // -- cancelling our own request on someone else's instruction.
+      const channel = createChannel({ messagePrefix: '/review' });
+      (channel as unknown as { botUsername: string }).botUsername = 'qwen_bot';
+      const entities = text.startsWith('/')
+        ? [
+            {
+              type: 'bot_command',
+              offset: 0,
+              length: text.split(' ')[0].length,
+            },
+          ]
+        : [];
+
+      const built = channel.buildTestEnvelope(
+        {
+          from: { id: 1, first_name: 'User' },
+          chat: { id: 1, type: 'private' },
+        },
+        text,
+        entities,
+        true,
+      );
+
+      expect(built.bypassMessagePrefix).toBe(expected ? true : undefined);
     },
   );
 

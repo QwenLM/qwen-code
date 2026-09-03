@@ -723,6 +723,46 @@ describe('FeishuChannel', () => {
     }
   });
 
+  it('keeps media messages running when a prefix is configured', async () => {
+    // Feishu delivers media as its own message type with no caption
+    // field, so an image carries only the adapter's `(image)`
+    // placeholder. Gating that would drop every media message with no
+    // action the user could take to get past it -- while text with no
+    // prefix must still be gated.
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+    const event = (
+      messageId: string,
+      messageType: string,
+      content: Record<string, unknown>,
+    ) => ({
+      message: {
+        message_id: messageId,
+        chat_id: 'oc_dm',
+        chat_type: 'p2p',
+        message_type: messageType,
+        content: JSON.stringify(content),
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    onMessage(event('media-image', 'image', { image_key: 'img_1' }));
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+    // The control: ordinary text with no prefix stays gated.
+    onMessage(event('plain-text', 'text', { text: 'no prefix here' }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(bridge.prompt).toHaveBeenCalledTimes(1);
+  });
+
   it('matches prefixes after platform-normalized mentions with spaced names', async () => {
     const bridge = createMockBridge();
     const channel = new FeishuChannel(
