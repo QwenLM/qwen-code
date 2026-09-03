@@ -118,6 +118,20 @@ describe('ECS runner qwen update workflow', () => {
     );
   });
 
+  it('keeps the verify diagnostics usable without passwordless sudo', () => {
+    // The diagnostics exist for the pools where the install step fell back
+    // to the runner user; on those pools an interactive `sudo` blocks on a
+    // password prompt until the job timeout kills the step, so every sudo
+    // probe must be non-interactive and the package dir must also be
+    // probed as the runner user sees it.
+    const verify = stepBody('Verify version');
+    expect(verify).toContain('npm prefix (user): $(npm prefix -g');
+    expect(verify).toMatch(
+      /^\s*cat \/usr\/local\/lib\/node_modules\/@qwen-code\/qwen-code\/package\.json/m,
+    );
+    expect(verify).not.toMatch(/sudo (cat|ls|env)/);
+  });
+
   it('runs only when this workflow changes on main', () => {
     expect(workflow).toContain(
       "  push:\n    branches: ['main']\n    paths: ['.github/workflows/update-ecs-runner-qwen.yml']",

@@ -141,13 +141,21 @@ jobs:
           if [[ "${actual}" != "${VERSION}" ]]; then
             # Diagnose where the stale binary comes from before failing:
             # the install step's npm may write to a different prefix than
-            # the one `command -v` resolves on this pool.
+            # the one `command -v` resolves on this pool. The probes must
+            # work on the pools without passwordless sudo — the same pools
+            # the install fallback serves — where an interactive `sudo`
+            # blocks on a password prompt until the job timeout kills the
+            # step, so they run as the runner user or with `sudo -n`, and
+            # the runner-user variants see what the fallback installed.
             echo "--- diagnostics ---"
             echo "readlink: $(readlink -f "${qwen_path}" 2>/dev/null || echo '(not a link)')"
             ls -la /usr/local/bin/qwen /usr/bin/qwen 2>/dev/null || true
-            echo "npm prefix (sudo): $(sudo env -u NPM_CONFIG_PREFIX npm prefix -g 2>/dev/null || true)"
-            sudo cat /usr/local/lib/node_modules/@qwen-code/qwen-code/package.json 2>/dev/null | grep '"version"' || true
-            sudo ls /usr/local/lib/node_modules/@qwen-code/ 2>/dev/null || true
+            echo "npm prefix (user): $(npm prefix -g 2>/dev/null || true)"
+            echo "npm prefix (sudo): $(sudo -n env -u NPM_CONFIG_PREFIX npm prefix -g 2>/dev/null || true)"
+            cat /usr/local/lib/node_modules/@qwen-code/qwen-code/package.json 2>/dev/null | grep '"version"' || true
+            sudo -n cat /usr/local/lib/node_modules/@qwen-code/qwen-code/package.json 2>/dev/null | grep '"version"' || true
+            ls -la /usr/local/lib/node_modules/@qwen-code/ 2>/dev/null || true
+            sudo -n ls /usr/local/lib/node_modules/@qwen-code/ 2>/dev/null || true
             echo "--- end diagnostics ---"
           fi
           test "${actual}" = "${VERSION}"
