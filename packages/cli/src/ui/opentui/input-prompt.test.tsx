@@ -23,7 +23,9 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
 import { cpLen, cpSlice } from '../utils/textUtils.js';
 import {
@@ -1024,4 +1026,38 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
     expect(submitted).toEqual(['/skills']);
     expect(editor.plainText).toBe('');
   });
+});
+
+describe('OpenTuiInputPrompt approval-mode indicator', () => {
+  // The mode text is the only on-screen proof an auto-accept mode took
+  // effect, and the OpenTUI interactive e2e leg's readiness poll greps the
+  // terminal for it. Asserted through the same translation call the component
+  // makes, so a non-English locale cannot flip the pin.
+  const renderWithMode = (approvalMode: ApprovalMode) =>
+    render(
+      <OpenTuiInputPrompt
+        onSubmit={() => {}}
+        userMessages={[]}
+        approvalMode={approvalMode}
+      />,
+    );
+
+  it.each<[ApprovalMode, string]>([
+    [ApprovalMode.YOLO, 'YOLO mode'],
+    [ApprovalMode.AUTO_EDIT, 'Accepting edits'],
+    [ApprovalMode.AUTO, 'Auto mode'],
+  ])('draws the %s status text', (approvalMode, key) => {
+    renderWithMode(approvalMode);
+    expect(screen.getByText(t(key))).toBeTruthy();
+  });
+
+  it.each<ApprovalMode>([ApprovalMode.PLAN, ApprovalMode.DEFAULT])(
+    'draws no status text for %s, matching ink',
+    (approvalMode) => {
+      renderWithMode(approvalMode);
+      for (const key of ['YOLO mode', 'Accepting edits', 'Auto mode']) {
+        expect(screen.queryByText(t(key))).toBeNull();
+      }
+    },
+  );
 });

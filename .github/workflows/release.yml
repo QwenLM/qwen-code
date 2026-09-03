@@ -540,16 +540,24 @@ jobs:
           VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
           VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
           VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
-          # Nightly and preview releases may absorb a transient timing
-          # failure. Stable releases add no retry of their own and stay on
-          # whatever each workspace's Vitest config asks for; the flag is
-          # omitted rather than set to 0, because a command-line --retry=0
-          # outranks the config and would disable a workspace's deliberate
-          # retry (packages/sdk-typescript) on the release lane alone.
-          VITEST_RETRY: "${{ (needs.prepare.outputs.is_nightly == 'true' || needs.prepare.outputs.is_preview == 'true') && '2' || '' }}"
+          # Every release schedule absorbs a transient timing failure, not
+          # just nightly and preview. A stable release used to run with no
+          # retry at all, so any one flaky test out of ~30k reddened it
+          # outright: six consecutive stable runs failed on a single test
+          # each while every other gate stayed green, and the same test
+          # passed on the next attempt. Retrying hides nothing — a real
+          # break fails all three attempts — it only stops a contended
+          # runner from deciding whether a release ships. Operators can
+          # retune this without a PR via the repository variable, or set it
+          # to 'off' to omit the flag entirely. 'off' rather than '0': a
+          # command-line --retry=0 outranks the config and would disable a
+          # workspace's deliberate retry (packages/sdk-typescript) on the
+          # release lane alone, and an empty variable just falls back to the
+          # default.
+          VITEST_RETRY: "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}"
         run: |-
           retry_arg=()
-          if [ -n "${VITEST_RETRY}" ]; then
+          if [ -n "${VITEST_RETRY}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
             retry_arg=("--retry=${VITEST_RETRY}")
           fi
           npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}"
@@ -711,50 +719,54 @@ jobs:
           sandbox_revision="$(git rev-parse HEAD)"
           sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxImageUri")-release-${sandbox_revision}"
 
-          acquire_daemon_write_lock() {
-            lock_deadline=$((SECONDS + 1800))
-            until flock --nonblock 9; do
-              if (( SECONDS >= lock_deadline )); then
-                echo "::error::docker daemon write lock not acquired within 30 minutes"
-                exit 1
-              fi
-              sleep 1
-            done
-          }
-
           if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
             mkdir -p "${HOME}/.cache/qwen-code-ci"
-            exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-release-${sandbox_revision}.lock"
-            if ! flock --wait 1800 8; then
-              echo "::error::docker build coordinator lock not acquired within 30 minutes"
-              exit 1
-            fi
+            # Same protocol as e2e.yml: the host daemon lock is held shared
+            # for the whole step and never upgraded, so preparing an image
+            # cannot be starved by the test phase of a run already on the
+            # host (run 33637097713).
             exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
             if ! flock --shared --wait 1800 9; then
               echo "::error::docker daemon read lock not acquired within 30 minutes"
+              exit 1
+            fi
+            exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-release-${sandbox_revision}.lock"
+            if ! flock --wait 1800 8; then
+              echo "::error::docker build coordinator lock not acquired within 30 minutes"
               exit 1
             fi
           fi
 
           if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
             if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
-              flock --unlock 9
-              acquire_daemon_write_lock
+              # Host build mutex, shared with the E2E lane and held only
+              # while an image is prepared.
+              exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"
+              if ! flock --wait 1800 7; then
+                echo "::error::docker build lock not acquired within 30 minutes"
+                exit 1
+              fi
             fi
             docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
-            npm run build:sandbox -- -s --no-prune -i "$sandbox_image"
+            # See e2e.yml: closing the lock descriptors in the child keeps
+            # a descendant that outlives this job from holding the lock.
+            npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-
+            if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+              flock --unlock 7
+              exec 7>&-
+            fi
           fi
           sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
           export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
           if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
-            flock --shared 9
             flock --unlock 8
+            exec 8>&-
           fi
 
           # The package.json docker test scripts each rebuild the sandbox image.
           # Run vitest directly here so this job reuses the image built above.
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli 9>&-
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive 9>&-
 
   audio_capture_prebuilds:
     name: 'Audio Capture Prebuilds'

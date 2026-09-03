@@ -45,6 +45,9 @@ import {
   renderResultDisplay,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
+import { isAtCommand } from '../utils/commandUtils.js';
+import { handleAtCommand } from '../hooks/atCommandProcessor.js';
+import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 
 interface LooseCompletedCall {
   request: { callId: string; name?: string; args?: unknown };
@@ -87,6 +90,13 @@ export interface LivePromptOptions {
    * refresh the memory instruction so the model sees the new content.
    */
   refreshContextFilesOnWrite?: boolean;
+  /**
+   * Raw composer text for `UserPromptSubmit` provenance (`submitted_prompt`).
+   * Core only honours it on a UserQuery, so it rides the first turn and the
+   * tool-result continuations below omit it by construction — matching the
+   * documented rule that continuations carry no provenance.
+   */
+  submittedPrompt?: string;
   /**
    * PromptId minted by the backend (`nextLivePromptId`) at submit time so
    * the user item and this request share the checkpoint key. Omitted → one
@@ -213,6 +223,70 @@ function createEventQueue<T>() {
 }
 
 /**
+ * One `@path` read as the tool card ink renders through `handleAtCommand`'s
+ * `addItem` (a `tool_group` history item): start → result → end, so the card
+ * is already settled when it lands and a failed read explains itself.
+ */
+function atMentionCardEvents(
+  display: IndividualToolCallDisplay,
+): OpenTuiStreamEvent[] {
+  const events: OpenTuiStreamEvent[] = [
+    {
+      type: 'tool-start',
+      id: display.callId,
+      tool: display.name,
+      title: display.description,
+    },
+  ];
+  const text = renderResultDisplay(display.resultDisplay);
+  if (text)
+    events.push({ type: 'tool-result', id: display.callId, display: text });
+  const failed = display.status === ToolCallStatus.Error;
+  events.push({
+    type: 'tool-end',
+    id: display.callId,
+    success: !failed,
+    summary: failed ? 'error' : 'ok',
+  });
+  return events;
+}
+
+/**
+ * ink parity (use-llm-stream `processQuery` for a fresh turn): `@path`
+ * mentions are expanded where the prompt enters the stream, never at the
+ * composer, so the transcript keeps what the user typed and queued text that
+ * survives to become the next turn is expanded by the time it reaches the
+ * model. Text drained mid-turn as steering rides raw — ink expands that hop
+ * too (`resolveSteeredMessages`); replicating it is tracked in #8662.
+ *
+ * `events` carries the read cards even when the expansion declines — the one
+ * decline is a failed read, and ink reports it instead of sending the
+ * unexpanded text.
+ */
+async function expandAtMentions(
+  config: Config,
+  query: string,
+  signal: AbortSignal,
+): Promise<{
+  parts: PartListUnion;
+  events: OpenTuiStreamEvent[];
+  declined: boolean;
+}> {
+  const result = await handleAtCommand({
+    query,
+    config,
+    onDebugMessage: (message) => config.getDebugLogger().debug(message),
+    messageId: Date.now(),
+    signal,
+  });
+  const events = (result.toolDisplays ?? []).flatMap(atMentionCardEvents);
+  if (!result.shouldProceed || result.processedQuery === null) {
+    return { parts: query, events, declined: true };
+  }
+  return { parts: result.processedQuery, events, declined: false };
+}
+
+/**
  * Sends one user prompt through the real client and yields neutral events.
  * The caller (backend) drains this into the streaming model.
  *
@@ -260,16 +334,35 @@ export async function* livePromptEvents(
   // loop here so tools actually run under OpenTUI (drain -> schedule ->
   // submit results -> drain again).
   let nextPrompt: PartListUnion = prompt;
+  // Provenance marks user-typed text: the composer submit and the follow-on
+  // turn built from the mid-turn queue both carry it. A slash command's
+  // generated `submit_prompt` payload does not, and ink never expands that
+  // one (processQuery returns it before its own isAtCommand check).
+  if (
+    typeof prompt === 'string' &&
+    options?.submittedPrompt !== undefined &&
+    isAtCommand(prompt)
+  ) {
+    const expanded = await expandAtMentions(config, prompt, abort);
+    for (const ev of expanded.events) yield ev;
+    // A failed read reports itself on the card above; ink drops the
+    // submission rather than sending the unexpanded text to the model.
+    if (expanded.declined) return;
+    nextPrompt = expanded.parts;
+  }
   let first = true;
   const waitingSeen = new Set<string>();
   for (;;) {
     const sendOptions = first
-      ? options?.modelOverride
-        ? {
-            type: SendMessageType.UserQuery,
-            modelOverride: options.modelOverride,
-          }
-        : undefined
+      ? {
+          type: SendMessageType.UserQuery,
+          ...(options?.modelOverride
+            ? { modelOverride: options.modelOverride }
+            : {}),
+          ...(options?.submittedPrompt
+            ? { submittedPrompt: options.submittedPrompt }
+            : {}),
+        }
       : {
           type: SendMessageType.ToolResult,
           ...(options?.modelOverride

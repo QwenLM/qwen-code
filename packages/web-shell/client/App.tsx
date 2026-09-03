@@ -5865,17 +5865,6 @@ export function App({
     },
     [showChat],
   );
-  const loadMcpManagerMessage = useCallback(async () => {
-    const status = await workspaceActions.loadMcpStatus();
-    setMcpDialogMessage({
-      status,
-      toolsByServer: {},
-      resourcesByServer: {},
-      showDescriptions: false,
-      showSchema: false,
-      showTips: false,
-    });
-  }, [workspaceActions]);
   const openScheduledTasks = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
@@ -14701,15 +14690,6 @@ export function App({
                       />
                     ) : activePanel === 'plugins' ? (
                       <PluginManagerPage
-                        mcpMessage={mcpDialogMessage}
-                        loadMcpMessage={async () => {
-                          try {
-                            await loadMcpManagerMessage();
-                          } catch (error) {
-                            reportError(error, 'Failed to load MCP status');
-                            throw error;
-                          }
-                        }}
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}

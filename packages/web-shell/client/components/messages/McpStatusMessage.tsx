@@ -97,6 +97,27 @@ function statusDisplay(
       className: styles.warning,
     };
   }
+  if (server.authenticationState === 'pending') {
+    return {
+      icon: '🔄',
+      text: t('mcp.status.authenticating'),
+      className: styles.warning,
+    };
+  }
+  if (server.authenticationState === 'failed') {
+    return {
+      icon: '✗',
+      text: t('mcp.status.authenticationFailed'),
+      className: styles.error,
+    };
+  }
+  if (server.requiresAuth && server.authenticationState !== 'succeeded') {
+    return {
+      icon: '!',
+      text: t('mcp.status.needsAuthentication'),
+      className: styles.warning,
+    };
+  }
   switch (server.mcpStatus) {
     case 'connected':
       return {
@@ -407,23 +428,54 @@ export function McpStatusMessage({
   }, [selectedServer, selectedTools.length, t]);
 
   const reloadSelectedServer = useCallback(async () => {
-    const nextStatus = await mcp.reload();
-    if (nextStatus) {
-      setLocalStatus(nextStatus);
-      const nextServer =
-        nextStatus.servers?.find(
-          (server) => server.name === selectedServer?.name,
-        ) ?? null;
-      if (nextServer) {
-        if (nextServer.approvalState) return;
-        const nextTools = await mcp.loadTools(nextServer.name);
-        setLocalToolsByServer((current) => ({
-          ...current,
-          [nextServer.name]: nextTools,
-        }));
+    let nextStatus: DaemonWorkspaceMcpStatus | undefined;
+    let runtimeEpoch: number | undefined;
+    await mcp.ensureRuntime();
+    for (let attempt = 0; attempt < 81; attempt += 1) {
+      const runtimeStatus = await mcp.runtimeStatus();
+      const capability = runtimeStatus.capabilities?.mcp;
+      if (capability?.state === 'error') {
+        throw new Error(
+          capability.error?.message ?? t('mcp.discovery.timeout'),
+        );
       }
+      if (
+        runtimeStatus.runtimeLive &&
+        capability?.state === 'ready' &&
+        capability.runtimeEpoch === runtimeStatus.runtimeEpoch
+      ) {
+        const candidate = await mcp.reload();
+        if (
+          candidate?.source === 'live' &&
+          candidate.runtimeEpoch === runtimeStatus.runtimeEpoch
+        ) {
+          nextStatus = candidate;
+          runtimeEpoch = runtimeStatus.runtimeEpoch;
+          break;
+        }
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1_500));
     }
-  }, [mcp, selectedServer?.name]);
+    if (!nextStatus || runtimeEpoch === undefined) {
+      throw new Error(t('mcp.discovery.timeout'));
+    }
+    setLocalStatus(nextStatus);
+    const nextServer =
+      nextStatus.servers?.find(
+        (server) => server.name === selectedServer?.name,
+      ) ?? null;
+    if (nextServer) {
+      if (nextServer.approvalState) return;
+      const nextTools = await mcp.loadTools(nextServer.name);
+      if (nextTools.runtimeEpoch !== runtimeEpoch) {
+        throw new Error(t('mcp.discovery.timeout'));
+      }
+      setLocalToolsByServer((current) => ({
+        ...current,
+        [nextServer.name]: nextTools,
+      }));
+    }
+  }, [mcp, selectedServer?.name, t]);
 
   const runServerAction = useCallback(
     async (action: McpServerAction) => {
@@ -480,7 +532,11 @@ export function McpStatusMessage({
                 : details;
           }
         }
-        await reloadSelectedServer();
+        try {
+          await reloadSelectedServer();
+        } catch (error) {
+          if (!nextActionMessage) throw error;
+        }
         setActionMessage(
           nextActionMessage ?? t('mcp.action.done', { action: action.label }),
         );
