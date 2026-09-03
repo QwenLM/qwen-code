@@ -1080,6 +1080,7 @@ import {
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
+import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { resetTrustedFoldersForTesting } from '../config/trustedFolders.js';
 import {
   MAX_PERMISSION_RULE_LENGTH,
@@ -20657,6 +20658,115 @@ describe('QwenAgent extMethod renameSession routing', () => {
       ),
     );
     expect(sessionDeleteHook).toHaveBeenCalledWith(deletedSessionId);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('resolves deleteSession settings per request, not from the this.settings cache', async () => {
+    const innerConfig = makeLiveSessionInnerConfig(null);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    // Multi-workspace daemon shape: this.settings holds the boot workspace's
+    // settings; the delete targets a cwd whose own settings (and therefore
+    // advanced.runtimeOutputDir) resolve differently. Routing through the
+    // stale cache would scan the wrong runtime root.
+    const perRequestSettings = makeAcpSettings();
+    vi.mocked(loadSettings).mockReturnValue(perRequestSettings);
+    const removeSession = vi.fn().mockResolvedValue(true);
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({ removeSession }) as unknown as InstanceType<typeof SessionService>,
+    );
+    vi.mocked(runWithAcpRuntimeOutputDir).mockClear();
+
+    await agent.extMethod('deleteSession', {
+      cwd: '/tmp/workspace-a',
+      sessionId: '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+    });
+
+    expect(runWithAcpRuntimeOutputDir).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![0]).toBe(
+      perRequestSettings,
+    );
+    // Pin the per-request cwd too: settings must be resolved FROM the
+    // request's directory and routing must target it — not the boot
+    // workspace's dir.
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
+      '/tmp/workspace-a',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('resolves dead-session renameSession settings per request, not from the this.settings cache', async () => {
+    const innerConfig = makeLiveSessionInnerConfig(null);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    const perRequestSettings = makeAcpSettings();
+    vi.mocked(loadSettings).mockReturnValue(perRequestSettings);
+    const renameSession = vi.fn().mockResolvedValue(true);
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({ renameSession }) as unknown as InstanceType<typeof SessionService>,
+    );
+    vi.mocked(runWithAcpRuntimeOutputDir).mockClear();
+
+    // No newSession: the target is not live in this process, so the rename
+    // takes the disk-only SessionService path.
+    await agent.extMethod('renameSession', {
+      cwd: '/tmp/workspace-a',
+      sessionId: '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+      title: 'renamed elsewhere',
+    });
+
+    expect(renameSession).toHaveBeenCalledWith(
+      '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+      'renamed elsewhere',
+    );
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![0]).toBe(
+      perRequestSettings,
+    );
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
+      '/tmp/workspace-a',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('resolves unstable_listSessions settings per request, not from the this.settings cache', async () => {
+    const innerConfig = makeLiveSessionInnerConfig(null);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    const perRequestSettings = makeAcpSettings();
+    vi.mocked(loadSettings).mockReturnValue(perRequestSettings);
+    const listSessions = vi
+      .fn()
+      .mockResolvedValue({ items: [], nextCursor: undefined });
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({ listSessions }) as unknown as InstanceType<typeof SessionService>,
+    );
+    vi.mocked(runWithAcpRuntimeOutputDir).mockClear();
+
+    await (
+      agent as unknown as {
+        unstable_listSessions: (p: Record<string, unknown>) => Promise<unknown>;
+      }
+    ).unstable_listSessions({ cwd: '/tmp/workspace-a' });
+
+    expect(listSessions).toHaveBeenCalled();
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![0]).toBe(
+      perRequestSettings,
+    );
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
+      '/tmp/workspace-a',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
