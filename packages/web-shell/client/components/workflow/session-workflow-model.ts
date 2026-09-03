@@ -7,9 +7,9 @@ import { isSubAgentToolCall } from '../../adapters/toolClassification';
 import {
   createTaskExecutionIndex,
   getActiveAgentsFromIndex,
-  todoIdOf,
   getPlanNodeStateFromIndex,
   nestedTasksFromIndex,
+  todoIdOf,
   type PlanNodeStatus,
   type TaskExecutionIndex,
 } from '../messages/PlanExecutionView';
