@@ -2690,17 +2690,24 @@ export async function runAcpAgent(
   argv: CliArgs,
   options?: {
     privateParentCapability?: string;
+    conversationsRuntimeProvenance?: boolean;
     externalToolGuardRequired?: boolean;
     externalToolGuardProviderAttached?: boolean;
   },
 ) {
+  // Conversations-runtime provenance, accepted by the CLI entry point only in
+  // ACP mode with the private parent capability present. Frozen for the
+  // process lifetime alongside the writer-lease snapshot.
+  const conversationsRuntimeProvenance =
+    options?.conversationsRuntimeProvenance === true;
   // Freeze the restart-required writer protocol before the first await.
   // Per-request settings reloads must not mix leased and legacy writers
   // within one ACP process lifetime.
   const sessionWriterLeaseEnabledAtStartup =
-    typeof config.isSessionWriterLeaseEnabled === 'function'
+    conversationsRuntimeProvenance ||
+    (typeof config.isSessionWriterLeaseEnabled === 'function'
       ? config.isSessionWriterLeaseEnabled()
-      : settings.merged.experimental?.sessionWriterLease === true;
+      : settings.merged.experimental?.sessionWriterLease === true);
   const privateParentCapability =
     options === undefined
       ? process.env[PRIVATE_ACP_CAPABILITY_ENV]
@@ -2855,6 +2862,7 @@ export async function runAcpAgent(
         sessionWriterLeaseEnabledAtStartup,
         managedToolInvocationGuard,
         externalToolGuardProviderAttached,
+        conversationsRuntimeProvenance,
       );
       return agentInstance;
     }, stream);
@@ -4515,6 +4523,7 @@ class QwenAgent implements Agent {
     private readonly sessionWriterLeaseEnabledAtStartup = false,
     private readonly managedToolInvocationGuard?: ToolInvocationGuard,
     private readonly externalToolGuardProviderAttached = false,
+    private readonly conversationsRuntimeProvenance = false,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
@@ -13434,7 +13443,13 @@ class QwenAgent implements Agent {
     try {
       this.assertManagedSessionAdmission();
       if (this.isTrustedManagedParent()) {
-        config.setSessionWriterReclaimPolicy('never');
+        // A child carrying the Conversations provenance marker writes through
+        // the mandatory session writer lease and may reclaim a provably dead
+        // same-domain writer; ordinary managed children keep the container
+        // contract.
+        config.setSessionWriterReclaimPolicy(
+          this.conversationsRuntimeProvenance ? 'local' : 'never',
+        );
         config.setSessionWriterTakeoverPolicy('certified');
       }
     } catch (error) {
@@ -14014,6 +14029,14 @@ class QwenAgent implements Agent {
 
       // After replay and resume-state restoration so a durable cron fire can't
       // interleave with either.
+      if (this.conversationsRuntimeProvenance) {
+        // A Conversations session never fires an unbound durable task; the
+        // daemon keepalive commits exactly one controller binding through the
+        // cross-process task-file transaction first.
+        config
+          .getCronScheduler()
+          .setSkipDurableFire((job) => job.boundSessionId === undefined);
+      }
       session.startCronScheduler();
 
       setTimeout(() => {

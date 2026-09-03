@@ -18,7 +18,8 @@ import type {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 export type ConversationRuntimeQuarantineReason =
-  'standalone_session_containment_failed';
+  | 'standalone_session_containment_failed'
+  | 'missing_mandatory_lease_attestation';
 
 export interface ConversationRuntimeManagerOptions {
   ownership: ConversationRuntimeOwnership;
@@ -42,13 +43,16 @@ export class ConversationRuntimeManager {
   private runtime?: WorkspaceRuntime;
   private pending?: Promise<WorkspaceRuntime>;
   private terminalRuntime?: WorkspaceRuntime;
+  private terminalError?: ConversationRuntimeOwnershipError;
   private quarantinePromise?: Promise<void>;
 
   constructor(private readonly options: ConversationRuntimeManagerOptions) {}
 
   ensure(): Promise<WorkspaceRuntime> {
     if (this.terminalRuntime) {
-      return Promise.reject(conversationRuntimeUnavailableError());
+      return Promise.reject(
+        this.terminalError ?? conversationRuntimeUnavailableError(),
+      );
     }
     if (this.pending) return this.pending;
     const pending = this.ensureOnce().finally(() => {
@@ -74,12 +78,20 @@ export class ConversationRuntimeManager {
     if (this.terminalRuntime === expectedRuntime && this.quarantinePromise) {
       return this.quarantinePromise;
     }
-    if (this.terminalRuntime) throw conversationRuntimeUnavailableError();
+    if (this.terminalRuntime) {
+      throw this.terminalError ?? conversationRuntimeUnavailableError();
+    }
     if (this.runtime !== expectedRuntime) {
       throw conversationRuntimeUnavailableError();
     }
     this.assertActiveRuntime(expectedRuntime.workspaceCwd, expectedRuntime);
     this.terminalRuntime = expectedRuntime;
+    if (reason === 'missing_mandatory_lease_attestation') {
+      // A static runtime contract violation never heals in place; keep every
+      // later access on the same non-retryable classification instead of
+      // degrading to retryable `conversation_runtime_unavailable`.
+      this.terminalError = conversationRootCompromisedError();
+    }
     try {
       this.options.onTerminalQuarantine?.(expectedRuntime, reason);
     } catch {
@@ -123,6 +135,17 @@ export class ConversationRuntimeManager {
       await this.assertExactRoot(existing.workspaceCwd);
       this.assertActiveRuntime(root.canonicalRoot, existing);
       this.runtime = existing;
+      try {
+        this.assertMandatoryLeaseAttestation(existing);
+      } catch (error) {
+        // An equivalent registered runtime that cannot prove the mandatory
+        // lease reaches its children is terminally quarantined, never served.
+        await this.quarantine(
+          existing,
+          'missing_mandatory_lease_attestation',
+        ).catch(() => undefined);
+        throw error;
+      }
       this.assertNotTerminal();
       return existing;
     }
@@ -134,6 +157,7 @@ export class ConversationRuntimeManager {
         async (candidate) => {
           await this.assertExactRoot(candidate.workspaceCwd);
           this.assertOwnedRuntime(candidate);
+          this.assertMandatoryLeaseAttestation(candidate);
         },
       );
     } catch (error) {
@@ -147,7 +171,9 @@ export class ConversationRuntimeManager {
   }
 
   private assertNotTerminal(): void {
-    if (this.terminalRuntime) throw conversationRuntimeUnavailableError();
+    if (this.terminalRuntime) {
+      throw this.terminalError ?? conversationRuntimeUnavailableError();
+    }
   }
 
   private async revalidateRoot(): Promise<
@@ -189,6 +215,12 @@ export class ConversationRuntimeManager {
       !runtime.trusted ||
       runtime.removable !== false
     ) {
+      throw conversationRootCompromisedError();
+    }
+  }
+
+  private assertMandatoryLeaseAttestation(runtime: WorkspaceRuntime): void {
+    if (runtime.bridge.mandatoryLeaseAttested !== true) {
       throw conversationRootCompromisedError();
     }
   }

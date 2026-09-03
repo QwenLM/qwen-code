@@ -91,6 +91,20 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('DEV');
   });
 
+  // QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME is the private daemon-to-child
+  // Conversations provenance marker. A project `.env` or settings.env setting
+  // it would mark ordinary workspace children as Conversations-hosted,
+  // forcing the writer lease and the unbound-durable-task skip onto sessions
+  // the contract does not cover.
+  it('excludes the Conversations provenance marker from project env files', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME',
+    );
+    expect(
+      isHardcodedProjectEnvExclusion('qwen_code_private_conversations_runtime'),
+    ).toBe(true);
+  });
+
   // QWEN_SERVE_NEW_FILE_MODE sets the daemon-wide creation mode for
   // agent-written NEW files. A project `.env` flipping it to `system` would
   // silently widen file visibility (0600 -> umask-derived) for every

@@ -33,6 +33,7 @@ import {
   ChatRecordingService,
   type ChatRecord,
 } from './chatRecordingService.js';
+import { readPidNamespaceId } from '../utils/process-liveness.js';
 import { SessionService } from './sessionService.js';
 import {
   getSessionWriterLockPath,
@@ -467,6 +468,40 @@ async function waitForClose(child: ChildProcess): Promise<void> {
   // almost always means a reused PID, not a leaked child; do not turn that
   // teardown observation into a test failure.
   console.warn(`Process ${pid} remained live after close`);
+}
+
+/**
+ * Acquires a lease in a helper process, kills it with SIGKILL, and rewrites
+ * the orphaned record through `mutate`, so Linux identity-domain cases can
+ * craft missing or foreign boot/namespace identities from a real record.
+ */
+async function deadOwnerRecord(
+  mutate?: (record: Record<string, unknown>) => void,
+): Promise<{
+  options: AcquireSessionWriterLeaseOptions;
+  lockPath: string;
+}> {
+  const fixture = await createFixture();
+  const deadOwner = startLeaseProcess();
+  expect(
+    await requestChild(deadOwner, {
+      type: 'acquire',
+      options: fixture.options,
+    }),
+  ).toMatchObject({ ok: true });
+  deadOwner.kill('SIGKILL');
+  await waitForClose(deadOwner);
+  const lockPath = getSessionWriterLockPath(
+    fixture.runtimeBaseDir,
+    fixture.options.sessionId,
+  );
+  const record = JSON.parse(await fs.readFile(lockPath, 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  mutate?.(record);
+  await fs.writeFile(lockPath, JSON.stringify(record));
+  return { options: fixture.options, lockPath };
 }
 
 function record(
@@ -986,6 +1021,54 @@ describe('SessionWriterLease', () => {
         `linux:${bootId.trim()}:${startTicks}`,
       );
       await lease.release();
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'records the PID namespace identity on Linux',
+    async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      const lockPath = getSessionWriterLockPath(
+        fixture.runtimeBaseDir,
+        fixture.options.sessionId,
+      );
+      const lockRecord = JSON.parse(await fs.readFile(lockPath, 'utf8')) as {
+        pid_namespace_id?: number;
+      };
+      expect(lockRecord.pid_namespace_id).toBe(readPidNamespaceId());
+      await lease.release();
+    },
+  );
+
+  it.runIf(process.platform === 'linux')(
+    'reclaims a dead writer only inside the same Linux identity domain',
+    async () => {
+      const reclaimable = await deadOwnerRecord();
+      const reclaimed = await SessionWriterLease.acquire(reclaimable.options);
+      await reclaimed.release();
+
+      const missingNamespace = await deadOwnerRecord((record) => {
+        delete record['pid_namespace_id'];
+      });
+      await expect(
+        SessionWriterLease.acquire(missingNamespace.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+
+      const foreignNamespace = await deadOwnerRecord((record) => {
+        record['pid_namespace_id'] = (record['pid_namespace_id'] as number) + 1;
+      });
+      await expect(
+        SessionWriterLease.acquire(foreignNamespace.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+
+      const foreignBoot = await deadOwnerRecord((record) => {
+        record['process_start_identity'] =
+          'linux:00000000-0000-0000-0000-000000000000:1';
+      });
+      await expect(
+        SessionWriterLease.acquire(foreignBoot.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
     },
   );
 

@@ -7,6 +7,7 @@ import {
   QWEN_CODE_DESKTOP_ENV,
   QWEN_CODE_SERVE_ENV,
 } from './acp-channel-fallback.js';
+import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core';
 
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
@@ -218,6 +219,11 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // distributed to every workspace's session children — reopening the #8653
   // vector for any repo whose .env happens to carry DEV=true.
   'DEV',
+  // The Conversations provenance marker is a private daemon-to-child signal:
+  // a project `.env` or settings.env must never mark an ordinary workspace
+  // child as Conversations-hosted (it would force the writer lease and the
+  // unbound-durable-task skip onto sessions the contract does not cover).
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
 ];
 
 // Windows env lookup is case-insensitive, so exact-case membership would let

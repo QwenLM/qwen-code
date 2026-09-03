@@ -482,6 +482,9 @@ describe('createBoundChannelDeliveryHandler', () => {
 
 function makeRuntimeBridge(): HttpAcpBridge {
   return {
+    // The fake stands in for production bridges built through
+    // `createSpawnChannelFactory`, which carry the forwarding attestation.
+    mandatoryLeaseAttested: true,
     spawnOrAttach: vi.fn(),
     shutdown: vi.fn().mockResolvedValue(undefined),
     killAllSync: vi.fn(),
@@ -7289,6 +7292,13 @@ describe('runQwenServe runtime startup failures', () => {
       // the guard plumbing marker but NOT the provider-attached marker.
       expect(bridgeOptions?.childEnvOverrides).toHaveProperty(
         'QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER',
+        undefined,
+      );
+      // The Conversations provenance marker stays explicitly removed for an
+      // ordinary workspace child; only the live-conversation runtime replaces
+      // it with the enable value.
+      expect(bridgeOptions?.childEnvOverrides).toHaveProperty(
+        'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME',
         undefined,
       );
       expect(createBridge.mock.calls.length).toBeGreaterThan(0);

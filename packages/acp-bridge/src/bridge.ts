@@ -34,6 +34,8 @@ import {
   DAEMON_TRACESTATE_META_KEY,
   INVOCATION_CONTEXT_META_KEY,
   PRIVATE_ACP_CAPABILITY_ENV,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   SESSION_PR_LIST_LIMIT,
@@ -52,6 +54,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
 import type { AcpChannel, AcpChannelTransportGuard } from './channel.js';
+import { channelFactoryForwardsChildEnv } from './child-env-forwarding.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
@@ -2858,6 +2861,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     opts.childEnvOverrides
       ? Object.freeze({ ...opts.childEnvOverrides })
       : Object.freeze({});
+  // The mandatory-lease attestation is conjunctive: the frozen overrides must
+  // offer the exact Conversations marker AND the configured factory must be
+  // attested to forward overrides into the spawned child's environment. A
+  // marker-shaped override map paired with a factory that ignores its second
+  // argument does not attest, because the child would run unleased while the
+  // daemon believes the transcripts are fenced.
+  const mandatoryLeaseAttested =
+    childEnvOverrides[PRIVATE_CONVERSATIONS_RUNTIME_ENV] ===
+      PRIVATE_CONVERSATIONS_RUNTIME_ENABLE &&
+    channelFactoryForwardsChildEnv(channelFactory);
   const initTimeoutMs = opts.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
   if (!Number.isInteger(initTimeoutMs) || initTimeoutMs <= 0) {
     throw new TypeError(
@@ -9039,6 +9052,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     { dispatched: boolean }
   >();
   const bridgeApi: AcpSessionBridge = {
+    // Derived once from the frozen overrides and the configured channel
+    // factory; immutable for the bridge's lifetime.
+    mandatoryLeaseAttested,
     setLiveScreenContextCaptureHandler(handler) {
       liveScreenContextCaptureHandler = handler;
     },

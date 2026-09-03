@@ -2053,6 +2053,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessions: [],
     }));
   return {
+    // The fake stands in for production bridges built through
+    // `createSpawnChannelFactory`, which carry the forwarding attestation
+    // the Conversations runtime publication gate requires.
+    mandatoryLeaseAttested: true,
     // F3 Commit 6 — `AcpSessionBridge.permissionPolicy` is required so
     // `/capabilities` can expose `policy.permission`. Tests don't
     // exercise mediation; pin to the pre-F3 default ('first-responder')

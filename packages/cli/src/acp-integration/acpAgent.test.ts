@@ -3689,6 +3689,161 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it('forces the session writer lease for a Conversations-marked child regardless of the setting', async () => {
+    const innerConfig = await setupSessionMocks('session-writer-lease-marked');
+    innerConfig.getCronScheduler = vi
+      .fn()
+      .mockReturnValue({ setSkipDurableFire: vi.fn() });
+    mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(false);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        conversationsRuntimeProvenance: true,
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const sessionSettings = vi.mocked(loadCliConfig).mock.calls[0]?.[0];
+    expect(sessionSettings?.experimental?.sessionWriterLease).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('selects the hardened local reclaim policy for a Conversations-marked managed child', async () => {
+    const innerConfig = await setupSessionMocks('managed-marked-session');
+    const scheduler = { setSkipDurableFire: vi.fn() };
+    innerConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        conversationsRuntimeProvenance: true,
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    expect(innerConfig.setSessionWriterReclaimPolicy).toHaveBeenCalledWith(
+      'local',
+    );
+    expect(innerConfig.setSessionWriterTakeoverPolicy).toHaveBeenCalledWith(
+      'certified',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('installs the unbound-durable-task skip before the scheduler starts for a marked child', async () => {
+    const innerConfig = await setupSessionMocks('managed-cron-skip-session');
+    const scheduler = { setSkipDurableFire: vi.fn() };
+    innerConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        conversationsRuntimeProvenance: true,
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    expect(scheduler.setSkipDurableFire).toHaveBeenCalledOnce();
+    const predicate = scheduler.setSkipDurableFire.mock.calls[0]?.[0] as (job: {
+      boundSessionId?: string;
+    }) => boolean;
+    expect(predicate({ boundSessionId: undefined })).toBe(true);
+    expect(predicate({ boundSessionId: 'session-1' })).toBe(false);
+    const startCronScheduler = (
+      lastSessionMock as unknown as {
+        startCronScheduler: ReturnType<typeof vi.fn>;
+      }
+    ).startCronScheduler;
+    expect(
+      scheduler.setSkipDurableFire.mock.invocationCallOrder[0]!,
+    ).toBeLessThan(startCronScheduler.mock.invocationCallOrder[0]!);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not install the skip predicate for an unmarked managed child', async () => {
+    const innerConfig = await setupSessionMocks('managed-unmarked-session');
+    const scheduler = { setSkipDurableFire: vi.fn() };
+    innerConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      { privateParentCapability: 'expected-capability' },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    expect(innerConfig.setSessionWriterReclaimPolicy).toHaveBeenCalledWith(
+      'never',
+    );
+    expect(scheduler.setSkipDurableFire).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it.each([
     ['channel', 'channel', false],
     ['scheduled task', 'scheduled_task', true],
@@ -4228,6 +4383,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
+      getCronScheduler: vi.fn(),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({

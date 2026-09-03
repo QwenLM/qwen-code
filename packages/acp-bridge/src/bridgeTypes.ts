@@ -1368,6 +1368,15 @@ export interface WorkspaceEventBridge extends WorkspaceEventPublisher {
 }
 
 export interface AcpSessionBridge extends WorkspaceEventBridge {
+  /**
+   * Immutable proof derived at construction: this bridge's frozen
+   * child-environment overrides carry the exact Conversations provenance
+   * marker AND its configured channel factory is attested to forward those
+   * overrides into the spawned child. The daemon requires this before it
+   * enables mandatory-lease-dependent behavior for the Conversations runtime.
+   */
+  readonly mandatoryLeaseAttested: boolean;
+
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
 

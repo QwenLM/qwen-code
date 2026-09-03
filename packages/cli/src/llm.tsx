@@ -19,6 +19,8 @@ import {
   createDebugLogger,
   persistSessionUsage,
   PRIVATE_ACP_CAPABILITY_ENV,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -384,6 +386,14 @@ export async function main() {
 
   const privateAcpParentCapability = process.env[PRIVATE_ACP_CAPABILITY_ENV];
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  // Captured beside the private parent capability so a Conversations
+  // provenance marker can never be introduced or withdrawn later by settings
+  // or environment files; acceptance below additionally requires ACP mode and
+  // the capability.
+  const conversationsRuntimeMarkerSeen =
+    process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV] ===
+    PRIVATE_CONVERSATIONS_RUNTIME_ENABLE;
+  delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
   const privateExternalToolGuard =
     process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV] ===
     EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
@@ -415,10 +425,20 @@ export async function main() {
   markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
   const isAcpMode = argv.acp || argv.experimentalAcp;
+  const conversationsRuntimeProvenance =
+    isAcpMode &&
+    privateAcpParentCapability !== undefined &&
+    conversationsRuntimeMarkerSeen;
   const privateAcpChildEnv =
     isAcpMode && privateAcpParentCapability !== undefined
       ? {
           [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability,
+          ...(conversationsRuntimeProvenance
+            ? {
+                [PRIVATE_CONVERSATIONS_RUNTIME_ENV]:
+                  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+              }
+            : {}),
           ...(privateExternalToolGuard
             ? {
                 [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: privateExternalToolGuard,
@@ -453,6 +473,9 @@ export async function main() {
     ? createMinimalSettings()
     : loadSettings();
   markAcpStartup('settingsLoadEnd');
+  // A user-level .env or settings reload may have reintroduced the marker;
+  // the accepted value already lives in immutable local state.
+  delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
 
   // Propagate corruption state to child process via env vars so
   // relaunchAppInChildProcess() doesn't lose the marker.
@@ -1119,6 +1142,7 @@ export async function main() {
           privateParentCapability: isAcpMode
             ? privateAcpParentCapability
             : undefined,
+          conversationsRuntimeProvenance,
           externalToolGuardRequired:
             isAcpMode &&
             privateAcpParentCapability !== undefined &&
