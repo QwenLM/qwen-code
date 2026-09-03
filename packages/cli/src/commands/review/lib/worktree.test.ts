@@ -2105,10 +2105,61 @@ describe('localFilterCommands', () => {
           .split('\n')
           .filter((l) => l.includes('--file'))
           .map((l) => l.split(' --file ')[1]?.split(' ')[0] ?? '');
-        const commonAt = reads.indexOf(join(dir, '.git', 'config'));
-        expect(commonAt).toBeGreaterThanOrEqual(0);
-        // Every other candidate was read before it.
-        expect(commonAt).toBe(reads.length - 1);
+        const own = join(dir, '.git', 'config.worktree');
+        const commonCfg = join(dir, '.git', 'config');
+        // The file the checkout honours is dead last...
+        expect(reads[reads.length - 1]).toBe(own);
+        // ...with the common config immediately before it, and the paddable
+        // admin entries before both.
+        expect(reads[reads.length - 2]).toBe(commonCfg);
+        expect(
+          reads.indexOf(join(dir, '.git', 'worktrees', 'w1', 'config.worktree')),
+        ).toBeLessThan(reads.indexOf(commonCfg));
+      } finally {
+        process.env['PATH'] = savedPath;
+        rmSync(shimDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // POSIX-only, same shim mechanism as the sibling above.
+  it.skipIf(process.platform === 'win32')(
+    'reads a CROSS-tree checkout target last, not the screened tree\'s own',
+    () => {
+      // `scratch-tree` screens the review worktree while authorising a
+      // checkout in the scratch tree. The producer cannot tell which admin
+      // entry that is, so the caller names it — and it, not the screened
+      // tree's own config, is what has to be read last.
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-xshim-'));
+      const log = join(shimDir, 'calls.log');
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      writeFileSync(
+        join(shimDir, 'git'),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> ${log}\nexec ${realGit} "$@"\n`,
+      );
+      chmodSync(join(shimDir, 'git'), 0o755);
+      for (const e of ['other', 'scratchy']) {
+        mkdirSync(join(dir, '.git', 'worktrees', e), { recursive: true });
+        writeFileSync(join(dir, '.git', 'worktrees', e, 'config.worktree'), '');
+      }
+      writeFileSync(join(dir, '.git', 'config.worktree'), '');
+      const savedPath = process.env['PATH'];
+      try {
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        localFilterCommands(dir, join(dirname(dir), 'scratchy'));
+
+        const reads = readFileSync(log, 'utf8')
+          .split('\n')
+          .filter((l) => l.includes('--file'))
+          .map((l) => l.split(' --file ')[1]?.split(' ')[0] ?? '');
+        expect(reads[reads.length - 1]).toBe(
+          join(dir, '.git', 'worktrees', 'scratchy', 'config.worktree'),
+        );
+        // The screened tree's own config is no longer the last read.
+        expect(reads).not.toContain(join(dir, '.git', 'config.worktree'));
       } finally {
         process.env['PATH'] = savedPath;
         rmSync(shimDir, { recursive: true, force: true });

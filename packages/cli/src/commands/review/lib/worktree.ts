@@ -642,7 +642,14 @@ export interface LocalFilterScreen {
    * refusal can name what it is not showing instead of silently shortening.
    */
   keys: string[];
-  /** How many distinct keys the screen found, before the cap on `keys`. */
+  /**
+   * How many matching entries the screen found, against `keys.length` shown.
+   *
+   * Exact while under `MAX_SCREEN_KEYS`; beyond it an upper bound, because
+   * retention stops at the cap and there is nothing left to deduplicate a
+   * later repeat against. Either way it answers the only question a refusal
+   * needs it for: is there more than what is named.
+   */
   total: number;
   /**
    * Why the screen stopped, when it did.
@@ -760,7 +767,27 @@ export function carriesReplacementChar(value: string): boolean {
   return value.includes('\uFFFD');
 }
 
-export function localFilterCommands(worktree: string): LocalFilterScreen {
+export function localFilterCommands(
+  worktree: string,
+  /**
+   * The tree the authorised checkout will run in, when that is not `worktree`.
+   *
+   * The screen reads candidates in sequence and the checkout reads merged
+   * config at its start, so each file's window runs from ITS read to the
+   * spawn. The file that decides what the checkout executes therefore has to
+   * be read last. For the restore and the revert that tree is the screened
+   * one, which is the default; `scratch-tree` screens the review worktree
+   * while authorising a checkout in the scratch tree, and only the caller
+   * knows which tree that is.
+   *
+   * Its per-worktree config is looked for at `<common>/worktrees/<basename of
+   * that path>/config.worktree`, which is where `git worktree add` registers
+   * it. If the tree does not exist yet — the rebuild path creates it after
+   * this screen — the file does not exist either and the read is a no-op,
+   * which is the correct answer: there is nothing there to plant in.
+   */
+  checkoutTree?: string,
+): LocalFilterScreen {
   const commonDir = revParsePath(worktree, '--git-common-dir');
   // The second discovery spawn is skipped once the first fails. Both read
   // config at git startup, so a plant that blocks one blocks the other for the
@@ -811,7 +838,17 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
   // between it and the checkout. This does not close the window — nothing
   // here can, since a checkout either reads merged config or does not run —
   // it removes the amplification.
-  const candidates = [join(resolve(worktree, gitDir), 'config.worktree')];
+  // The checkout tree's own per-worktree config, held back to the very end.
+  const ownAdminConfig =
+    checkoutTree === undefined || resolve(checkoutTree) === resolve(worktree)
+      ? join(resolve(worktree, gitDir), 'config.worktree')
+      : join(
+          common,
+          'worktrees',
+          basename(resolve(checkoutTree)),
+          'config.worktree',
+        );
+  const candidates: string[] = [];
   // Every OTHER worktree's per-worktree config too. This screen runs against
   // the review worktree, but the checkout it authorises runs in the SCRATCH
   // tree, whose own `<common>/worktrees/<label>/config.worktree` is honored
@@ -855,11 +892,41 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     };
   }
   for (const entry of worktreeEntries ?? []) {
-    candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
+    // The checkout tree's own config comes last, below — not here, in the
+    // middle of a set an attacker can pad.
+    // Entry names are the THIRD attacker-influenced source of candidate bytes,
+    // after the two rev-parse answers. `readdirSync` transcodes an invalid
+    // byte to U+FFFD, `join` re-encodes it as EF BF BD, `existsSync` is then
+    // false and the loop would skip a `config.worktree` that really exists and
+    // really defines a filter — the clean verdict authorising the checkout
+    // that runs it. The sibling hazards on this same directory (EACCES, and
+    // U+FFFD in the rev-parse answers) both refuse; so does this.
+    if (carriesReplacementChar(entry)) {
+      return {
+        keys: [],
+        total: 0,
+        unreadable: join(common, 'worktrees'),
+        stopped: 'unreadable',
+      };
+    }
+    const candidate = join(common, 'worktrees', entry, 'config.worktree');
+    if (candidate !== ownAdminConfig) candidates.push(candidate);
   }
-  // Last, per the note above the list.
+  // Then the common config, then — dead last — the file the authorised
+  // checkout will actually honour. Order is the whole mitigation here: the
+  // admin set above is attacker-paddable, so anything read before it carries a
+  // window the plant itself can widen.
   candidates.push(join(common, 'config'));
+  candidates.push(ownAdminConfig);
+  // Retention is bounded at INSERTION, not at the report. The caps below limit
+  // how many keys are NAMED and how many files are read, but the Set itself
+  // would hold every distinct key an attacker wrote — bounded only by the
+  // product of the caps, on exactly the input this screen exists to survive.
+  // Tens of thousands of keys per file across the admin set is a gibibyte of
+  // key text held live to report twelve of them, once per mutant. Past the cap
+  // only the count matters, so only the count is kept.
   const found = new Set<string>();
+  let total = 0;
   let unreadable: string | null = null;
   for (const file of candidates) {
     if (!existsSync(file)) continue;
@@ -954,12 +1021,22 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
       // as many as the 1 MiB output holds, so a linear membership test per line
       // is quadratic on exactly the input this screen exists to survive.
       // (Measured: 100k keys took 144 s as an array scan and 53 ms as a Set.)
-      if (key) found.add(key);
+      if (!key) continue;
+      // Deduplicated only within the cap — past it there is nothing left to
+      // deduplicate against, which is the whole point of not retaining it. So
+      // `total` counts matching entries, exact while under the cap and an
+      // upper bound beyond it; `keys` stays distinct. A refusal saying "12
+      // shown of 40" is honest either way: there is more than it is naming.
+      if (found.size < MAX_SCREEN_KEYS) {
+        if (found.has(key)) continue;
+        found.add(key);
+      }
+      total += 1;
     }
   }
   return {
-    keys: [...found].slice(0, MAX_SCREEN_KEYS),
-    total: found.size,
+    keys: [...found],
+    total,
     unreadable,
     stopped: unreadable === null ? null : 'unreadable',
   };

@@ -38,6 +38,7 @@ import { MAX_SCREEN_KEYS, sanitizedGitEnv } from './lib/worktree.js';
 import {
   mkdtempSync,
   mkdirSync,
+  chmodSync,
   writeFileSync,
   appendFileSync,
   symlinkSync,
@@ -784,6 +785,74 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // POSIX-only: the relink is a symlink swap driven from a `#!/bin/sh` shim.
+  it.skipIf(process.platform === 'win32')(
+    'refuses when the tree stops being its own root mid-screen',
+    () => {
+      // The root verdict is taken at the top of the restore; the filter screen
+      // runs between it and the destructive spawns, and an attacker can
+      // stretch that walk. A planter that swaps the root for a symlink to the
+      // SHARED tree inside the window would send `checkout --force` and
+      // `clean -ffdx` there — tracked files rewritten, untracked and ignored
+      // ones deleted. Driven deterministically here: a `git` shim performs the
+      // swap on the screen's first config read, so the relink lands exactly in
+      // the window rather than by racing.
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-relink-'));
+      const victim = mkdtempSync(join(tmpdir(), 'qwen-victim-'));
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-relinkshim-'));
+      const isolation = isolateHostGitConfig();
+      const savedPath = process.env['PATH'];
+      try {
+        writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+        asCheckout(dir);
+        writeFileSync(join(dir, 'a.ts'), 'dirtied\n');
+        // The tree the relink points at is a real checkout, so without the
+        // re-check the spawns SUCCEED there rather than failing on "not a git
+        // repository" — `clean -ffdx` eats the untracked file, which is what
+        // makes this a damage witness and not just a diagnostics one.
+        writeFileSync(join(victim, 'tracked.ts'), 'shared\n');
+        asCheckout(victim);
+        writeFileSync(join(victim, 'PRECIOUS'), 'do not delete\n');
+        const realGit = execFileSync('which', ['git'], {
+          encoding: 'utf8',
+        }).trim();
+        // On the first `config --file` read, swap the root for a symlink.
+        writeFileSync(
+          join(shimDir, 'git'),
+          `#!/bin/sh\ncase "$*" in\n  *--file*)\n    if [ ! -e ${shimDir}/done ]; then\n      touch ${shimDir}/done\n      rm -rf ${dir}.real && mv ${dir} ${dir}.real && ln -s ${victim} ${dir}\n    fi\n    ;;\nesac\nexec ${realGit} "$@"\n`,
+        );
+        chmodSync(join(shimDir, 'git'), 0o755);
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        // Wrapped, because without the re-check the run does not merely
+        // return a wrong verdict — it throws further along, after the damage.
+        let detail = '';
+        try {
+          detail = runOneMutant(
+            dir,
+            { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+            ['a.test.ts'],
+          ).detail;
+        } catch (e) {
+          detail = e instanceof Error ? e.message : String(e);
+        }
+
+        // The damage assertion FIRST: this is the one that fails when the
+        // re-check is removed, and it fails because `clean -ffdx` really did
+        // run in the shared tree.
+        expect(existsSync(join(victim, 'PRECIOUS'))).toBe(true);
+        expect(detail).toContain('stopped being its own root');
+      } finally {
+        process.env['PATH'] = savedPath;
+        isolation.dispose();
+        rmSync(shimDir, { recursive: true, force: true });
+        rmSync(`${dir}.real`, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('refuses when git cannot PARSE a candidate config — not "clean"', () => {
     // The readability gate above answers "can this process open it"; this is

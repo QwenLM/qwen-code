@@ -425,7 +425,17 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
 
   // BEFORE any checkout runs — the reuse path's reset and the rebuild path's
   // `worktree add` both execute configured content filters.
-  const filters = localFilterCommands(worktree);
+  //
+  // The screen runs against the REVIEW worktree, but the checkout it
+  // authorises runs in the SCRATCH tree, whose own `config.worktree` is just
+  // another entry in the admin set as far as the screen can tell — read in the
+  // middle of a walk a plant can pad, with the longest window of any candidate
+  // to the spawn that honours it. Only this caller knows which entry that is,
+  // so it says: read that one last.
+  const filters = localFilterCommands(
+    worktree,
+    scratchWorktreePath(worktree, label),
+  );
   if (filters.stopped) {
     return unavailable(
       `the screen could not clear this repository: ${screenStopDetail(filters)}. ` +

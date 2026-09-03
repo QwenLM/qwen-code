@@ -1609,6 +1609,10 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
           `git rev-parse exited ${top.status}`;
   }
   const [toplevel, commonDir, gitDir] = top.stdout.trim().split('\n');
+  // Captured with the root verdict below, re-asked immediately before the
+  // spawns — see `probeRootIdentity`. The screen between them is a walk an
+  // attacker can stretch.
+  const rootAtVerdict = probeRootIdentity(probeTree);
   try {
     // The LEAF first. Every comparison below realpaths both sides, so a probe
     // tree that is itself a symlink into the shared review worktree agrees
@@ -1680,6 +1684,16 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   }
   if (filters.keys.length > 0) {
     return `the repository's local config defines content filter(s) ${screenKeyList(filters)}, which this tree's restore would EXECUTE`;
+  }
+  // The root verdict again, with only these two syscalls before the spawns.
+  // Everything above — the gitfile round-trip, the ancestor walk, the filter
+  // screen's per-candidate spawns — ran on the verdict taken at the top, and
+  // the screen in particular is stretchable by filler admin entries.
+  if (
+    rootAtVerdict === null ||
+    probeRootIdentity(probeTree) !== rootAtVerdict
+  ) {
+    return `${probeTree} stopped being its own root while the restore was being cleared, so the checkout and clean would run somewhere else`;
   }
   // `core.hooksPath` and `core.fsmonitor` both run a command on these two
   // spawns, and the config that sets them lives in the tree they are cleaning:
@@ -2073,6 +2087,34 @@ function newSideLength(header: string): number {
  * control that never ran) rather than written through; a component missing on
  * disk escapes nothing — the read or write fails on its own.
  */
+/**
+ * The probe tree root's identity, for re-asking immediately before a spawn.
+ *
+ * Every root-escape verdict in this file is taken once and then acted on
+ * several statements later — and what sits in between grew: the filter screen
+ * is a walk of one spawn per candidate, and an attacker can stretch it with
+ * filler admin entries. A detached planter (the capability the revert phase's
+ * own comment credits) that replaces the predictable `<worktree>-probe` root
+ * with a symlink to the SHARED review worktree inside that window turns
+ * `checkout --force` and `clean -ffdx` loose on the reviewer's own tree:
+ * tracked files rewritten, untracked and ignored files deleted — `.qwen/**`
+ * included — while the restore still reports success.
+ *
+ * So the verdict is re-taken here, with nothing but two syscalls between it
+ * and the spawn. `null` means "not a root to write into"; comparing the
+ * answer to the one taken earlier catches a root swapped in between. This does
+ * not close the window — a check and a spawn are never one operation — it
+ * narrows it to what fs calls cost, from a walk an attacker can widen.
+ */
+function probeRootIdentity(probeTree: string): string | null {
+  try {
+    if (lstatSync(probeTree).isSymbolicLink()) return null;
+    return realpathSync(probeTree);
+  } catch {
+    return null;
+  }
+}
+
 function probeTargetEscapes(probeTree: string, file: string): boolean {
   // The separator set is platform-dependent: on POSIX a backslash is an
   // ordinary NAME character, so splitting on it turns `x\\y.test.ts` into two
@@ -3002,6 +3044,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               'root), so the revert would run against whatever it points at',
           );
         }
+        // Captured here, re-asked immediately before the checkout — the
+        // classification loop and the filter screen both sit in between, and
+        // both are attacker-sized (one `cat-file -e` per revert path; one
+        // spawn per screened candidate).
+        const revertRootAtVerdict = probeRootIdentity(probeTree);
         // Filters, again, and for the same reason the restore screens them:
         // `checkout base -- <paths>` below rewrites files, and a rewrite
         // EXECUTES `filter.<name>.smudge`. Screening once at the restore is
@@ -3053,6 +3100,20 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             "the repository's local config defines content filter(s) " +
               `${screenKeyList(revertFilters)}, which this revert's checkout ` +
               'would EXECUTE',
+          );
+        }
+        // The root verdict again, two syscalls before the spawn. `safeRmWithin`
+        // re-walks ancestors on every call, so the DELETE half already asks
+        // this question per path; the checkout half trusted the verdict taken
+        // above the classification loop, and a relink landing in between
+        // rewrote the reviewer's own files with base content.
+        if (
+          revertRootAtVerdict === null ||
+          probeRootIdentity(probeTree) !== revertRootAtVerdict
+        ) {
+          throw new Error(
+            'the probe tree stopped being its own root while the revert was ' +
+              'being cleared, so the checkout would run somewhere else',
           );
         }
         if (modified.length > 0) {
