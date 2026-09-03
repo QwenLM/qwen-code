@@ -794,11 +794,15 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         # A hung suite used to burn the whole job budget: #10490's run 3 was
         # cancelled at ~60 minutes with the runner terminating orphaned test
-        # processes, which reads as a timeout rather than a failure. The
-        # healthy step is
-        # ~32 minutes and the worst measured is ~60, so this cap turns a hang
-        # into a legible failure without touching a slow-but-live run.
-        timeout-minutes: 90
+        # processes, which reads as a timeout rather than a failure.
+        #
+        # The cap has to clear the slowest honest run, not the healthy one.
+        # ~32 minutes was measured at six Vitest forks; the pool now runs
+        # three, which roughly doubles the test phase on an idle host, and a
+        # failing run adds its retries on top. 110 leaves room for that and
+        # still fits the job's 120-minute budget, which this step enters at
+        # around minute 18.
+        timeout-minutes: 110
         env:
           NO_COLOR: true
           # Every attempt of a contended shard is a fresh roll: the same

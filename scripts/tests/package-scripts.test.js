@@ -125,7 +125,7 @@ describe('package scripts', () => {
       getWorkflowJob(readWorkflow('.github/workflows/ci.yml'), 'test'),
       'Run tests and generate reports',
     );
-    expect(step).toContain('timeout-minutes: 90');
+    expect(step).toContain('timeout-minutes: 110');
   });
 
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
