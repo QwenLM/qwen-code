@@ -25,7 +25,7 @@ jobs:
     name: 'Resolve version'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 30
+    timeout-minutes: 70
     outputs:
       version: '${{ steps.version.outputs.version }}'
     steps:
@@ -36,12 +36,13 @@ jobs:
           # npm publishes asynchronously: `npm publish --provenance` returns
           # "Your package is being processed and may take a few minutes to
           # become available", and release.yml dispatches this workflow as soon
-          # as it returns. For v0.22.3 the gap was ~16 minutes (published
-          # 17:14Z, resolvable 17:30Z), so the single un-retried `npm view` this
-          # step used to run 404'd on 3 of the 4 pools and left the fleet split
-          # across two CLI versions until a maintainer noticed. Wait the
-          # registry out rather than losing the race.
-          RESOLVE_TIMEOUT_SECONDS: '1500'
+          # as it returns. The gap varies widely: v0.22.3 took ~16 minutes
+          # (published 17:14Z, resolvable 17:30Z), and v0.23.0 took ~40
+          # minutes (published 11:03Z, resolvable ~11:43Z) — the previous
+          # 1500s budget gave up at 25 minutes and the run failed with the
+          # package still in flight, leaving the fleet on the old version.
+          # Wait the registry out rather than losing the race.
+          RESOLVE_TIMEOUT_SECONDS: '3600'
           RESOLVE_INTERVAL_SECONDS: '30'
         run: |-
           set -euo pipefail
