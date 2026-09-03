@@ -72,14 +72,12 @@
     "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/qwen-code-core": "file:../core",
     "@types/node": "^22.0.0",
-    "@typescript-eslint/eslint-plugin": "^7.13.0",
-    "@typescript-eslint/parser": "^7.13.0",
-    "@vitest/coverage-v8": "^1.6.0",
+    "@vitest/coverage-v8": "^3.2.4",
     "dts-bundle-generator": "^9.5.1",
     "esbuild": "^0.25.12",
-    "eslint": "^8.57.0",
+    "eslint": "^9.24.0",
     "typescript": "^5.4.5",
-    "vitest": "^1.6.0"
+    "vitest": "^3.2.4"
   },
   "peerDependencies": {
     "typescript": ">=5.0.0"
