@@ -408,6 +408,20 @@ export interface SubmitPromptResult {
 }
 
 export interface DaemonSessionActions {
+  /**
+   * Publish the daemon's authoritative "this session has a prompt in flight"
+   * state for the connected session, or `undefined` when it cannot be known
+   * (a daemon without `workspace_session_live_state`, or a workspace nothing
+   * polls live state for).
+   *
+   * The event stream alone cannot tell a long silent tool call apart from a
+   * finished turn, so without this the pane settles a still-running turn to
+   * `idle` after a few seconds of silence and the loading indicator drops
+   * mid-turn (#9487). While this reports `true`, silence-based settling is
+   * suppressed; a `true` -> `false` transition settles the turn as a backstop
+   * for terminal events that never arrive.
+   */
+  setDaemonActivePrompt(active: boolean | undefined): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
   /**
    * Non-blocking prompt submission. POSTs to the daemon and returns

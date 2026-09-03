@@ -170,11 +170,21 @@ export function useSessionCatalogQueries(
   return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_SNAPSHOTS);
 }
 
-export function useSessionHasActivePrompt(
+/**
+ * Whether the daemon reports a prompt in flight for `sessionId`, together with
+ * whether that answer is actually known.
+ *
+ * `known: false` means no authority covers this workspace yet (no live-state
+ * response and no loaded fallback page). Callers that only light up a spinner
+ * can treat it as "not running"; callers that use a `false` to *settle* a
+ * running turn must not, or an unknown answer would settle a turn that is
+ * still going — the failure this whole signal exists to prevent (#9487).
+ */
+export function useSessionActivePromptState(
   client: DaemonClient,
   workspaceCwd: string | undefined,
   sessionId: string | undefined,
-): boolean {
+): { hasActivePrompt: boolean; known: boolean } {
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const subscribeLiveSessions = useCallback(
     (listener: () => void) =>
@@ -213,18 +223,35 @@ export function useSessionHasActivePrompt(
   }, [catalogFallbackArmed, hasLiveSessions, workspaceCwd]);
   // autoLoad keeps the fallback page loading (and the store's error-retry
   // timer armed) for observer panes that never trigger an invalidation.
-  const { sessions } = useSessionCatalogQuery(client, catalogQuery, {
+  const { sessions, page } = useSessionCatalogQuery(client, catalogQuery, {
     autoLoad: true,
   });
-  if (!workspaceCwd || !sessionId) return false;
-  if (hasLiveSessions) {
-    return (
-      store.getLiveSession(workspaceCwd, sessionId)?.hasActivePrompt === true
-    );
+  if (!workspaceCwd || !sessionId) {
+    return { hasActivePrompt: false, known: false };
   }
-  return sessions.some(
-    (session) => session.sessionId === sessionId && session.hasActivePrompt,
-  );
+  if (hasLiveSessions) {
+    return {
+      hasActivePrompt:
+        store.getLiveSession(workspaceCwd, sessionId)?.hasActivePrompt === true,
+      known: true,
+    };
+  }
+  return {
+    hasActivePrompt: sessions.some(
+      (session) => session.sessionId === sessionId && session.hasActivePrompt,
+    ),
+    // A page that has not loaded yet says nothing about this session.
+    known: page !== undefined,
+  };
+}
+
+export function useSessionHasActivePrompt(
+  client: DaemonClient,
+  workspaceCwd: string | undefined,
+  sessionId: string | undefined,
+): boolean {
+  return useSessionActivePromptState(client, workspaceCwd, sessionId)
+    .hasActivePrompt;
 }
 
 export function useSessionCatalogPolling(

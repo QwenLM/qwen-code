@@ -185,6 +185,14 @@ export interface CreateDaemonSessionActionsArgs {
   manualSessionClearRef: RefBox<boolean>;
   skipNextCleanupDetachSessionRef: RefBox<DaemonSessionClient | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
+  /**
+   * Daemon-authoritative "a prompt is in flight" state for the connected
+   * session, published by the host through `setDaemonActivePrompt`.
+   * `undefined` means no authority is available (a daemon without
+   * `workspace_session_live_state`, or a host that never wires it) and the
+   * silence-based heuristics stay in charge.
+   */
+  daemonActivePromptRef: RefBox<boolean | undefined>;
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
     workspaceCwd?: string,
@@ -339,6 +347,7 @@ export function createDaemonSessionActions({
   manualSessionClearRef,
   skipNextCleanupDetachSessionRef,
   passiveAssistantDoneTimerRef,
+  daemonActivePromptRef,
   getCreateSessionRequest,
   createDetachedSession,
   createDetachedStandaloneSession,
@@ -849,6 +858,26 @@ export function createDaemonSessionActions({
   }
 
   return {
+    setDaemonActivePrompt(active) {
+      const previous = daemonActivePromptRef.current;
+      daemonActivePromptRef.current = active;
+      // Only a true -> false transition is a settle signal. Going true (or
+      // going unknown) must never revive a finished turn: the live-state poll
+      // trails the event stream, so reviving would flash the indicator back on
+      // for one poll interval after every turn_complete.
+      if (previous !== true || active !== false) return;
+      // Terminal events normally settle the turn well before this. This is the
+      // backstop for the ones that never arrive (dropped stream, daemon
+      // restart mid-turn), so a pane held alive through silent tool gaps
+      // cannot stay stuck on a turn the daemon already finished (#9487).
+      if (hasSessionActivePrompt()) return;
+      clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+      if (store.getSnapshot().activeAssistantBlockId) {
+        store.dispatch({ type: 'assistant.done', reason: 'daemon_idle' });
+      }
+      setPromptStatus('idle');
+    },
+
     async sendPrompt(text, options) {
       const session = requireSessionForAction(
         addNotice,

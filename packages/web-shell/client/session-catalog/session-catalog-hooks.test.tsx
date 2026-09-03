@@ -60,6 +60,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 const {
   useSessionCatalogQuery,
   useSessionCatalogController,
+  useSessionActivePromptState,
   useSessionHasActivePrompt,
   useWebShellSessions,
 } = await import('./session-catalog-hooks');
@@ -339,6 +340,39 @@ describe('useSessionHasActivePrompt (#9487)', () => {
     });
     // A session absent from the live response has no active prompt.
     expect(container.textContent).toBe('false');
+  });
+
+  it('reports the answer as unknown until an authority covers the workspace', async () => {
+    // `known` gates settling a running turn: a `false` that only means
+    // "nothing has answered yet" must never be mistaken for "turn finished".
+    const listPage = vi.fn(
+      () =>
+        new Promise<{ sessions: unknown[] }>(() => {
+          // never resolves: the fallback page is still in flight
+        }),
+    );
+    (mocks.workspace.client as { workspaceByCwd: unknown }).workspaceByCwd =
+      vi.fn(() => ({ listWorkspaceSessionsPage: listPage }));
+    const client = mocks.workspace.client as DaemonClient;
+    const store = getSessionCatalogStore(client);
+
+    function KnownProbe() {
+      const state = useSessionActivePromptState(client, '/work', 'sess-1');
+      return <span>{`${state.hasActivePrompt}/${state.known}`}</span>;
+    }
+
+    await act(async () => {
+      root.render(<KnownProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    expect(container.textContent).toBe('false/false');
+
+    act(() => {
+      store.applyLiveState('/work', []);
+    });
+    // A live-state response that covers the workspace answers definitively:
+    // absent from it means the session has no prompt in flight.
+    expect(container.textContent).toBe('false/true');
   });
 
   it('sees an active prompt the loaded catalog page does not contain', async () => {

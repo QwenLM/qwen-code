@@ -1047,6 +1047,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const passiveAssistantDoneTimerRef = useRef<
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
+  // Daemon-authoritative "a prompt is in flight" state for the connected
+  // session, pushed in by the host from the workspace live-state poll via
+  // `actions.setDaemonActivePrompt`. `undefined` = unknown; the silence
+  // heuristics below then behave exactly as they did before (#9487).
+  const daemonActivePromptRef = useRef<boolean | undefined>(undefined);
   const heartbeatSupportedRef = useRef(false);
   const heartbeatFailureStateRef = useRef<HeartbeatFailureState>({
     consecutiveFailures: 0,
@@ -1974,6 +1979,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ) {
               setPromptStatus('idle');
               clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+              // The hint describes the session we are leaving; a stale `true`
+              // must not keep the next session's indicator alive.
+              daemonActivePromptRef.current = undefined;
               needsStoreReset = true;
             } else if (previousSessionId !== undefined) {
               const replaySnapshotEventCount =
@@ -2058,7 +2066,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             activePromptsRef.current.has(`${activeSession.sessionId}:shell`);
           hasCurrentSessionActivePrompt = hasSessionActivePrompt;
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
-          setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
+          setPromptStatus((current) =>
+            hasSessionActivePrompt()
+              ? 'streaming'
+              : // A Last-Event-ID resume on the same session is not a turn
+                // boundary. `hasSessionActivePrompt()` only knows about
+                // prompts this browser submitted plus the one-shot /load
+                // snapshot, so for an observer pane it reads false mid-turn
+                // and would reset a running turn to idle. Keep whatever the
+                // stream already established while the daemon still reports
+                // the prompt in flight (#9487).
+                daemonActivePromptRef.current === true && current !== 'idle'
+                ? current
+                : 'idle',
+          );
 
           const pendingLoad = pendingSessionLoadRef.current;
           const pendingLoadToResolve =
@@ -3132,7 +3153,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   passiveAssistantDoneTimerRef,
                   'passive_observer',
                   3000,
-                  () => setPromptStatus('idle'),
+                  () => {
+                    // Silence is not a terminal signal: one tool call
+                    // routinely runs far longer than this window without
+                    // emitting an event, and dropping the pane's loading
+                    // state there is exactly the mid-turn indicator loss in
+                    // #9487. The stale streaming block is still finished
+                    // above; settle the prompt state only when the daemon
+                    // does not contradict it.
+                    if (daemonActivePromptRef.current === true) return;
+                    setPromptStatus('idle');
+                  },
                 );
               }
               const pendingRepair = liveJournalRepairRef.current;
@@ -3930,6 +3961,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         manualSessionClearRef,
         skipNextCleanupDetachSessionRef,
         passiveAssistantDoneTimerRef,
+        daemonActivePromptRef,
         hasSessionActivePrompt: () =>
           hasCurrentSessionActivePromptRef.current(),
         resetCurrentSessionActivePrompt: () => {

@@ -298,6 +298,47 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  describe('setDaemonActivePrompt (#9487)', () => {
+    it('settles the prompt state when the daemon reports the turn finished', () => {
+      const daemonActivePromptRef: { current: boolean | undefined } = {
+        current: undefined,
+      };
+      const { actions, setPromptStatus } = createActionsHarness({
+        daemonActivePromptRef,
+      });
+
+      actions.setDaemonActivePrompt(true);
+      expect(daemonActivePromptRef.current).toBe(true);
+      expect(setPromptStatus).not.toHaveBeenCalled();
+
+      actions.setDaemonActivePrompt(false);
+      expect(setPromptStatus).toHaveBeenCalledWith('idle');
+    });
+
+    it('never revives a settled turn', () => {
+      // The live-state poll trails the event stream, so a stale `true`
+      // arriving after turn_complete must not flash the indicator back on.
+      const { actions, setPromptStatus } = createActionsHarness();
+
+      actions.setDaemonActivePrompt(false);
+      actions.setDaemonActivePrompt(true);
+      actions.setDaemonActivePrompt(undefined);
+      expect(setPromptStatus).not.toHaveBeenCalled();
+    });
+
+    it('leaves a locally submitted prompt alone', () => {
+      // This browser owns the prompt, so its own terminal handling settles it;
+      // a lagging live-state sample must not cut the turn short.
+      const { actions, setPromptStatus } = createActionsHarness({
+        hasSessionActivePrompt: () => true,
+      });
+
+      actions.setDaemonActivePrompt(true);
+      actions.setDaemonActivePrompt(false);
+      expect(setPromptStatus).not.toHaveBeenCalled();
+    });
+  });
+
   it('does not report a stats error while the session is disconnected', async () => {
     const addNotice = vi.fn();
     const { actions } = createActionsHarness({ addNotice });
@@ -4043,6 +4084,8 @@ function createActionsHarness(
     connection?: DaemonConnectionState;
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
+    daemonActivePromptRef?: { current: boolean | undefined };
+    hasSessionActivePrompt?: () => boolean;
     manualSessionClearRef?: { current: boolean };
     pendingSessionLoadRef?: { current: PendingSessionLoad | undefined };
     restartEventStream?: ReturnType<typeof vi.fn>;
@@ -4071,10 +4114,12 @@ function createActionsHarness(
     ({ current: undefined } as {
       current: PendingSessionLoad | undefined;
     });
+  const setPromptStatus = vi.fn();
   const store = {
     reset: vi.fn(),
     appendLocalUserMessage: vi.fn(),
     dispatch: vi.fn(),
+    getSnapshot: vi.fn(() => ({ activeAssistantBlockId: undefined })),
   };
   const actions = createDaemonSessionActions({
     store: store as never,
@@ -4088,6 +4133,7 @@ function createActionsHarness(
     manualSessionClearRef: opts.manualSessionClearRef ?? { current: false },
     skipNextCleanupDetachSessionRef: { current: undefined },
     passiveAssistantDoneTimerRef: { current: undefined },
+    daemonActivePromptRef: opts.daemonActivePromptRef ?? { current: undefined },
     getCreateSessionRequest: () => ({ workspaceCwd: '/workspace' }),
     createDetachedSession: (opts.createDetachedSession ??
       vi.fn(
@@ -4106,7 +4152,7 @@ function createActionsHarness(
     getDefaultSessionContext:
       opts.getDefaultSessionContext ?? (() => undefined),
     getConnection: () => connection,
-    hasSessionActivePrompt: () => false,
+    hasSessionActivePrompt: opts.hasSessionActivePrompt ?? (() => false),
     resetCurrentSessionActivePrompt: vi.fn(),
     restartEventStream: opts.restartEventStream ?? vi.fn(),
     addNotice: opts.addNotice ?? vi.fn(),
@@ -4114,7 +4160,7 @@ function createActionsHarness(
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
     },
-    setPromptStatus: vi.fn(),
+    setPromptStatus,
     setRestoreSessionId: opts.setRestoreSessionId ?? vi.fn(),
     setRestoreSessionContext: opts.setRestoreSessionContext ?? vi.fn(),
     setRestoreMode: vi.fn(),
@@ -4129,6 +4175,7 @@ function createActionsHarness(
     pendingSessionLoadRef,
     replaceConnection,
     sessionRef,
+    setPromptStatus,
     store,
   };
 }

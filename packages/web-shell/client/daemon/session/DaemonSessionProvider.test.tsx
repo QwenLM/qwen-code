@@ -9880,6 +9880,197 @@ describe('DaemonSessionProvider', () => {
     }
   });
 
+  describe('observed turn loading across silent tool gaps (#9487)', () => {
+    // An observer pane is one that did not submit the running prompt — a
+    // refreshed page, a second tab, a split pane, or a turn driven by a
+    // scheduler. It only has the event stream to go on, and a single tool call
+    // routinely runs far longer than the passive settle window without
+    // emitting anything.
+    function createObservedSparseTurnSession(silentToolGap: {
+      promise: Promise<void>;
+    }) {
+      return createMockSession({
+        events: async function* observedSparseTurn(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          yield {
+            id: 9,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'run long task' },
+              },
+            },
+          };
+          yield {
+            id: 10,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'starting' },
+              },
+            },
+          };
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+            void silentToolGap.promise.then(() => resolve());
+          });
+          if (opts.signal?.aborted) return;
+          yield {
+            id: 11,
+            v: 1,
+            type: 'turn_complete',
+            timestamp: '2025-01-01T00:00:00.000Z',
+            sessionId: 'session-1',
+            data: { stopReason: 'end_turn' },
+          };
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      });
+    }
+
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+    let actions: DaemonSessionActions | undefined;
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      streamingState = useDaemonStreamingState();
+      actions = useDaemonActions();
+      return null;
+    }
+
+    beforeEach(() => {
+      promptStatus = 'idle';
+      streamingState = 'idle';
+      actions = undefined;
+    });
+
+    it('keeps the pane loading while the daemon reports the prompt in flight', async () => {
+      vi.useFakeTimers();
+      try {
+        const silentToolGap = createDeferred<void>();
+        sdkMocks.sessions.push(createObservedSparseTurnSession(silentToolGap));
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        // The workspace live-state poll says the turn is still running.
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+
+        // A long tool call goes quiet well past the passive settle window.
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+        expect(streamingState).not.toBe('idle');
+
+        await act(async () => {
+          silentToolGap.resolve();
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
+        expect(streamingState).toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('settles on the daemon reporting the prompt finished without a terminal event', async () => {
+      vi.useFakeTimers();
+      try {
+        // Backstop for terminal events that never arrive (dropped stream,
+        // daemon restart mid-turn): the turn never emits turn_complete here.
+        const silentToolGap = createDeferred<void>();
+        sdkMocks.sessions.push(createObservedSparseTurnSession(silentToolGap));
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(false);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
+        expect(streamingState).toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('still settles on silence when no daemon prompt state is available', async () => {
+      vi.useFakeTimers();
+      try {
+        // Hosts that never publish live state (or daemons without
+        // workspace_session_live_state) keep the pre-existing silence
+        // heuristic, so an observer pane cannot be left spinning forever.
+        const silentToolGap = createDeferred<void>();
+        sdkMocks.sessions.push(createObservedSparseTurnSession(silentToolGap));
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(promptStatus).not.toBe('idle');
+
+        await act(async () => {
+          vi.advanceTimersByTime(10_000);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
+        expect(streamingState).toBe('idle');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it('finishes replayed assistant streaming when replay completes', async () => {
     vi.useFakeTimers();
     try {

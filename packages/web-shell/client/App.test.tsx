@@ -316,6 +316,7 @@ const {
     mockCollectSystemInfo,
     mockConnection: connection,
     mockSessionActions: {
+      setDaemonActivePrompt: vi.fn(),
       sendPrompt: vi.fn().mockResolvedValue(undefined),
       btwSession: vi.fn().mockResolvedValue({ answer: 'side answer' }),
       generateSessionContent: vi.fn(async function* () {}),
@@ -1461,6 +1462,10 @@ vi.mock('./session-catalog/session-catalog-store', async (importOriginal) => {
 vi.mock('./session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => sessionCatalogController,
   useSessionHasActivePrompt: () => testState.sessionHasActivePrompt,
+  useSessionActivePromptState: () => ({
+    hasActivePrompt: testState.sessionHasActivePrompt,
+    known: true,
+  }),
   // The Workspaces overview panel's per-row session counts; inert here.
   useSessionCatalogQuery: () => ({
     page: undefined,
