@@ -102,6 +102,30 @@ describe('GET /background-agents', () => {
     expect(agent).not.toHaveProperty('startedAt');
   });
 
+  it('omits startedAt but keeps pid when only the stamp is unusable', async () => {
+    // `pid` and `startedAt` are derived from independent sources in
+    // `managedSessionRows`; a partial store write can spoil one without
+    // the other, and the guards must not fail together.
+    const response = await request(
+      appWith(async () => [
+        snapshot({
+          state: { ...snapshot().state, createdAt: 'not-a-date' },
+          worker: {
+            schemaVersion: 1,
+            workerPid: 777,
+            protocolVersion: 1,
+            platform: 'linux',
+            recentOutputBytes: 0,
+          },
+        }),
+      ]),
+    ).get('/background-agents');
+
+    const agent = response.body.agents[0];
+    expect(agent.pid).toBe(777);
+    expect(agent).not.toHaveProperty('startedAt');
+  });
+
   it('returns an empty list when nothing is running', async () => {
     const response = await request(appWith(async () => [])).get(
       '/background-agents',
