@@ -107,6 +107,7 @@ const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
 const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
   'effort',
   'model',
+  'output-style',
   'statusline',
 ]);
 
