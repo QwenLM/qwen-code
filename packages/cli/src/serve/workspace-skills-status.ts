@@ -34,6 +34,7 @@ import { SkillManager, isSafeModeEnv } from '@qwen-code/qwen-code-core';
 import type { Config, SkillLevel } from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
+import * as fs from 'node:fs/promises';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { mapSkillConfigToStatus } from '../runtime/workspace-skills-mapping.js';
@@ -124,12 +125,13 @@ async function buildWorkspaceSkillsStatus(
             )
           : [],
       );
+      const safeMode =
+        (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv();
       const shim: SkillManagerConfigShim = {
         // Honor the safe-mode env the same way `Config` does when no explicit
         // flag is passed, so an operator running in safe mode gets the same
         // bundled-only listing the child would produce.
-        isSafeMode: () =>
-          (!workspaceTrusted && !includeUntrustedSkills) || isSafeModeEnv(),
+        isSafeMode: () => safeMode,
         // Bare mode is the interactive `--bare` CLI flag; the daemon never runs
         // bare, so it is always off here.
         getBareMode: () => false,
@@ -140,6 +142,20 @@ async function buildWorkspaceSkillsStatus(
         getDisabledSkillLevels: () => disabledLevels,
       };
       skillManager = new SkillManager(shim as Config);
+      if (!safeMode) {
+        for (const level of ['project', 'user'] as const) {
+          if (disabledLevels.has(level)) continue;
+          for (const directory of skillManager.getSkillsBaseDirs(level)) {
+            try {
+              await fs.readdir(directory);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                throw error;
+              }
+            }
+          }
+        }
+      }
       managers.set(workspaceCwd, skillManager);
     }
     const disablements = resolveSkillSettings(settings).disablements;

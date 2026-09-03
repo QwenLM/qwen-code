@@ -84,6 +84,24 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(mockWriteStderrLine.mock.calls[0][0]).toContain('boom');
   });
 
+  it('fails closed when a configured Skills directory cannot be read', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-unreadable-'),
+    );
+    const notDirectory = path.join(workspace, 'not-a-directory');
+    await fsp.writeFile(notDirectory, 'x');
+    vi.spyOn(SkillManager.prototype, 'getSkillsBaseDirs').mockReturnValueOnce([
+      notDirectory,
+    ]);
+
+    const status = await createWorkspaceSkillsStatusProvider()(workspace);
+
+    expect(status.initialized).toBe(false);
+    expect(status.skills).toEqual([]);
+    expect(status.errors?.[0]?.status).toBe('error');
+    await fsp.rm(workspace, { recursive: true, force: true });
+  });
+
   it('marks skills disabled in workspace settings', async () => {
     vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([
       {
