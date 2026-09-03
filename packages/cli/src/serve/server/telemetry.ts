@@ -194,6 +194,12 @@ export const legacySessionTelemetryRoutes = [
     route: 'POST /session/:id/tasks/:taskId/workflow-action',
   },
   {
+    method: 'GET',
+    path: '/session/:id/saved-workflows/:name',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/saved-workflows/:name',
+  },
+  {
     method: 'POST',
     path: '/session/:id/goal',
     attribution: 'handler_resolved',
@@ -695,6 +701,9 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'POST' && path === '/workspace/reload') {
     return { route: 'POST /workspace/reload' };
+  }
+  if (req.method === 'POST' && path === '/language') {
+    return { route: 'POST /language' };
   }
   const mcpRestart = path.match(/^\/workspace\/mcp\/([^/]+)\/restart$/);
   if (mcpRestart?.[1] && req.method === 'POST') {

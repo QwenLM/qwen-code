@@ -147,6 +147,7 @@ export * from './tools/modifiable-tool.js';
 export {
   buildSkillLlmContent,
   applySkillAllowedTools,
+  canApplySkillSideEffects,
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
 export { nextFireTime, parseCron } from './utils/cronParser.js';
@@ -464,6 +465,10 @@ export {
   type ResolvedSavedWorkflow,
   type WorkflowSaveResult,
 } from './agents/runtime/workflow-saved.js';
+export {
+  extractAndStripMeta,
+  type WorkflowMeta,
+} from './agents/runtime/workflow-sandbox.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
@@ -643,6 +648,7 @@ export * from './utils/git-ignore.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/github-prs.js';
+export * from './utils/github-pr-issues.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/invocation-context.js';
 export {

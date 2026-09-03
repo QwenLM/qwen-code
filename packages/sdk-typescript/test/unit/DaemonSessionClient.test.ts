@@ -186,6 +186,36 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
+  it('reads a saved workflow definition for its own session', async () => {
+    const status = {
+      v: 1 as const,
+      sessionId: 's-1',
+      name: 'deep-review',
+      workflow: null,
+    };
+    const { fetch, calls } = recordingFetch((req) =>
+      req.url.endsWith('/session/s-1/saved-workflows/deep-review')
+        ? jsonResponse(200, status)
+        : jsonResponse(500, { error: `unexpected ${req.url}` }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.savedWorkflow('deep-review')).resolves.toEqual(status);
+    expect(calls.map((c) => c.url)).toEqual([
+      'http://daemon/session/s-1/saved-workflows/deep-review',
+    ]);
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
   it('binds Goal reads and controls to the session and client identity', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(200, { snapshot: GOAL_SNAPSHOT }),
@@ -1848,6 +1878,9 @@ describe('DaemonSessionClient', () => {
       if (req.url.endsWith('/session/s-1/model')) {
         return jsonResponse(200, { modelId: 'qwen3-coder' });
       }
+      if (req.url.endsWith('/session/s-1/config-option')) {
+        return jsonResponse(200, { configOptions: [], persisted: true });
+      }
       if (req.url.endsWith('/session/s-1/context')) {
         return jsonResponse(200, {
           v: 1,
@@ -1936,6 +1969,9 @@ describe('DaemonSessionClient', () => {
     await expect(session.setModel('qwen3-coder')).resolves.toEqual({
       modelId: 'qwen3-coder',
     });
+    await expect(
+      session.setConfigOption('reasoning_effort', 'medium', { persist: true }),
+    ).resolves.toEqual({ configOptions: [], persisted: true });
     await expect(session.context()).resolves.toEqual({
       v: 1,
       sessionId: 's-1',
@@ -1997,6 +2033,7 @@ describe('DaemonSessionClient', () => {
     expect(calls.map((c) => c.url)).toEqual([
       'http://daemon/session/s-1/prompt',
       'http://daemon/session/s-1/model',
+      'http://daemon/session/s-1/config-option',
       'http://daemon/session/s-1/context',
       'http://daemon/session/s-1/supported-commands',
       'http://daemon/session/s-1/tasks',
@@ -2009,7 +2046,13 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1',
     ]);
     expect(calls[0]?.signal).toBe(controller.signal);
+    expect(JSON.parse(calls[2]!.body!)).toEqual({
+      configId: 'reasoning_effort',
+      value: 'medium',
+      persist: true,
+    });
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
       'client-1',
       'client-1',
       'client-1',

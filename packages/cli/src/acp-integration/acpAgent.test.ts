@@ -37,10 +37,15 @@ const { mockRunExitCleanup } = vi.hoisted(() => ({
 const { mockStartNonInteractiveOpenAILogHousekeeping } = vi.hoisted(() => ({
   mockStartNonInteractiveOpenAILogHousekeeping: vi.fn(),
 }));
-const { mockMcpPoolDrainAll } = vi.hoisted(() => ({
+const { mockMcpPoolDrainAll, mockMcpPoolGetSnapshot } = vi.hoisted(() => ({
   mockMcpPoolDrainAll: vi
     .fn()
     .mockResolvedValue({ drained: 0, forced: 0, errors: [] }),
+  mockMcpPoolGetSnapshot: vi.fn().mockReturnValue({
+    total: 0,
+    subprocessCount: 0,
+    byName: {},
+  }),
 }));
 vi.mock('../utils/cleanup.js', () => ({
   runExitCleanup: mockRunExitCleanup,
@@ -105,6 +110,9 @@ const { mockListWorkflowSnapshots } = vi.hoisted(() => ({
 }));
 const { mockListSavedWorkflows } = vi.hoisted(() => ({
   mockListSavedWorkflows: vi.fn().mockResolvedValue([]),
+}));
+const { mockResolveSavedWorkflowScript } = vi.hoisted(() => ({
+  mockResolveSavedWorkflowScript: vi.fn(),
 }));
 const { mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockAddDaemonRequestAttribute: vi.fn(),
@@ -309,6 +317,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).tryWithWorkflowTaskMutation,
   listSavedWorkflows: mockListSavedWorkflows,
+  resolveSavedWorkflowScript: mockResolveSavedWorkflowScript,
+  extractAndStripMeta: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).extractAndStripMeta,
   listWorkflowSnapshots: mockListWorkflowSnapshots,
   createDebugLogger: () => mockDebugLogger,
   extractDaemonTraceContext: mockExtractDaemonTraceContext,
@@ -340,7 +352,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return config.getReasoningEffort() === effort;
   },
   REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
-  ApprovalMode: { YOLO: 'yolo' },
+  // The real enum: the reload approval-mode fold reaches beyond YOLO
+  // (ApprovalMode.AUTO), and a partial shape leaves the other members
+  // undefined at runtime.
+  ApprovalMode: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).ApprovalMode,
   isGatedMcpScope: (scope: unknown) =>
     scope === 'project' || scope === 'workspace',
   matchesAnyServerPattern: (name: string, patterns: string[] | undefined) =>
@@ -640,11 +657,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   })),
   McpTransportPool: vi.fn().mockImplementation(() => ({
     drainAll: mockMcpPoolDrainAll,
-    getSnapshot: vi.fn().mockReturnValue({
-      total: 0,
-      subprocessCount: 0,
-      byName: {},
-    }),
+    getSnapshot: mockMcpPoolGetSnapshot,
     releaseSession: vi.fn(),
     restartByName: vi.fn().mockResolvedValue([]),
     getBudget: vi.fn().mockReturnValue(undefined),
@@ -883,19 +896,42 @@ vi.mock('../config/loadedSettingsAdapter.js', () => ({
     return settings;
   }),
 }));
-vi.mock('../config/config.js', () => ({
-  loadCliConfig: vi.fn(),
-  buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
-  buildEnabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
-  SessionIdConflictError: class SessionIdConflictError extends Error {
-    sessionId: string;
-    constructor(sessionId: string, message: string) {
-      super(message);
-      this.name = 'SessionIdConflictError';
-      this.sessionId = sessionId;
-    }
-  },
-}));
+vi.mock('../config/config.js', async () => {
+  const { APPROVAL_MODES, ApprovalMode } = await import(
+    '@qwen-code/qwen-code-core'
+  );
+  return {
+    loadCliConfig: vi.fn(),
+    buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+    buildEnabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+    // Mirror the real boot parser (trim, lowercase, legacy aliases, lookup
+    // against the live APPROVAL_MODES array) so the reload fold's
+    // boot-equivalence sees the same spelling rules — and the same array a
+    // test splices — as the real module.
+    parseApprovalModeValue: (value: string) => {
+      const normalized = value.trim().toLowerCase();
+      const canonical =
+        normalized === 'auto_edit' || normalized === 'autoedit'
+          ? ApprovalMode.AUTO_EDIT
+          : normalized;
+      const approvalMode = (APPROVAL_MODES as readonly string[]).find(
+        (mode) => mode === canonical,
+      );
+      if (approvalMode === undefined) {
+        throw new Error(`Invalid approval mode: ${value}.`);
+      }
+      return approvalMode;
+    },
+    SessionIdConflictError: class SessionIdConflictError extends Error {
+      sessionId: string;
+      constructor(sessionId: string, message: string) {
+        super(message);
+        this.name = 'SessionIdConflictError';
+        this.sessionId = sessionId;
+      }
+    },
+  };
+});
 vi.mock('../ui/commands/contextCommand.js', () => ({
   collectContextData: vi.fn().mockResolvedValue({
     modelName: 'm',
@@ -1070,6 +1106,7 @@ import {
   updateOutputLanguageFile,
   writeOutputLanguageAndRegisterPath,
 } from '../i18n/languageUtils.js';
+import { getCurrentLanguage, setLanguageAsync } from '../i18n/index.js';
 import { buildAuthMethods } from './authMethods.js';
 import {
   ACTIVE_WORK_HEARTBEAT_META_KEY,
@@ -2098,6 +2135,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
+        getDefaultReasoningConfig: ReturnType<typeof vi.fn>;
+        reloadReasoningSelection: ReturnType<typeof vi.fn>;
+        persistReasoningSelection: ReturnType<typeof vi.fn>;
+        setSessionReasoningSelection: ReturnType<typeof vi.fn>;
+        getSessionReasoningSelection: ReturnType<typeof vi.fn>;
         hardSuspendTodoStopGuard: ReturnType<typeof vi.fn>;
         beginClose: ReturnType<typeof vi.fn>;
         beginCloseIfAvailable: ReturnType<typeof vi.fn>;
@@ -2143,6 +2185,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockMcpPoolDrainAll
       .mockReset()
       .mockResolvedValue({ drained: 0, forced: 0, errors: [] });
+    mockMcpPoolGetSnapshot.mockReset().mockReturnValue({
+      total: 0,
+      subprocessCount: 0,
+      byName: {},
+    });
     mockExtensionManagerState.extensions = [];
     mockExtensionManagerState.refreshCache.mockResolvedValue(undefined);
     mockRunManagedAutoMemoryDream.mockReset();
@@ -4205,12 +4252,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      // Per-session folder-trust flag (security.folderTrust.enabled of the
+      // admission workspace), bound once at Config construction. Default off;
+      // bootRelocatableSession overrides it to reflect the fed workspace.
+      getFolderTrust: vi.fn().mockReturnValue(false),
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getAvailableModels: vi.fn().mockReturnValue([]),
       getModes: vi.fn().mockReturnValue([]),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      setSessionWorkflowEnabledProvider: vi.fn(),
       getReasoningEffort: vi.fn().mockReturnValue(undefined),
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
       setReasoningEffort: vi.fn(),
@@ -4247,7 +4299,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setWorkflowsEnabled: vi.fn(),
       getBareMode: vi.fn().mockReturnValue(false),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
-      getFolderTrust: vi.fn().mockReturnValue(true),
       isTrustedFolder: vi.fn().mockReturnValue(true),
     };
   }
@@ -4550,6 +4601,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
           clearActiveTodoPlanRevision: vi.fn(),
           clearTodoStopGuardTrust: vi.fn(),
+          getDefaultReasoningConfig: vi.fn(),
+          reloadReasoningSelection: vi.fn(),
+          persistReasoningSelection: vi.fn(),
+          setSessionReasoningSelection: vi.fn(),
+          getSessionReasoningSelection: vi.fn(),
           hardSuspendTodoStopGuard: vi.fn(),
           releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
           isIdle: vi.fn().mockReturnValue(true),
@@ -4642,6 +4698,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
       isRestrictiveSandbox: vi.fn().mockReturnValue(false),
       relocateWorkingDirectory: vi.fn().mockResolvedValue({}),
+      // The gate reads config.getFolderTrust() (admission-workspace flag),
+      // so mirror the fed workspace's security.folderTrust.enabled here.
+      getFolderTrust: vi
+        .fn()
+        .mockReturnValue(
+          settings.merged.security?.folderTrust?.enabled ?? false,
+        ),
     });
     Object.assign(innerConfig.getLlmClient(), {
       addWorkingDirectoryChangedContext: vi.fn().mockResolvedValue(undefined),
@@ -5318,6 +5381,67 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('uses the pool status for the top-level MCP server status', async () => {
+    const manager = {
+      getDiscoveryState: vi.fn().mockReturnValue(MCPDiscoveryState.COMPLETED),
+      getMcpClientAccounting: vi.fn().mockReturnValue({
+        total: 0,
+        reservedSlots: [],
+        refusedServerNames: [],
+      }),
+      getMcpClientBudget: vi.fn().mockReturnValue(undefined),
+      getMcpBudgetMode: vi.fn().mockReturnValue('off'),
+      getServerStatus: vi.fn().mockReturnValue(MCPServerStatus.DISCONNECTED),
+    };
+    mockConfig = {
+      ...mockConfig,
+      getMcpServers: vi
+        .fn()
+        .mockReturnValue({ code: { httpUrl: 'https://example.com/mcp' } }),
+      getWorkingDir: vi.fn().mockReturnValue('/tmp'),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      isMcpServerDisabled: vi.fn().mockReturnValue(false),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getMcpClientManager: vi.fn().mockReturnValue(manager),
+      }),
+    } as unknown as Config;
+    mockMcpPoolGetSnapshot.mockReturnValue({
+      total: 1,
+      subprocessCount: 0,
+      byName: {
+        code: {
+          entryCount: 1,
+          entrySummary: [
+            {
+              entryIndex: 0,
+              refs: 1,
+              status: MCPServerStatus.CONNECTED,
+            },
+          ],
+        },
+      },
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceMcp, {}),
+    ).resolves.toMatchObject({
+      servers: [
+        expect.objectContaining({
+          name: 'code',
+          status: 'ok',
+          mcpStatus: 'connected',
+          entrySummary: [
+            expect.objectContaining({ entryIndex: 0, status: 'connected' }),
+          ],
+        }),
+      ],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('reports authentication-required MCP servers and refuses reconnect', async () => {
     const server: {
       httpUrl: string;
@@ -5436,9 +5560,193 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         lastSessionMock?.clearActiveTodoPlanRevision,
       ).toHaveBeenCalledOnce();
       expect(lastSessionMock?.clearTodoStopGuardTrust).toHaveBeenCalledTimes(2);
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionApprovalMode, {
+          sessionId,
+          mode: 'default',
+        }),
+      ).resolves.toEqual({ previous: 'plan', current: 'default' });
+      expect(
+        lastSessionMock?.clearActiveTodoPlanRevision,
+      ).toHaveBeenCalledTimes(2);
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
     }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('updates the Session Workflow gate for every live session', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod('qwen/control/workspace/session-workflow', {
+        enabled: true,
+      }),
+    ).resolves.toEqual({ enabled: true, sessionsUpdated: 1 });
+    const provider = vi.mocked(innerConfig.setSessionWorkflowEnabledProvider)
+      .mock.calls[0]?.[0];
+    expect(provider?.()).toBe(true);
+    expect(lastSessionMock?.clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('updates the Session Workflow gate for an initializing session', async () => {
+    const innerConfig = await setupSessionMocks(
+      '11111111-1111-1111-1111-111111111111',
+    );
+    let releaseAuth = () => {};
+    innerConfig.refreshAuth.mockReturnValue(
+      new Promise<void>((resolve) => {
+        releaseAuth = resolve;
+      }),
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+    const newSession = agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await vi.waitFor(() => expect(innerConfig.refreshAuth).toHaveBeenCalled());
+
+    await expect(
+      agent.extMethod('qwen/control/workspace/session-workflow', {
+        enabled: true,
+      }),
+    ).resolves.toEqual({ enabled: true, sessionsUpdated: 0 });
+    releaseAuth();
+    await newSession;
+
+    const provider = vi
+      .mocked(innerConfig.setSessionWorkflowEnabledProvider)
+      .mock.calls.at(-1)?.[0];
+    expect(provider?.()).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('applies the Session Workflow gate to a session whose publication a concurrent write straddles', async () => {
+    const innerConfig = await setupSessionMocks(
+      '11111111-1111-1111-1111-111111111111',
+    );
+    let releaseRegistration = () => {};
+    vi.mocked(registerCreateSubSessionTool).mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        releaseRegistration = resolve;
+      }),
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+    const newSession = agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await vi.waitFor(() =>
+      expect(registerCreateSubSessionTool).toHaveBeenCalled(),
+    );
+
+    // A write landing while `registerCreateSubSessionTool` is suspended
+    // cannot reach the session being published: it is not in `this.sessions`
+    // yet, so the ext handler's live-session loop pins nothing and reports
+    // sessionsUpdated: 0. The publication-adjacent pin must still observe the
+    // recorded override when the session publishes.
+    await expect(
+      agent.extMethod('qwen/control/workspace/session-workflow', {
+        enabled: true,
+      }),
+    ).resolves.toEqual({ enabled: true, sessionsUpdated: 0 });
+
+    releaseRegistration();
+    await newSession;
+
+    const provider = vi
+      .mocked(innerConfig.setSessionWorkflowEnabledProvider)
+      .mock.calls.at(-1)?.[0];
+    expect(provider?.()).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not re-clear live plan state on a same-value Session Workflow write', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod('qwen/control/workspace/session-workflow', {
+        enabled: true,
+      }),
+    ).resolves.toEqual({ enabled: true, sessionsUpdated: 1 });
+    const providerCalls = vi.mocked(
+      innerConfig.setSessionWorkflowEnabledProvider,
+    );
+    expect(providerCalls).toHaveBeenCalledTimes(1);
+    expect(lastSessionMock?.clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
+
+    // A same-value write (the settings POST routes push the post-write
+    // effective value, which a system-scope settings file can make equal to
+    // the already-pinned override) must not re-pin the provider or clear
+    // every live session's active plan revision again.
+    await expect(
+      agent.extMethod('qwen/control/workspace/session-workflow', {
+        enabled: true,
+      }),
+    ).resolves.toEqual({ enabled: true, sessionsUpdated: 0 });
+    expect(providerCalls).toHaveBeenCalledTimes(1);
+    expect(lastSessionMock?.clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
+
+    // A genuine flip still applies to every live session.
+    await expect(
+      agent.extMethod('qwen/control/workspace/session-workflow', {
+        enabled: false,
+      }),
+    ).resolves.toEqual({ enabled: false, sessionsUpdated: 1 });
+    expect(providerCalls).toHaveBeenCalledTimes(2);
+    expect(providerCalls.mock.calls.at(-1)?.[0]?.()).toBe(false);
+    expect(lastSessionMock?.clearActiveTodoPlanRevision).toHaveBeenCalledTimes(
+      2,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not clear live plan state when a first Session Workflow write matches the effective gate', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    // A system-scope settings file pins the gate on: the live session
+    // already derives gate=true from settings while the daemon-held
+    // override is still `undefined` (a workspace write shadowed by the
+    // system scope pushes the unchanged effective value true).
+    Object.assign(innerConfig, {
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(true),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod('qwen/control/workspace/session-workflow', {
+        enabled: true,
+      }),
+    ).resolves.toEqual({ enabled: true, sessionsUpdated: 0 });
+    expect(
+      innerConfig.setSessionWorkflowEnabledProvider,
+    ).not.toHaveBeenCalled();
+    expect(lastSessionMock?.clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+
+    // A genuine flip from the same starting point still applies.
+    await expect(
+      agent.extMethod('qwen/control/workspace/session-workflow', {
+        enabled: false,
+      }),
+    ).resolves.toEqual({ enabled: false, sessionsUpdated: 1 });
+    const provider = vi
+      .mocked(innerConfig.setSessionWorkflowEnabledProvider)
+      .mock.calls.at(-1)?.[0];
+    expect(provider?.()).toBe(false);
+    expect(lastSessionMock?.clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -6013,6 +6321,133 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const { agent, agentPromise, sessionId } = await bootRelocatableSession(
         settings,
         'expected-capability',
+      );
+
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: canonicalTarget,
+            allowedRoots: [canonicalRoot],
+          }),
+        ).rejects.toThrow('Directory not trusted');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+  });
+
+  it('resolves the cd trust gate from the session workspace, not the stale this.settings cache', async () => {
+    await withEmptyTrustedFolders(async (directory) => {
+      const root = path.join(directory, 'Conversations');
+      const target = path.join(root, 'conversation-cross-workspace');
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+      const canonicalRoot = await fs.realpath(root);
+      const canonicalTarget = await fs.realpath(target);
+      // Session A's workspace enables folder trust.
+      const aSettings = makeSessionSettings({
+        mcpServers: {},
+        security: { folderTrust: { enabled: true } },
+      });
+      const { agent, agentPromise, sessionId } = await bootRelocatableSession(
+        aSettings,
+        'expected-capability',
+      );
+      // A different workspace's activity has since refreshed the agent's
+      // "latest loaded" cache to a workspace that DISABLES folder trust.
+      // Reading that cache in the cd gate (the pre-fix bug) would switch off
+      // session A's trust check and admit the untrusted cd; the fix reads
+      // config.getFolderTrust() (A's admission-workspace flag), so the gate
+      // still enforces.
+      (agent as unknown as { settings: LoadedSettings }).settings =
+        makeSessionSettings({
+          mcpServers: {},
+          security: { folderTrust: { enabled: false } },
+        });
+
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: canonicalTarget,
+            allowedRoots: [canonicalRoot],
+          }),
+        ).rejects.toThrow('Directory not trusted');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+  });
+
+  it('does not gate cd when the session workspace disables folder trust, even if the stale cache enables it', async () => {
+    // Mirror of the test above. Session A's own workspace DISABLES folder
+    // trust, while the stale `this.settings` cache holds a trust-ENABLED
+    // workspace. The gate must follow A's own settings and NOT gate the cd —
+    // otherwise a gate that OR-combined both sources would fail closed and
+    // spuriously reject an ordinary cd for a session whose workspace never
+    // asked for trust enforcement.
+    await withEmptyTrustedFolders(async (directory) => {
+      const root = path.join(directory, 'Conversations');
+      const target = path.join(root, 'conversation-trust-disabled');
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+      const canonicalRoot = await fs.realpath(root);
+      const canonicalTarget = await fs.realpath(target);
+      // Session A's workspace disables folder trust.
+      const aSettings = makeSessionSettings({ mcpServers: {} });
+      const { agent, agentPromise, sessionId } = await bootRelocatableSession(
+        aSettings,
+        'expected-capability',
+      );
+      (agent as unknown as { settings: LoadedSettings }).settings =
+        makeSessionSettings({
+          mcpServers: {},
+          security: { folderTrust: { enabled: true } },
+        });
+
+      try {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
+            sessionId,
+            path: canonicalTarget,
+            allowedRoots: [canonicalRoot],
+          }),
+        ).resolves.toMatchObject({ newCwd: canonicalTarget });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+  });
+
+  it('keeps the cd trust gate armed after the cwd drifts into a settings-less subdirectory', async () => {
+    // The gate must bind folder-trust to the ADMISSION workspace, not re-read
+    // it from the current cwd: a prior cd moves targetDir into a subdirectory
+    // that carries no `.qwen/settings.json`, so a cwd-keyed read would resolve
+    // disabled (isFolderTrustEnabled defaults to false) and disarm the gate
+    // for the rest of the session. config.getFolderTrust() stays true, so an
+    // untrusted cd is still rejected.
+    await withEmptyTrustedFolders(async (directory) => {
+      const root = path.join(directory, 'Conversations');
+      const target = path.join(root, 'conversation-subtree-drift');
+      await fs.mkdir(target, { recursive: true, mode: 0o700 });
+      const canonicalRoot = await fs.realpath(root);
+      const canonicalTarget = await fs.realpath(target);
+      const aSettings = makeSessionSettings({
+        mcpServers: {},
+        security: { folderTrust: { enabled: true } },
+      });
+      const { agent, agentPromise, sessionId, innerConfig } =
+        await bootRelocatableSession(aSettings, 'expected-capability');
+      // cwd has drifted into a subdirectory whose settings disable folder
+      // trust. A cwd-keyed gate would read this and skip; the admission-bound
+      // config.getFolderTrust() must not.
+      innerConfig.getTargetDir.mockReturnValue('/tmp/sub');
+      vi.mocked(loadSettings).mockImplementation((cwd?: string) =>
+        cwd === '/tmp/sub'
+          ? makeSessionSettings({ mcpServers: {} })
+          : aSettings,
       );
 
       try {
@@ -6620,6 +7055,65 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect(
         lastSessionMock?.installManagedConversationActivation,
       ).toHaveBeenCalledOnce();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('defers standalone reasoning options until the generation config is available', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getSessionSourceType = vi.fn().mockReturnValue('standalone');
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+    innerConfig.getContentGeneratorConfig = vi.fn().mockReturnValue(undefined);
+    const { agent, agentPromise } = await bootInitializedAcpAgent(
+      makeSessionSettings(),
+      'trusted-capability',
+    );
+
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+        _meta: {
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: 'standalone',
+            [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+          },
+        },
+      })) as {
+        configOptions: Array<{ id: string; options: Array<{ value: string }> }>;
+      };
+
+      expect(session.configOptions.map((option) => option.id)).toEqual([
+        'mode',
+        'model',
+      ]);
+      expect(innerConfig.refreshAuth).not.toHaveBeenCalled();
+
+      innerConfig.getContentGeneratorConfig.mockReturnValue({
+        thinkingMandatory: true,
+      });
+      const context = (await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.sessionContext,
+        { sessionId },
+      )) as {
+        state: {
+          configOptions: Array<{
+            id: string;
+            options: Array<{ value: string }>;
+          }>;
+        };
+      };
+      const reasoningOption = context.state.configOptions.find(
+        (option) => option.id === 'reasoning_effort',
+      );
+
+      expect(reasoningOption).toBeDefined();
+      expect(
+        reasoningOption?.options.some((option) => option.value === 'none'),
+      ).toBe(false);
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -8371,6 +8865,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         category: 'thought_level',
         currentValue: 'default',
         options: [
+          { value: 'none', name: 'Thinking off' },
           { value: 'default', name: 'Default' },
           { value: 'low', name: 'Low', description: expect.any(String) },
           { value: 'medium', name: 'Medium', description: expect.any(String) },
@@ -8416,7 +8911,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           value: 'ultra',
         }),
       ).rejects.toThrow(
-        'Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
+        'Unknown reasoning effort: ultra. Choose one of: default, none, low, medium, high, xhigh, max',
       );
       expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(2);
 
@@ -8431,6 +8926,231 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'Reasoning effort cannot be applied while thinking is disabled',
       );
       expect(innerConfig.setReasoningEffort).toHaveBeenCalledTimes(3);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('does not re-enable an explicitly disabled generic model with a tier', async () => {
+    const sessionId = 'generic-disabled-reasoning-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation: {
+      reasoning?: false | { effort?: string };
+    } = { reasoning: false };
+    innerConfig.getModel = vi.fn().mockReturnValue('claude-opus-4-6');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() =>
+      generation.reasoning ? generation.reasoning.effort : undefined,
+    );
+    innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
+      if (generation.reasoning === false) return;
+      generation.reasoning = effort ? { effort } : undefined;
+    });
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'high',
+          _meta: { 'qwenCode/persistReasoningSelection': true },
+        }),
+      ).rejects.toThrow(
+        'Reasoning effort cannot be applied while thinking is disabled',
+      );
+      expect(generation.reasoning).toBe(false);
+      expect(lastSessionMock?.persistReasoningSelection).not.toHaveBeenCalled();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it.each([
+    ['claude-opus-4-6', 'none'],
+    ['qwen3.8-max', 'medium'],
+  ] as const)(
+    'restores persisted %s reasoning %s after daemon authentication',
+    async (model, selection) => {
+      const sessionId = 'persisted-none-auth-session';
+      const innerConfig = await setupSessionMocks(sessionId);
+      const extraBody = { enable_thinking: false, seed: 7 };
+      const samplingParams = { thinking_budget: 1024, temperature: 0.2 };
+      const generation: {
+        model: string;
+        reasoning?: false | { effort?: string };
+        extra_body?: Record<string, unknown>;
+        samplingParams?: Record<string, unknown>;
+      } = { model, reasoning: false };
+      const settings = makeSessionSettings({
+        mcpServers: {},
+        model: { reasoningEffort: selection },
+      });
+      vi.mocked(loadSettings).mockReturnValue(settings);
+      innerConfig.getModel = vi.fn(() => generation.model);
+      innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+      innerConfig.refreshAuth = vi.fn(async () => {
+        generation.reasoning =
+          selection === 'none' ? undefined : { effort: selection };
+        generation.extra_body = extraBody;
+        generation.samplingParams = samplingParams;
+      });
+
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+        expect(generation.reasoning).toEqual(
+          selection === 'none' ? false : { effort: selection },
+        );
+        if (model === 'qwen3.8-max') {
+          expect(generation.extra_body).toEqual({ seed: 7 });
+          expect(generation.samplingParams).toEqual({ temperature: 0.2 });
+        }
+        expect(extraBody).toEqual({ enable_thinking: false, seed: 7 });
+        expect(samplingParams).toEqual({
+          thinking_budget: 1024,
+          temperature: 0.2,
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each([false, { effort: 'medium', budget_tokens: 42000 }] as const)(
+    'resets to canonical reasoning defaults %j rather than a previous selection',
+    async (defaultReasoning) => {
+      const sessionId = 'canonical-default-reasoning-session';
+      const innerConfig = await setupSessionMocks(sessionId);
+      const generation: {
+        reasoning?: false | { effort?: string; budget_tokens?: number };
+      } = { reasoning: { effort: 'max' } };
+      innerConfig.getModel = vi.fn().mockReturnValue('claude-opus-4-6');
+      innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+      innerConfig.getReasoningEffort = vi.fn(() =>
+        generation.reasoning ? generation.reasoning.effort : undefined,
+      );
+      innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
+        if (generation.reasoning === false) return;
+        const next = { ...generation.reasoning };
+        if (effort) next.effort = effort;
+        else delete next.effort;
+        generation.reasoning = Object.keys(next).length ? next : undefined;
+      });
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        lastSessionMock!.getDefaultReasoningConfig.mockReturnValue(
+          defaultReasoning,
+        );
+        const reset = (await agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'default',
+          _meta: { 'qwenCode/persistReasoningSelection': true },
+        })) as SetSessionConfigOptionResponse;
+        expect(generation.reasoning).toEqual(defaultReasoning);
+        expect(
+          reset.configOptions.find((item) => item.id === 'reasoning_effort')
+            ?.currentValue,
+        ).toBe(defaultReasoning === false ? 'none' : 'medium');
+        expect(lastSessionMock!.persistReasoningSelection).toHaveBeenCalledWith(
+          'default',
+        );
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('rolls back live reasoning and request overrides if persistence fails', async () => {
+    const sessionId = 'failed-reasoning-persistence';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const before = {
+      reasoning: { effort: 'low' },
+      extra_body: { seed: 7 },
+      samplingParams: { reasoning_effort: 'low' },
+    };
+    const generation = { ...before };
+    const rebuildable = { reasoning: before.reasoning };
+    Object.assign(innerConfig.getModelsConfig(), {
+      getGenerationConfig: () => rebuildable,
+    });
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() => generation.reasoning.effort);
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      lastSessionMock!.persistReasoningSelection.mockImplementation(() => {
+        throw new Error('settings are read-only');
+      });
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'medium',
+          _meta: { 'qwenCode/persistReasoningSelection': true },
+        }),
+      ).rejects.toThrow('settings are read-only');
+      expect(generation).toEqual(before);
+      expect(rebuildable.reasoning).toEqual(before.reasoning);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('reconciles session reasoning after a workspace model-name reload', async () => {
+    const cfg = await setupSessionMocks('model-name-reload');
+    const settings = makeSessionSettings({
+      mcpServers: {},
+      model: { name: 'qwen3.8-max', reasoningEffort: 'none' },
+    });
+    let reasoningEffort: 'none' | 'low' = 'none';
+    settings.reloadScopeFromDisk = vi.fn(() => {
+      settings.merged.model = { name: 'qwen3.7-plus', reasoningEffort };
+      return true;
+    });
+    let model = 'qwen3.8-max';
+    cfg.getModel = vi.fn(() => model);
+    const switchModel = vi.fn(async (_authType: string, modelId: string) => {
+      model = modelId;
+    });
+    Object.assign(cfg, { switchModel });
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(switchModel).toHaveBeenCalledWith('api-key', 'qwen3.7-plus');
+      expect(lastSessionMock!.reloadReasoningSelection).toHaveBeenCalledOnce();
+      expect(
+        lastSessionMock!.reloadReasoningSelection.mock.invocationCallOrder[0],
+      ).toBeGreaterThan(switchModel.mock.invocationCallOrder[0]);
+
+      reasoningEffort = 'low';
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(switchModel).toHaveBeenCalledOnce();
+      expect(lastSessionMock!.reloadReasoningSelection).toHaveBeenCalledTimes(
+        2,
+      );
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -8484,7 +9204,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         sessionId,
         configId: 'reasoning_effort',
         value: 'medium',
+        _meta: { 'qwenCode/persistReasoningSelection': true },
       })) as SetSessionConfigOptionResponse;
+      expect(lastSessionMock?.persistReasoningSelection).toHaveBeenCalledWith(
+        'medium',
+      );
+      expect(medium._meta).toEqual({
+        'qwenCode/reasoningSelectionPersisted': true,
+      });
       expect(generation.reasoning).toEqual({ effort: 'medium' });
       expect(
         medium.configOptions.find((item) => item.id === 'reasoning_effort')
@@ -8513,6 +9240,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           ?.currentValue,
       ).toBe('medium');
 
+      const reset = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+        _meta: { 'qwenCode/persistReasoningSelection': true },
+      })) as SetSessionConfigOptionResponse;
+      expect(
+        lastSessionMock?.persistReasoningSelection,
+      ).toHaveBeenLastCalledWith('default');
+      expect(
+        lastSessionMock?.setSessionReasoningSelection,
+      ).toHaveBeenCalledTimes(4);
+      expect(lastSessionMock?.setSessionReasoningSelection.mock.calls).toEqual([
+        [undefined],
+        ['none'],
+        ['medium'],
+        [undefined],
+      ]);
+      expect(generation.reasoning).toBeUndefined();
+      expect(
+        reset.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('xhigh');
+
       await expect(
         agent.setSessionConfigOption({
           sessionId,
@@ -8522,7 +9273,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ).rejects.toThrow(
         'Unknown reasoning effort: high. Choose one of: none, low, medium, xhigh',
       );
-      expect(generation.reasoning).toEqual({ effort: 'medium' });
+      expect(generation.reasoning).toBeUndefined();
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -8706,6 +9457,64 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('returns qwen3.8-max to default after a static thinking disable', async () => {
+    const sessionId = 'qwen38-static-thinking-default';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation: {
+      reasoning?: false | { effort?: string };
+      extra_body?: Record<string, unknown>;
+      samplingParams?: Record<string, unknown>;
+    } = {
+      reasoning: { effort: 'low' },
+      extra_body: { enable_thinking: false, seed: 7 },
+      samplingParams: { thinking_budget: 2048, temperature: 0.2 },
+    };
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningEffort = vi.fn(() =>
+      generation.reasoning ? generation.reasoning.effort : undefined,
+    );
+    innerConfig.getReasoningEffortOverride = vi.fn(() =>
+      generation.extra_body?.['enable_thinking'] === false
+        ? {
+            source: 'extra_body' as const,
+            field: 'enable_thinking' as const,
+          }
+        : generation.samplingParams?.['thinking_budget'] !== undefined
+          ? {
+              source: 'samplingParams' as const,
+              field: 'thinking_budget' as const,
+            }
+          : undefined,
+    );
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      const reset = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+        _meta: { 'qwenCode/persistReasoningSelection': true },
+      })) as SetSessionConfigOptionResponse;
+
+      expect(generation.extra_body).toEqual({ seed: 7 });
+      expect(generation.samplingParams).toEqual({ temperature: 0.2 });
+      expect(generation.reasoning).toBeUndefined();
+      expect(
+        reset.configOptions.find((item) => item.id === 'reasoning_effort')
+          ?.currentValue,
+      ).toBe('xhigh');
+      expect(
+        lastSessionMock?.persistReasoningSelection,
+      ).toHaveBeenLastCalledWith('default');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it.each([
     [4096, 'low'],
     [4097, 'medium'],
@@ -8749,70 +9558,59 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
-  it('does not project qwen3.8 controls onto an opaque model route', async () => {
-    const sessionId = 'qwen38-opaque-route-reasoning';
-    const innerConfig = await setupSessionMocks(sessionId);
-    let currentEffort: string | undefined;
-    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
-    innerConfig.getAuthType = vi.fn().mockReturnValue('openai');
-    innerConfig.getCurrentModelRegistryBaseUrl = vi
-      .fn()
-      .mockReturnValue('https://one.example/v1');
-    innerConfig.getAllConfiguredModels = vi.fn().mockReturnValue([
-      {
-        id: 'qwen3.8-max',
-        label: 'Qwen 3.8 Max One',
-        authType: 'openai',
-        baseUrl: 'https://one.example/v1',
-        registryBaseUrl: 'https://one.example/v1',
-      },
-      {
-        id: 'qwen3.8-max',
-        label: 'Qwen 3.8 Max Two',
-        authType: 'openai',
-        baseUrl: 'https://two.example/v1',
-        registryBaseUrl: 'https://two.example/v1',
-      },
-    ]);
-    innerConfig.getReasoningEffort = vi.fn(() => currentEffort);
-    innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
-      currentEffort = effort;
-    });
-
-    const { agent, agentPromise } = await bootAcpAgent();
-    try {
-      const session = (await agent.newSession({
-        cwd: '/tmp',
-        mcpServers: [],
-      })) as SetSessionConfigOptionResponse;
-      expect(
-        session.configOptions.find((item) => item.id === 'model')?.currentValue,
-      ).toMatch(/^qwen-route:v1:/);
-      expect(
-        session.configOptions.find((item) => item.id === 'reasoning_effort'),
-      ).toMatchObject({
-        currentValue: 'default',
-        options: [
-          { value: 'default' },
-          { value: 'low' },
-          { value: 'medium' },
-          { value: 'high' },
-          { value: 'xhigh' },
-          { value: 'max' },
-        ],
-      });
-
-      await agent.setSessionConfigOption({
-        sessionId,
-        configId: 'reasoning_effort',
-        value: 'medium',
-      });
-      expect(innerConfig.setReasoningEffort).toHaveBeenCalledWith('medium');
-    } finally {
-      mockConnectionState.resolve();
-      await agentPromise;
-    }
-  });
+  it.each([
+    { modelId: 'qwen-plus', value: 'high', opaque: false },
+    { modelId: 'qwen3.8-max', value: 'medium', opaque: true },
+  ])(
+    'hides and rejects unsupported reasoning for $modelId with opaque=$opaque',
+    async ({ modelId, value, opaque }) => {
+      const sessionId = 'unsupported-reasoning';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.getModel = vi.fn().mockReturnValue(modelId);
+      if (opaque) {
+        innerConfig.getAuthType = vi.fn().mockReturnValue('openai');
+        innerConfig.getCurrentModelRegistryBaseUrl = vi
+          .fn()
+          .mockReturnValue('https://one.example/v1');
+        innerConfig.getAllConfiguredModels = vi.fn().mockReturnValue(
+          ['one', 'two'].map((name) => ({
+            id: modelId,
+            label: name,
+            authType: 'openai',
+            baseUrl: `https://${name}.example/v1`,
+            registryBaseUrl: `https://${name}.example/v1`,
+          })),
+        );
+      }
+      const { agent, agentPromise } = await bootAcpAgent();
+      try {
+        const session = (await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+        })) as SetSessionConfigOptionResponse;
+        if (opaque) {
+          expect(
+            session.configOptions.find((item) => item.id === 'model')
+              ?.currentValue,
+          ).toMatch(/^qwen-route:v1:/);
+        }
+        expect(
+          session.configOptions.find((item) => item.id === 'reasoning_effort'),
+        ).toBeUndefined();
+        await expect(
+          agent.setSessionConfigOption({
+            sessionId,
+            configId: 'reasoning_effort',
+            value,
+          }),
+        ).rejects.toThrow('Reasoning is not supported by the current model');
+        expect(innerConfig.setReasoningEffort).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('projects toggle-only Qwen reasoning without effort tiers', async () => {
     const sessionId = 'qwen37-toggle-reasoning-session';
@@ -8867,6 +9665,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         value: 'default',
       })) as SetSessionConfigOptionResponse;
       expect(generation.reasoning).toBeUndefined();
+      expect(
+        lastSessionMock?.setSessionReasoningSelection,
+      ).toHaveBeenLastCalledWith('default');
       expect(
         enabled.configOptions.find((item) => item.id === 'reasoning_effort')
           ?.currentValue,
@@ -12265,6 +13066,96 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('reads a saved workflow definition with its parsed meta', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+    const scriptPath = '/tmp/.qwen/workflows/deep-review.js';
+    const script = [
+      'export const meta = {',
+      "  name: 'deep-review',",
+      "  description: 'Review deeply',",
+      "  phases: [{ title: 'Scan', detail: 'grep' }],",
+      '}',
+      "return await agent('go')",
+      '',
+    ].join('\n');
+    mockListSavedWorkflows.mockResolvedValueOnce([
+      { name: 'deep-review', source: 'project', scriptPath },
+    ]);
+    mockResolveSavedWorkflowScript.mockResolvedValueOnce({
+      name: 'deep-review',
+      scriptPath,
+      script,
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow, {
+        sessionId,
+        name: 'deep-review',
+      }),
+    ).resolves.toEqual({
+      v: 1,
+      sessionId,
+      name: 'deep-review',
+      workflow: {
+        v: 1,
+        sessionId,
+        name: 'deep-review',
+        source: 'project',
+        scriptPath,
+        script,
+        meta: {
+          name: 'deep-review',
+          description: 'Review deeply',
+          phases: [{ title: 'Scan', detail: 'grep' }],
+        },
+      },
+    });
+    expect(mockResolveSavedWorkflowScript).toHaveBeenCalledWith(
+      'deep-review',
+      expect.anything(),
+    );
+
+    // Unknown names and disabled Workflow controls both fail closed to null.
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow, {
+        sessionId,
+        name: 'missing',
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, name: 'missing', workflow: null });
+    innerConfig.isWorkflowsEnabled.mockReturnValue(false);
+    mockListSavedWorkflows.mockClear();
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow, {
+        sessionId,
+        name: 'deep-review',
+      }),
+    ).resolves.toEqual({
+      v: 1,
+      sessionId,
+      name: 'deep-review',
+      workflow: null,
+    });
+    expect(mockListSavedWorkflows).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('uses the exact run id when a concurrent saved workflow uses the same script', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -12333,9 +13224,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       status: 'running',
       taskId: 'wf_5678efab',
     });
-    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
-      scriptPath: '/tmp/.qwen/workflows/deep-review.js',
-    });
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith(
+      {
+        scriptPath: '/tmp/.qwen/workflows/deep-review.js',
+      },
+      'deep-review',
+    );
     expect(execute).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
@@ -12351,6 +13245,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       runId: 'wf_1234abcd',
       kind: 'workflow' as const,
       status: 'failed' as 'failed' | 'running',
+      workflowName: 'deep-review',
       script: 'return await agent(args.prompt)',
       args: { prompt: 'retry this path' },
     };
@@ -12393,11 +13288,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         action: 'retry',
       }),
     ).resolves.toEqual({ changed: true, status: 'running' });
-    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
-      script: task.script,
-      args: task.args,
-      resumeFromRunId: task.runId,
-    });
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith(
+      {
+        script: task.script,
+        args: task.args,
+        resumeFromRunId: task.runId,
+      },
+      task.workflowName,
+    );
     expect(execute).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
@@ -12641,6 +13539,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       runId: 'wf_1234abcd',
       kind: 'workflow' as const,
       status: 'failed' as 'failed' | 'running',
+      workflowName: 'deep-review',
       script: 'return await agent(args.prompt)',
       args: { prompt: 'rerun everything' },
     };
@@ -12711,10 +13610,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       status: 'running',
       taskId: rerun.runId,
     });
-    expect(buildSessionOwnedBackground).toHaveBeenCalledWith({
-      script: task.script,
-      args: task.args,
-    });
+    expect(buildSessionOwnedBackground).toHaveBeenCalledWith(
+      {
+        script: task.script,
+        args: task.args,
+      },
+      task.workflowName,
+    );
     expect(execute).toHaveBeenCalledOnce();
     expect(rerun).toMatchObject({
       sourceRunId: task.runId,
@@ -21467,6 +22369,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           messages: [{ role: 'user', parts: [{ text: 'restored' }] }],
         },
       });
+      innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+      innerConfig.getContentGeneratorConfig = vi
+        .fn()
+        .mockReturnValue(undefined);
       vi.mocked(loadSettings).mockReturnValue(settings);
       const { agent, agentPromise } = await spawnAgent('expected-capability');
 
@@ -21482,12 +22388,18 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
             },
           },
         };
-        if (action === 'load') {
-          await agent.loadSession(request);
-        } else {
-          await agent.unstable_resumeSession(request);
-        }
+        const response = (
+          action === 'load'
+            ? await agent.loadSession(request)
+            : await agent.unstable_resumeSession(request)
+        ) as {
+          configOptions: Array<{ id: string }>;
+        };
 
+        expect(response.configOptions.map((option) => option.id)).toEqual([
+          'mode',
+          'model',
+        ]);
         expect(innerConfig.refreshAuth).not.toHaveBeenCalled();
         expect(innerConfig.activateProvisionalWorkspace).not.toHaveBeenCalled();
         expect(
@@ -24490,6 +25402,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     };
     const runtimeServer = { command: 'runtime-server' };
     const forceDiscover = vi.fn().mockResolvedValue(undefined);
+    const setTools = vi.fn().mockResolvedValue(undefined);
     let finishDiscovery!: () => void;
     const discoveryPending = new Promise<void>((resolve) => {
       finishDiscovery = resolve;
@@ -24542,6 +25455,10 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       .mockReturnValue({ runtime: runtimeServer });
     mockConfig.getWorkingDir = vi.fn().mockReturnValue('/tmp');
     mockConfig.isMcpServerDisabled = vi.fn().mockReturnValue(false);
+    mockConfig.getLlmClient = vi.fn().mockReturnValue({
+      isInitialized: vi.fn().mockReturnValue(true),
+      setTools,
+    });
     mockConfig.getToolRegistry = vi.fn().mockReturnValue({
       discoverToolsForServer: forceDiscover,
       getMcpClientManager: vi.fn().mockReturnValue({
@@ -24615,6 +25532,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         discovery: discoveryServer,
       }),
     );
+    expect(setTools).toHaveBeenCalledOnce();
     expect(mockConfig.setExcludedMcpServers).toHaveBeenCalledWith(['disabled']);
     expect(mockConfig.setAllowedMcpServers).toHaveBeenCalledWith([
       'persisted',
@@ -25285,6 +26203,8 @@ describe('sessionLanguage multi-session propagation', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(setLanguageAsync).mockReset().mockResolvedValue(undefined);
+    vi.mocked(getCurrentLanguage).mockReturnValue('zh');
     mockConnectionState.reset();
     capturedAgentFactory = undefined;
 
@@ -25812,7 +26732,13 @@ describe('sessionLanguage multi-session propagation', () => {
     const cfg = makeConfig({
       getSessionId: vi.fn().mockReturnValue('s-reload'),
       getAuthType: vi.fn().mockReturnValue('openai'),
+      // The reload re-derivation applies the Session Workflow gate to live
+      // sessions unconditionally; report the (unchanged) effective gate so
+      // the per-session no-op check skips this session.
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
     });
+    const reloadReasoningSelection = vi.fn();
+    const getSessionReasoningSelection = vi.fn().mockReturnValue('default');
 
     vi.mocked(loadSettings).mockReturnValue(settings);
     vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
@@ -25823,6 +26749,8 @@ describe('sessionLanguage multi-session propagation', () => {
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
+          reloadReasoningSelection,
+          getSessionReasoningSelection,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
           installGoalTerminalObserver: vi.fn(),
@@ -25860,22 +26788,25 @@ describe('sessionLanguage multi-session propagation', () => {
       providerConfig,
       {},
     );
-    expect(cfg.refreshAuth).toHaveBeenCalledWith('openai');
+    expect(cfg.refreshAuth).toHaveBeenCalledWith('openai', undefined);
+    expect(getSessionReasoningSelection).toHaveBeenCalledOnce();
+    expect(reloadReasoningSelection).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
   });
 
-  it('clears Todo Stop Guard trust when workspace reload enters plan mode', async () => {
+  it('clears plan state when workspace reload changes approval mode', async () => {
     let mergedSettings: Record<string, unknown> = {
       tools: { approvalMode: 'default' },
     };
+    let nextMode = 'plan';
     const settings = {
       get merged() {
         return mergedSettings;
       },
       reloadScopeFromDisk: vi.fn(() => {
-        mergedSettings = { tools: { approvalMode: 'plan' } };
+        mergedSettings = { tools: { approvalMode: nextMode } };
       }),
       getUserHooks: vi.fn().mockReturnValue({}),
       getProjectHooks: vi.fn().mockReturnValue({}),
@@ -25888,6 +26819,11 @@ describe('sessionLanguage multi-session propagation', () => {
         approvalMode = mode;
       }),
       setDisabledTools: vi.fn(),
+      // The reload re-derivation applies the Session Workflow gate to live
+      // sessions unconditionally; report the (unchanged) effective gate so
+      // the per-session no-op check skips this session and the approval-mode
+      // clear below stays the only plan-revision clear.
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
     });
     const clearActiveTodoPlanRevision = vi.fn();
     const clearTodoStopGuardTrust = vi.fn();
@@ -25935,7 +26871,7 @@ describe('sessionLanguage multi-session propagation', () => {
     ).mockClear();
     const approvalModes = APPROVAL_MODES as unknown as string[];
     const originalApprovalModes = [...approvalModes];
-    approvalModes.splice(0, approvalModes.length, 'plan');
+    approvalModes.splice(0, approvalModes.length, 'default', 'plan');
     try {
       const result = await agent.extMethod(
         SERVE_CONTROL_EXT_METHODS.workspaceReload,
@@ -25949,9 +26885,1458 @@ describe('sessionLanguage multi-session propagation', () => {
       ).toHaveBeenCalledWith('plan');
       expect(clearActiveTodoPlanRevision).toHaveBeenCalledOnce();
       expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
+
+      nextMode = 'default';
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(
+        (cfg as typeof cfg & { setApprovalMode: ReturnType<typeof vi.fn> })
+          .setApprovalMode,
+      ).toHaveBeenLastCalledWith('default');
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(2);
+      expect(clearTodoStopGuardTrust).toHaveBeenCalledOnce();
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
     }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('re-derives the Session Workflow gate when workspace reload flips it', async () => {
+    let mergedSettings: Record<string, unknown> = {
+      experimental: { sessionWorkflow: false },
+    };
+    let nextEnabled = true;
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(() => {
+        mergedSettings = { experimental: { sessionWorkflow: nextEnabled } };
+      }),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    let installedProvider: (() => boolean) | undefined;
+    const setSessionWorkflowEnabledProvider = vi.fn(
+      (provider?: () => boolean) => {
+        installedProvider = provider;
+      },
+    );
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-workflow-reload'),
+      setSessionWorkflowEnabledProvider,
+      // The reload's no-op decision lives inside
+      // applySessionWorkflowOverrideToLiveSessions, which reads each
+      // session's effective gate. The session captured gate-off at
+      // construction and its own settings view is never reloaded here.
+      isSessionWorkflowEnabled: vi.fn(() => installedProvider?.() ?? false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-workflow-reload'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust: vi.fn(),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    // The override starts undefined, so session creation installs no provider;
+    // the first provider install must come from the reload below.
+    expect(setSessionWorkflowEnabledProvider).not.toHaveBeenCalled();
+
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+
+    // The gate must track the reloaded file: the provider installed on the
+    // live session now reads true, and the stale plan revision is cleared.
+    const provider = setSessionWorkflowEnabledProvider.mock.calls.at(-1)?.[0];
+    expect(provider?.()).toBe(true);
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalled();
+
+    // A no-op reload (file unchanged) must not re-pin the provider.
+    setSessionWorkflowEnabledProvider.mockClear();
+    clearActiveTodoPlanRevision.mockClear();
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setSessionWorkflowEnabledProvider).not.toHaveBeenCalled();
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+
+    // A disk state that contradicts a UI-pinned override must also win: pin
+    // the override to true via the UI write path while the file says false.
+    nextEnabled = false;
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setSessionWorkflowEnabledProvider.mock.calls.at(-1)?.[0]?.()).toBe(
+      false,
+    );
+    setSessionWorkflowEnabledProvider.mockClear();
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow, {
+      enabled: true,
+    });
+    expect(setSessionWorkflowEnabledProvider.mock.calls.at(-1)?.[0]?.()).toBe(
+      true,
+    );
+    setSessionWorkflowEnabledProvider.mockClear();
+    nextEnabled = false;
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    // merged↔merged is false↔false (no diff), but the file contradicts the
+    // UI-pinned true, so the override must follow the file.
+    expect(setSessionWorkflowEnabledProvider.mock.calls.at(-1)?.[0]?.()).toBe(
+      false,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not re-pin or clear live sessions when a reload diff fires against a stale settings view', async () => {
+    // The child boots with the gate off on disk; its settings view only
+    // syncs through reloadScopeFromDisk, and the UI write path never
+    // triggers one — so after a UI toggle the first reload diffs the new
+    // merged view against a stale clone.
+    let viewEnabled = false;
+    const settings = {
+      get merged() {
+        return { experimental: { sessionWorkflow: viewEnabled } };
+      },
+      reloadScopeFromDisk: vi.fn(() => {
+        viewEnabled = true; // the UI write persisted true behind the child's back
+      }),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let installedProvider: (() => boolean) | undefined;
+    const setSessionWorkflowEnabledProvider = vi.fn(
+      (provider?: () => boolean) => {
+        installedProvider = provider;
+      },
+    );
+    const isSessionWorkflowEnabled = vi.fn(
+      () => installedProvider?.() ?? viewEnabled,
+    );
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-workflow-stale-reload'),
+      setSessionWorkflowEnabledProvider,
+      isSessionWorkflowEnabled,
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-workflow-stale-reload'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust: vi.fn(),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // UI toggle ON: the serve route persists the write and pushes the
+    // effective value; the child pins the override while its own settings
+    // view still reads false.
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow, {
+      enabled: true,
+    });
+    expect(setSessionWorkflowEnabledProvider).toHaveBeenCalledTimes(1);
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+
+    // The session approves a workflow plan (revision bound, execution under
+    // way). Any later POST /workspace/reload diffs oldMerged cloned from the
+    // stale view (false) against the reloaded disk state (true), so the
+    // re-derivation condition fires — but every session's provider already
+    // returns the pushed true, so neither a re-pin nor a revision clear may
+    // happen.
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setSessionWorkflowEnabledProvider).toHaveBeenCalledTimes(1);
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+
+    // A genuine disk flip away from the pinned value must still reach the
+    // live session.
+    settings.reloadScopeFromDisk = vi.fn(() => {
+      viewEnabled = false;
+      return true;
+    });
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setSessionWorkflowEnabledProvider).toHaveBeenCalledTimes(2);
+    expect(installedProvider?.()).toBe(false);
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(2);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('still applies a Session Workflow gate flip after the daemon settings cache was swapped', async () => {
+    // `this.settings` is a replaceable "latest loaded" cache: handlers such
+    // as qwen/settings/getCore swap it for a fresh loadSettings instance.
+    // If the disk flips and THEN such a swap happens, the reload diff
+    // compares two fresh views of the same disk state (no diff) while the
+    // live session still holds its own stale LoadedSettings — the
+    // re-derivation must not depend on the diff.
+    const mergedSettings: Record<string, unknown> = {
+      experimental: { sessionWorkflow: false },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let installedProvider: (() => boolean) | undefined;
+    const setSessionWorkflowEnabledProvider = vi.fn(
+      (provider?: () => boolean) => {
+        installedProvider = provider;
+      },
+    );
+    const isSessionWorkflowEnabled = vi.fn(
+      // The session captured gate-off at construction; its own settings
+      // instance is never reloaded by the daemon's workspaceReload.
+      () => installedProvider?.() ?? false,
+    );
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-workflow-swapped-settings'),
+      setSessionWorkflowEnabledProvider,
+      isSessionWorkflowEnabled,
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-workflow-swapped-settings'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust: vi.fn(),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // The disk flips to gate-on, and a handler then swaps the daemon's
+    // settings cache for a fresh load that already carries the new state.
+    const freshSettings = {
+      merged: { experimental: { sessionWorkflow: true } },
+      user: { settings: {}, path: '/home/u/.qwen/settings.json' },
+      workspace: { settings: {}, path: '/reload/.qwen/settings.json' },
+      isTrusted: true,
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(freshSettings);
+    await agent.extMethod('qwen/settings/getCore', {});
+
+    // oldMerged (cloned from the fresh cache) and newMerged both read true,
+    // so a diff-based re-derivation would skip the live session entirely.
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+
+    expect(installedProvider?.()).toBe(true);
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('still applies an approval-mode flip after the daemon settings cache was swapped', async () => {
+    // `this.settings` is a replaceable "latest loaded" cache: handlers such
+    // as qwen/settings/getCore swap it for a fresh loadSettings instance.
+    // If the disk flips and THEN such a swap happens, the reload diff
+    // compares two fresh views of the same disk state (no diff) while the
+    // live session still runs the old mode — the approval-mode application
+    // must not depend on the diff.
+    const mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'default' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'default';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-approval-swapped-settings'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      // The reload re-derivation applies the Session Workflow gate to live
+      // sessions unconditionally; report the (unchanged) effective gate so
+      // the per-session no-op check skips this session and the clear counts
+      // below stay attributable to the approval-mode application.
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-approval-swapped-settings'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // The disk flips to plan, and a handler then swaps the daemon's
+    // settings cache for a fresh load that already carries the new state.
+    const freshSettings = {
+      merged: { tools: { approvalMode: 'plan' } },
+      user: { settings: {}, path: '/home/u/.qwen/settings.json' },
+      workspace: { settings: {}, path: '/reload/.qwen/settings.json' },
+      isTrusted: true,
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(freshSettings);
+    await agent.extMethod('qwen/settings/getCore', {});
+
+    const approvalModes = APPROVAL_MODES as unknown as string[];
+    const originalApprovalModes = [...approvalModes];
+    approvalModes.splice(0, approvalModes.length, 'default', 'plan');
+    try {
+      // oldMerged (cloned from the fresh cache) and newMerged both read
+      // plan, so a diff-based application would skip the live session
+      // entirely.
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+
+      expect(setApprovalMode).toHaveBeenCalledWith('plan');
+      expect(approvalMode).toBe('plan');
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+      expect(clearTodoStopGuardTrust).toHaveBeenCalledTimes(1);
+
+      // A follow-up no-edit reload must stay a per-session no-op.
+      setApprovalMode.mockClear();
+      clearActiveTodoPlanRevision.mockClear();
+      clearTodoStopGuardTrust.mockClear();
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+      expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+    } finally {
+      approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps runtime-only approval-mode transitions across unchanged-file reloads', async () => {
+    // The file pins plan; the session legitimately exits plan through an
+    // approved exit_plan_mode, which switches the live mode at runtime
+    // without ever persisting (core Config.setApprovalMode is runtime-only,
+    // as are ACP session/set_mode and the sessionApprovalMode ext). A reload
+    // whose file value is unchanged must not re-apply the disk value: that
+    // would flip the executing session back into PLAN between turns and
+    // destroy its approved revision + stop-guard trust.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'plan';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-runtime-mode'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-runtime-mode'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    const approvalModes = APPROVAL_MODES as unknown as string[];
+    const originalApprovalModes = [...approvalModes];
+    approvalModes.splice(0, approvalModes.length, 'default', 'plan', 'auto');
+    try {
+      // Runtime-only transition (approved plan exit): the live session drops
+      // to default between turns while the file still says plan. An
+      // unrelated-settings reload must leave it alone.
+      approvalMode = 'default';
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+      expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+      expect(approvalMode).toBe('default');
+
+      // The disk flips plan→default; the session already sits on default, so
+      // the per-session guard no-ops, but the daemon baseline advances...
+      mergedSettings = { tools: { approvalMode: 'default' } };
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
+
+      // ...which keeps the mirror direction safe too: the file is default
+      // while the user drafts in PLAN at runtime (session/set_mode never
+      // persists), and a no-edit reload must not discard the draft.
+      approvalMode = 'plan';
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+      expect(approvalMode).toBe('plan');
+
+      // A genuine disk flip must still reach the runtime-diverged session.
+      mergedSettings = { tools: { approvalMode: 'auto' } };
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).toHaveBeenCalledWith('auto');
+      expect(approvalMode).toBe('auto');
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+      expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+    } finally {
+      approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('retries the approval-mode apply for sessions a reload skipped or failed', async () => {
+    // The baseline advances only when every live session actually converged
+    // on the file value. A session that was busy during the flip (or whose
+    // setApprovalMode threw) never received it; if the baseline still
+    // advanced, every later no-edit reload would compute no change and the
+    // session would stay on the stale mode until the file changes again or
+    // the daemon restarts.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'default' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'default';
+    let idle = true;
+    let failSetApprovalMode = false;
+    const setApprovalMode = vi.fn((mode: string) => {
+      if (failSetApprovalMode) throw new Error('trust gate probe');
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-reload-retry'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-reload-retry'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn(() => idle),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // The disk flips default->plan while the session is busy: the reload
+    // skips it, reports it, and must not advance the baseline.
+    mergedSettings = { tools: { approvalMode: 'plan' } };
+    idle = false;
+    const skippedResult = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceReload,
+      {},
+    );
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(skippedResult).toMatchObject({
+      sessionsSkipped: ['s-reload-retry'],
+    });
+
+    // Once idle, a no-edit reload re-attempts and converges the session —
+    // impossible if the skipped reload had advanced the baseline.
+    idle = true;
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(approvalMode).toBe('plan');
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+    expect(clearTodoStopGuardTrust).toHaveBeenCalledTimes(1);
+
+    // The disk flips plan->auto, but the apply throws (e.g. TrustGateError):
+    // the live mode stays and the baseline must not advance either.
+    mergedSettings = { tools: { approvalMode: 'auto' } };
+    failSetApprovalMode = true;
+    setApprovalMode.mockClear();
+    clearActiveTodoPlanRevision.mockClear();
+    clearTodoStopGuardTrust.mockClear();
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).toHaveBeenCalledWith('auto');
+    expect(approvalMode).toBe('plan');
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+
+    // Once the apply can succeed, a no-edit reload delivers the file value.
+    failSetApprovalMode = false;
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).toHaveBeenCalledWith('auto');
+    expect(approvalMode).toBe('auto');
+    // Leaving plan (the mode before this apply) clears the bound revision.
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+
+    // Every session converged, so the baseline advanced: another no-edit
+    // reload is a per-session no-op again.
+    setApprovalMode.mockClear();
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('folds a removed or falsy approvalMode key to AUTO for live sessions on reload', async () => {
+    // Deleting tools.approvalMode from the settings file must reach live
+    // sessions: the reload folds a missing/falsy value to AUTO — the same
+    // default a fresh session derives — instead of skipping it and pinning a
+    // stale privileged mode until daemon restart.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'plan';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-mode-removal'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-mode-removal'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    const approvalModes = APPROVAL_MODES as unknown as string[];
+    const originalApprovalModes = [...approvalModes];
+    approvalModes.splice(0, approvalModes.length, 'default', 'plan', 'auto');
+    try {
+      // The operator deletes the key (hand edit / dotfile sync): the live
+      // session leaves plan for AUTO on the next reload.
+      mergedSettings = {};
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).toHaveBeenCalledWith('auto');
+      expect(approvalMode).toBe('auto');
+      expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+      expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+
+      // The baseline advanced with the fold: a repeat reload is a no-op...
+      setApprovalMode.mockClear();
+      clearActiveTodoPlanRevision.mockClear();
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+
+      mergedSettings = { tools: { approvalMode: 'plan' } };
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(approvalMode).toBe('plan');
+      setApprovalMode.mockClear();
+
+      mergedSettings = { tools: { approvalMode: null } };
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).toHaveBeenCalledWith('auto');
+      expect(approvalMode).toBe('auto');
+      setApprovalMode.mockClear();
+
+      // ...and an invalid value is never converged at all: boot rejects an
+      // unparseable tools.approvalMode outright, so reload keeps live
+      // sessions on their current modes (a no-op here as well, but for the
+      // stronger reason — see the dedicated invalid-value test below).
+      mergedSettings = { tools: { approvalMode: 'bogus' } };
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+      expect(setApprovalMode).not.toHaveBeenCalled();
+    } finally {
+      approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps live sessions on their modes when the file holds an approval mode boot would reject', async () => {
+    // Boot rejects an unparseable tools.approvalMode outright (loadCliConfig
+    // has no catch around parseApprovalModeValue), so reload must not
+    // converge live sessions on it either: folding the invalid value to AUTO
+    // silently escalated the approval gate for every session not already on
+    // AUTO. The session here sits on DEFAULT, where the old fold would have
+    // called setApprovalMode('auto').
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'default' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'default';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-mode-invalid'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-mode-invalid'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // The file holds a value boot would reject: the reload keeps the live
+    // session on DEFAULT (no escalation to AUTO) and leaves the plan guards
+    // untouched.
+    mergedSettings = { tools: { approvalMode: 'bogus' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(approvalMode).toBe('default');
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+
+    // Once the file is corrected, the very next reload converges the
+    // session — the invalid value did not pin or advance the baseline.
+    mergedSettings = { tools: { approvalMode: 'plan' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).toHaveBeenCalledWith('plan');
+    expect(approvalMode).toBe('plan');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps an approved plan exit intact when an invalid value round-trips the file', async () => {
+    // The file pins plan; an approved exit_plan_mode legitimately drops the
+    // live session to default without persisting. A hand edit / dotfile
+    // sync then briefly writes a value boot would reject: the reload must
+    // neither apply it nor record it as converged. Recording the undefined
+    // fold corrupted the convergence record, so restoring the file to
+    // exactly 'plan' afterwards computed a change and snapped the session
+    // back into PLAN between turns — destroying the approved exit via an
+    // edit cycle that left the file byte-identical.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'plan';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-invalid-roundtrip'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-invalid-roundtrip'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // Runtime-only transition: an approved plan exit drops the session to
+    // default between turns while the file still says plan.
+    approvalMode = 'default';
+
+    // A transient invalid value (typo, mid-save dotfile sync) applies
+    // nothing...
+    mergedSettings = { tools: { approvalMode: 'bogus' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+
+    // ...and restoring the file byte-identical to 'plan' must not snap the
+    // session back into PLAN: the invalid value never poisoned the
+    // convergence record.
+    mergedSettings = { tools: { approvalMode: 'plan' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(approvalMode).toBe('default');
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('re-converges flipped sessions when the file round-trips before a retry completes', async () => {
+    // A partially applied convergence retries until every session holds the
+    // file value. If the file round-trips back to the old value before the
+    // retry completes, the sessions that already flipped must flip back:
+    // one daemon-wide baseline still equal to the round-tripped value
+    // computed "no change" and stranded them on the intermediate mode until
+    // an unrelated file edit or daemon restart.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    const approvalModes = new Map<string, string>([
+      ['s-roundtrip-a', 'plan'],
+      ['s-roundtrip-b', 'plan'],
+    ]);
+    const busySessionIds = new Set<string>();
+    const setApprovalModeCalls: Array<[string, string]> = [];
+    function makeReloadSession(id: string) {
+      const clearActiveTodoPlanRevision = vi.fn();
+      const clearTodoStopGuardTrust = vi.fn();
+      const cfg = makeConfig({
+        getSessionId: vi.fn().mockReturnValue(id),
+        getApprovalMode: vi.fn(() => approvalModes.get(id)),
+        setApprovalMode: vi.fn((mode: string) => {
+          setApprovalModeCalls.push([id, mode]);
+          approvalModes.set(id, mode);
+        }),
+        setDisabledTools: vi.fn(),
+        isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+      });
+      const session = {
+        getId: vi.fn().mockReturnValue(id),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        isIdle: vi.fn(() => !busySessionIds.has(id)),
+        clearActiveTodoPlanRevision,
+        clearTodoStopGuardTrust,
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+      return { cfg, session, clearActiveTodoPlanRevision };
+    }
+    const reloadSessions = new Map(
+      ['s-roundtrip-a', 's-roundtrip-b'].map((id) => [
+        id,
+        makeReloadSession(id),
+      ]),
+    );
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    let configsServed = 0;
+    vi.mocked(loadCliConfig).mockImplementation(async (...args) => {
+      const argv = args[1] as { sessionId?: string } | undefined;
+      if (argv?.sessionId === 'workspace-mcp-discovery') {
+        return reloadSessions.get('s-roundtrip-a')!.cfg as unknown as Config;
+      }
+      const id = configsServed++ === 0 ? 's-roundtrip-a' : 's-roundtrip-b';
+      return reloadSessions.get(id)!.cfg as unknown as Config;
+    });
+    let sessionsSpawned = 0;
+    vi.mocked(Session).mockImplementation(() => {
+      const id = sessionsSpawned++ === 0 ? 's-roundtrip-a' : 's-roundtrip-b';
+      return reloadSessions.get(id)!.session;
+    });
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // The file flips plan->auto while s-roundtrip-b is mid-turn: only A
+    // converges and the reload reports B as skipped.
+    mergedSettings = { tools: { approvalMode: 'auto' } };
+    busySessionIds.add('s-roundtrip-b');
+    const partial = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceReload,
+      {},
+    );
+    expect(setApprovalModeCalls).toEqual([['s-roundtrip-a', 'auto']]);
+    expect(partial).toMatchObject({ sessionsSkipped: ['s-roundtrip-b'] });
+
+    // Before B's retry can run, the file round-trips back to plan. A must
+    // flip back; B still holds plan and stays untouched.
+    mergedSettings = { tools: { approvalMode: 'plan' } };
+    busySessionIds.clear();
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalModeCalls).toEqual([
+      ['s-roundtrip-a', 'auto'],
+      ['s-roundtrip-a', 'plan'],
+    ]);
+    expect(approvalModes.get('s-roundtrip-a')).toBe('plan');
+    expect(approvalModes.get('s-roundtrip-b')).toBe('plan');
+    expect(
+      reloadSessions.get('s-roundtrip-a')!.clearActiveTodoPlanRevision,
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      reloadSessions.get('s-roundtrip-b')!.clearActiveTodoPlanRevision,
+    ).not.toHaveBeenCalled();
+
+    // Every session converged again: a no-edit reload is a per-session
+    // no-op.
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalModeCalls).toEqual([
+      ['s-roundtrip-a', 'auto'],
+      ['s-roundtrip-a', 'plan'],
+    ]);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('converges reload with the boot parser for aliased approval-mode spellings', async () => {
+    // Boot accepts legacy alias spellings (parseApprovalModeValue trims,
+    // lowercases, and maps auto_edit/autoedit to AUTO_EDIT), so reload
+    // convergence must too: a strict canonical fold seeded the baseline with
+    // AUTO for an 'autoedit' file, which hid a genuine autoedit→auto change
+    // from every live session. Deliberately no APPROVAL_MODES splice here —
+    // the fold must stand on the boot parser alone.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'autoedit' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'auto-edit';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-mode-alias'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-mode-alias'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // An unchanged file stays a no-op even though the spelling is an alias.
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+
+    // A genuine AUTO_EDIT→AUTO file change reaches the live session.
+    mergedSettings = { tools: { approvalMode: 'auto' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).toHaveBeenCalledWith('auto');
+    expect(approvalMode).toBe('auto');
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not treat case-only approval-mode edits as a mode change on reload', async () => {
+    // Boot treats 'Plan' and 'plan' as the same mode (parseApprovalModeValue
+    // lowercases), so a hand edit or dotfile sync that changes only the case
+    // must not snap live sessions out of PLAN and destroy the bound plan
+    // revision: the strict fold mapped 'Plan' to AUTO. No APPROVAL_MODES
+    // splice — the fold must stand on the boot parser alone.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'plan';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-mode-case'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-mode-case'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    mergedSettings = { tools: { approvalMode: 'Plan' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+    expect(approvalMode).toBe('plan');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps safe-mode sessions pinned to DEFAULT through approval-mode reloads', async () => {
+    // Safe/bare sessions ignore tools.approvalMode at boot (loadCliConfig
+    // pins them to DEFAULT), so reload must never push the file value — or
+    // the AUTO fold of a deleted/corrupted key — into them; the pre-fix fold
+    // flipped a safe-mode session into auto-approval when the key was
+    // deleted after boot.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'default';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-safe-mode'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSafeMode: vi.fn().mockReturnValue(true),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-safe-mode'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig({
+        isSafeMode: vi.fn().mockReturnValue(true),
+        getBareMode: vi.fn().mockReturnValue(false),
+      }) as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // Neither an unchanged file...
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+
+    // ...nor a genuine file flip...
+    mergedSettings = { tools: { approvalMode: 'auto' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+
+    // ...nor a deleted key (which folds to AUTO for unrestricted sessions)
+    // may move the safe-mode session off DEFAULT.
+    mergedSettings = {};
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(approvalMode).toBe('default');
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps bare-mode sessions pinned to DEFAULT when the approval key appears later', async () => {
+    let mergedSettings: Record<string, unknown> = {};
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'default';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-bare-mode'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(true),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-bare-mode'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig({
+        isSafeMode: vi.fn().mockReturnValue(false),
+        getBareMode: vi.fn().mockReturnValue(true),
+      }) as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    // Boot without the key: a bare session derives DEFAULT anyway.
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // The key appears later (shared settings sync): the bare session stays
+    // DEFAULT instead of adopting the file value.
+    mergedSettings = { tools: { approvalMode: 'plan' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(approvalMode).toBe('default');
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -26006,6 +28391,8 @@ describe('sessionLanguage multi-session propagation', () => {
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
           sendAvailableCommandsUpdate,
+          clearActiveTodoPlanRevision: vi.fn(),
+          clearTodoStopGuardTrust: vi.fn(),
           installRewriter: vi.fn(),
           installGoalTerminalObserver: vi.fn(),
           startCronScheduler: vi.fn(),
@@ -26627,6 +29014,257 @@ describe('sessionLanguage multi-session propagation', () => {
     expect(cfg.refreshHierarchicalMemory).not.toHaveBeenCalled();
     expect(cfg.getLlmClient().refreshSystemInstruction).toHaveBeenCalledOnce();
     expect(sendAvailableCommandsUpdate).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('userLanguage: accepts auto without any session and performs no writes', async () => {
+    const settings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    vi.mocked(updateOutputLanguageFile).mockClear();
+    vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
+
+    const result = await agent.extMethod('qwen/control/user/language', {
+      language: 'auto',
+      syncOutputLanguage: true,
+    });
+
+    // Zero sessions is a success, and the daemon process owns persistence:
+    // the runtime must not write settings or output-language files itself.
+    expect(result).toEqual({ language: 'zh', sessions: 0, failed: 0 });
+    expect(vi.mocked(setLanguageAsync)).toHaveBeenCalledWith('auto');
+    expect(settings.reloadScopeFromDisk).toHaveBeenCalledWith(
+      SettingScope.User,
+    );
+    expect(vi.mocked(updateOutputLanguageFile)).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(writeOutputLanguageAndRegisterPath),
+    ).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('userLanguage: wraps UI-language switch failures', async () => {
+    const settings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(setLanguageAsync).mockRejectedValueOnce(new Error('i18n down'));
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await expect(
+      agent.extMethod('qwen/control/user/language', { language: 'zh' }),
+    ).rejects.toMatchObject({ code: -32603 });
+    expect(settings.reloadScopeFromDisk).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('userLanguage: refreshes sessions without rewriting project-bound files', async () => {
+    const cfgA = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-a'),
+      getOutputLanguageFilePath: vi
+        .fn()
+        .mockReturnValue('/proj-a/.qwen/output-language.md'),
+    });
+    const cfgB = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-b'),
+      getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+      refreshHierarchicalMemory: vi
+        .fn()
+        .mockRejectedValue(new Error('refresh failed')),
+    });
+
+    const sessionConfigs = [cfgA, cfgB];
+    let sessionIdx = 0;
+
+    const settings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockImplementation(
+      async () => sessionConfigs[sessionIdx]! as unknown as Config,
+    );
+    vi.mocked(Session).mockImplementation(() => {
+      const cfg = sessionConfigs[sessionIdx]!;
+      const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
+      sessionIdx++;
+      return {
+        getId: vi.fn().mockReturnValue(id),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+    });
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/proj-a', mcpServers: [] });
+    await agent.newSession({ cwd: '/proj-b', mcpServers: [] });
+
+    vi.mocked(updateOutputLanguageFile).mockClear();
+    vi.mocked(writeOutputLanguageAndRegisterPath).mockClear();
+
+    const result = await agent.extMethod('qwen/control/user/language', {
+      language: 'zh',
+      syncOutputLanguage: true,
+    });
+
+    expect(result).toEqual({ language: 'zh', sessions: 2, failed: 1 });
+    expect(cfgA.refreshHierarchicalMemory).toHaveBeenCalled();
+    expect(cfgB.refreshHierarchicalMemory).toHaveBeenCalled();
+    expect(cfgA.getLlmClient().refreshSystemInstruction).toHaveBeenCalled();
+    expect(cfgB.getLlmClient().refreshSystemInstruction).not.toHaveBeenCalled();
+    // Unlike the session-scoped route, project-bound output-language files
+    // stay untouched: cfgA keeps its project override.
+    expect(vi.mocked(updateOutputLanguageFile)).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(writeOutputLanguageAndRegisterPath),
+    ).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('userLanguage: skips the session refresh when syncOutputLanguage is false', async () => {
+    const cfgA = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-a'),
+    });
+
+    const settings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfgA as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-a'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+          getConfig: vi.fn().mockReturnValue(cfgA),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/proj-a', mcpServers: [] });
+    vi.mocked(cfgA.refreshHierarchicalMemory).mockClear();
+
+    const result = await agent.extMethod('qwen/control/user/language', {
+      language: 'en',
+    });
+
+    expect(result).toEqual({ language: 'zh', sessions: 0, failed: 0 });
+    expect(vi.mocked(setLanguageAsync)).toHaveBeenCalledWith('en');
+    expect(cfgA.refreshHierarchicalMemory).not.toHaveBeenCalled();
+    expect(settings.reloadScopeFromDisk).toHaveBeenCalledWith(
+      SettingScope.User,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('userLanguage: rejects an unknown language code', async () => {
+    const settings = {
+      merged: { mcpServers: {} },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await expect(
+      agent.extMethod('qwen/control/user/language', { language: 'xx' }),
+    ).rejects.toThrow('Invalid language');
+    expect(settings.reloadScopeFromDisk).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

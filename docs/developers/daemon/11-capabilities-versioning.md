@@ -75,6 +75,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       typeof t.writerIdleTimeoutMs === 'number' && t.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (t) => t.persistSettingAvailable === true],
+  ['user_language_sync', (t) => t.persistSettingAvailable === true],
   ['workspace_voice', (t) => t.persistSettingAvailable === true],
   [
     'workspace_voice_transcription',
@@ -108,7 +109,7 @@ Baseline tags are not present in the `Map` and are advertised unconditionally. T
 
 Foundation: `health`, `daemon_status`, `capabilities`.
 
-Sessions: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume`, `session_list`, `session_info`, `session_prompt`, `session_mid_turn_message_mutation`, `session_cancel`, `session_events`, `session_set_model`, `session_close`, `session_metadata`, `session_archive`, `session_storage_conflict_repair`, `session_export`, `session_transcript`, `session_context`, `session_context_usage`, `session_supported_commands`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_status`, `session_approval_mode_control`, `session_recap`, `session_btw`, **`session_shell_command`** (conditional), `session_language`, `session_rewind`, `session_hooks`, `session_branch`.
+Sessions: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume`, `session_list`, `session_info`, `session_prompt`, `session_mid_turn_message_mutation`, `session_cancel`, `session_events`, `session_set_model`, `session_close`, `session_metadata`, `session_archive`, `session_storage_conflict_repair`, `session_export`, `session_transcript`, `session_context`, `session_context_usage`, `session_supported_commands`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_status`, `session_approval_mode_control`, `session_recap`, `session_btw`, **`session_shell_command`** (conditional), `session_language`, **`user_language_sync`** (conditional), `session_rewind`, `session_hooks`, `session_branch`.
 
 Streaming: `slow_client_warning`, `typed_event_schema`.
 
@@ -207,7 +208,7 @@ sequenceDiagram
 | Env                        | `QWEN_SERVE_NO_MCP_POOL=1`                                      | Stops advertising `mcp_workspace_pool` and `mcp_pool_restart`; MCP events no longer stamp `scope: 'workspace'`.                                                        |
 | CLI flag                   | `--mcp-client-budget=N`, `--mcp-budget-mode={off,warn,enforce}` | Does not change the tag set (`mcp_guardrails` is always advertised), but changes per-server reservation and refusal behavior.                                          |
 | CLI flag / env             | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1`                      | Advertises `rate_limit`.                                                                                                                                               |
-| Embedded option            | `persistSettingAvailable`                                       | Advertises `workspace_settings` and `workspace_voice`.                                                                                                                 |
+| Embedded option            | `persistSettingAvailable`                                       | Advertises `workspace_settings`, `user_language_sync`, and `workspace_voice`.                                                                                          |
 | Embedded option            | `voiceTranscriptionAvailable`                                   | Advertises `workspace_voice_transcription`.                                                                                                                            |
 | CLI flag / embedded option | `--enable-session-shell` / `sessionShellCommandEnabled`         | Advertises `session_shell_command`.                                                                                                                                    |
 | Runtime state              | More than one registered workspace runtime                      | Advertises `multi_workspace_sessions` and `multi_workspace_session_rewind`; also advertises `multi_workspace_session_shell` when session shell is effectively enabled. |

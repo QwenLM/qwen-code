@@ -29,9 +29,10 @@ import {
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
-import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
+import { resolveEnvVarsInObject } from '@qwen-code/qwen-code-core/envVarResolver';
 import {
   setNestedPropertySafe,
+  WORKSPACE_NON_OVERRIDING_SETTINGS,
   WORKSPACE_RESTRICTED_SETTINGS,
 } from './settingsUtils.js';
 import { customDeepMerge, type MergeStrategy } from '../utils/deepMerge.js';
@@ -386,6 +387,20 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
         `Warning: ${section}.${key} in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
       );
     }
+    for (const ref of WORKSPACE_NON_OVERRIDING_SETTINGS) {
+      if (!isSettingDefined(workspaceFile.originalSettings, ref)) continue;
+      const definingScope = [
+        SettingScope.System,
+        SettingScope.User,
+        SettingScope.SystemDefaults,
+      ].find((scope) =>
+        isSettingDefined(loadedSettings.forScope(scope).originalSettings, ref),
+      );
+      if (definingScope === undefined) continue;
+      warningSet.add(
+        `Warning: ${ref.section}.${ref.key} in workspace settings (${workspaceFile.path}) is ignored because ${definingScope} scope settings also set it. A workspace value is honored only when no User, System, or SystemDefaults scope sets this setting.`,
+      );
+    }
   }
   return [...warningSet];
 }
@@ -414,22 +429,64 @@ function tagMcpServerScope(
   return { ...settings, mcpServers: tagged };
 }
 
+type SettingKeyRef = {
+  readonly section: keyof Settings;
+  readonly key: string;
+};
+
+function isSettingDefined(
+  settings: Settings,
+  { section, key }: SettingKeyRef,
+): boolean {
+  const sectionValue = settings[section] as Record<string, unknown> | undefined;
+  return sectionValue?.[key] !== undefined;
+}
+
 /**
- * Strip the workspace-restricted settings before merging so a repository
- * cannot opt the user into those capabilities. Returns a shallow copy, and
- * the input unchanged when it carries none of them.
+ * Return `settings` without the given keys. Returns a shallow copy, and the
+ * input unchanged when it carries none of them.
  */
-function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
+function stripSettingKeys(
+  settings: Settings,
+  keys: Iterable<SettingKeyRef>,
+): Settings {
   let stripped: Settings | undefined;
-  for (const { section, key } of WORKSPACE_RESTRICTED_SETTINGS) {
+  for (const { section, key } of keys) {
     const source = (stripped ?? settings)[section] as
       | Record<string, unknown>
       | undefined;
     if (source?.[key] === undefined) continue;
-    const { [key]: _restricted, ...rest } = source;
+    const { [key]: _removed, ...rest } = source;
     stripped = { ...(stripped ?? settings), [section]: rest } as Settings;
   }
   return stripped ?? settings;
+}
+
+/**
+ * Strip the workspace-restricted settings before merging so a repository
+ * cannot opt the user into those capabilities.
+ */
+function stripWorkspaceRestrictedSettings(settings: Settings): Settings {
+  return stripSettingKeys(settings, WORKSPACE_RESTRICTED_SETTINGS);
+}
+
+/**
+ * Drop the workspace's WORKSPACE_NON_OVERRIDING_SETTINGS values that a
+ * higher scope also defines. A repository may narrow where its own HTTP
+ * hooks send data, but it must never replace a whitelist the user or
+ * platform configured: an empty whitelist means "allow all", so a replaced
+ * list is a widened one.
+ */
+function stripWorkspaceOverrides(
+  workspace: Settings,
+  higherScopes: readonly Settings[],
+): Settings {
+  return stripSettingKeys(
+    workspace,
+    WORKSPACE_NON_OVERRIDING_SETTINGS.filter((ref) =>
+      higherScopes.some((scope) => isSettingDefined(scope, ref)),
+    ),
+  );
 }
 
 function mergeSettings(
@@ -441,7 +498,11 @@ function mergeSettings(
 ): Settings {
   const safeWorkspace = isTrusted
     ? tagMcpServerScope(
-        stripWorkspaceRestrictedSettings(workspace),
+        stripWorkspaceOverrides(stripWorkspaceRestrictedSettings(workspace), [
+          systemDefaults,
+          user,
+          system,
+        ]),
         'workspace',
       )
     : ({} as Settings);

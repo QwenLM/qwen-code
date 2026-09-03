@@ -112,6 +112,10 @@ const ciIntegrationJob = ciDoc.jobs.integration_cli;
 const ciIntegrationOwnershipStep = ciIntegrationJob.steps.find(
   (s) => s.name === 'Restore workspace ownership',
 );
+const ciLintJob = ciDoc.jobs.lint_and_static;
+const ciLintOwnershipStep = ciLintJob.steps.find(
+  (s) => s.name === 'Restore workspace ownership',
+);
 
 // A probe that only checks .qwen/.git reports "healthy" on workspace-wide
 // poisoning (root-owned node_modules/dist, no .qwen/.git) and skips the
@@ -371,7 +375,10 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     // included. The step must therefore truncate all four after the agent,
     // on every exit path.
     const statusIdx = run.indexOf('status=$?');
-    assert.ok(statusIdx > -1, 'the run block must capture the qwen exit status');
+    assert.ok(
+      statusIdx > -1,
+      'the run block must capture the qwen exit status',
+    );
     for (const file of [
       'GITHUB_ENV',
       'GITHUB_PATH',
@@ -380,7 +387,10 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
     ]) {
       const trunc = `: > "\${${file}:?}" || true`;
       const idx = run.indexOf(trunc);
-      assert.ok(idx > -1, `${file} must be truncated after the qwen invocation`);
+      assert.ok(
+        idx > -1,
+        `${file} must be truncated after the qwen invocation`,
+      );
       assert.ok(
         idx > statusIdx,
         `${file} truncation must run on the exit path, after status=$?`,
@@ -400,7 +410,7 @@ describe('qwen-code-pr-review.yml resolve-pr: agent settings', () => {
       'the workspace settings removal must precede the qwen invocation',
     );
     assert.ok(run.includes('echo "::stop-commands::${stop_token}"'));
-    assert.ok(run.includes("printf '\\n::%s::\\n' \"$stop_token\""));
+    assert.ok(run.includes('printf \'\\n::%s::\\n\' "$stop_token"'));
     assert.ok(run.includes('--approval-mode yolo'));
     for (const key of Object.keys(resolveConflictsStep.env)) {
       assert.ok(
@@ -1024,6 +1034,18 @@ describe('ci.yml: self-hosted checkout jobs restore ownership unconditionally', 
     );
   });
 
+  it('lint_and_static restores ownership unconditionally', () => {
+    // The split copied the recovery prelude into the new lane; a
+    // poisoning-recovery edit landing only in this copy would leave every
+    // other pin green while the future required check fails checkout with
+    // EACCES on the next contaminated runner.
+    assertUnconditional(
+      ciLintJob.steps,
+      ciLintOwnershipStep,
+      'ci.yml lint_and_static',
+    );
+  });
+
   it('cleanup step removes .qwen but no longer any .stale.* dirs', () => {
     assert.ok(
       ciCleanStep,
@@ -1428,13 +1450,24 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
       /^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m,
       'the scrubbed child must copy the parent-recorded diff, never re-run git under env -i',
     );
-    const recordDiffAt = recordStep.run.search(/^\s*\/usr\/bin\/git -c core\.quotePath=false diff -z/m);
+    const recordDiffAt = recordStep.run.search(
+      /^\s*\/usr\/bin\/git -c core\.quotePath=false diff -z/m,
+    );
     const recordReExecAt = recordStep.run.search(/exec \/usr\/bin\/env -i/);
-    const recordCpAt = recordStep.run.search(/^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m);
-    const recordInstallAt = recordStep.run.search(/^\s*install -d -m 0700 -o root -g root "\$GATE_HOME"$/m);
+    const recordCpAt = recordStep.run.search(
+      /^\s*cp "\$\{RUNNER_TEMP:\?\}\/flake-record-files-all" "\$GATE_HOME\/files-all"$/m,
+    );
+    const recordInstallAt = recordStep.run.search(
+      /^\s*install -d -m 0700 -o root -g root "\$GATE_HOME"$/m,
+    );
     assert.ok(
-      recordDiffAt !== -1 && recordReExecAt !== -1 && recordCpAt !== -1 && recordInstallAt !== -1 &&
-        recordDiffAt < recordReExecAt && recordReExecAt < recordInstallAt && recordInstallAt < recordCpAt,
+      recordDiffAt !== -1 &&
+        recordReExecAt !== -1 &&
+        recordCpAt !== -1 &&
+        recordInstallAt !== -1 &&
+        recordDiffAt < recordReExecAt &&
+        recordReExecAt < recordInstallAt &&
+        recordInstallAt < recordCpAt,
       'the diff must be recorded in the parent arm before the env -i re-exec, and copied into the recreated root-only home',
     );
     // The scrubbed child must never re-run git under env -i: the ordering
@@ -1442,7 +1475,10 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // second git in the child. Strip comments first (the child's own docs
     // name `git diff` when describing what NOT to do) before asserting.
     assert.doesNotMatch(
-      recordStep.run.slice(recordReExecAt).replace(/^\s*#.*$/gm, '').replace(/\\\n/g, ' '),
+      recordStep.run
+        .slice(recordReExecAt)
+        .replace(/^\s*#.*$/gm, '')
+        .replace(/\\\n/g, ' '),
       /\bgit\b[^\n]*\b(diff|log|show|whatchanged)\b/,
       'the scrubbed child must never re-run git under env -i — that is the failure shape of run 32227155960',
     );
@@ -3846,12 +3882,19 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
           timeout: 30_000,
         },
       );
-      assert.equal(res.status, 0, `the gate refusal is fail-open: ${res.stderr}`);
+      assert.equal(
+        res.status,
+        0,
+        `the gate refusal is fail-open: ${res.stderr}`,
+      );
       const outputs = Object.fromEntries(
         readFileSync(out, 'utf8')
           .split('\n')
           .filter((l) => l.includes('='))
-          .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
+          .map((l) => [
+            l.slice(0, l.indexOf('=')),
+            l.slice(l.indexOf('=') + 1),
+          ]),
       );
       assert.equal(outputs.flake_verdict, 'error');
       assert.match(
@@ -4218,7 +4261,11 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       undefined,
       'no verdict may be written on a poisoned startup',
     );
-    assert.equal(counts('a.test.js'), 0, 'no round may run on a poisoned startup');
+    assert.equal(
+      counts('a.test.js'),
+      0,
+      'no round may run on a poisoned startup',
+    );
   });
 
   it('a BASH_FUNC_exec%% import cannot skip the env -i re-exec — bash refuses it at startup', () => {
@@ -4246,7 +4293,11 @@ describe('qwen-triage: flakiness gate — behavioral, under the production wrapp
       undefined,
       'no verdict may be written on a poisoned startup',
     );
-    assert.equal(counts('a.test.js'), 0, 'the body must never run on a poisoned startup');
+    assert.equal(
+      counts('a.test.js'),
+      0,
+      'the body must never run on a poisoned startup',
+    );
   });
 
   it('a same-stem sibling (X.test.tsx next to changed X.test.ts) runs in ONE merged group, never attributed separately', () => {

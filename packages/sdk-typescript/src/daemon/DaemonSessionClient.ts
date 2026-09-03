@@ -38,6 +38,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionConfigOptionResult,
+  ReasoningSelection,
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonSessionSummary,
@@ -53,6 +54,7 @@ import type {
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
+  DaemonSessionSavedWorkflowStatus,
   HeartbeatResult,
   GoalControlRequest,
   GoalStateResponse,
@@ -513,6 +515,15 @@ export class DaemonSessionClient {
     return this.session.branch;
   }
 
+  /**
+   * Present when this client was created with a `modelServiceId`: `false`
+   * means the spawn-time model switch failed and the session is running on
+   * the agent default model.
+   */
+  get modelApplied(): DaemonSession['modelApplied'] {
+    return this.session.modelApplied;
+  }
+
   get lastEventId(): number | undefined {
     return this.lastSeenEventId;
   }
@@ -781,14 +792,13 @@ export class DaemonSessionClient {
 
   setConfigOption(
     configId: 'reasoning_effort',
-    value: string,
+    value: ReasoningSelection,
+    opts?: { persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
-    return this.client.setSessionConfigOption(
-      this.sessionId,
-      configId,
-      value,
-      this.clientId,
-    );
+    return this.client.setSessionConfigOption(this.sessionId, configId, value, {
+      clientId: this.clientId,
+      persist: opts?.persist,
+    });
   }
 
   getRewindSnapshots(): Promise<{
@@ -1001,6 +1011,14 @@ export class DaemonSessionClient {
     return this.client.sessionWorkflowTasks(this.sessionId, this.clientId);
   }
 
+  savedWorkflow(name: string): Promise<DaemonSessionSavedWorkflowStatus> {
+    return this.client.sessionSavedWorkflow(
+      this.sessionId,
+      name,
+      this.clientId,
+    );
+  }
+
   lspStatus(): Promise<DaemonSessionLspStatus> {
     return this.client.sessionLspStatus(this.sessionId, this.clientId);
   }
@@ -1086,7 +1104,7 @@ export class DaemonSessionClient {
 
   async updateMetadata(metadata: {
     displayName?: string;
-    pr?: DaemonSessionPrInfo;
+    pr?: Omit<DaemonSessionPrInfo, 'issues'>;
   }): Promise<SessionMetadataResult> {
     return await this.client.updateSessionMetadata(
       this.sessionId,
