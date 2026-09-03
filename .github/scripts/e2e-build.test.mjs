@@ -372,6 +372,21 @@ describe('e2e build archive', () => {
     assert.doesNotMatch(result.stdout, /stamp/);
   });
 
+  it('treats a directory at the archive path as a download that never landed', () => {
+    // A drifted unpack argument that resolves to the download directory
+    // must read as the same drift, not as a corrupt archive.
+    const leg = mkdtempSync(join(scratch, 'dirpath-'));
+    const dir = join(leg, 'e2e-build');
+    mkdirSync(dir, { recursive: true });
+    const result = run(UNPACK, [dir], { cwd: leg });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stdout,
+      /::error::build artifact not found at .*e2e-build — check the Download build artifact step's path/,
+    );
+    assert.doesNotMatch(result.stdout, /stamp/);
+  });
+
   it("reports a download cut off before its stamp with tar's diagnostic", () => {
     // 20 bytes is a gzip header and little else: no tar can read the
     // first member from it, on either platform. There is no "cut after
@@ -387,10 +402,11 @@ describe('e2e build archive', () => {
       result.stdout,
       /::error::cannot read the e2e-build\.sha stamp from .*downloaded\.tar\.gz — the archive is corrupt, truncated/,
     );
-    assert.match(
-      result.stdout,
-      /gzip|unexpected end|Unexpected EOF|truncated/i,
-    );
+    // No `truncated` alternative: the script's own static text says
+    // "corrupt, truncated", so it would match without any tar output.
+    // GNU tar says "gzip: stdin: unexpected end of file", bsdtar says
+    // "truncated gzip input"; both carry "gzip".
+    assert.match(result.stdout, /gzip|unexpected end|Unexpected EOF/i);
     assert.ok(!existsSync(join(leg, 'dist')), 'nothing is extracted');
     assert.ok(existsSync(copy), 'a refused archive is left for inspection');
   });

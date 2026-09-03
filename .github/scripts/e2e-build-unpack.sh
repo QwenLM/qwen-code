@@ -15,7 +15,7 @@ archive="${1:?usage: e2e-build-unpack.sh <archive-path>}"
 # Three states an operator must tell apart: the download never landed
 # (the step's path and this argument drifted), the file is not a readable
 # gzip tarball (truncated upload), or the archive has no stamp member.
-if [ ! -r "$archive" ]; then
+if [ ! -f "$archive" ]; then
   echo "::error::build artifact not found at $archive — check the Download build artifact step's path"
   exit 1
 fi
