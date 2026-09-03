@@ -290,7 +290,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
 
-`session_resources` advertises `GET /session/:id/resources`, a read-only pair of sanitized Skill and MCP snapshots built from the selected live session's Config. The route is live-session-owner scoped: it never falls back to the primary runtime and does not infer the session's resources from workspace status. The nested `skills` and `mcp` objects reuse the corresponding workspace status payloads, including their initialization, discovery, error, and compatibility fields. Older daemons return `404`; pre-flight this tag before showing a session resource catalog.
+`session_resources` advertises `GET /session/:id/resources`, a read-only pair of sanitized Skill and MCP snapshots built from the selected live session's Config. The route is live-session-owner scoped: it never falls back to the primary runtime and does not infer the session's resources from workspace status. The nested `skills` and `mcp` objects reuse the corresponding workspace status payloads, but omit MCP authentication, pool, workspace-budget, and workspace discovery-error enrichments. Status, discovery, and accounting reported by the selected session's MCP manager remain present. Older daemons return `404`; pre-flight this tag before showing a session resource catalog.
 
 `session_status` advertises `GET /session/:id/status`, the live bridge summary for a single session by id. In addition to `clientCount` and `hasActivePrompt`, live sessions expose `isWaitingForPermission`, `isWaitingForUserQuestion`, `pendingInteractionCount`, and a retained `turnError` after a failed turn. The error clears when the next prompt actually starts. A live session that has settled a running turn in the current bridge also carries `updatedAt`, the same activity watermark documented under the live-state route; because this route returns the bridge summary directly, the value is not merged with the persisted transcript mtime and may be earlier than the one a session list reports. Both the single-session status response and workspace session lists include `turnError` and `pendingInteractions`: render-ready permission actions or `ask_user_question` questions plus the `requestId` and selectable options required by the existing permission vote routes. Each user question has an `answerKey`; vote with `answers`, for example `{ "0": "Polling" }`, keyed by that value. Persisted-only sessions omit runtime state because no runtime exists. Older daemons return `404`; pre-flight this tag before polling a single session's status instead of scanning the full session list.
 
@@ -2127,7 +2127,11 @@ The nested objects use the exact `GET /workspace/skills` and
 `GET /workspace/mcp` status contracts. Their `workspaceCwd` fields identify
 the Config that produced the snapshot and match the top-level value. Existing
 redaction rules still apply: MCP credentials and headers, environment values,
-Skill bodies, and raw settings never appear in the response.
+Skill bodies, and raw settings never appear in the response. MCP
+authentication, pool, workspace-budget, and workspace discovery-error
+enrichments are absent because their backing state is workspace-owned or keyed
+only by server name rather than by session. Status, discovery, and accounting
+from the selected session's own MCP manager remain available.
 
 ### Standalone session lifecycle (`standalone_sessions_v1`)
 

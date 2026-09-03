@@ -6472,7 +6472,8 @@ class QwenAgent implements Agent {
         }
       }
 
-      const sharedTokenStorage = new MCPOAuthTokenStorage();
+      const sharedTokenStorage =
+        scope === 'workspace' ? new MCPOAuthTokenStorage() : undefined;
 
       return {
         v: STATUS_SCHEMA_VERSION,
@@ -6482,15 +6483,20 @@ class QwenAgent implements Agent {
         servers: await Promise.all(
           Object.entries(servers).map(async ([name, server]) => {
             const disabled = config.isMcpServerDisabled(name);
-            let hasOAuthTokens = false;
-            try {
-              const credentials = await sharedTokenStorage.getCredentials(name);
-              hasOAuthTokens = credentials !== null;
-            } catch {
-              // Match CLI: token lookup errors should not break /mcp status.
+            let hasOAuthTokens: boolean | undefined;
+            if (sharedTokenStorage) {
+              hasOAuthTokens = false;
+              try {
+                const credentials =
+                  await sharedTokenStorage.getCredentials(name);
+                hasOAuthTokens = credentials !== null;
+              } catch {
+                // Match CLI: token lookup errors should not break /mcp status.
+              }
             }
             const rawStatus = this.getMcpServerStatus(config, name);
             const requiresAuth =
+              scope === 'workspace' &&
               rawStatus !== MCPServerStatus.CONNECTED &&
               (mcpServerRequiresOAuth.get(name) === true ||
                 (server.oauth?.enabled === true && !hasOAuthTokens));
@@ -6510,7 +6516,7 @@ class QwenAgent implements Agent {
               mcpStatus: this.mcpStatus(rawStatus),
               transport: this.mcpTransport(server),
               disabled,
-              hasOAuthTokens,
+              ...(hasOAuthTokens !== undefined ? { hasOAuthTokens } : {}),
               ...(requiresAuth ? { requiresAuth: true } : {}),
             };
             if (isGatedMcpScope(server.scope)) {
@@ -6527,14 +6533,16 @@ class QwenAgent implements Agent {
                 }
               }
             }
-            if (this.pendingMcpAuthentications.has(name)) {
-              out.authenticationState = 'pending';
-            } else {
-              const authentication = this.mcpAuthenticationResults.get(name);
-              if (authentication) {
-                out.authenticationState = authentication.state;
-                if (authentication.error) {
-                  out.authenticationError = authentication.error;
+            if (scope === 'workspace') {
+              if (this.pendingMcpAuthentications.has(name)) {
+                out.authenticationState = 'pending';
+              } else {
+                const authentication = this.mcpAuthenticationResults.get(name);
+                if (authentication) {
+                  out.authenticationState = authentication.state;
+                  if (authentication.error) {
+                    out.authenticationError = authentication.error;
+                  }
                 }
               }
             }
@@ -7083,6 +7091,7 @@ class QwenAgent implements Agent {
 
   private async buildWorkspaceSkillsStatus(
     config: Config,
+    settings: LoadedSettings = this.settings,
   ): Promise<ServeWorkspaceSkillsStatus> {
     const skillManager = config.getSkillManager();
     if (!skillManager) {
@@ -7110,7 +7119,7 @@ class QwenAgent implements Agent {
           skills: [],
         };
       }
-      const resolved = resolveSkillSettings(this.settings);
+      const resolved = resolveSkillSettings(settings);
       const disablements = new Map(
         Array.from(config.getDisabledSkillNames(), (name) => {
           const normalizedName = name.trim().toLowerCase();
@@ -7175,8 +7184,9 @@ class QwenAgent implements Agent {
     sessionId: string,
   ): Promise<ServeSessionResourcesStatus> {
     const config = this.sessionOrThrow(sessionId).getConfig();
+    const settings = loadSettingsCached(config.getTargetDir());
     const [skills, mcp] = await Promise.all([
-      this.buildWorkspaceSkillsStatus(config),
+      this.buildWorkspaceSkillsStatus(config, settings),
       this.buildWorkspaceMcpStatus(config, 'session'),
     ]);
     return {

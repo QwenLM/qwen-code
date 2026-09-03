@@ -47,11 +47,12 @@ session's live Config:
 }
 ```
 
-The nested objects deliberately reuse the existing workspace status contracts.
-This preserves their loading, error, discovery, disabled, authentication, and
-budget fields without creating a second projection that can drift. Their
-`workspaceCwd` values identify the Config that produced each snapshot and must
-match the top-level value.
+The nested objects deliberately reuse the existing workspace status contracts
+without creating a second projection that can drift. Their `workspaceCwd`
+values identify the Config that produced each snapshot and must match the
+top-level value. Session snapshots omit workspace-owned MCP authentication,
+pool, budget, and discovery-error fields because those sources are not keyed by
+the selected session.
 
 The route is observational. It does not initialize MCP discovery, attach a
 client, reload settings, or create a runtime. Unknown, persisted-only, draining,
@@ -72,8 +73,10 @@ snapshot may aggregate data from several session Configs, while the workspace
 Skill snapshot is rooted at the runtime's base Config.
 
 The session projection therefore uses the selected Config's MCP manager for
-accounting, omits workspace pool entry summaries and workspace discovery
-errors, and disables the workspace-only fallback that scans other sessions for
+status, discovery, and accounting; resolves Skill disablement details from the
+selected Config's cached settings; omits workspace pool entry summaries,
+workspace budget accounting, workspace discovery errors, and name-keyed OAuth
+state; and disables the workspace-only fallback that scans other sessions for
 resource and prompt counts. Two sessions with the same server name must not
 affect each other's result.
 

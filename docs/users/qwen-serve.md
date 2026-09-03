@@ -200,7 +200,9 @@ otherwise the route returns `enabled: false` with no servers.
 `GET /session/:id/resources` returns the sanitized Skill and MCP snapshots
 from that live session's own Config. Use it when a session may run from a
 worktree or another effective directory whose resources differ from the base
-workspace. Check the `session_resources` capability before calling it.
+workspace. Workspace-owned MCP authentication, pool, budget, and discovery
+error details are omitted from this session view. Check the
+`session_resources` capability before calling it.
 
 `GET /daemon/status` is the consolidated troubleshooting snapshot. The default
 `detail=summary` reads only in-memory daemon state (sessions, permissions,

@@ -380,6 +380,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
+      'session_resources',
       'session_status',
       'session_close',
       'session_archive',
