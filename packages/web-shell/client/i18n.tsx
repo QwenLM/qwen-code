@@ -69,8 +69,9 @@ const EN: Messages = {
   'branchPicker.hint.behindDirty': (v) =>
     `↓${v?.count ?? 0} · uncommitted changes`,
   'branchPicker.hint.setsUpstream': 'Sets upstream on push',
+  'branchPicker.hint.createsPushBranch': (v) => `Creates ${v?.target ?? ''}`,
   'branchPicker.hint.aheadBehind': (v) =>
-    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · update first`,
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · diverged`,
   'branchPicker.hint.nothingToPush': 'Nothing to push',
   'branchPicker.hint.noChanges': 'No changes',
   'branchPicker.hint.changes': (v) =>
@@ -3567,8 +3568,9 @@ const ZH: Messages = {
   'branchPicker.hint.upstreamGone': '上游分支已不存在',
   'branchPicker.hint.behindDirty': (v) => `↓${v?.count ?? 0} · 有未提交更改`,
   'branchPicker.hint.setsUpstream': '推送时设置上游',
+  'branchPicker.hint.createsPushBranch': (v) => `将创建 ${v?.target ?? ''}`,
   'branchPicker.hint.aheadBehind': (v) =>
-    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · 请先更新`,
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · 已分叉`,
   'branchPicker.hint.nothingToPush': '无待推送',
   'branchPicker.hint.noChanges': '无更改',
   'branchPicker.hint.changes': (v) => `${v?.count ?? 0} 处更改`,
