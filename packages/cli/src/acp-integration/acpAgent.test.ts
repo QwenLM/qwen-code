@@ -4290,7 +4290,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setWorkflowsEnabled: vi.fn(),
       getBareMode: vi.fn().mockReturnValue(false),
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
-      getFolderTrust: vi.fn().mockReturnValue(true),
       isTrustedFolder: vi.fn().mockReturnValue(true),
     };
   }
