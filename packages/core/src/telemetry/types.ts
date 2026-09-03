@@ -489,6 +489,8 @@ export enum LoopType {
   INVALID_TOOL_PARAMS_STAGNATION = 'invalid_tool_params_stagnation',
   /** The same tool execution failure continued after a corrective reminder. */
   REPEATED_TOOL_EXECUTION_FAILURE = 'repeated_tool_execution_failure',
+  /** Consecutive tool results returned the same error signature (issue #10887). */
+  REPEATED_TOOL_ERROR = 'repeated_tool_error',
 }
 
 export class LoopDetectedEvent implements BaseTelemetryEvent {

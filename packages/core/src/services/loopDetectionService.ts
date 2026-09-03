@@ -39,6 +39,20 @@ export { getToolCallRepeatKey };
 // so the client breaks the loop before the server rejects the whole
 // conversation with a 400 (issue #5019).
 const TOOL_CALL_LOOP_THRESHOLD = 5;
+// Consecutive tool results carrying the same error signature tolerated
+// before the always-on error-repetition guard halts the turn (issue
+// #10887). Dead-end sessions kept re-running failing operations with varied
+// arguments — every (tool, args) pair unique, so no argument-based
+// repetition signal ever accumulated — while the same error kept returning
+// (e.g. exit 128 / permission denied on every call). The streak is keyed by
+// a fingerprint of the error payload and counts across arbitrary calls:
+// successful results in between neither advance nor reset it (interleaved
+// reads are exactly what let the reported loops slip past the stagnation
+// detectors), and a different error signature restarts it. Deliberately low:
+// a byte-identical error repeating across calls is never a productive
+// signal — a corrected approach that still fails identically is exactly the
+// dead end to surface to the user instead of burning tokens on.
+const REPEATED_TOOL_ERROR_THRESHOLD = 3;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
 // Cap for the debug-log excerpt of a fired chanting region (~one period,
@@ -377,6 +391,14 @@ export class LoopDetectionService {
     { fingerprint: string; count: number }
   >();
 
+  // Consecutive identical tool-error signatures (issue #10887): fingerprint
+  // of the most recent error payload and how many consecutive error results
+  // carried it. Successful results neither advance nor reset the streak (an
+  // interleaved read must not mask a dead end); a different error signature
+  // restarts it at one.
+  private toolErrorStreakSignature: string | null = null;
+  private toolErrorStreakCount = 0;
+
   // callId → request pairing so results can be matched to their calls when
   // the runtime only has the response (populated on ToolCallRequest events,
   // consumed by recordToolResultByCallId).
@@ -440,6 +462,12 @@ export class LoopDetectionService {
   ): boolean {
     if (this.loopDetected) return true;
     if (this.disabledForSession) return false;
+    // Repeated tool-error detection (issue #10887): applies to every tool,
+    // ahead of the stateful-read carve-out — the dead-end signal is the
+    // repeated error payload, not which call produced it.
+    if (this.checkRepeatedToolError(responseParts)) {
+      return true;
+    }
     if (!this.isStatefulReadTool(toolCall.name)) return false;
 
     const resultText = LoopDetectionService.extractResultText(responseParts);
@@ -523,14 +551,20 @@ export class LoopDetectionService {
    * Variant of recordToolResult for runtimes that only have the response:
    * the request is resolved through the callId pairing populated on
    * ToolCallRequest events. Unknown callIds (e.g. client-initiated calls
-   * that never streamed through this service) are ignored.
+   * that never streamed through this service) skip the request-dependent
+   * guards but still feed the error-repetition guard, which works from the
+   * result alone (issue #10887).
    */
   recordToolResultByCallId(
     callId: string,
     responseParts: readonly Part[],
   ): boolean {
     const request = this.requestByCallId.get(callId);
-    if (!request) return false;
+    if (!request) {
+      if (this.loopDetected) return true;
+      if (this.disabledForSession) return false;
+      return this.checkRepeatedToolError(responseParts);
+    }
     this.requestByCallId.delete(callId);
     return this.recordToolResult(
       { name: request.name, args: request.args },
@@ -565,6 +599,70 @@ export class LoopDetectionService {
       );
     }
     return chunks.length > 0 ? chunks.join('\n') : null;
+  }
+
+  /**
+   * Extracts the error payload of a failed tool result, or null when the
+   * parts carry none. Failed calls surface their failure as a
+   * `functionResponse.response.error` string across every runtime (scheduler
+   * error responses, cancellations, timeouts). Oversized error messages
+   * arrive as persistence stubs whose envelope embeds a per-call unique
+   * path, so each value is reduced to its stable payload first
+   * (stripPersistenceEnvelope) — identical underlying errors fingerprint
+   * identically no matter where they were persisted.
+   */
+  private static extractToolErrorText(
+    responseParts: readonly Part[],
+  ): string | null {
+    const errors: string[] = [];
+    for (const part of responseParts) {
+      const response = part.functionResponse?.response;
+      if (!response) continue;
+      const error = response['error'];
+      if (typeof error === 'string' && error.trim().length > 0) {
+        errors.push(stripPersistenceEnvelope(error));
+      }
+    }
+    return errors.length > 0 ? errors.join('\n') : null;
+  }
+
+  /**
+   * Repeated tool-error detection (issue #10887): halts the turn when the
+   * same error signature returns on REPEATED_TOOL_ERROR_THRESHOLD consecutive
+   * error results. Result-aware and tool-agnostic: dead-end loops vary their
+   * (tool, args) on every retry, so argument-based repetition never
+   * accumulates — the repeated error payload is the evidence. Always-on like
+   * the consecutive-identical-call guard (a byte-identical error repeating
+   * across calls is never productive, and the gated heuristics ship disabled
+   * by default in the CLI).
+   *
+   * @returns true when the streak trips the threshold (loopDetected is set);
+   * callers halt the turn exactly as for an event-detected loop.
+   */
+  private checkRepeatedToolError(responseParts: readonly Part[]): boolean {
+    const errorText = LoopDetectionService.extractToolErrorText(responseParts);
+    if (errorText === null) {
+      // A successful result is neither evidence of the dead end nor a reset:
+      // interleaved reads between failing calls must not mask the streak.
+      return false;
+    }
+    const signature = createHash('sha256').update(errorText).digest('hex');
+    if (this.toolErrorStreakSignature === signature) {
+      this.toolErrorStreakCount++;
+    } else {
+      this.toolErrorStreakSignature = signature;
+      this.toolErrorStreakCount = 1;
+    }
+    if (this.toolErrorStreakCount < REPEATED_TOOL_ERROR_THRESHOLD) {
+      return false;
+    }
+    this.lastLoopType = LoopType.REPEATED_TOOL_ERROR;
+    logLoopDetected(
+      this.config,
+      new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, this.promptId),
+    );
+    this.loopDetected = true;
+    return true;
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
@@ -1677,6 +1775,8 @@ export class LoopDetectionService {
     this.capMaxKeyRepeat = 0;
     this.statefulRepeatState.clear();
     this.statefulConsecutiveResults.clear();
+    this.toolErrorStreakSignature = null;
+    this.toolErrorStreakCount = 0;
     this.requestByCallId.clear();
   }
 

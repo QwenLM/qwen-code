@@ -194,6 +194,8 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
     'the model repeatedly sent invalid tool parameters without correcting them',
   [LoopType.REPEATED_TOOL_EXECUTION_FAILURE]:
     'the same tool execution failure continued after a corrective reminder',
+  [LoopType.REPEATED_TOOL_ERROR]:
+    'the model kept receiving the same tool error without making progress',
 };
 
 function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
@@ -208,7 +210,8 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
     loopType === LoopType.SHELL_COMMAND_STAGNATION ||
     loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE ||
     loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION ||
-    loopType === LoopType.REPEATED_TOOL_EXECUTION_FAILURE;
+    loopType === LoopType.REPEATED_TOOL_EXECUTION_FAILURE ||
+    loopType === LoopType.REPEATED_TOOL_ERROR;
   const hint =
     loopType === LoopType.TURN_TOOL_CALL_CAP
       ? ' A per-turn tool-call cap was reached. The default is adaptive (allows up to 1000 diverse calls, halting only on repeated calls); an explicitly set `model.maxToolCallsPerTurn` is a hard cap. If the model was repeating the same call, investigate the repetition; otherwise unset the value to use the adaptive default, or raise it (set 0 to disable).'

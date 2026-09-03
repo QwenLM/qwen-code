@@ -3293,4 +3293,142 @@ ${boardState}
       expect(fired).toBe(false);
     });
   });
+
+  describe('Repeated tool-error detection (issue #10887)', () => {
+    // Dead-end sessions kept burning millions of tokens re-running failing
+    // operations: every (tool, args) pair unique (the model varies the
+    // retry), interleaved successful reads between failures, and the same
+    // error returning on every call. No argument-based repetition signal
+    // ever accumulates, so only the repeated error payload is evidence.
+    // Mirrored from loopDetectionService.ts.
+    const REPEATED_TOOL_ERROR_THRESHOLD = 3;
+
+    const errorResult = (errorMessage: string, callId = 'call-err'): Part[] => [
+      {
+        functionResponse: {
+          id: callId,
+          name: 'run_shell_command',
+          response: { error: errorMessage },
+        },
+      },
+    ];
+
+    const successResult = (output: string, callId = 'call-ok'): Part[] => [
+      {
+        functionResponse: {
+          id: callId,
+          name: 'read_file',
+          response: { output },
+        },
+      },
+    ];
+
+    it('halts when the same error keeps returning across distinct calls with interleaved successes', () => {
+      const gitError =
+        'fatal: not a git repository (or any of the parent directories): .git';
+      let fired = false;
+      for (let i = 0; i < 10 && !fired; i++) {
+        // A successful read between failing calls must not mask the streak
+        // (interleaved reads are what let the reported loops slip past the
+        // stagnation detectors).
+        expect(
+          service.recordToolResult(
+            { name: 'read_file', args: { file_path: `f${i}.ts` } },
+            successResult(`content ${i}`, `ok-${i}`),
+          ),
+        ).toBe(false);
+        fired = service.recordToolResult(
+          {
+            name: 'run_shell_command',
+            args: { command: `git remote -v attempt-${i}` },
+          },
+          errorResult(gitError, `err-${i}`),
+        );
+        if (i < REPEATED_TOOL_ERROR_THRESHOLD - 1) {
+          expect(fired).toBe(false);
+        }
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('fires from recordToolResultByCallId for calls this service never streamed', () => {
+      // client.ts records every functionResponse by callId, including calls
+      // the service never paired at request time.
+      const permDenied = 'bash: /usr/bin/foo: Permission denied';
+      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD - 1; i++) {
+        expect(
+          service.recordToolResultByCallId(
+            `unknown-${i}`,
+            errorResult(permDenied, `unknown-${i}`),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.recordToolResultByCallId(
+          `unknown-${REPEATED_TOOL_ERROR_THRESHOLD}`,
+          errorResult(permDenied, `unknown-${REPEATED_TOOL_ERROR_THRESHOLD}`),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('does not halt below the threshold and restarts the streak on a different error', () => {
+      const errA = 'fatal: not a git repository';
+      const errB = 'npm ERR! code E404';
+      const call = (command: string) => ({
+        name: 'run_shell_command',
+        args: { command },
+      });
+      expect(service.recordToolResult(call('a1'), errorResult(errA))).toBe(
+        false,
+      );
+      expect(service.recordToolResult(call('a2'), errorResult(errA))).toBe(
+        false,
+      );
+      // A different error signature restarts the streak...
+      expect(service.recordToolResult(call('b1'), errorResult(errB))).toBe(
+        false,
+      );
+      expect(service.recordToolResult(call('a3'), errorResult(errA))).toBe(
+        false,
+      );
+      expect(service.recordToolResult(call('a4'), errorResult(errA))).toBe(
+        false,
+      );
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('clears the error streak on reset()', () => {
+      const err = 'fatal: not a git repository';
+      const call = (command: string) => ({
+        name: 'run_shell_command',
+        args: { command },
+      });
+      service.recordToolResult(call('a1'), errorResult(err));
+      service.recordToolResult(call('a2'), errorResult(err));
+      service.reset('fresh-prompt');
+      expect(service.recordToolResult(call('a3'), errorResult(err))).toBe(
+        false,
+      );
+      expect(service.recordToolResult(call('a4'), errorResult(err))).toBe(
+        false,
+      );
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('honors an explicit in-session disable', () => {
+      service.disableForSession();
+      const err = 'fatal: not a git repository';
+      for (let i = 0; i <= REPEATED_TOOL_ERROR_THRESHOLD; i++) {
+        expect(
+          service.recordToolResult(
+            { name: 'run_shell_command', args: { command: `c${i}` } },
+            errorResult(err),
+          ),
+        ).toBe(false);
+      }
+      expect(service.getLastLoopType()).toBeNull();
+    });
+  });
 });
