@@ -4265,7 +4265,7 @@ describe('SessionTranscriptReader', () => {
       expect(head.turns[1]).not.toHaveProperty('promptId');
     });
 
-    it('keeps snapshots stable after append and locates a turn inclusively', async () => {
+    it('keeps snapshots stable after append and a cold-cache rebuild', async () => {
       const filePath = await writeRecords([
         record('u1', null, 'first'),
         record('a1', 'u1', 'answer one'),
@@ -4278,6 +4278,7 @@ describe('SessionTranscriptReader', () => {
         filePath,
         `${JSON.stringify(record('u3', 'a2', 'third'))}\n`,
       );
+      resetSessionTranscriptIndexCacheForTest();
 
       const frozen = await reader.readTurnIndexPage(sessionId, {
         snapshot: first.snapshot,
@@ -4476,6 +4477,16 @@ describe('SessionTranscriptReader', () => {
       const tampered = `${page.snapshot[0] === 'A' ? 'B' : 'A'}${page.snapshot.slice(1)}`;
       await expect(
         reader.readTurnIndexPage(sessionId, { snapshot: tampered }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      const decoded = JSON.parse(
+        Buffer.from(page.snapshot, 'base64url').toString('utf8'),
+      ) as Record<string, unknown>;
+      decoded['snapshotSize'] = (decoded['snapshotSize'] as number) + 1;
+      const forged = Buffer.from(JSON.stringify(decoded), 'utf8').toString(
+        'base64url',
+      );
+      await expect(
+        reader.readTurnIndexPage(sessionId, { snapshot: forged }),
       ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
       await expect(
         reader.readTurnIndexPage(sessionId, { start: 0 }),
