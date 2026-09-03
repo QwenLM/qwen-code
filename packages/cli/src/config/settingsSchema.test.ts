@@ -203,6 +203,17 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should keep Agent View disabled by default', () => {
+      expect(
+        getSettingsSchema().experimental.properties.agentView,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties

@@ -2518,6 +2518,28 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': 'Open the memory manager.',
+  'Detach the current Agent View session.':
+    'Detach the current Agent View session.',
+  'Cannot detach Agent View while a question is waiting.':
+    'Cannot detach Agent View while a question is waiting.',
+  'Cannot detach Agent View while a tool confirmation is pending.':
+    'Cannot detach Agent View while a tool confirmation is pending.',
+  'Cannot detach Agent View while a command confirmation is pending.':
+    'Cannot detach Agent View while a command confirmation is pending.',
+  'Cannot detach Agent View while a foreground shell is active.':
+    'Cannot detach Agent View while a foreground shell is active.',
+  'Cannot detach Agent View while the background tasks dialog is open.':
+    'Cannot detach Agent View while the background tasks dialog is open.',
+  'Cannot detach Agent View while prompts are queued.':
+    'Cannot detach Agent View while prompts are queued.',
+  'Cannot detach Agent View while a turn is running.':
+    'Cannot detach Agent View while a turn is running.',
+  'Cannot detach Agent View before configuration is loaded.':
+    'Cannot detach Agent View before configuration is loaded.',
+  'Cannot detach Agent View before the session is saved.':
+    'Cannot detach Agent View before the session is saved.',
+  'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.':
+    'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.',
   'Show current process memory diagnostics':
     'Show current process memory diagnostics',
   'Record a CPU profile for Chrome DevTools analysis':

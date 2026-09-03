@@ -25,6 +25,10 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import {
+  isManagedAgentViewResumeBlocked,
+  MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+} from '../../startup/agent-view-resume-guard.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -155,6 +159,18 @@ export function useResumeCommand(
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
+        if (await isManagedAgentViewResumeBlocked(sessionId)) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+            } as HistoryItemWithoutId,
+            Date.now(),
+          );
+          config.getLlmClient()?.commitTelemetrySwap?.();
+          return;
+        }
+
         const cwd = config.getTargetDir();
         const sessionService = new SessionService(cwd);
         const sessionData = await sessionService.loadSession(sessionId);

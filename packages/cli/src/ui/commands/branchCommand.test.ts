@@ -4,9 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { branchCommand } from './branchCommand.js';
 import type { CommandContext } from './types.js';
+import type { AgentViewWorkerSidebandEnv } from '../../agent-view/worker-sideband.js';
+
+const mockReadAgentViewWorkerSidebandEnv = vi.hoisted(() =>
+  vi.fn<() => AgentViewWorkerSidebandEnv | undefined>(() => undefined),
+);
+
+vi.mock('../../agent-view/worker-sideband.js', () => ({
+  readAgentViewWorkerSidebandEnv: mockReadAgentViewWorkerSidebandEnv,
+}));
 
 function makeCtx(
   overrides: {
@@ -34,6 +43,10 @@ function makeCtx(
 }
 
 describe('branchCommand', () => {
+  beforeEach(() => {
+    mockReadAgentViewWorkerSidebandEnv.mockReset().mockReturnValue(undefined);
+  });
+
   it('rejects when config is unavailable', async () => {
     const result = await branchCommand.action!(makeCtx({ noConfig: true }), '');
     expect(result).toMatchObject({ type: 'message', messageType: 'error' });
@@ -54,6 +67,24 @@ describe('branchCommand', () => {
     const result = await branchCommand.action!(makeCtx({ isIdle: false }), '');
     expect(result).toMatchObject({ type: 'message', messageType: 'error' });
     expect((result as { content: string }).content).toMatch(/in progress/);
+  });
+
+  it('rejects inside an attached background agent', async () => {
+    mockReadAgentViewWorkerSidebandEnv.mockReturnValue({
+      sessionId: 'session-1',
+      sidebandEndpoint: '/tmp/sideband.sock',
+      token: 'token-1',
+      activeCwd: '/tmp/project',
+    });
+
+    const result = await branchCommand.action!(makeCtx(), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Branching is disabled inside an attached background agent. Detach to `qwen agents` and branch from a foreground session.',
+    });
   });
 
   it('returns dialog action with no name when args are empty', async () => {

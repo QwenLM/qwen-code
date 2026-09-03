@@ -149,6 +149,13 @@ export const TOP_LEVEL_GLOBAL_OPTIONS = {
     description:
       'Enable chat recording to disk. If false, chat history is not saved and --continue/--resume will not work.',
   },
+  background: {
+    alias: 'bg',
+    type: 'boolean' as const,
+    nargs: 0,
+    global: false,
+    description: 'Start a new Agent View background session',
+  },
 } as const satisfies Record<string, Options>;
 
 export const TOP_LEVEL_DEPRECATED_OPTIONS = {

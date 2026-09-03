@@ -383,8 +383,12 @@ describe('Agent View PTY host process server', () => {
           'Unauthorized PTY host request.',
         );
       } finally {
-        exitCallback?.({ exitCode: 0 });
-        await runPromise;
+        // A non-zero worker exit must surface verbatim to the CLI entrypoint.
+        exitCallback?.({ exitCode: 3 });
+        await expect(runPromise).resolves.toEqual({
+          kind: 'exited',
+          exitCode: 3,
+        });
       }
     } finally {
       if (previousToken === undefined) {

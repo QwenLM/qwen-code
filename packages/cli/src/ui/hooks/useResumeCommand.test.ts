@@ -6,7 +6,7 @@
 // @vitest-environment jsdom
 
 import { act, renderHook } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
   useResumeCommand,
@@ -131,6 +131,15 @@ vi.mock('../utils/resumeHistoryUtils.js', async (importOriginal) => {
   };
 });
 
+const mockIsManagedAgentViewResumeBlocked = vi.hoisted(() =>
+  vi.fn(async () => false),
+);
+
+vi.mock('../../startup/agent-view-resume-guard.js', () => ({
+  isManagedAgentViewResumeBlocked: mockIsManagedAgentViewResumeBlocked,
+  MANAGED_AGENT_VIEW_RESUME_MESSAGE: 'managed session message',
+}));
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
@@ -158,6 +167,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 describe('useResumeCommand', () => {
+  beforeEach(() => {
+    resumeMocks.reset();
+    mockIsManagedAgentViewResumeBlocked.mockReset();
+    mockIsManagedAgentViewResumeBlocked.mockResolvedValue(false);
+  });
+
   it('should initialize with dialog closed', () => {
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -803,6 +818,59 @@ describe('useResumeCommand', () => {
     expect(blockedItem.type).toBe('error');
     expect(blockedItem.text).toContain(BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE);
     expect(blockedItem.text).toContain('[bg_ab12cd34]');
+  });
+
+  it('blocks picker resume for a managed Agent View session', async () => {
+    const calls: string[] = [];
+    mockIsManagedAgentViewResumeBlocked.mockImplementationOnce(async () => {
+      calls.push('guard');
+      return true;
+    });
+    const llmClient = {
+      beginTelemetrySwap: vi.fn(() => {
+        calls.push('begin');
+        return true;
+      }),
+      commitTelemetrySwap: vi.fn(() => {
+        calls.push('commit');
+      }),
+    };
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+    const config = {
+      getBackgroundTaskRegistry: () => ({ hasRunningTasks: () => false }),
+      getBackgroundShellRegistry: () => ({ hasRunningEntries: () => false }),
+      getMonitorRegistry: () => ({ getRunning: () => [] }),
+      getWorkflowRunRegistry: () => ({ hasRunningEntries: () => false }),
+      getLlmClient: () => llmClient,
+      getSessionId: () => 'current-session',
+      getTargetDir: () => '/tmp',
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('managed-session');
+    });
+
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      { type: 'error', text: 'managed session message' },
+      expect.any(Number),
+    );
+    expect(calls).toEqual(['begin', 'guard', 'commit']);
+    expect(llmClient.beginTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(llmClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
   });
 
   it('blocks resume when the current session still has a running monitor', async () => {

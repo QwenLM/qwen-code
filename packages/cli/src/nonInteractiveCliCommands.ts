@@ -235,6 +235,13 @@ function handleCommandResult(
         originalType: 'confirm_action',
       };
 
+    case 'agent_view_detach':
+      return {
+        type: 'unsupported',
+        reason: 'Agent View detach is only supported in interactive mode.',
+        originalType: 'agent_view_detach',
+      };
+
     default: {
       // Exhaustiveness check
       const _exhaustive: never = result;

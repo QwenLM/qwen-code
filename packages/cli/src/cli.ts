@@ -39,6 +39,7 @@ initCpuProfiler();
 type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
 
 export const TOP_LEVEL_COMMANDS = [
+  ['agents <command>', 'Manage Agent View background agents'],
   ['auth', 'Configure authentication (removed)'],
   ['channel <command>', 'Manage messaging channels (Telegram, Discord, etc.)'],
   ['extensions <command>', 'Manage Qwen Code extensions.'],

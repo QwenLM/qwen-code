@@ -3609,6 +3609,11 @@
       "description": "Settings to enable experimental features.",
       "type": "object",
       "properties": {
+        "agentView": {
+          "description": "Enable Agent View background sessions.",
+          "type": "boolean",
+          "default": false
+        },
         "liveVoice": {
           "description": "Experimental realtime voice conversations through Qwen Live Host on macOS WebShell.",
           "type": "object",

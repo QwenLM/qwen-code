@@ -22,6 +22,11 @@ import {
   scrubInheritedLoaderEnv,
   setLoaderKeyRejectionReporter,
 } from './shared-env-keys.js';
+import {
+  PTY_HOST_AUTH_TOKEN_ENV,
+  PTY_HOST_ID_ENV,
+} from '../agent-view/pty-host-env.js';
+import { AGENT_VIEW_WORKER_ENV_KEYS } from '../agent-view/worker-sideband.js';
 
 describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   // Security guard: a project `.env` must never be able to disable TLS
@@ -69,6 +74,17 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('excludes entrypoint and trust-anchor keys', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CLI_ENTRY');
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('NODE_EXTRA_CA_CERTS');
+  });
+
+  it('keeps Agent View process identity out of project env files', () => {
+    for (const key of [
+      ...AGENT_VIEW_WORKER_ENV_KEYS,
+      'QWEN_AGENT_VIEW_SUPERVISOR',
+      PTY_HOST_AUTH_TOKEN_ENV,
+      PTY_HOST_ID_ENV,
+    ]) {
+      expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
+    }
   });
 
   // The compile-cache keys stay settable from project files: a

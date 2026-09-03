@@ -102,6 +102,7 @@ export interface SetupStartupWorktreeOptions {
    * symlinks as `enter_worktree` and agent isolation worktrees do.
    */
   symlinkDirectories?: readonly string[];
+  requireExisting?: boolean;
 }
 
 export async function setupStartupWorktree(
@@ -272,6 +273,13 @@ export async function setupStartupWorktree(
         isPullRequest,
         wasReattached: true,
       },
+    };
+  }
+
+  if (options?.requireExisting) {
+    return {
+      ok: false,
+      error: `--worktree: ${expectedWorktreePath} is not an existing registered worktree. Resume and continue can only re-attach an existing worktree.`,
     };
   }
 

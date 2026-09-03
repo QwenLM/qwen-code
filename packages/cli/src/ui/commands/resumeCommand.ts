@@ -8,6 +8,12 @@ import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { isValidSessionId } from '../../config/config.js';
 import { t } from '../../i18n/index.js';
+import {
+  AGENT_VIEW_WORKER_RESUME_MESSAGE,
+  isAgentViewWorkerResumeCommandBlocked,
+  isManagedAgentViewResumeBlocked,
+  MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+} from '../../startup/agent-view-resume-guard.js';
 
 export const resumeCommand: SlashCommand = {
   name: 'resume',
@@ -18,6 +24,14 @@ export const resumeCommand: SlashCommand = {
     return t('Resume a previous session');
   },
   action: async (context, args): Promise<SlashCommandActionReturn> => {
+    if (isAgentViewWorkerResumeCommandBlocked()) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t(AGENT_VIEW_WORKER_RESUME_MESSAGE),
+      };
+    }
+
     const arg = args.trim();
 
     // No argument — show picker
@@ -39,6 +53,13 @@ export const resumeCommand: SlashCommand = {
       const sessionService = config.getSessionService();
       const exists = await sessionService.sessionExists(arg);
       if (exists) {
+        if (await isManagedAgentViewResumeBlocked(arg)) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(MANAGED_AGENT_VIEW_RESUME_MESSAGE),
+          };
+        }
         return { type: 'dialog', dialog: 'resume', sessionId: arg };
       }
       return {

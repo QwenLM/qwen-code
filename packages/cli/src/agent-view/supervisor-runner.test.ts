@@ -29,6 +29,17 @@ import {
   writeAgentViewSessionState,
 } from './supervisor-store.js';
 
+const mockAttachAgentViewSupervisorTerminal = vi.hoisted(() => vi.fn());
+
+vi.mock('./supervisor-client.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./supervisor-client.js')>();
+  return {
+    ...actual,
+    attachAgentViewSupervisorTerminal: mockAttachAgentViewSupervisorTerminal,
+  };
+});
+
 const cleanupDirs: string[] = [];
 const cleanupServers: AgentViewSupervisorServerHandle[] = [];
 
@@ -91,6 +102,31 @@ describe('Agent View supervisor runner', () => {
     expect(handle.socketPath).toBe(socketPath);
     expect(handle.startedProcess).toBeUndefined();
     await expect(handle.status()).resolves.toEqual({ state: 'ready' });
+  });
+
+  it('binds attach to the blocking terminal bridge', async () => {
+    const { globalDir, socketPath } = await makeSupervisorPath();
+    const server = createFakeSupervisor(socketPath, {
+      status: () => ({ state: 'ready' }),
+      list: () => [],
+      shutdown: () => ({ shuttingDown: true }),
+    });
+    await server.listen();
+    cleanupServers.push(server);
+    mockAttachAgentViewSupervisorTerminal.mockClear();
+
+    const handle = await ensureAgentViewSupervisor({
+      globalDir,
+      spawnProcess: vi.fn(() => createFakeProcess()),
+    });
+
+    await handle.attach('session-9');
+
+    expect(mockAttachAgentViewSupervisorTerminal).toHaveBeenCalledOnce();
+    const [callSocketPath, callSessionId] =
+      mockAttachAgentViewSupervisorTerminal.mock.calls[0];
+    expect(callSocketPath).toBe(socketPath);
+    expect(callSessionId).toBe('session-9');
   });
 
   it('spawns through the injected process factory and waits for readiness', async () => {
@@ -183,6 +219,7 @@ describe('Agent View supervisor runner', () => {
       logs: vi.fn(() => ({ logs: ['line-1'] })),
       stop: vi.fn(() => ({ stopped: true })),
       kill: vi.fn(() => ({ killed: true })),
+      release: vi.fn(() => ({ released: true })),
       remove: vi.fn(() => ({ removed: true })),
       respawn: vi.fn(() => ({ respawned: true })),
       pin: vi.fn(() => ({ sessionId: 'session-3', pinned: true })),
@@ -281,6 +318,11 @@ describe('Agent View supervisor runner', () => {
     });
     expect(handler.kill).toHaveBeenCalledWith({ sessionId: 'session-3' });
 
+    await expect(handle.release('session-3')).resolves.toEqual({
+      released: true,
+    });
+    expect(handler.release).toHaveBeenCalledWith({ sessionId: 'session-3' });
+
     await expect(handle.remove('session-3')).resolves.toEqual({
       removed: true,
     });
@@ -350,6 +392,7 @@ describe('Agent View supervisor runner', () => {
     ).resolves.toEqual({
       shuttingDown: true,
       workersStopped: 0,
+      workersFailed: [],
     });
     await supervisorPromise;
 

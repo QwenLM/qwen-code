@@ -1248,7 +1248,10 @@ export const parseArgsCommand: CommandModule = {
     ) {
       commandPrefix++;
     }
-    const unbound = positionals.slice(commandPrefix);
+    const separatorTail = Array.isArray(argv['--'])
+      ? (argv['--'] as unknown[]).map(String)
+      : [];
+    const unbound = [...positionals.slice(commandPrefix), ...separatorTail];
     if (unbound.length > 0) {
       throw new Error(
         `parse-args: unexpected extra argument(s) ${JSON.stringify(unbound)} — a raw string that begins with a flag must be passed via --stdin, not after --`,

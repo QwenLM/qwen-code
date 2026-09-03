@@ -49,6 +49,11 @@ const mockStartNonInteractiveOpenAILogHousekeeping = vi.hoisted(() => vi.fn());
 const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
   vi.fn(async () => {}),
 );
+const mockSetupStartupWorktree = vi.hoisted(() => vi.fn());
+const mockRouteManagedAgentViewResume = vi.hoisted(() => vi.fn());
+const mockIsManagedAgentViewContinueBlocked = vi.hoisted(() => vi.fn());
+const mockIsManagedAgentViewResumeBlocked = vi.hoisted(() => vi.fn());
+const mockReleaseExitedManagedSessionForContinue = vi.hoisted(() => vi.fn());
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
 const mockRegisterSession = vi.hoisted(
@@ -215,6 +220,45 @@ vi.mock('./startup/startup-prefetch.js', () => ({
     mockStartPostRenderPrefetches(...args),
 }));
 
+vi.mock('./startup/worktreeStartup.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./startup/worktreeStartup.js')>();
+  return {
+    ...actual,
+    setupStartupWorktree: (...args: unknown[]) => {
+      if (mockSetupStartupWorktree.getMockImplementation()) {
+        return mockSetupStartupWorktree(...args);
+      }
+      return actual.setupStartupWorktree(
+        ...(args as Parameters<typeof actual.setupStartupWorktree>),
+      );
+    },
+  };
+});
+
+vi.mock('./startup/agent-view-resume.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./startup/agent-view-resume.js')>();
+  return {
+    ...actual,
+    routeManagedAgentViewResume: mockRouteManagedAgentViewResume,
+  };
+});
+
+vi.mock('./startup/agent-view-resume-guard.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('./startup/agent-view-resume-guard.js')
+    >();
+  return {
+    ...actual,
+    isManagedAgentViewContinueBlocked: mockIsManagedAgentViewContinueBlocked,
+    isManagedAgentViewResumeBlocked: mockIsManagedAgentViewResumeBlocked,
+    releaseExitedManagedSessionForContinue:
+      mockReleaseExitedManagedSessionForContinue,
+  };
+});
+
 vi.mock('./ui/update-relaunch.js', () => ({
   updateBeforeRelaunch: (...args: unknown[]) =>
     mockUpdateBeforeRelaunch(...args),
@@ -330,6 +374,16 @@ describe('llm.tsx main function', () => {
   beforeEach(() => {
     mockStartNonInteractiveOpenAILogHousekeeping.mockClear();
     mockStopNonInteractiveOpenAILogHousekeeping.mockClear();
+    mockSetupStartupWorktree.mockReset();
+    mockRouteManagedAgentViewResume.mockReset();
+    mockIsManagedAgentViewContinueBlocked.mockReset();
+    mockIsManagedAgentViewResumeBlocked.mockReset();
+    mockReleaseExitedManagedSessionForContinue.mockReset();
+    mockSetupStartupWorktree.mockResolvedValue(null);
+    mockRouteManagedAgentViewResume.mockResolvedValue(false);
+    mockIsManagedAgentViewContinueBlocked.mockResolvedValue(false);
+    mockIsManagedAgentViewResumeBlocked.mockResolvedValue(false);
+    mockReleaseExitedManagedSessionForContinue.mockResolvedValue(true);
     lspConfigWatcherMock.instances.length = 0;
     mockUpdateBeforeRelaunch.mockResolvedValue(true);
     mockGetInstallationInfo.mockReturnValue({
@@ -888,6 +942,126 @@ describe('llm.tsx main function', () => {
       undefined,
       expect.any(Function),
     );
+  });
+
+  it('routes an explicit managed resume before creating a startup worktree', async () => {
+    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    const originalExitCode = process.exitCode;
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const { parseArguments } = await import('./config/config.js');
+    const { loadSettings } = await import('./config/settings.js');
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      resume: sessionId,
+      worktree: 'managed-resume',
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        experimental: { agentView: true },
+        security: { auth: {} },
+        ui: {},
+        worktree: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    mockRouteManagedAgentViewResume.mockImplementation(async () => {
+      process.exitCode = 0;
+      return true;
+    });
+
+    try {
+      try {
+        await main();
+      } catch (error) {
+        if (!(error instanceof MockProcessExitError)) {
+          throw error;
+        }
+      }
+
+      expect(mockRouteManagedAgentViewResume).toHaveBeenCalledWith(
+        sessionId,
+        process.env,
+        true,
+        true,
+      );
+      expect(mockSetupStartupWorktree).not.toHaveBeenCalled();
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+    } finally {
+      processExitSpy.mockRestore();
+      process.exitCode = originalExitCode;
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
+  });
+
+  it('requires an existing startup worktree before title resume lookup', async () => {
+    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const { parseArguments } = await import('./config/config.js');
+    const { loadSettings } = await import('./config/settings.js');
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      resume: 'session-title',
+      worktree: 'resume',
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        experimental: { agentView: true },
+        security: { auth: {} },
+        ui: {},
+        worktree: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    mockSetupStartupWorktree.mockResolvedValue({
+      ok: false,
+      error: 'existing worktree required',
+    });
+
+    try {
+      await expect(main()).rejects.toBeInstanceOf(MockProcessExitError);
+      expect(mockSetupStartupWorktree).toHaveBeenCalledWith(
+        'resume',
+        expect.objectContaining({ requireExisting: true }),
+      );
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'existing worktree required',
+      );
+    } finally {
+      processExitSpy.mockRestore();
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
   });
 
   describe('registerLspHotReload', () => {

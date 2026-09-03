@@ -7,6 +7,11 @@ import {
   QWEN_CODE_DESKTOP_ENV,
   QWEN_CODE_SERVE_ENV,
 } from './acp-channel-fallback.js';
+import {
+  PTY_HOST_AUTH_TOKEN_ENV,
+  PTY_HOST_ID_ENV,
+} from '../agent-view/pty-host-env.js';
+import { AGENT_VIEW_WORKER_ENV_KEYS } from '../agent-view/worker-sideband.js';
 
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
@@ -189,6 +194,12 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // `cd <untrusted repo> && qwen serve` into code execution as the daemon
   // via an attacker-chosen ACP entrypoint, for every workspace's sessions.
   'QWEN_CLI_ENTRY',
+  // Agent View worker, supervisor, and PTY-host identity markers are stamped
+  // only by trusted launchers; a project .env must not impersonate them.
+  ...AGENT_VIEW_WORKER_ENV_KEYS,
+  'QWEN_AGENT_VIEW_SUPERVISOR',
+  PTY_HOST_AUTH_TOKEN_ENV,
+  PTY_HOST_ID_ENV,
   // QWEN_CDP_MCP_COMMAND is the command the daemon spawns as the
   // browser-automation MCP adapter, and QWEN_SERVE_CDP_TUNNEL_OVER_WS
   // switches that tunnel surface on. A project `.env` or settings.env fixing

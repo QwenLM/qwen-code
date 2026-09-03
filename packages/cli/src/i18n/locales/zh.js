@@ -2309,6 +2309,27 @@ export default {
   '[{{label}}] failed: {{error}}': '[{{label}}] 失败：{{error}}',
   'Loading suggestions...': '正在加载建议...',
   'Open the memory manager.': '打开记忆管理器。',
+  'Detach the current Agent View session.': '分离当前 Agent View 会话。',
+  'Cannot detach Agent View while a question is waiting.':
+    '有提问等待回答时无法分离 Agent View。',
+  'Cannot detach Agent View while a tool confirmation is pending.':
+    '有待确认的工具调用时无法分离 Agent View。',
+  'Cannot detach Agent View while a command confirmation is pending.':
+    '有待确认的命令时无法分离 Agent View。',
+  'Cannot detach Agent View while a foreground shell is active.':
+    '前台 shell 运行时无法分离 Agent View。',
+  'Cannot detach Agent View while the background tasks dialog is open.':
+    '后台任务对话框打开时无法分离 Agent View。',
+  'Cannot detach Agent View while prompts are queued.':
+    '有排队的 prompt 时无法分离 Agent View。',
+  'Cannot detach Agent View while a turn is running.':
+    '回合运行中无法分离 Agent View。',
+  'Cannot detach Agent View before configuration is loaded.':
+    '配置加载完成前无法分离 Agent View。',
+  'Cannot detach Agent View before the session is saved.':
+    '会话保存前无法分离 Agent View。',
+  'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.':
+    '在已 attach 的后台 agent 内禁用 resume。请先分离回 `qwen agents`，再在那里使用 `/resume`。',
   'Show current process memory diagnostics': '显示当前进程的内存诊断。',
   'Record a CPU profile for Chrome DevTools analysis':
     '录制 CPU 性能分析文件，用于 Chrome DevTools 分析',

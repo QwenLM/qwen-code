@@ -21,9 +21,9 @@ import type {
   AgentViewRosterEntry,
   AgentViewSessionSnapshot,
   AgentViewSessionStateFile,
-  AgentViewWorkerFile,
   AgentViewWorkerControlEvent,
   AgentViewWorkerEvent,
+  AgentViewWorkerFile,
 } from './protocol.js';
 import type {
   AgentViewPtyHostExit,
@@ -53,6 +53,7 @@ import {
   readAgentViewActivity,
   readAgentViewRosterStrict,
   readAgentViewSessionState,
+  readAgentViewSessionStateForControl,
   readAgentViewWorker,
   redactAgentViewActivity,
   redactAgentViewWorker,
@@ -114,6 +115,8 @@ export interface AgentViewSupervisorMaintenanceResult
 }
 
 type AgentViewStoreOptions = { globalDir?: string };
+
+const retiredInitialPromptTokenDigests = new Map<string, string>();
 
 export interface AgentViewSupervisorMaintenance {
   hibernateIdleSessions(): Promise<AgentViewSupervisorHibernationResult>;
@@ -276,6 +279,7 @@ class AgentViewSupervisorProcessHandler
 
   status() {
     return {
+      running: true,
       protocolVersion: AGENT_VIEW_PROTOCOL_VERSION,
       pid: process.pid,
       socketPath: this.socketPath,
@@ -354,7 +358,6 @@ class AgentViewSupervisorProcessHandler
         ),
     );
   }
-
   private async gcUnmanagedSession(
     snapshotState: AgentViewSessionStateFile,
   ): Promise<boolean> {
@@ -426,7 +429,7 @@ class AgentViewSupervisorProcessHandler
       ...store,
       sidebandEndpoint: this.socketPath,
       publishRoster: false,
-      promptInArgv: !shouldWaitForWorkerReady(this.options),
+      promptInArgv: true,
     });
     const launch = await readAgentViewLaunch(result.sessionId, store);
     if (!launch) {
@@ -487,9 +490,6 @@ class AgentViewSupervisorProcessHandler
         readyCompleted = true;
         await ensureSessionStillLaunchable(result.sessionId, store);
       });
-      if (shouldWaitForWorkerReady(this.options)) {
-        await this.queuePromptForSession(result.sessionId, prompt);
-      }
       const state = await readAgentViewSessionState(result.sessionId, store);
       const publishedAt = new Date().toISOString();
       try {
@@ -612,6 +612,7 @@ class AgentViewSupervisorProcessHandler
             resumeSessionId: adoption.resumeSessionId,
             argv: buildResumeWorkerArgv(
               adoption.resumeSessionId,
+              undefined,
               adoption.approvalMode,
             ),
             env: createAgentViewWorkerSidebandEnv({
@@ -799,7 +800,23 @@ class AgentViewSupervisorProcessHandler
       event.type === 'ready'
         ? (this.workers.getBootGeneration(event.sessionId) ?? null)
         : undefined;
-    await requireValidWorkerToken(event.sessionId, params, this.store);
+    try {
+      await requireValidWorkerToken(event.sessionId, params, this.store);
+    } catch (error) {
+      if (
+        await this.workers.withHostSetupLock(event.sessionId, () =>
+          clearInitialPromptPendingForRetiredWorkingEvent(
+            event,
+            params,
+            this.store,
+          ),
+        )
+      ) {
+        this.notifyChanged();
+        return { sessionId: event.sessionId, accepted: true };
+      }
+      throw error;
+    }
     if (event.type === 'ready') {
       this.workers.validatePendingWorkerReady(event, readyGeneration);
     }
@@ -833,6 +850,18 @@ class AgentViewSupervisorProcessHandler
           ? await this.withPromptQueueLock(event.sessionId, apply)
           : await apply();
     } catch (error) {
+      if (
+        await this.workers.withHostSetupLock(event.sessionId, () =>
+          clearInitialPromptPendingForRetiredWorkingEvent(
+            event,
+            params,
+            this.store,
+          ),
+        )
+      ) {
+        this.notifyChanged();
+        return { sessionId: event.sessionId, accepted: true };
+      }
       if (event.type === 'ready') {
         this.workers.rejectPendingWorkerReady(
           event.sessionId,
@@ -1260,6 +1289,63 @@ class AgentViewSupervisorProcessHandler
     this.notifyChanged();
     return { sessionId, removed: true };
   }
+  async release(params?: Record<string, unknown>) {
+    const sessionId = requireSessionId(params);
+    return this.withAttachSetupLock(sessionId, () =>
+      this.withPromptQueueLock(sessionId, () =>
+        this.workers.withHostSetupLock(sessionId, async () => {
+          let state = await readAgentViewSessionStateForControl(
+            sessionId,
+            this.store,
+          );
+          if (!state) {
+            throw new Error(`No Agent View session found for ${sessionId}.`);
+          }
+          state = await this.detachIfAttachIsStale(state);
+          if (state.ownership === 'unmanaged') {
+            return { sessionId, released: true, alreadyReleased: true };
+          }
+          if (state.ownership === 'removing') {
+            await this.finishRemovingSessionLocked(sessionId);
+            this.notifyChanged();
+            return { sessionId, released: true, resumedRelease: true };
+          }
+          if (
+            state.ownership !== 'managed' ||
+            (state.processState !== 'exited' &&
+              state.processState !== 'hibernated') ||
+            state.attachState !== 'detached'
+          ) {
+            throw new Error(
+              `Agent View session ${sessionId} cannot be released while it is active.`,
+            );
+          }
+          const accepted = await patchAgentViewSessionStateIf(
+            sessionId,
+            (current) =>
+              current.ownership === 'managed' &&
+              (current.processState === 'exited' ||
+                current.processState === 'hibernated') &&
+              current.attachState === 'detached'
+                ? {
+                    ownership: 'removing',
+                    updatedAt: new Date().toISOString(),
+                  }
+                : undefined,
+            this.store,
+          );
+          if (!accepted) {
+            throw new Error(
+              `Agent View session ${sessionId} changed while it was being released.`,
+            );
+          }
+          await this.finishRemovingSessionLocked(sessionId);
+          this.notifyChanged();
+          return { sessionId, released: true };
+        }),
+      ),
+    );
+  }
   private async finishRemovingSessionLocked(sessionId: string): Promise<void> {
     const state = await readAgentViewSessionState(sessionId, this.store);
     if (state?.ownership !== 'removing') {
@@ -1280,6 +1366,7 @@ class AgentViewSupervisorProcessHandler
           : undefined,
       this.store,
     );
+    forgetRetiredInitialPromptTokenDigest(sessionId, this.store);
   }
 
   private async finishRemovingSession(sessionId: string): Promise<void> {
@@ -1383,9 +1470,21 @@ class AgentViewSupervisorProcessHandler
       socket.destroy();
     }
     this.attachSockets.clear();
-    const workerCount = await this.workers.shutdownAll();
+    const workers = await this.workers.shutdownAll();
+    if (workers.failed.length > 0) {
+      this.shuttingDown = false;
+      return {
+        shuttingDown: false,
+        workersStopped: workers.stopped.length,
+        workersFailed: workers.failed,
+      };
+    }
     await this.options.onShutdown?.();
-    return { shuttingDown: true, workersStopped: workerCount };
+    return {
+      shuttingDown: true,
+      workersStopped: workers.stopped.length,
+      workersFailed: workers.failed,
+    };
   }
   async hibernateIdleSessions() {
     const result = await this.hibernateIdleSessionsWithPolicy(
@@ -1660,7 +1759,7 @@ class AgentViewSupervisorProcessHandler
         detachSignal: controller.signal,
       });
     } catch (error) {
-      propagatingError = true;
+      propagatingError = !bridged;
       throw error;
     } finally {
       clearInterval(heartbeat);
@@ -2068,7 +2167,7 @@ class WorkerRegistry {
         `Agent View session ${sessionId} has a stored worker whose identity cannot be verified.`,
       );
     }
-    await clearAgentViewWorkerPids(sessionId, this.store);
+    await retireAgentViewWorkerPids(sessionId, this.store);
     await markStoppedSession(sessionId, this.store, 'exited');
   }
 
@@ -2127,7 +2226,7 @@ class WorkerRegistry {
     if (this.ptyHosts.get(sessionId) === host) {
       this.clearStopFallback(sessionId, host);
       this.ptyHosts.delete(sessionId);
-      await clearAgentViewWorkerPids(sessionId, this.store);
+      await retireAgentViewWorkerPids(sessionId, this.store);
       if (preserveInput) {
         this.preserveQueuedInputControls(sessionId);
       } else {
@@ -2143,19 +2242,39 @@ class WorkerRegistry {
     await this.retireSessionHost(sessionId, host);
   }
 
-  async shutdownAll(): Promise<number> {
+  async shutdownAll(): Promise<{
+    stopped: string[];
+    failed: Array<{ sessionId: string; error: string }>;
+  }> {
     const sessionIds = Array.from(this.ptyHosts.keys());
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       sessionIds.map((sessionId) =>
         this.withHostSetupLock(sessionId, async () => {
           const host = this.ptyHosts.get(sessionId);
-          if (!host) return;
+          if (!host) return undefined;
           await this.shutdownHost(sessionId, host);
           await markStoppedSession(sessionId, this.store, 'exited');
+          return sessionId;
         }),
       ),
     );
-    return sessionIds.length;
+    const stopped: string[] = [];
+    const failed: Array<{ sessionId: string; error: string }> = [];
+    for (const [index, result] of results.entries()) {
+      const sessionId = sessionIds[index]!;
+      if (result.status === 'fulfilled') {
+        if (result.value !== undefined) stopped.push(result.value);
+      } else {
+        failed.push({
+          sessionId,
+          error:
+            result.reason instanceof Error
+              ? result.reason.message
+              : String(result.reason),
+        });
+      }
+    }
+    return { stopped, failed };
   }
 
   async launchPtyHostForSupervisor(
@@ -2409,6 +2528,7 @@ class WorkerRegistry {
     const resumeLaunch = await writeResumeWorkerLaunch(
       launch,
       token,
+      refreshedState.initialPromptPending === true,
       this.store,
     );
     // The replacement worker must not inherit stop/redraw controls queued
@@ -2603,12 +2723,12 @@ class WorkerRegistry {
         `Agent View session ${sessionId} host became unreachable before its exit was confirmed.`,
       );
     }
-    await clearAgentViewWorkerPids(sessionId, this.store);
+    await retireAgentViewWorkerPids(sessionId, this.store);
   }
 
   async ensureNoStoredWorkerProcess(sessionId: string): Promise<void> {
     await this.assertNoStoredWorkerProcess(sessionId);
-    await clearAgentViewWorkerPids(sessionId, this.store);
+    await retireAgentViewWorkerPids(sessionId, this.store);
   }
 
   private async assertNoStoredWorkerProcess(sessionId: string): Promise<void> {
@@ -2911,7 +3031,7 @@ class WorkerRegistry {
       if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
         return state;
       }
-      await clearAgentViewWorkerPids(state.sessionId, this.store);
+      await retireAgentViewWorkerPids(state.sessionId, this.store);
       await markStoppedSession(state.sessionId, this.store, 'exited');
       return { ...state, processState: 'exited' };
     }
@@ -2960,7 +3080,7 @@ class WorkerRegistry {
         this.store,
       );
       if (applied && !connected) {
-        await clearAgentViewWorkerPids(state.sessionId, this.store);
+        await retireAgentViewWorkerPids(state.sessionId, this.store);
         await removeAgentViewRosterEntry(state.sessionId, this.store);
       }
       if (applied) {
@@ -3048,21 +3168,6 @@ class WorkerRegistry {
     ) {
       return state;
     }
-    if (!reconnect) {
-      if (this.hostSetupQueues.has(state.sessionId)) {
-        return state;
-      }
-      return this.withHostSetupLock(state.sessionId, async () => {
-        const latest = await readAgentViewSessionState(
-          state.sessionId,
-          this.store,
-        );
-        if (!latest) return state;
-        return this.refreshMissingWorkerState(latest, () =>
-          this.reconnectSessionHostLocked(state.sessionId),
-        );
-      });
-    }
     if (await reconnectHost()) {
       return state;
     }
@@ -3114,7 +3219,7 @@ class WorkerRegistry {
       this.store,
     );
     if (appliedPatch) {
-      await clearAgentViewWorkerPids(state.sessionId, this.store);
+      await retireAgentViewWorkerPids(state.sessionId, this.store);
     }
     return appliedPatch ? { ...state, ...appliedPatch } : state;
   }
@@ -3605,7 +3710,7 @@ async function updateExitedSession(
   if (applied) {
     // The exit verdict is authoritative: drop the persisted pids so later
     // liveness probes and signaling paths cannot target a reused pid.
-    await clearAgentViewWorkerPids(sessionId, options);
+    await retireAgentViewWorkerPids(sessionId, options);
   }
 }
 
@@ -3681,29 +3786,47 @@ async function readOrThrowIfAbsent<T>(
 
 async function readAgentViewWorkerForLiveness(
   sessionId: string,
-  options: AgentViewStoreOptions,
+  options: { globalDir?: string },
 ): Promise<AgentViewWorkerFile | undefined> {
   const workerPath = getAgentViewSessionPaths(sessionId, options).workerPath;
-  for (let attempt = 0; attempt <= 3; attempt++) {
-    const worker = await readAgentViewWorker(sessionId, options);
+  const filePresent = async () => {
+    try {
+      await fs.promises.access(workerPath);
+      return true;
+    } catch (error) {
+      if (isEnoent(error)) {
+        return false;
+      }
+      throw new Error(
+        `Agent View worker record at ${workerPath} is temporarily unreadable. Retry the operation.`,
+        { cause: error },
+      );
+    }
+  };
+  let worker = await readAgentViewWorker(sessionId, options);
+  if (worker) {
+    return worker;
+  }
+  if (!(await filePresent())) {
+    return undefined;
+  }
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+    worker = await readAgentViewWorker(sessionId, options);
     if (worker) {
       return worker;
     }
-    try {
-      await fs.promises.access(workerPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return undefined;
-      }
-      throw error;
-    }
-    if (attempt < 3) {
-      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    if (!(await filePresent())) {
+      return undefined;
     }
   }
   throw new Error(
-    `Agent View record at ${workerPath} is temporarily unreadable. Retry the operation.`,
+    `Agent View worker record at ${workerPath} is temporarily unreadable. Retry the operation.`,
   );
+}
+
+function isEnoent(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
 async function applyWorkerEvent(
@@ -3742,6 +3865,12 @@ async function applyWorkerEvent(
       state.processState === 'hibernating') &&
     (event.type === 'ready' || event.type === 'state')
   ) {
+    if (isInitialPromptWorkingEvent(event)) {
+      return clearInitialPromptPendingForTerminalState(
+        event.sessionId,
+        options,
+      );
+    }
     // A buffered/in-flight event from a dead worker must not clobber the
     // exit verdict. A legitimate replacement worker's ready arrives only
     // after respawn writes processState 'starting'.
@@ -3761,20 +3890,30 @@ async function applyWorkerEvent(
         : state.sessionState;
 
   let statePatchApplied = false;
+  let clearedTerminalInitialPrompt = false;
   await patchAgentViewSessionStateIf(
     event.sessionId,
     (existing) => {
       // Re-validate inside the queued mutation: an exit verdict enqueued
       // after the guard read above must not be clobbered by this patch.
+      const terminalState =
+        existing.sessionState === 'stopped' ||
+        existing.processState === 'exited' ||
+        existing.processState === 'hibernated' ||
+        existing.processState === 'hibernating';
       if (
         (existing.ownership !== 'managed' &&
           existing.ownership !== 'adopting') ||
-        ((existing.sessionState === 'stopped' ||
-          existing.processState === 'exited' ||
-          existing.processState === 'hibernated' ||
-          existing.processState === 'hibernating') &&
-          (event.type === 'ready' || event.type === 'state'))
+        (terminalState && (event.type === 'ready' || event.type === 'state'))
       ) {
+        if (
+          terminalState &&
+          isInitialPromptWorkingEvent(event) &&
+          existing.initialPromptPending === true
+        ) {
+          clearedTerminalInitialPrompt = true;
+          return { initialPromptPending: undefined };
+        }
         return undefined;
       }
       statePatchApplied = true;
@@ -3789,11 +3928,17 @@ async function applyWorkerEvent(
           : {}),
         activeCwd,
         updatedAt: now,
+        ...(event.type === 'state' && event.sessionState === 'working'
+          ? { initialPromptPending: undefined }
+          : {}),
         ...(event.type === 'ready' ? { lastError: undefined } : {}),
       };
     },
     options,
   );
+  if (clearedTerminalInitialPrompt) {
+    return true;
+  }
   if (!statePatchApplied) {
     return false;
   }
@@ -3883,6 +4028,61 @@ async function applyWorkerEvent(
     options,
   );
   return true;
+}
+
+function isInitialPromptWorkingEvent(
+  event: AgentViewWorkerEvent,
+): event is Extract<AgentViewWorkerEvent, { type: 'state' }> {
+  return event.type === 'state' && event.sessionState === 'working';
+}
+
+async function clearInitialPromptPendingForTerminalState(
+  sessionId: string,
+  options: { globalDir?: string },
+): Promise<boolean> {
+  return patchAgentViewSessionStateIf(
+    sessionId,
+    (existing) => {
+      if (
+        (existing.ownership !== 'managed' &&
+          existing.ownership !== 'adopting') ||
+        existing.initialPromptPending !== true ||
+        (existing.sessionState !== 'stopped' &&
+          existing.processState !== 'exited' &&
+          existing.processState !== 'hibernated' &&
+          existing.processState !== 'hibernating')
+      ) {
+        return undefined;
+      }
+      return { initialPromptPending: undefined };
+    },
+    options,
+  );
+}
+
+async function clearInitialPromptPendingForRetiredWorkingEvent(
+  event: AgentViewWorkerEvent,
+  params: Record<string, unknown> | undefined,
+  options: { globalDir?: string },
+): Promise<boolean> {
+  if (!isInitialPromptWorkingEvent(event)) {
+    return false;
+  }
+  const token = params?.['token'];
+  if (typeof token !== 'string' || token.length === 0) {
+    return false;
+  }
+  if (!hasRetiredInitialPromptTokenDigest(event.sessionId, token, options)) {
+    return false;
+  }
+  const cleared = await clearInitialPromptPendingForTerminalState(
+    event.sessionId,
+    options,
+  );
+  if (cleared) {
+    forgetRetiredInitialPromptTokenDigest(event.sessionId, options);
+  }
+  return cleared;
 }
 
 async function applyWorkerHeartbeatEvent(
@@ -4298,12 +4498,14 @@ function stringArrayParam(
 
 function buildResumeWorkerArgv(
   sessionId: string,
+  initialPrompt?: string,
   approvalMode?: string,
 ): string[] {
   // Attached form: the id stays one token even if it starts with '-', so
   // the argument parser can never drop or reinterpret it as a flag.
   return buildCurrentQwenCliArgv([
     `--resume=${sessionId}`,
+    ...(initialPrompt ? [`--prompt-interactive=${initialPrompt}`] : []),
     ...(approvalMode ? [`--approval-mode=${approvalMode}`] : []),
   ]);
 }
@@ -4311,6 +4513,11 @@ function buildResumeWorkerArgv(
 function refreshResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
   token?: string,
+  // Entrypoint migration runs after a respawn launch is built; preserve a
+  // still-pending initial prompt already encoded in that argv.
+  replayInitialPrompt = launch.argv.includes(
+    `--prompt-interactive=${launch.initialPrompt ?? ''}`,
+  ),
 ): AgentViewLaunchFile {
   return {
     ...launch,
@@ -4319,6 +4526,7 @@ function refreshResumeWorkerLaunch(
     // is case-sensitive and the canonical id may rewrite it.
     argv: buildResumeWorkerArgv(
       launch.resumeSessionId ?? launch.sessionId,
+      replayInitialPrompt ? launch.initialPrompt : undefined,
       launch.approvalMode,
     ),
     env: {
@@ -4357,9 +4565,14 @@ function getResumeWorkerSandboxEnv(
 async function writeResumeWorkerLaunch(
   launch: AgentViewLaunchFile,
   token: string,
+  replayInitialPrompt: boolean,
   store: { globalDir?: string },
 ): Promise<AgentViewLaunchFile> {
-  const resumeLaunch = refreshResumeWorkerLaunch(launch, token);
+  const resumeLaunch = refreshResumeWorkerLaunch(
+    launch,
+    token,
+    replayInitialPrompt,
+  );
   await writeAgentViewLaunch(resumeLaunch, store);
   return resumeLaunch;
 }
@@ -4397,10 +4610,92 @@ export async function requireValidWorkerToken(
   }
 }
 
+export async function authorizeAgentViewWorkerSideband(
+  op: 'workerEvent' | 'workerControl',
+  params: Record<string, unknown> | undefined,
+  options: { globalDir?: string },
+): Promise<boolean> {
+  const sessionId = params?.['sessionId'];
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return false;
+  try {
+    await requireValidWorkerToken(sessionId, params, options);
+    return true;
+  } catch {
+    if (
+      op !== 'workerEvent' ||
+      params?.['type'] !== 'state' ||
+      params['sessionState'] !== 'working'
+    ) {
+      return false;
+    }
+    const token = params['token'];
+    return (
+      typeof token === 'string' &&
+      token.length > 0 &&
+      hasRetiredInitialPromptTokenDigest(sessionId, token, options)
+    );
+  }
+}
+
 function tokenDigestMatches(token: string, expectedDigest: string): boolean {
   const actual = Buffer.from(digestAgentViewWorkerToken(token), 'hex');
   const expected = Buffer.from(expectedDigest, 'hex');
   return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function retiredInitialPromptTokenKey(
+  sessionId: string,
+  options: { globalDir?: string },
+): string {
+  return `${getAgentViewStorePaths(options).globalDir}\0${sanitizeSessionId(
+    sessionId,
+  )}`;
+}
+
+function rememberRetiredInitialPromptTokenDigest(
+  sessionId: string,
+  tokenDigest: string | undefined,
+  options: { globalDir?: string },
+): void {
+  if (!tokenDigest) return;
+  retiredInitialPromptTokenDigests.set(
+    retiredInitialPromptTokenKey(sessionId, options),
+    tokenDigest,
+  );
+}
+
+async function retireAgentViewWorkerPids(
+  sessionId: string,
+  options: { globalDir?: string },
+): Promise<void> {
+  const tokenDigest = await clearAgentViewWorkerPids(sessionId, options);
+  rememberRetiredInitialPromptTokenDigest(sessionId, tokenDigest, options);
+  const state = await readAgentViewSessionState(sessionId, options);
+  if (state !== undefined && state.initialPromptPending !== true) {
+    forgetRetiredInitialPromptTokenDigest(sessionId, options);
+  }
+}
+
+function hasRetiredInitialPromptTokenDigest(
+  sessionId: string,
+  token: string,
+  options: { globalDir?: string },
+): boolean {
+  const key = retiredInitialPromptTokenKey(sessionId, options);
+  const tokenDigest = retiredInitialPromptTokenDigests.get(key);
+  if (!tokenDigest || !tokenDigestMatches(token, tokenDigest)) {
+    return false;
+  }
+  return true;
+}
+
+function forgetRetiredInitialPromptTokenDigest(
+  sessionId: string,
+  options: { globalDir?: string },
+): void {
+  retiredInitialPromptTokenDigests.delete(
+    retiredInitialPromptTokenKey(sessionId, options),
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

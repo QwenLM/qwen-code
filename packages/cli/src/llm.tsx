@@ -29,6 +29,7 @@ import {
   PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import dns from 'node:dns';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -95,7 +96,11 @@ import { start_sandbox } from './serve/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
-import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
+import {
+  drainStdioBeforeExit,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
@@ -401,6 +406,55 @@ export async function main() {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
+  if (process.argv.includes('--internal-agent-view-supervisor')) {
+    // Gate on the supervisor launch env: defaultSpawnSupervisor always sets
+    // it on the daemon child, while a natural-language prompt mentioning the
+    // flag never does. Without the gate such a prompt would hijack the
+    // process into supervisor mode and hang without running the user input.
+    const { runAgentViewSupervisor, INTERNAL_AGENT_VIEW_SUPERVISOR_ENV } =
+      await import('./agent-view/supervisor-runner.js');
+    if (process.env[INTERNAL_AGENT_VIEW_SUPERVISOR_ENV] === '1') {
+      await runAgentViewSupervisor();
+      process.exit(0);
+    }
+  }
+
+  const ptyHostArgIndex = process.argv.indexOf(
+    '--internal-agent-view-pty-host',
+  );
+  if (ptyHostArgIndex !== -1) {
+    // Gate on the host auth token: the spawner always sets it in the child
+    // env, while a natural-language prompt mentioning the flag never does.
+    // Without the gate such a prompt would hijack the process into PTY-host
+    // mode and readFile/JSON.parse arbitrary words from the command line.
+    const { PTY_HOST_AUTH_TOKEN_ENV } = await import(
+      './agent-view/pty-host-env.js'
+    );
+    if (process.env[PTY_HOST_AUTH_TOKEN_ENV]) {
+      const launchPath = process.argv[ptyHostArgIndex + 1];
+      const socketPath = process.argv[ptyHostArgIndex + 2];
+      if (!launchPath || !socketPath) {
+        throw new Error(
+          'Agent View PTY host requires launch and socket paths.',
+        );
+      }
+      const { runAgentViewPtyHostProcess } = await import(
+        './agent-view/pty-host-process.js'
+      );
+      const exit = await runAgentViewPtyHostProcess({ launchPath, socketPath });
+      // node-pty reports signal-kills as {exitCode: 0, signal}; surface them
+      // as failures (shell convention) so the supervisor does not record a
+      // killed worker as successfully completed.
+      process.exit(
+        exit.kind === 'exited'
+          ? exit.exitCode === 0 && exit.signal
+            ? 128 + exit.signal
+            : exit.exitCode
+          : 1,
+      );
+    }
+  }
+
   // Run before yargs parses subcommands — handlers like `channel status`/`stop`
   // call `process.exit` before `loadSettings()` would otherwise bootstrap.
   preResolveHomeEnvOverrides();
@@ -453,6 +507,15 @@ export async function main() {
     ? createMinimalSettings()
     : loadSettings();
   markAcpStartup('settingsLoadEnd');
+
+  if (argv.background) {
+    const { handleAgentViewBackgroundPrompt } = await import(
+      './commands/agents.js'
+    );
+    await handleAgentViewBackgroundPrompt(argv.query ?? '', settings.merged);
+    await drainStdioBeforeExit();
+    process.exit(0);
+  }
 
   // Propagate corruption state to child process via env vars so
   // relaunchAppInChildProcess() doesn't lose the marker.
@@ -509,6 +572,10 @@ export async function main() {
   const { themeManager, AUTO_THEME_NAME } = await import(
     './ui/themes/theme-manager.js'
   );
+  const { isAgentViewWorkerEnv } = await import(
+    './agent-view/worker-sideband.js'
+  );
+  const isAgentViewWorker = isAgentViewWorkerEnv();
   // Load custom themes from settings
   themeManager.loadCustomThemes(settings.merged.ui?.customThemes);
 
@@ -579,7 +646,12 @@ export async function main() {
     if (sandboxConfig) {
       const partialConfig = await loadCliConfig(
         settings.merged,
-        argv,
+        {
+          ...argv,
+          continue: false,
+          resume: undefined,
+          forkSession: false,
+        },
         undefined,
         [],
         // Pass separated hooks for proper source attribution
@@ -791,9 +863,34 @@ export async function main() {
     );
     process.exit(1);
   }
+
+  const hasAgentViewOneShotInput = (): boolean =>
+    argv.prompt !== undefined ||
+    argv.promptInteractive !== undefined ||
+    argv.query !== undefined ||
+    argv.inputFile !== undefined ||
+    argv.forkSession === true ||
+    !process.stdin.isTTY;
+  if (argv.resume !== undefined && cliConfig.isValidSessionId(argv.resume)) {
+    const { routeManagedAgentViewResume } = await import(
+      './startup/agent-view-resume.js'
+    );
+    if (
+      await routeManagedAgentViewResume(
+        argv.resume,
+        process.env,
+        hasAgentViewOneShotInput(),
+        settings.merged.experimental?.agentView === true,
+      )
+    ) {
+      process.exit(typeof process.exitCode === 'number' ? process.exitCode : 1);
+    }
+  }
+
   {
     const startupRes = await setupStartupWorktree(argv.worktree, {
       symlinkDirectories: settings.merged.worktree?.symlinkDirectories,
+      requireExisting: argv.resume !== undefined || argv.continue,
     });
     if (startupRes !== null) {
       if (!startupRes.ok) {
@@ -804,16 +901,113 @@ export async function main() {
     }
   }
 
+  const exitStartup = (code: number, message?: string): never => {
+    if (message) writeStderrLine(message);
+    process.exit(code);
+  };
+
+  if (argv.resume !== undefined || argv.continue) {
+    Storage.setRuntimeBaseDir(
+      settings.merged.advanced?.runtimeOutputDir,
+      process.cwd(),
+    );
+  }
+
+  if (argv.continue) {
+    const sessionService = new SessionService(process.cwd());
+    const sessionData = await sessionService.loadLastSession();
+    if (!sessionData) {
+      if (argv.forkSession) {
+        await exitStartup(
+          1,
+          'Cannot use --fork-session with --continue: no saved session found to fork.',
+        );
+      }
+    } else {
+      const sourceSessionId = sessionData.conversation.sessionId;
+      const {
+        isManagedAgentViewContinueBlocked,
+        isManagedAgentViewResumeBlocked,
+        MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+        releaseExitedManagedSessionForContinue,
+      } = await import('./startup/agent-view-resume-guard.js');
+      const agentViewEnabled = settings.merged.experimental?.agentView === true;
+      const releaseManagedSessionForContinue = async (): Promise<boolean> => {
+        let retryableError: unknown;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            return await releaseExitedManagedSessionForContinue(
+              sourceSessionId,
+              process.env,
+              agentViewEnabled,
+            );
+          } catch (error) {
+            retryableError = error;
+            if (
+              !(
+                error instanceof Error &&
+                error.message.includes('temporarily unreadable')
+              )
+            ) {
+              break;
+            }
+          }
+        }
+        return await exitStartup(
+          1,
+          retryableError instanceof Error
+            ? retryableError.message
+            : String(retryableError),
+        );
+      };
+      if (
+        !agentViewEnabled &&
+        (await isManagedAgentViewResumeBlocked(sourceSessionId))
+      ) {
+        const { AGENT_VIEW_DISABLED_MESSAGE } = await import(
+          './agent-view/feature.js'
+        );
+        await exitStartup(1, AGENT_VIEW_DISABLED_MESSAGE);
+      }
+      let ownershipReleased = false;
+      if (await isManagedAgentViewContinueBlocked(sourceSessionId)) {
+        if (!argv.forkSession) {
+          ownershipReleased = await releaseManagedSessionForContinue();
+        }
+        if (!ownershipReleased) {
+          await exitStartup(1, MANAGED_AGENT_VIEW_RESUME_MESSAGE);
+        }
+      }
+      if (argv.forkSession) {
+        const forkedSessionId = randomUUID();
+        try {
+          await sessionService.forkSession(sourceSessionId, forkedSessionId);
+        } catch (error) {
+          await exitStartup(
+            1,
+            `Failed to fork session ${sourceSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        argv = {
+          ...argv,
+          continue: false,
+          resume: forkedSessionId,
+          forkSession: false,
+        };
+      } else {
+        if (!ownershipReleased && !(await releaseManagedSessionForContinue())) {
+          await exitStartup(1, MANAGED_AGENT_VIEW_RESUME_MESSAGE);
+        }
+        argv = { ...argv, continue: false, resume: sourceSessionId };
+      }
+    }
+  }
+
   // Handle --resume without a session ID, or with a custom title, by showing
   // the session picker. Set the runtime output dir early so the picker can find
   // sessions stored under a custom runtimeOutputDir (setRuntimeBaseDir is
   // idempotent and will be called again inside loadCliConfig).
   if (argv.resume !== undefined) {
-    Storage.setRuntimeBaseDir(
-      settings.merged.advanced?.runtimeOutputDir,
-      process.cwd(),
-    );
-
     let resolvedSessionId: string | undefined;
 
     if (argv.resume === '') {
@@ -849,13 +1043,60 @@ export async function main() {
     } else if (argv.resume === '' || !cliConfig.isValidSessionId(argv.resume)) {
       // User cancelled the picker or no sessions found for the title
       if (argv.resume !== '') {
-        writeStderrLine(`No saved session found with title "${argv.resume}".`);
-        process.exit(1);
+        await exitStartup(
+          1,
+          `No saved session found with title "${argv.resume}".`,
+        );
       } else {
-        process.exit(0);
+        await exitStartup(0);
       }
     }
     // else: argv.resume is already a valid UUID, pass through to loadCliConfig
+  }
+
+  if (argv.resume !== undefined) {
+    const { routeManagedAgentViewResume } = await import(
+      './startup/agent-view-resume.js'
+    );
+    if (
+      await routeManagedAgentViewResume(
+        argv.resume,
+        process.env,
+        hasAgentViewOneShotInput(),
+        settings.merged.experimental?.agentView === true,
+      )
+    ) {
+      await exitStartup(
+        typeof process.exitCode === 'number' ? process.exitCode : 1,
+      );
+    }
+  }
+
+  if (argv.resume !== undefined) {
+    const sessionService = new SessionService(process.cwd());
+    if (argv.forkSession) {
+      const sourceSessionId = argv.resume;
+      const forkedSessionId = randomUUID();
+      try {
+        await sessionService.forkSession(sourceSessionId, forkedSessionId);
+      } catch (error) {
+        await exitStartup(
+          1,
+          `Failed to fork session ${sourceSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      argv = {
+        ...argv,
+        resume: forkedSessionId,
+        continue: false,
+        forkSession: false,
+      };
+    } else if (!(await sessionService.loadSession(argv.resume))) {
+      await exitStartup(
+        1,
+        `No saved session found with ID ${argv.resume}. Run \`qwen --resume\` without an ID to choose from existing sessions.`,
+      );
+    }
   }
 
   // We are now past the logic handling potentially launching a child process
@@ -876,7 +1117,7 @@ export async function main() {
     settingsWatcher?.startWatching();
 
     markAcpStartup('configConstructionStart');
-    const config = await loadCliConfig(
+    const config: Config = await loadCliConfig(
       settings.merged,
       argv.acp || argv.experimentalAcp
         ? { ...argv, chatRecording: false }
@@ -897,6 +1138,36 @@ export async function main() {
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+
+    {
+      const {
+        readAgentViewWorkerSidebandEnv,
+        reportAgentViewWorkerState,
+        sendAgentViewWorkerEvent,
+        startAgentViewWorkerHeartbeat,
+      } = await import('./agent-view/worker-sideband.js');
+      const sideband = readAgentViewWorkerSidebandEnv();
+      if (sideband) {
+        await sendAgentViewWorkerEvent({
+          type: 'ready',
+          cwd: process.cwd(),
+          capabilities: ['ready', 'heartbeat', 'state'],
+          summary: config.getQuestion(),
+        }).catch((error) => {
+          debugLogger.debug(
+            `Agent View worker ready sideband failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+        await reportAgentViewWorkerState({
+          sessionState: 'idle',
+          cwd: process.cwd(),
+          summary: config.getQuestion(),
+        });
+        startAgentViewWorkerHeartbeat();
+      }
+    }
 
     const nonInteractiveHousekeeping =
       !config.isInteractive() || config.getExperimentalZedIntegration()
@@ -1069,7 +1340,10 @@ export async function main() {
       // the filter in startEarlyInputCapture absorbs the OSC 11 response
       // bytes so they cannot leak into the TUI input, even though our
       // probe attaches its own listener to parse the RGB value.
-      if (!configuredTheme || configuredTheme === AUTO_THEME_NAME) {
+      if (
+        !isAgentViewWorker &&
+        (!configuredTheme || configuredTheme === AUTO_THEME_NAME)
+      ) {
         themeAutoDetectionComplete = themeManager
           .resolveAutoThemeAsync()
           .catch((err) => {

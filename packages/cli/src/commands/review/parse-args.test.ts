@@ -1395,6 +1395,7 @@ describe('parseArgsCommand wiring', () => {
 
   async function runCli(tokens: string[]): Promise<void> {
     await yargs(tokens)
+      .parserConfiguration({ 'populate--': true })
       .command(parseArgsCommand)
       .strict()
       .exitProcess(false)
@@ -1484,6 +1485,7 @@ describe('parseArgsCommand wiring', () => {
   describe('nested under the real review command', () => {
     async function runNested(tokens: string[]): Promise<void> {
       await yargs(tokens)
+        .parserConfiguration({ 'populate--': true })
         .command(reviewCommand)
         .strict()
         .exitProcess(false)

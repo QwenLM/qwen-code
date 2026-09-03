@@ -2056,6 +2056,27 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': '打開記憶管理器。',
+  'Detach the current Agent View session.': '分離目前 Agent View 工作階段。',
+  'Cannot detach Agent View while a question is waiting.':
+    '有提問等待回答時無法分離 Agent View。',
+  'Cannot detach Agent View while a tool confirmation is pending.':
+    '有待確認的工具呼叫時無法分離 Agent View。',
+  'Cannot detach Agent View while a command confirmation is pending.':
+    '有待確認的指令時無法分離 Agent View。',
+  'Cannot detach Agent View while a foreground shell is active.':
+    '前景 shell 執行時無法分離 Agent View。',
+  'Cannot detach Agent View while the background tasks dialog is open.':
+    '背景工作對話框開啟時無法分離 Agent View。',
+  'Cannot detach Agent View while prompts are queued.':
+    '有排隊中的 prompt 時無法分離 Agent View。',
+  'Cannot detach Agent View while a turn is running.':
+    '回合執行中無法分離 Agent View。',
+  'Cannot detach Agent View before configuration is loaded.':
+    '設定載入完成前無法分離 Agent View。',
+  'Cannot detach Agent View before the session is saved.':
+    '工作階段儲存前無法分離 Agent View。',
+  'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.':
+    '在已 attach 的背景 agent 內停用 resume。請先分離回 `qwen agents`，再在那裡使用 `/resume`。',
   'Show current process memory diagnostics': '顯示目前程序的內存診斷。',
   'Record a CPU profile for Chrome DevTools analysis':
     '錄製 CPU 效能分析檔案，用於 Chrome DevTools 分析',

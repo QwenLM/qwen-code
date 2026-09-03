@@ -266,6 +266,13 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
+import {
+  readAgentViewWorkerSidebandEnv,
+  reportAgentViewWorkerState,
+  sendAgentViewWorkerEvent,
+} from '../agent-view/worker-sideband.js';
+import type { AgentViewIdleGateState } from './commands/types.js';
 import {
   findLastUserItemIndex,
   isSyntheticHistoryItem,
@@ -896,6 +903,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const [currentModel, setCurrentModel] = useState(() => config.getModel());
 
   const [isConfigInitialized, setConfigInitialized] = useState(false);
+  const unregisterSessionEndCleanupRef = useRef<(() => void) | undefined>(
+    undefined,
+  );
 
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
@@ -1236,7 +1246,7 @@ export const AppContainer = (props: AppContainerProps) => {
     })();
 
     // Register SessionEnd cleanup for process exit
-    registerCleanup(async () => {
+    unregisterSessionEndCleanupRef.current = registerCleanup(async () => {
       try {
         await config
           .getHookSystem()
@@ -1391,6 +1401,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useLlmStream).
   const isIdleRef = useRef(true);
+  const agentViewIdleGateStateRef = useRef<AgentViewIdleGateState>({});
   // Live content-area height, kept in a ref so useLlmStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
   // when bounding the pending item's rendered height. terminalWidthRef pairs
@@ -1950,6 +1961,19 @@ export const AppContainer = (props: AppContainerProps) => {
     [config, skillReviewPending],
   );
 
+  const detachAgentViewSession = useCallback(async () => {
+    if (readAgentViewWorkerSidebandEnv() !== undefined) {
+      await sendAgentViewWorkerEvent({ type: 'detach' });
+      return;
+    }
+    await config.getChatRecordingService?.()?.flush?.();
+    await detachCurrentSessionToAgentView(config);
+    unregisterSessionEndCleanupRef.current?.();
+    config.getLlmClient()?.requestShutdown();
+    await runExitCleanup();
+    process.exit(0);
+  }, [config]);
+
   // Subscribe to skill-review task changes and keep skillReviewPending in sync.
   useEffect(() => {
     const mgr = config.getMemoryManager();
@@ -2043,6 +2067,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleBranch,
       openDeleteDialog,
       openHelpDialog,
+      detachAgentViewSession,
       clearPendingState: () => clearPendingStateRef.current(),
     }),
     [
@@ -2075,6 +2100,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       openHelpDialog,
       openDiffDialog,
+      detachAgentViewSession,
       config,
     ],
   );
@@ -2111,6 +2137,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.updateItem,
     setSessionName,
     extensionRefreshState,
+    agentViewIdleGateStateRef,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -2415,6 +2442,32 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [streamingState]);
 
+  useEffect(() => {
+    if (readAgentViewWorkerSidebandEnv() === undefined) {
+      return undefined;
+    }
+    const sessionState =
+      streamingState === StreamingState.Responding
+        ? 'working'
+        : streamingState === StreamingState.WaitingForConfirmation
+          ? 'needs_input'
+          : 'idle';
+
+    void reportAgentViewWorkerState({
+      sessionState,
+      ...(sessionState === 'needs_input'
+        ? pendingToolCalls.some(
+            (call) =>
+              call.status === 'awaiting_approval' &&
+              call.confirmationDetails?.type === 'ask_user_question',
+          )
+          ? { inputKind: 'soft', waitingFor: 'response' }
+          : { inputKind: 'blocking' }
+        : {}),
+    });
+    return undefined;
+  }, [streamingState, pendingToolCalls]);
+
   // Auto-open the skill-review dialog when idle and there are pending skills.
   // Gated on the live auto-skill flag: after the dialog's turn-off option
   // (which disables the feature and closes WITHOUT dismissing), the batch must
@@ -2472,6 +2525,28 @@ export const AppContainer = (props: AppContainerProps) => {
     livePanelFocused: bgLivePanelFocused,
   } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
+  agentViewIdleGateStateRef.current = {
+    hasPendingUserQuestion: pendingToolCalls.some(
+      (call) =>
+        call.status === 'awaiting_approval' &&
+        call.confirmationDetails?.type === 'ask_user_question',
+    ),
+    hasPendingToolConfirmation: pendingToolCalls.some(
+      (call) => call.status === 'awaiting_approval',
+    ),
+    hasPendingCommandConfirmation: Boolean(
+      shellConfirmationRequest ||
+        confirmationRequest ||
+        loopDetectionConfirmationRequest,
+    ),
+    hasForegroundShell: Boolean(
+      activePtyId || embeddedShellFocused || agentViewState.agentShellFocused,
+    ),
+    hasBackgroundFocusDialog: bgTasksDialogOpen || bgLivePanelFocused,
+    hasQueuedPrompt:
+      goalQueueRef.current?.hasQueuedUserMessages?.() === true ||
+      (goalQueueRef.current?.getPendingSubmissionCount?.() ?? 0) > 0,
+  };
 
   // Prompt suggestion state
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);

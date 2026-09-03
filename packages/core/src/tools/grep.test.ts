@@ -17,6 +17,7 @@ import { tildeifyPath } from '../utils/paths.js';
 import { ToolErrorType } from './tool-error.js';
 import * as glob from 'glob';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { INTERNAL_SECRET_ENV_VARS } from '../utils/sanitize-child-env.js';
 
 vi.mock('glob', { spy: true });
 
@@ -133,6 +134,7 @@ describe('GrepTool', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await fs.rm(tempRootDir, { recursive: true, force: true });
   });
 
@@ -880,6 +882,31 @@ describe('GrepTool', () => {
       // the git grep strategy run before the system grep fallback.
       await fs.mkdir(path.join(tempRootDir, '.git'), { recursive: true });
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'strips internal secrets from fallback grep processes',
+      async () => {
+        for (const key of INTERNAL_SECRET_ENV_VARS) {
+          vi.stubEnv(key, `secret-${key}`);
+        }
+
+        await grepTool.build({ pattern: 'world' }).execute(abortSignal);
+
+        for (const bin of ['git', 'grep']) {
+          const calls = vi
+            .mocked(spawn)
+            .mock.calls.filter((call) => call[0] === bin);
+          expect(calls).not.toHaveLength(0);
+          for (const call of calls) {
+            const env = call[2]?.env;
+            expect(env).toBeDefined();
+            for (const key of INTERNAL_SECRET_ENV_VARS) {
+              expect(env).not.toHaveProperty(key);
+            }
+          }
+        }
+      },
+    );
 
     it.each([['-n'], ['-i'], ['--color']])(
       'introduces the pattern "%s" with -e for git grep',

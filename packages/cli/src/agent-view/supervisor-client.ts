@@ -33,6 +33,7 @@ export type AgentViewSupervisorOperation =
   | 'stop'
   | 'kill'
   | 'respawn'
+  | 'release'
   | 'remove'
   | 'pin'
   | 'rename';
@@ -101,6 +102,7 @@ export interface AgentViewSupervisorRequestMap {
   stop: { sessionId: string };
   kill: { sessionId: string };
   respawn: { sessionId: string } | { all: true };
+  release: { sessionId: string };
   remove: { sessionId: string };
   pin: { sessionId: string; pinned?: boolean };
   rename: { sessionId: string; displayName: string };
@@ -127,6 +129,7 @@ export interface AgentViewSupervisorResponseMap {
   stop: unknown;
   kill: unknown;
   respawn: unknown;
+  release: unknown;
   remove: unknown;
   pin: unknown;
   rename: unknown;
