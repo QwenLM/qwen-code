@@ -103,7 +103,12 @@ jobs:
             PKG_DIR='/usr/local/lib/node_modules/@qwen-code'
             for attempt in 1 2 3; do
               sudo rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
-              if sudo env -u NPM_CONFIG_PREFIX npm install -g --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+              # --prefix pins the install to /usr/local: on the hk-4/hk-5
+              # machines root's npm global prefix is a custom Node directory
+              # (/usr/local/lib/nodejs/node-v22.23.2-linux-x64), so without
+              # it the update landed there while the pool kept resolving the
+              # stale /usr/local/bin/qwen -> /usr/local/lib/node_modules copy.
+              if sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
                 exit 0
               fi
               if [[ "${attempt}" -lt 3 ]]; then
