@@ -60,6 +60,8 @@ import type {
   DaemonSessionGroupInput,
   DaemonSessionGroupUpdate,
   DaemonSessionLspStatus,
+  DaemonSessionResourcesStatus,
+  DaemonSessionSavedWorkflowStatus,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
   DaemonSessionSearchOptions,
@@ -1591,6 +1593,17 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /session/:id/hooks');
         return (await res.json()) as DaemonSessionHooksStatus;
       },
+    );
+  }
+
+  async sessionResources(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionResourcesStatus> {
+    return await this.jsonRequest<DaemonSessionResourcesStatus>(
+      `/session/${urlEncode(sessionId)}/resources`,
+      'GET /session/:id/resources',
+      { clientId, mode: 'rest' },
     );
   }
 
@@ -3456,6 +3469,26 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /session/:id/tasks');
         }
         return (await res.json()) as DaemonSessionWorkflowTasksStatus;
+      },
+    );
+  }
+
+  async sessionSavedWorkflow(
+    sessionId: string,
+    name: string,
+    clientId?: string,
+  ): Promise<DaemonSessionSavedWorkflowStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/saved-workflows/${urlEncode(name)}`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/saved-workflows/:name',
+          );
+        }
+        return (await res.json()) as DaemonSessionSavedWorkflowStatus;
       },
     );
   }

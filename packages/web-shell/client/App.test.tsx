@@ -64,6 +64,7 @@ type MockConnection = {
   }>;
   commands: unknown[];
   skills: string[] | undefined;
+  supportedCommands?: { workflowsEnabled?: boolean };
   capabilities: { qwenCodeVersion: string; features: string[] };
   loadingTranscript: boolean;
   catchingUp: boolean;
@@ -366,6 +367,12 @@ const {
         now: 1,
         tasks: [],
       }),
+      getWorkflowTasks: vi.fn().mockResolvedValue({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      }),
       loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
       loadSession: vi.fn().mockResolvedValue(undefined),
       reloadSession: vi.fn().mockResolvedValue(undefined),
@@ -537,6 +544,8 @@ const {
       latestTasksStatusProps: null as {
         planTodos?: Array<{ id: string }>;
         agentTools?: Array<{ callId: string }>;
+        includeWorkflows?: boolean;
+        onWorkflowRunStarted?: () => void;
         onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
       } | null,
       settings: [] as DaemonSettingDescriptor[],
@@ -595,6 +604,10 @@ const {
       latestGoalsProps: null as {
         onCreateGoal?: (condition: string) => Promise<void>;
         onOpenSession?: (sessionId: string) => void;
+      } | null,
+      latestWorkflowRunsProps: null as {
+        onCreateViaChat?: () => void;
+        onWorkflowRunStarted?: () => void;
       } | null,
     },
     rawEnqueuePrompt: vi.fn(() => true),
@@ -754,6 +767,7 @@ vi.mock('./hooks/useBackgroundTasks', () => ({
   useBackgroundTasks: (
     _sessionId: string | undefined,
     _taskActivityKey: string,
+    _taskActivityActive: boolean,
     _connected: boolean,
     refreshTrigger = 0,
   ) => {
@@ -1928,6 +1942,20 @@ vi.doMock('./components/dialogs/GoalsDialog', async () => {
     },
   };
 });
+vi.doMock('./components/workflows/WorkflowRunsPage', async () => {
+  const React = await import('react');
+  return {
+    WorkflowRunsPage: (props: {
+      onCreateViaChat?: () => void;
+      onWorkflowRunStarted?: () => void;
+    }) => {
+      testState.latestWorkflowRunsProps = props;
+      return React.createElement('div', {
+        'data-testid': 'workflow-runs-content',
+      });
+    },
+  };
+});
 vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
   const React = await import('react');
   return {
@@ -2014,6 +2042,8 @@ vi.doMock('./components/messages/TasksStatusMessage', async () => {
     TasksStatusMessage: (props: {
       planTodos?: Array<{ id: string }>;
       agentTools?: Array<{ callId: string }>;
+      includeWorkflows?: boolean;
+      onWorkflowRunStarted?: () => void;
       onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
     }) => {
       testState.latestTasksStatusProps = props;
@@ -2146,7 +2176,7 @@ describe('mergeSideTaskCatalog', () => {
 });
 
 describe('task activity key', () => {
-  it('includes background shells in any tool-call state', () => {
+  it('includes task-bearing tool calls in any state', () => {
     const messages = [
       {
         id: 'tools',
@@ -2197,12 +2227,18 @@ describe('task activity key', () => {
             status: 'completed',
             args: { command: 'npm run dev --watch' },
           },
+          {
+            callId: 'workflow-call',
+            toolName: 'workflow',
+            status: 'in_progress',
+            args: {},
+          },
         ],
       },
     ] satisfies Message[];
 
     expect(getTaskActivityKey(messages)).toBe(
-      'shell-call:in_progress|agent-call:pending|nested-shell:completed|completed-shell:completed|promoted-shell:completed|monitor-call:completed',
+      'shell-call:in_progress|agent-call:pending|nested-shell:completed|completed-shell:completed|promoted-shell:completed|monitor-call:completed|workflow-call:in_progress',
     );
   });
 
@@ -5561,6 +5597,7 @@ beforeEach(() => {
   mockConnection.sessionContext = undefined;
   mockConnection.commands = [];
   mockConnection.skills = [];
+  mockConnection.supportedCommands = undefined;
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
   mockConnection.capabilities = {
@@ -5696,6 +5733,7 @@ beforeEach(() => {
   testState.latestModelManagement = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
+  testState.latestWorkflowRunsProps = null;
   testState.latestSplitViewProps = null;
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
@@ -5782,6 +5820,12 @@ beforeEach(() => {
     mimeType: 'text/plain',
   });
   mockSessionActions.getTasks.mockResolvedValue({
+    v: 1,
+    sessionId: 'session-1',
+    now: 1,
+    tasks: [],
+  });
+  mockSessionActions.getWorkflowTasks.mockResolvedValue({
     v: 1,
     sessionId: 'session-1',
     now: 1,
@@ -23012,6 +23056,72 @@ describe('App session callbacks', () => {
     expect(loadSplitSessions()).toEqual([]);
   });
 
+  it('does not let stale split classification replace workflows', async () => {
+    const classification = deferred<never>();
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+          workflowsEnabled: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    mockWorkspace.client.getStandaloneSession.mockReturnValueOnce(
+      classification.promise,
+    );
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.latestSessionOverviewProps?.onOpenSplit?.(['older-session']);
+      await vi.waitFor(() => {
+        expect(mockWorkspace.client.getStandaloneSession).toHaveBeenCalledWith(
+          'older-session',
+        );
+      });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/workflows');
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      classification.reject(
+        new DaemonHttpError(
+          404,
+          { code: 'standalone_session_not_found' },
+          'not found',
+        ),
+      );
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).not.toBeNull();
+  });
+
   it('does not let stale split classification replace a sidebar session load', async () => {
     const classification = deferred<never>();
     mockWorkspace.capabilities = {
@@ -29638,6 +29748,201 @@ describe('App /goal command', () => {
     });
 
     expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+  });
+});
+
+describe('App workflow history entry', () => {
+  it('keeps an opened tasks panel on the workflow-aware endpoint', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestStatusBarOnOpenTasks?.();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestTasksStatusProps?.includeWorkflows).toBe(true);
+  });
+
+  it('refreshes background-task polling when a task-dialog workflow starts', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestStatusBarOnOpenTasks?.();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(0);
+    act(() => testState.latestTasksStatusProps?.onWorkflowRunStarted?.());
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
+  });
+
+  it('refreshes background-task polling when a saved workflow starts', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(0);
+    act(() => testState.latestWorkflowRunsProps?.onWorkflowRunStarted?.());
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
+  });
+
+  it('starts a fresh workflow-creation chat from the runs page', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    const onCreateViaChat = testState.latestWorkflowRunsProps?.onCreateViaChat;
+    if (!onCreateViaChat) throw new Error('onCreateViaChat was not captured');
+    mockSessionActions.clearSession.mockClear();
+    editorInsertText.mockClear();
+
+    await act(async () => onCreateViaChat());
+    await flush();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    expect(editorInsertText).toHaveBeenCalledWith('/workflow-creator ', {
+      mode: 'replace',
+    });
+  });
+
+  it('does not prime the current chat when workflow session creation fails', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    const onCreateViaChat = testState.latestWorkflowRunsProps?.onCreateViaChat;
+    if (!onCreateViaChat) throw new Error('onCreateViaChat was not captured');
+    mockSessionActions.clearSession.mockRejectedValueOnce(new Error('boom'));
+    editorInsertText.mockClear();
+
+    await act(async () => onCreateViaChat());
+    await flush();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(editorInsertText).not.toHaveBeenCalled();
+  });
+
+  it('opens workflows from a session-less enabled workspace', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/workspace',
+          primary: true,
+          workflowsEnabled: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.supportedCommands = { workflowsEnabled: false };
+
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    mockConnection.sessionId = 'session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.supportedCommands = { workflowsEnabled: false };
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).toBeNull();
+  });
+
+  it('opens the workflow runs page for a bare /workflows command', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="workflow-runs-content"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    mockConnection.supportedCommands = { workflowsEnabled: false };
+    rerender();
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).toBeNull();
+  });
+
+  it('forwards /workflows in a non-workspace session', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).toBeNull();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/workflows',
+      expect.any(Object),
+    );
+  });
+
+  it('does not expose the local workflow page when workflows are disabled', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('button[aria-label="Workflows"]'),
+    ).toBeNull();
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="workflow-runs-page"]'),
+    ).toBeNull();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/workflows',
+      expect.any(Object),
+    );
   });
 });
 
