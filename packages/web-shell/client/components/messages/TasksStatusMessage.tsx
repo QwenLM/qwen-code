@@ -610,6 +610,7 @@ export function TasksStatusMessage({
     [
       actions,
       busy,
+      documentMode,
       loadTasks,
       onTasksChange,
       onWorkflowRunStarted,
@@ -652,7 +653,15 @@ export function TasksStatusMessage({
         if (expectedSessionIdRef.current === sessionId) setBusy(false);
       }
     },
-    [actions, busy, loadTasks, onTasksChange, selectedTask?.id, t],
+    [
+      actions,
+      busy,
+      documentMode,
+      loadTasks,
+      onTasksChange,
+      selectedTask?.id,
+      t,
+    ],
   );
 
   useDelayedGlobalKeyDown(
