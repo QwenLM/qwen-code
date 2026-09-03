@@ -1992,6 +1992,23 @@ export interface DaemonWorkspaceSkillsStatus {
   errors?: DaemonStatusCell[];
 }
 
+/** Sanitized Skill and MCP snapshots built from one live session's Config. */
+export interface DaemonSessionResourcesStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  skills: DaemonWorkspaceSkillsStatus;
+  /**
+   * Session-scoped MCP snapshot. Status, discovery, and accounting come from
+   * the selected session's manager; workspace-owned pool, budget, and
+   * discovery-error enrichments are absent. The name-keyed `hasOAuthTokens`,
+   * `requiresAuth`, `authenticationState`, and `authenticationError` fields
+   * are always absent; consumers must not treat their absence as a negative
+   * authentication state.
+   */
+  mcp: DaemonWorkspaceMcpStatus;
+}
+
 export interface DaemonWorkspaceAcpStatusResult {
   channelLive: boolean;
 }
@@ -2636,6 +2653,42 @@ export interface DaemonSessionSupportedCommandsStatus {
   }>;
 }
 
+/** Parsed `export const meta` contract of a saved workflow script. */
+export interface DaemonSavedWorkflowMeta {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  phases?: Array<{ title: string; detail?: string; model?: string }>;
+}
+
+/** One saved workflow definition, resolved and read for display. */
+export interface DaemonSessionSavedWorkflowDetail {
+  v: 1;
+  sessionId: string;
+  name: string;
+  source: 'project' | 'user';
+  /** Absolute path of the `.js` file the definition was read from. */
+  scriptPath: string;
+  /** Full script source, `export const meta` included. */
+  script: string;
+  /** Parsed meta block, or null when the script declares none or it is malformed. */
+  meta: DaemonSavedWorkflowMeta | null;
+  /** Why `meta` is null although a meta block is present. */
+  metaError?: string;
+}
+
+/**
+ * Response for `GET /session/:id/saved-workflows/:name`. `workflow` is null
+ * when the name is unknown or Workflow controls are unavailable for the
+ * session (untrusted workspace) — the same shape on every transport.
+ */
+export interface DaemonSessionSavedWorkflowStatus {
+  v: 1;
+  sessionId: string;
+  name: string;
+  workflow: DaemonSessionSavedWorkflowDetail | null;
+}
+
 export type DaemonSessionTaskLifecycleStatus =
   | 'running'
   | 'paused'
@@ -2808,6 +2861,8 @@ export interface DaemonSessionWorkflowTaskStatus {
   id: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;
+  /** Saved workflow definition name, when this run came from one. */
+  workflowName?: string;
   /** Restored from the project snapshot store; controls are read-only. */
   isHistorical?: boolean;
   sourceRunId?: string;

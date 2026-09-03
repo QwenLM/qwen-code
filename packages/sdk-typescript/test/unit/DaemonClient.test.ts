@@ -29,6 +29,7 @@ import type {
   GoalStateResponse,
   DaemonSessionContextStatus,
   DaemonSessionLspStatus,
+  DaemonSessionResourcesStatus,
   DaemonSessionOrganizationResult,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTasksStatus,
@@ -1996,6 +1997,41 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('GETs a saved workflow definition with encoded ids', async () => {
+      const status = {
+        v: 1 as const,
+        sessionId: 'with/slash',
+        name: 'deep review',
+        workflow: {
+          v: 1 as const,
+          sessionId: 'with/slash',
+          name: 'deep review',
+          source: 'project' as const,
+          scriptPath: '/work/a/.qwen/workflows/deep review.js',
+          script: 'export const meta = { name: "deep review" }',
+          meta: null,
+          metaError: 'missing description',
+        },
+      };
+      const { fetch, calls } = recordingFetch((req) =>
+        req.url.endsWith('/session/with%2Fslash/saved-workflows/deep%20review')
+          ? jsonResponse(200, status)
+          : jsonResponse(500, { error: `unexpected ${req.url}` }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.sessionSavedWorkflow('with/slash', 'deep review', 'client-1'),
+      ).resolves.toEqual(status);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        [
+          'GET',
+          'http://daemon/session/with%2Fslash/saved-workflows/deep%20review',
+        ],
+      ]);
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('GETs session status routes with encoded session ids', async () => {
       const context: DaemonSessionContextStatus = {
         v: 1,
@@ -2041,6 +2077,23 @@ describe('DaemonClient', () => {
           },
         ],
       };
+      const resources: DaemonSessionResourcesStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        workspaceCwd: '/work/a',
+        skills: {
+          v: 1,
+          workspaceCwd: '/work/a',
+          initialized: true,
+          skills: [],
+        },
+        mcp: {
+          v: 1,
+          workspaceCwd: '/work/a',
+          initialized: true,
+          servers: [],
+        },
+      };
       const { fetch, calls } = recordingFetch((req) => {
         if (req.url.endsWith('/session/with%2Fslash/context')) {
           return jsonResponse(200, context);
@@ -2058,6 +2111,9 @@ describe('DaemonClient', () => {
         }
         if (req.url.endsWith('/session/with%2Fslash/lsp')) {
           return jsonResponse(200, lsp);
+        }
+        if (req.url.endsWith('/session/with%2Fslash/resources')) {
+          return jsonResponse(200, resources);
         }
         return jsonResponse(500, { error: `unexpected ${req.url}` });
       });
@@ -2078,6 +2134,9 @@ describe('DaemonClient', () => {
       await expect(
         client.sessionLspStatus('with/slash', 'client-1'),
       ).resolves.toEqual(lsp);
+      await expect(
+        client.sessionResources('with/slash', 'client-1'),
+      ).resolves.toEqual(resources);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
@@ -2087,8 +2146,10 @@ describe('DaemonClient', () => {
           'http://daemon/session/with%2Fslash/tasks?includeWorkflows=true',
         ],
         ['GET', 'http://daemon/session/with%2Fslash/lsp'],
+        ['GET', 'http://daemon/session/with%2Fslash/resources'],
       ]);
       expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
         'client-1',
         'client-1',
         'client-1',
