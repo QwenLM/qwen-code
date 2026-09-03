@@ -108,9 +108,41 @@ export function classifyResult(body) {
     return 'noop';
   }
   if (line.includes('did not run conflict resolution')) {
-    return 'skipped';
+    // The producer posts this ONE sentence for every request it did not run,
+    // benign or not: the reason follows on the next line. Two of those reasons
+    // are the lane breaking, not a lane with nothing to do — `prepare`'s EXIT
+    // trap firing when the step dies before writing a decision (an expired
+    // CI_BOT_PAT does exactly this), and `git merge-tree` failing so the
+    // conflict status is unknown. Left as `skipped` they count on neither
+    // side of the streak while their comment marks the request answered, so a
+    // lane that crash-skips EVERY request reads as healthy forever — the
+    // never-ran incident class this watch exists for.
+    return CRASH_SKIP_REASONS.some((r) => skipReason(body).startsWith(r))
+      ? 'infra_failed'
+      : 'skipped';
   }
   return 'unknown';
+}
+
+// Producer-owned prefixes, `finish_without_agent failed` in
+// qwen-code-pr-review.yml's `Prepare pull request branch`. A test extracts
+// them from the workflow so a reworded reason fails there rather than going
+// quiet here. Benign refusals (`skip`/`unsupported`: closed PR, draft-free
+// no-conflict, deleted head repo, fork without maintainer edits) are NOT
+// listed — they must stay uncounted.
+const CRASH_SKIP_REASONS = [
+  'Internal error while preparing',
+  'Could not determine conflict status',
+];
+
+// The line after the fixed sentence: `Report skipped request` writes the
+// sentence, a blank line, then `skip_reason` verbatim.
+function skipReason(body) {
+  const lines = body
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('<!--'));
+  return lines[1] ?? '';
 }
 
 function firstLine(body) {
@@ -301,15 +333,49 @@ function sameState(previous, current) {
   );
 }
 
+// The shape the watch writes, and the only shape it will read back. A marker
+// is text on a GitHub issue, so a payload of the wrong TYPE is as reachable as
+// one of the wrong value — and type confusion defeats the close gate's checks
+// all at once: `newestUnanswered: []` is truthy (so the "no barrier recorded"
+// refusal misses it) and compares greater-than against every timestamp (so the
+// postdating gate passes), closing on any push at all. Validate rather than
+// trust: anything malformed reads as no state, which the gate already treats
+// as "cannot close".
+function validState(state) {
+  if (!state || typeof state !== 'object' || Array.isArray(state)) {
+    return null;
+  }
+  // A field that is absent reads as "not recorded", which every gate already
+  // handles; a field that is PRESENT must have the type the watch writes.
+  const ok = (v, type) => v === undefined || v === null || typeof v === type;
+  const { streak, unanswered, newestUnanswered, latest, recovered } = state;
+  if (!ok(streak, 'number') || !ok(newestUnanswered, 'string')) {
+    return null;
+  }
+  if (!ok(latest, 'number') || !ok(recovered, 'number')) {
+    return null;
+  }
+  if (
+    unanswered !== undefined &&
+    unanswered !== null &&
+    (!Array.isArray(unanswered) ||
+      unanswered.some((v) => typeof v !== 'number'))
+  ) {
+    return null;
+  }
+  return state;
+}
+
 export function readState(issueBodyAndComments) {
   let state = null;
   for (const text of issueBodyAndComments) {
     const m = text.match(STATE_RE);
     if (m) {
       try {
-        state = JSON.parse(m[1]);
+        state = validState(JSON.parse(m[1]));
       } catch {
         // A hand-edited marker is treated as no state: the next tick rewrites it.
+        state = null;
       }
     }
   }
@@ -420,21 +486,9 @@ export function renderRecovery(assessment, options = {}, previous = null) {
   ].join('\n');
 }
 
-// Holds a state's barrier at the issue body's own when the body is not
-// trusted as state — see findOpenIssue's `bodyFloor`. Monotone, so a body
-// can only hold the barrier up, never lower what a trusted marker recorded.
-function withFloor(previous, bodyFloor) {
-  const carried = previous?.newestUnanswered ?? null;
-  return {
-    ...previous,
-    newestUnanswered:
-      bodyFloor && (!carried || bodyFloor > carried) ? bodyFloor : carried,
-  };
-}
-
 // Pure decision: what to write, given the assessment and the open issue (if
-// any). `existing` is { number, texts: [body, ...comments], bodyFloor } or
-// null.
+// any). `existing` is { number, texts: [...the watch's own unedited comments] }
+// or null.
 export function decide(assessment, existing, options = {}) {
   const actions = [];
   if (assessment.alarm) {
@@ -451,11 +505,7 @@ export function decide(assessment, existing, options = {}) {
         actions.push({
           type: 'comment',
           number: existing.number,
-          body: renderUpdate(
-            assessment,
-            options,
-            withFloor(previous, existing.bodyFloor),
-          ),
+          body: renderUpdate(assessment, options, previous),
         });
       }
     }
@@ -467,48 +517,54 @@ export function decide(assessment, existing, options = {}) {
     // no attempt happened at all — is not a recovery, and closing on it
     // would hide a lane that is still broken.
     const previous = readState(existing.texts);
-    const carried = withFloor(previous, existing.bodyFloor);
     const latest = assessment.latestAttempt;
     // ...and the push must postdate every unanswered request the watch has
     // seen since the issue opened: a push that landed before those requests
     // cannot be evidence that anything ran after them. Requests answered by
     // a closed PR or by ageing out of the window leave no trace in the
-    // current assessment, so their newest timestamp survives in the state
-    // markers written on the issue.
-    const barrier = stateOf(assessment, carried).newestUnanswered;
-    // No readable state means no barrier ON RECORD, which is not the same as
-    // no barrier: the marker carrying it can be edited away, and closing on
-    // that would certify a recovery nothing vouches for.
-    if (
-      previous &&
-      latest &&
-      latest.kind === 'pushed' &&
-      (!barrier || latest.at > barrier)
-    ) {
+    // current assessment, so their newest timestamp is carried in the state
+    // markers the watch writes on the issue.
+    //
+    // Those markers live on GitHub, where a triage user can edit or delete
+    // them, so the barrier is floored at the issue's OWN creation time — a
+    // field GitHub maintains and nobody can edit. The floor is sound on its
+    // own terms: the issue exists because the lane was failing at that
+    // moment, so a push from before it cannot show the lane recovered. What
+    // the floor buys is that tampering with the markers can no longer
+    // manufacture a false close — the worst a forged, junked, wrong-typed or
+    // deleted marker can do is drop the barrier back to this floor — while a
+    // record the watch can still read keeps the stronger, later barrier.
+    const recorded = stateOf(assessment, previous).newestUnanswered;
+    const barrier =
+      recorded && recorded > existing.createdAt ? recorded : existing.createdAt;
+    if (latest && latest.kind === 'pushed' && latest.at > barrier) {
       // Comment-then-close is not atomic: if the close fails after the
       // comment lands, the `recovered` field the comment wrote keeps the
       // next tick from repeating it while it retries the close. A success
       // first seen in an alarm update still closes once the alarm clears —
       // only the recovery comment itself is deduped, never the close.
-      if (!previous.recovered) {
+      if (!previous?.recovered) {
         actions.push({
           type: 'comment',
           number: existing.number,
-          body: renderRecovery(assessment, options, carried),
+          body: renderRecovery(assessment, options, previous),
         });
       }
       actions.push({ type: 'close', number: existing.number });
-    } else if (!previous || barrier > (previous.newestUnanswered ?? '')) {
+    } else if (
+      !previous ||
+      (recorded ?? '') > (previous.newestUnanswered ?? '')
+    ) {
       // Persist the barrier while the alarm is quiet. A request that goes
       // unanswered below the threshold reaches no marker otherwise, and once
       // its PR closes assess() drops it by design: the gate above would fall
-      // back to the older recorded maximum and close on a push that predates
-      // it. This write is also what keeps the refusal above from wedging the
-      // issue open — the next tick reads the state recorded here.
+      // back to the creation-time floor and close on a push that predates the
+      // request. Keyed on the RECORDED barrier, not the floored one, so the
+      // floor alone never makes the watch chatter on a quiet lane.
       actions.push({
         type: 'comment',
         number: existing.number,
-        body: renderStateRefresh(assessment, options, carried),
+        body: renderStateRefresh(assessment, options, previous),
       });
     }
   }
@@ -614,14 +670,12 @@ export function findOpenIssue(gh, repo, label) {
       'per_page=100',
       '--paginate',
       '--jq',
-      '.[] | select(.pull_request == null) | [.number, .user.login, .created_at, .updated_at, (.body // "" | @base64)] | @tsv',
+      '.[] | select(.pull_request == null) | [.number, .user.login, .created_at, (.body // "" | @base64)] | @tsv',
     ]),
   );
-  for (const [number, author, created_at, updated_at, body] of rows) {
-    // The issue's body is a state source, so the issue has to be the watch's
-    // own: a planted issue carrying the label and the marker is exactly as
-    // forgeable as a comment on one, and applying that label needs triage —
-    // the same adversary assess() models for result comments.
+  for (const [number, author, created_at, body] of rows) {
+    // The issue must still be the watch's own: adopting a planted one would
+    // let its comments — which ARE the state source — be chosen wholesale.
     if (!STATE_AUTHORS.has(author)) {
       continue;
     }
@@ -650,17 +704,26 @@ export function findOpenIssue(gh, repo, label) {
             STATE_AUTHORS.has(user) && updated === created,
         )
         .map(([, , , b]) => b64(b));
-      return {
-        number: Number(number),
-        texts: [updated_at === created_at ? text : '', ...comments],
-        // The barrier outlives the blanking above: `updated_at` moves on ANY
-        // comment, so a stranger's reply — no permission needed — would
-        // otherwise drop the only record of it until the watch's own first
-        // comment, and an older push could certify a recovery. Only this one
-        // field is carried out of an untrusted body, and only upward: a
-        // forged-high floor can delay a close, never certify a false one.
-        bodyFloor: readState([text])?.newestUnanswered ?? null,
-      };
+      // The body is what FINDS the issue, never what the watch believes. It
+      // cannot be trusted as state and cannot be cheaply checked either: the
+      // Issues API bumps an issue's `updated_at` on ANY comment, so
+      // `updated_at !== created_at` marks an untouched body as edited the
+      // moment a stranger replies (no permission needed), while a body a
+      // triage user really did edit is indistinguishable from that. Carrying
+      // one field out of it anyway — the barrier — was worse than dropping
+      // it: the quiet-tick refresh wrote that value into a comment the watch
+      // DOES trust, laundering an attacker-chosen barrier into trusted state
+      // one tick later, and a forged-low, absent, or wrong-typed payload then
+      // closed the issue on a push that predates the real barrier.
+      //
+      // So: state comes only from the watch's own unedited comments (a
+      // comment's `updated_at` moves only on an edit, which is checkable).
+      // Nothing is lost. `decide()` refuses to close while no state is
+      // readable and writes a refresh instead, so the first quiet tick
+      // re-derives the barrier from the live assessment and records it in a
+      // trusted comment; the requests that opened the issue are still inside
+      // the window then (ticks are hours apart, the window is days).
+      return { number: Number(number), createdAt: created_at, texts: comments };
     }
   }
   return null;
