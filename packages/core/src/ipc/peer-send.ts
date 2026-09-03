@@ -120,10 +120,21 @@ const RECEIPT_TRANSITIONS: Record<
   PeerDeliveryStatus | 'pending',
   ReadonlySet<PeerDeliveryStatus>
 > = {
-  pending: new Set(['held', 'delivered', 'denied', 'expired', 'misaddressed']),
+  pending: new Set([
+    'held',
+    'delivered',
+    'denied',
+    'refused',
+    'expired',
+    'misaddressed',
+  ]),
+  // A refusal is decided at admission, so it cannot follow a hold: a
+  // message already parked was not turned away. Switching the setting to
+  // `refuse` while it sits there settles it as `denied` — someone chose.
   held: new Set(['delivered', 'denied', 'expired', 'misaddressed']),
   delivered: new Set(['expired', 'misaddressed']),
   denied: new Set(),
+  refused: new Set(),
   expired: new Set(),
   misaddressed: new Set(),
 };
