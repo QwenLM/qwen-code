@@ -69,6 +69,7 @@ import {
   AlreadyReportedError,
   _resetExitLatchForTest,
 } from './utils/errors.js';
+import { expectWithinLatencyBudget } from './test-utils/latency-budget.js';
 
 // Mock core modules
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
@@ -8384,7 +8385,7 @@ describe('runNonInteractive', () => {
       // 1000 ms is generous (test env CI noise) while still proving the
       // cap exists; without the cap, an infinitely-true
       // hasUnfinalizedTasks would never return.
-      expect(elapsed).toBeLessThan(1000);
+      expectWithinLatencyBudget(elapsed, 1000);
 
       // Find the result event and the simulated cancellation
       // task_notification. The notification must appear BEFORE the
