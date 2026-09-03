@@ -132,6 +132,15 @@ describe('ECS runner qwen update workflow', () => {
     expect(verify).not.toMatch(/sudo (cat|ls|env)/);
   });
 
+  it('captures the installed version tolerantly', () => {
+    // Under `set -e`, a failing `--version` feeding a bare assignment
+    // aborts the step before the mismatch branch — and the diagnostics
+    // this step exists to print — ever runs.
+    expect(stepBody('Verify version')).toContain(
+      'actual="$("${qwen_path}" --version 2>&1)" || actual=',
+    );
+  });
+
   it('runs only when this workflow changes on main', () => {
     expect(workflow).toContain(
       "  push:\n    branches: ['main']\n    paths: ['.github/workflows/update-ecs-runner-qwen.yml']",
@@ -307,6 +316,41 @@ function runResolve({ failures = 0, version = '0.22.3', env = {} } = {}) {
   }
 }
 
+// Runs the 'Verify version' step body against a stubbed `qwen` whose
+// `--version` prints `output` and exits with `exitCode`.
+function runVerify({ output = '', exitCode = 0, target = '0.22.3' } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'ecs-verify-'));
+  try {
+    const qwenStub = join(dir, 'qwen');
+    const stubLines = ['#!/usr/bin/env bash'];
+    if (output) {
+      stubLines.push(`echo '${output}'`);
+    }
+    stubLines.push(`exit ${exitCode}`);
+    writeFileSync(qwenStub, stubLines.join('\n'), { mode: 0o755 });
+    chmodSync(qwenStub, 0o755);
+
+    const script = join(dir, 'verify.sh');
+    writeFileSync(script, stepBody('Verify version'));
+
+    const result = spawnSync('bash', [script], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH ?? ''}`,
+        VERSION: target,
+      },
+    });
+    return {
+      status: result.status,
+      stdout: result.stdout ?? '',
+      stderr: result.stderr ?? '',
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 // Runs .github/scripts/ecs-fleet-update-failure-issue.sh against a stubbed
 // `gh`. The stub applies the script's real `--jq` filter with real jq, so the
 // pool-naming expression is exercised rather than mocked away, and it honours
@@ -433,6 +477,33 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
     const resolved = runResolve({ env: { INPUT_VERSION: '' } });
     expect(resolved.status).toBe(0);
     expect(resolved.output.trim()).toBe('version=0.22.3');
+  });
+
+  it('verifies a healthy install without diagnostics', () => {
+    const verified = runVerify({ output: '0.22.3', target: '0.22.3' });
+    expect(verified.status).toBe(0);
+    expect(verified.stdout).toContain('qwen version: 0.22.3');
+    expect(verified.stdout).not.toContain('--- diagnostics ---');
+  });
+
+  it('prints the diagnostics when the installed qwen is stale', () => {
+    const verified = runVerify({ output: '0.22.2', target: '0.22.3' });
+    expect(verified.status).toBe(1);
+    expect(verified.stdout).toContain('--- diagnostics ---');
+    expect(verified.stdout).toContain('--- end diagnostics ---');
+  });
+
+  it('prints the diagnostics when the installed qwen cannot run at all', () => {
+    // A crashed install can leave `command -v qwen` resolving to a broken
+    // entrypoint whose `--version` exits non-zero; the tolerant capture is
+    // what keeps the step failing at the version test with diagnostics
+    // instead of dying at the bare assignment under `set -e`.
+    const verified = runVerify({ exitCode: 127, target: '0.22.3' });
+    expect(verified.status).toBe(1);
+    expect(verified.stdout).toContain(
+      'qwen version: (qwen --version failed, exit 127)',
+    );
+    expect(verified.stdout).toContain('--- diagnostics ---');
   });
 
   it('files an issue naming the pools left on the old CLI', () => {

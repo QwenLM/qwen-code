@@ -135,7 +135,14 @@ jobs:
         run: |-
           set -euo pipefail
           qwen_path="$(command -v qwen)"
-          actual="$("${qwen_path}" --version)"
+          # Tolerate a broken entrypoint: a crashed install can leave
+          # `command -v qwen` resolving to a binary whose `--version` exits
+          # non-zero, and under `set -e` a failing command substitution
+          # feeding a bare assignment aborts the step right here — before
+          # the mismatch diagnostics below can print, for exactly the
+          # failure class they exist for. The version test at the end
+          # still fails the step either way.
+          actual="$("${qwen_path}" --version 2>&1)" || actual="(qwen --version failed, exit $?)"
           echo "qwen path: ${qwen_path}"
           echo "qwen version: ${actual}"
           if [[ "${actual}" != "${VERSION}" ]]; then
