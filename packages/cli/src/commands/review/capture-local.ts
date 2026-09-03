@@ -24,6 +24,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
