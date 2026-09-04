@@ -60,6 +60,10 @@ import {
   writeSnapshotArtifacts,
   collectPlatformInfo,
 } from './_daemon-perf-report.js';
+import {
+  promptLatencySkipReason,
+  shouldSkipPromptLatency,
+} from './_prompt-latency-policy.js';
 
 // Minimal type-shape for the SSE backpressure unit suite — we only assert
 // `.type`, so we avoid coupling tests to the full BridgeEvent surface.
@@ -90,32 +94,7 @@ const RSS_SAMPLE_DURATION_MS = Number(
   process.env['QWEN_BASELINE_RSS_SAMPLE_DURATION_MS'] ??
     (HEAVY ? 15_000 : 5_000),
 );
-const PROMPT_LATENCY_CREDENTIAL_ENV_KEYS = [
-  'DASHSCOPE_API_KEY',
-  'OPENAI_API_KEY',
-  'ANTHROPIC_API_KEY',
-  'GEMINI_API_KEY',
-  'GOOGLE_API_KEY',
-  'QWEN_API_KEY',
-];
-const HAS_PROMPT_LATENCY_CREDENTIAL =
-  process.env['QWEN_BASELINE_ENABLE_PROMPT_LATENCY'] === '1' ||
-  PROMPT_LATENCY_CREDENTIAL_ENV_KEYS.some((key) => Boolean(process.env[key])) ||
-  Object.entries(process.env).some(
-    ([key, value]) => key.startsWith('QWEN_CUSTOM_API_KEY_') && Boolean(value),
-  );
-// The pool runners share one ECS host with ~30 concurrent jobs, so the slowest
-// of PROMPT_ITERATIONS real model round-trips measures that contention rather
-// than the daemon: `promptP99MaxMs` becomes a coin flip, and every one of
-// vitest's attempts re-issues all 20 prompts inside the 10-minute budget below.
-// `integration-tests/vitest.config.ts` exempts the same runners from the
-// analogous pressure class. The dedicated macOS legs still record the baseline,
-// and QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 still force-runs it here.
-const SKIP_PROMPT_LATENCY =
-  process.env['QWEN_BASELINE_SKIP_PROMPT_LATENCY'] === '1' ||
-  (process.env['QWEN_BASELINE_ENABLE_PROMPT_LATENCY'] !== '1' &&
-    process.env['RUNNER_ENVIRONMENT'] === 'self-hosted') ||
-  !HAS_PROMPT_LATENCY_CREDENTIAL;
+const SKIP_PROMPT_LATENCY = shouldSkipPromptLatency(process.env);
 
 const FIXTURES_DIR = path.resolve(__dirname, '../fixtures');
 const IDLE_MCP_PATH = path.join(FIXTURES_DIR, 'idle-mcp/server.mjs');
@@ -687,9 +666,7 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
             firstByteMs: null,
             totalMs: null,
             skipped: true,
-            skipReason: !HAS_PROMPT_LATENCY_CREDENTIAL
-              ? 'No recognized model credential env var is set; prompt latency requires real model access. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run with non-env auth.'
-              : 'Shared self-hosted pool: 20 real model round-trips would measure host contention, not the daemon. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run.',
+            skipReason: promptLatencySkipReason(process.env, PROMPT_ITERATIONS),
           };
           // Mark via a no-op assertion so the suite still appears in output.
           expect(true).toBe(true);
