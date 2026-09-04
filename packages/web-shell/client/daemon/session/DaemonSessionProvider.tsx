@@ -2009,7 +2009,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 nextSession.replaySnapshot.compactedReplay.length +
                 nextSession.replaySnapshot.liveJournal.length;
               if (replaySnapshotEventCount > 0) {
-                setPromptStatus('idle');
+                // Rebuilding the transcript store is not a turn boundary. The
+                // episode-start updater below can only preserve a state this
+                // reset has not already flattened, so an observer pane whose
+                // ring-evicted reload carries a replay snapshot would lose the
+                // indicator for the rest of the turn (#9487).
+                if (maySettleToIdle()) setPromptStatus('idle');
                 clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
                 needsStoreReset = true;
               } else {

@@ -10265,6 +10265,150 @@ describe('DaemonSessionProvider', () => {
       expect(promptStatus).not.toBe('idle');
     });
 
+    it('does not revive a backstop-settled restored prompt on reconnect', async () => {
+      // The /load snapshot's `hasActivePrompt` is one-shot: once something
+      // consumes it, a reconnect on the same session client must not recompute
+      // it as still running. The backstop is one of those consumers — without
+      // it marking the snapshot settled, an ordinary Last-Event-ID resume
+      // flips the pane back to streaming for a turn the daemon already
+      // finished.
+      const streamEnd = createDeferred<void>();
+      const reattached = createDeferred<void>();
+      let attach = 0;
+      const session = createMockSession({
+        sessionId: 'session-restored-backstop',
+        hasActivePrompt: true,
+        events: async function* restoredThenReconnect(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          attach += 1;
+          if (attach === 1) {
+            await streamEnd.promise;
+            return;
+          }
+          reattached.resolve();
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+          yield* [];
+        },
+      });
+      // The same client instance on both attaches: a PATH-A resume, which is
+      // what makes the one-shot snapshot recomputable.
+      sdkMocks.sessions.push(session, session);
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(promptStatus).toBe('streaming');
+
+      await act(async () => {
+        actions?.setDaemonActivePrompt(true);
+        actions?.setDaemonActivePrompt(false);
+        await flushPromises();
+      });
+      expect(promptStatus).toBe('idle');
+
+      await act(async () => {
+        streamEnd.resolve();
+        await reattached.promise;
+        await flushPromises();
+      });
+
+      expect(attach).toBe(2);
+      expect(promptStatus).toBe('idle');
+    });
+
+    it('survives a same-session reload that carries a replay snapshot', async () => {
+      // A ring-evicted reload rebuilds the store from a fresh replay snapshot.
+      // That reset is not a turn boundary, and it runs before the episode-start
+      // updater — so if it flattens the state unconditionally there is nothing
+      // left for the updater to preserve, and an observer pane mid-turn loses
+      // the indicator with no event left to revive it.
+      const resyncGate = createDeferred<void>();
+      const reloaded = createDeferred<void>();
+      const firstSession = createMockSession({
+        sessionId: 'session-replay-reload',
+        events: async function* observedThenResync() {
+          yield {
+            id: 9,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'starting' },
+              },
+            },
+          };
+          await resyncGate.promise;
+          yield {
+            id: 10,
+            v: 1,
+            type: 'state_resync_required',
+            data: { reason: 'ring_evicted' },
+          } satisfies DaemonEvent;
+        },
+      });
+      const reloadedSession = createMockSession({
+        sessionId: 'session-replay-reload',
+        // Non-empty, and with no terminal in it: the turn is still running.
+        replaySnapshot: {
+          compactedReplay: [
+            {
+              id: 1,
+              v: 1,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'starting' },
+                },
+              },
+            },
+          ],
+          liveJournal: [],
+        },
+        events: createPendingEvents(reloaded),
+      });
+      sdkMocks.sessions.push(firstSession, reloadedSession);
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(promptStatus).not.toBe('idle');
+
+      await act(async () => {
+        actions?.setDaemonActivePrompt(true);
+        await flushPromises();
+      });
+
+      await act(async () => {
+        resyncGate.resolve();
+        await reloaded.promise;
+        await flushPromises();
+      });
+
+      expect(promptStatus).not.toBe('idle');
+    });
+
     it('still settles on silence when no daemon prompt state is available', async () => {
       vi.useFakeTimers();
       try {
