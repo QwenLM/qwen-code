@@ -212,6 +212,7 @@ export {
   type DaemonSessionContextStatus,
   type DaemonLspServerStatus,
   type DaemonSessionLspStatus,
+  type DaemonSessionResourcesStatus,
   type DaemonSessionAgentTaskStatus,
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionWorkflowTaskStatus,
