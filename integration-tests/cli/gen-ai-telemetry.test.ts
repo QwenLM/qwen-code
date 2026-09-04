@@ -5,7 +5,6 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TestRig } from '../test-helper.js';
 import {
@@ -53,41 +52,6 @@ function parseTelemetry(content: string): TelemetryRecord[] {
         return [];
       }
     });
-}
-
-/**
- * The CLI exports telemetry as it shuts down, so `telemetry.log` can still be
- * missing or mid-write when `rig.run()` resolves. On the shared self-hosted
- * pool the flush loses that race and the exact span counts below fail a run
- * whose spans were all emitted — the same reason `waitForTelemetryEvent` and
- * `waitForToolCall` wait for telemetry readiness before asserting. Poll
- * quietly (`readFile` dumps the whole file under VERBOSE) until the caller's
- * expectation is satisfiable; on a timeout hand back what did arrive so the
- * assertion reports the real diff instead of an ENOENT.
- */
-async function readFlushedTelemetry(
-  rig: TestRig,
-  isFlushed: (records: TelemetryRecord[]) => boolean,
-): Promise<TelemetryRecord[]> {
-  const logPath = join(rig.testDir!, 'telemetry.log');
-  let records: TelemetryRecord[] = [];
-  const flushed = await rig.poll(
-    () => {
-      try {
-        records = parseTelemetry(readFileSync(logPath, 'utf-8'));
-      } catch {
-        records = [];
-      }
-      return isFlushed(records);
-    },
-    rig.getDefaultTimeout(),
-    100,
-  );
-  return flushed ? parseTelemetry(rig.readFile('telemetry.log')) : records;
-}
-
-function spanCount(records: TelemetryRecord[], name: string): number {
-  return records.filter((record) => record.name === name).length;
 }
 
 function setEnvironment(
@@ -210,13 +174,7 @@ describeLocal('GenAI telemetry fields', () => {
       restoreEnvironment();
     }
 
-    const records = await readFlushedTelemetry(
-      rig,
-      (parsed) =>
-        spanCount(parsed, 'qwen-code.llm_request') === 2 &&
-        spanCount(parsed, 'qwen-code.interaction') === 1 &&
-        parsed.some((record) => record.name === 'qwen-code.tool'),
-    );
+    const records = parseTelemetry(rig.readFile('telemetry.log'));
     const llmSpans = records.filter(
       (record) => record.name === 'qwen-code.llm_request',
     );
@@ -551,14 +509,7 @@ describeLocal('GenAI telemetry fields', () => {
       restoreEnvironment();
     }
 
-    // This case leaves follow-up suggestions on, so the turn's own spans are
-    // not the only ones exported; wait for the two it asserts on to exist.
-    const records = await readFlushedTelemetry(
-      rig,
-      (parsed) =>
-        parsed.some((record) => record.name === 'qwen-code.interaction') &&
-        parsed.some((record) => record.name === 'qwen-code.llm_request'),
-    );
+    const records = parseTelemetry(rig.readFile('telemetry.log'));
     const interactionSpan = records.find(
       (record) => record.name === 'qwen-code.interaction',
     );
@@ -648,13 +599,7 @@ describeLocal('GenAI telemetry fields', () => {
       expect(body).toMatchObject({ n: 1 });
     }
 
-    const records = await readFlushedTelemetry(
-      rig,
-      (parsed) =>
-        spanCount(parsed, 'qwen-code.llm_request') ===
-          server!.requests.length &&
-        parsed.some((record) => record.name === 'qwen-code.tool'),
-    );
+    const records = parseTelemetry(rig.readFile('telemetry.log'));
     const interactionSpan = records.find(
       (record) => record.name === 'qwen-code.interaction',
     );
@@ -691,30 +636,5 @@ describeLocal('GenAI telemetry fields', () => {
       'gen_ai.tool.call.arguments',
     );
     expect(toolSpan?.attributes).not.toHaveProperty('gen_ai.tool.call.result');
-  });
-
-  it('waits for telemetry that lands after the run resolves', async () => {
-    rig = new TestRig();
-    await rig.setup('gen-ai-telemetry-late-flush');
-    // Stands in for a shutdown flush that loses the race with the CLI's exit:
-    // nothing is on disk yet when the read starts, so a single-shot read has
-    // nothing to parse.
-    const lateFlush = setTimeout(() => {
-      writeFileSync(
-        join(rig!.testDir!, 'telemetry.log'),
-        `${JSON.stringify({
-          name: 'qwen-code.llm_request',
-          attributes: {},
-        })}\n`,
-      );
-    }, 1_000);
-    try {
-      const records = await readFlushedTelemetry(rig, (parsed) =>
-        parsed.some((record) => record.name === 'qwen-code.llm_request'),
-      );
-      expect(records).toHaveLength(1);
-    } finally {
-      clearTimeout(lateFlush);
-    }
   });
 });
