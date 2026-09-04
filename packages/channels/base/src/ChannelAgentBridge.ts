@@ -148,6 +148,8 @@ export interface BridgeSessionInfo {
   sessionId: string;
   workspaceCwd: string;
   hasActivePrompt: boolean;
+  worktree?: { slug: string; path: string; branch: string };
+  worktreeState?: 'persisted-v1';
 }
 
 export interface ChannelAgentBridgeSessionOptions {
@@ -160,6 +162,8 @@ export interface ChannelAgentBridgeSessionOptions {
    * through a channel.
    */
   sourceId?: string;
+  /** Request daemon-managed git worktree isolation for a fresh session. */
+  worktree?: Record<string, never>;
 }
 
 export interface ChannelPromptImage {

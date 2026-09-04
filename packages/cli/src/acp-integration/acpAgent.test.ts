@@ -14,7 +14,9 @@ import {
   afterAll,
   type MockInstance,
 } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { Stats } from 'node:fs';
+import * as ts from 'typescript';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -116,6 +118,12 @@ const { mockResolveSavedWorkflowScript } = vi.hoisted(() => ({
 }));
 const { mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockAddDaemonRequestAttribute: vi.fn(),
+}));
+const { mockRestoreWorktreeContext } = vi.hoisted(() => ({
+  mockRestoreWorktreeContext: vi.fn().mockResolvedValue({
+    contextMessage: null,
+    session: null,
+  }),
 }));
 
 const {
@@ -299,6 +307,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ),
   initializeTelemetry: vi.fn().mockResolvedValue(undefined),
   addDaemonRequestAttribute: mockAddDaemonRequestAttribute,
+  restoreWorktreeContext: mockRestoreWorktreeContext,
   observeToolResultBoundary: vi.fn(() => false),
   toolResultArtifactState: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
@@ -388,6 +397,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   SESSION_TRANSCRIPT_MAX_LIMIT: 500,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES: 4 * 1024 * 1024,
   InvalidSessionTranscriptCursorError: class InvalidSessionTranscriptCursorError extends Error {},
+  InvalidSessionTranscriptTurnAnchorError: class InvalidSessionTranscriptTurnAnchorError extends Error {},
   SessionTranscriptSnapshotUnavailableError: class SessionTranscriptSnapshotUnavailableError extends Error {},
   SessionTranscriptTooLargeError: class SessionTranscriptTooLargeError extends Error {
     constructor(
@@ -738,6 +748,21 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         ? `${entry.subagentType}: ${entry.description}`
         : entry.description,
   ),
+  getSubagentSessionDir: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getSubagentSessionDir,
+  MAX_RETAINED_TERMINAL_AGENTS: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).MAX_RETAINED_TERMINAL_AGENTS,
+  readAgentMeta: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).readAgentMeta,
+  readAgentMetaAsync: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).readAgentMetaAsync,
+  sanitizeFilenameComponent: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).sanitizeFilenameComponent,
   SessionStartSource: {
     Startup: 'startup',
     Resume: 'resume',
@@ -1040,6 +1065,7 @@ import {
   Storage,
   SessionTranscriptReader,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   SessionTranscriptPageTooLargeError,
@@ -1064,6 +1090,7 @@ import {
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import { DAEMON_OWNED_STANDALONE_CREATION_KEY } from '@qwen-code/acp-bridge/sessionSource';
@@ -3702,6 +3729,161 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it('forces the session writer lease for a Conversations-marked child regardless of the setting', async () => {
+    const innerConfig = await setupSessionMocks('session-writer-lease-marked');
+    innerConfig.getCronScheduler = vi
+      .fn()
+      .mockReturnValue({ setSkipDurableFire: vi.fn() });
+    mockConfig.isSessionWriterLeaseEnabled = vi.fn().mockReturnValue(false);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        conversationsRuntimeProvenance: true,
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const sessionSettings = vi.mocked(loadCliConfig).mock.calls[0]?.[0];
+    expect(sessionSettings?.experimental?.sessionWriterLease).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('selects the hardened local reclaim policy for a Conversations-marked managed child', async () => {
+    const innerConfig = await setupSessionMocks('managed-marked-session');
+    const scheduler = { setSkipDurableFire: vi.fn() };
+    innerConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        conversationsRuntimeProvenance: true,
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    expect(innerConfig.setSessionWriterReclaimPolicy).toHaveBeenCalledWith(
+      'local',
+    );
+    expect(innerConfig.setSessionWriterTakeoverPolicy).toHaveBeenCalledWith(
+      'certified',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('installs the unbound-durable-task skip before the scheduler starts for a marked child', async () => {
+    const innerConfig = await setupSessionMocks('managed-cron-skip-session');
+    const scheduler = { setSkipDurableFire: vi.fn() };
+    innerConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      {
+        privateParentCapability: 'expected-capability',
+        conversationsRuntimeProvenance: true,
+      },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    expect(scheduler.setSkipDurableFire).toHaveBeenCalledOnce();
+    const predicate = scheduler.setSkipDurableFire.mock.calls[0]?.[0] as (job: {
+      boundSessionId?: string;
+    }) => boolean;
+    expect(predicate({ boundSessionId: undefined })).toBe(true);
+    expect(predicate({ boundSessionId: 'session-1' })).toBe(false);
+    const startCronScheduler = (
+      lastSessionMock as unknown as {
+        startCronScheduler: ReturnType<typeof vi.fn>;
+      }
+    ).startCronScheduler;
+    expect(
+      scheduler.setSkipDurableFire.mock.invocationCallOrder[0]!,
+    ).toBeLessThan(startCronScheduler.mock.invocationCallOrder[0]!);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not install the skip predicate for an unmarked managed child', async () => {
+    const innerConfig = await setupSessionMocks('managed-unmarked-session');
+    const scheduler = { setSkipDurableFire: vi.fn() };
+    innerConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      { privateParentCapability: 'expected-capability' },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    expect(innerConfig.setSessionWriterReclaimPolicy).toHaveBeenCalledWith(
+      'never',
+    );
+    expect(scheduler.setSkipDurableFire).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it.each([
     ['channel', 'channel', false],
     ['scheduled task', 'scheduled_task', true],
@@ -4241,6 +4423,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setSessionWriterReclaimPolicy: vi.fn(),
       setSessionWriterTakeoverPolicy: vi.fn(),
       setSessionSource: vi.fn(),
+      getCronScheduler: vi.fn(),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
@@ -4252,6 +4435,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getModel: vi.fn().mockReturnValue('m'),
       storage: {
         getProjectRoot: vi.fn().mockReturnValue('/tmp'),
+        getProjectDir: vi.fn().mockReturnValue('/tmp'),
         getWorkflowRunsDir: vi.fn().mockReturnValue('/tmp/workflows'),
       },
       getProjectRoot: vi.fn().mockReturnValue('/tmp'),
@@ -10530,6 +10714,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const tasks = await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
       sessionId,
     });
+    const agents = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionAgents,
+      { sessionId },
+    );
     const contextUsage = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContextUsage,
       { sessionId, detail: true },
@@ -10623,6 +10811,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
     expect(JSON.stringify(tasks)).not.toContain('abortController');
+    expect(agents).toMatchObject({
+      v: 1,
+      sessionId,
+      tasks: [
+        {
+          kind: 'agent',
+          id: 'agent-1',
+          status: 'paused',
+        },
+      ],
+    });
     expect(JSON.stringify(tasks)).not.toContain('outputOffset');
     expect(JSON.stringify(tasks)).not.toContain('pendingMessages');
     expect(JSON.stringify(tasks)).not.toContain('idleTimer');
@@ -15086,6 +15285,68 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('resolves sessionTurnStatus settings per request, not from the this.settings cache', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId,
+      records: [],
+      hasMore: false,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // Multi-workspace daemon shape: the live session and `this.settings`
+    // belong to the boot workspace; the status request names another cwd
+    // whose own settings (and therefore advanced.runtimeOutputDir) must pin
+    // the transcript read. Routing through the stale cache would scan the
+    // wrong runtime root.
+    const perRequestSettings = makeSessionSettings();
+    vi.mocked(loadSettings).mockClear();
+    vi.mocked(loadSettings).mockReturnValue(perRequestSettings);
+    vi.mocked(runWithAcpRuntimeOutputDir).mockClear();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        cwd: '/tmp/workspace-a',
+        sessionId,
+        promptId: 'prompt-1',
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, turnResult: null });
+
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(runWithAcpRuntimeOutputDir).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![0]).toBe(
+      perRequestSettings,
+    );
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
+      '/tmp/workspace-a',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('still scans the transcript when the pre-read flush fails', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -16657,6 +16918,66 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('resolves qwen/status/session/transcript settings per request, not from the this.settings cache', async () => {
+    const settings = makeCoreSettings();
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    const transcriptConfig = {
+      ...makeInnerConfig(),
+      enableFileCheckpointing: vi.fn(),
+    };
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      transcriptConfig as unknown as Config,
+    );
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    // Multi-workspace daemon shape: `this.settings` holds the boot
+    // workspace's settings; the transcript request names another cwd whose
+    // own settings must pin the read (and seed the replay config).
+    // A different outputLanguage makes the request's settings distinguishable
+    // from the boot settings by content, not just by identity.
+    const perRequestSettings = makeCoreSettings('French');
+    vi.mocked(loadSettings).mockClear();
+    vi.mocked(loadSettings).mockReturnValue(perRequestSettings);
+    vi.mocked(runWithAcpRuntimeOutputDir).mockClear();
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      cwd: '/tmp/workspace-a',
+      sessionId: VALID_SESSION_ID,
+    });
+
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    // The outer pin is the handler's; the replay-config build inside it may
+    // pin again with the same settings. Every pin must carry the request's.
+    const pins = vi.mocked(runWithAcpRuntimeOutputDir).mock.calls;
+    expect(pins.length).toBeGreaterThanOrEqual(1);
+    expect(pins[0]![0]).toBe(perRequestSettings);
+    expect(pins[0]![1]).toBe('/tmp/workspace-a');
+    expect(pins.every(([s]) => s === perRequestSettings)).toBe(true);
+    // The replay config built inside the pinned scope was seeded from the
+    // request's settings (the operation receives them), not this.settings.
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[0]).toMatchObject({
+      general: { outputLanguage: 'French' },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('flushes the live recording before reading the latest persisted page', async () => {
     const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
     const recording = innerConfig.getChatRecordingService();
@@ -16693,6 +17014,205 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       maxBytes: 4 * 1024 * 1024,
     });
     expect(result['hasMore']).toBe(false);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('flushes latest but not frozen turn-index pages', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    const recording = innerConfig.getChatRecordingService();
+    const readTurnIndexPage = vi.fn().mockResolvedValue({
+      v: 1,
+      sessionId: VALID_SESSION_ID,
+      snapshot: 'snapshot-1',
+      totalTurns: 1,
+      start: 0,
+      turns: [
+        {
+          ordinal: 0,
+          turnId: 'u1',
+          kind: 'prompt',
+          label: 'hello',
+        },
+      ],
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readTurnIndexPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const result = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+      { sessionId: VALID_SESSION_ID, limit: 2 },
+    );
+
+    expect(recording?.flush).toHaveBeenCalledOnce();
+    expect(readTurnIndexPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
+      limit: 2,
+    });
+    expect(result).toMatchObject({
+      snapshot: 'snapshot-1',
+      totalTurns: 1,
+    });
+
+    const frozenResult = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+      {
+        sessionId: VALID_SESSION_ID,
+        snapshot: 'snapshot-1',
+        start: 0,
+        limit: 2,
+      },
+    );
+
+    expect(recording?.flush).toHaveBeenCalledOnce();
+    expect(readTurnIndexPage).toHaveBeenNthCalledWith(2, VALID_SESSION_ID, {
+      snapshot: 'snapshot-1',
+      start: 0,
+      limit: 2,
+    });
+    expect(frozenResult).toMatchObject({ snapshot: 'snapshot-1' });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each([
+    {
+      name: 'invalid cursors',
+      error: new InvalidSessionTranscriptCursorError(),
+      snapshot: undefined,
+      expected: {
+        code: -32602,
+        data: { errorKind: 'invalid_transcript_cursor' },
+      },
+    },
+    {
+      name: 'unavailable snapshots',
+      error: new SessionTranscriptSnapshotUnavailableError(VALID_SESSION_ID),
+      snapshot: undefined,
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'oversized snapshots',
+      error: new SessionTranscriptTooLargeError(VALID_SESSION_ID, 300, 200),
+      snapshot: undefined,
+      expected: {
+        code: -32011,
+        data: {
+          errorKind: 'transcript_too_large',
+          sessionId: VALID_SESSION_ID,
+          snapshotSize: 300,
+          maxBytes: 200,
+        },
+      },
+    },
+    {
+      name: 'missing frozen snapshots',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      snapshot: 'snapshot-1',
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'missing first-page transcripts',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      snapshot: undefined,
+      expected: {
+        code: -32002,
+        data: { uri: `session:${VALID_SESSION_ID}` },
+      },
+    },
+  ])(
+    'qwen/status/session/turn_index maps $name',
+    async ({ error, snapshot, expected }) => {
+      const settings = makeCoreSettings();
+      vi.mocked(SessionTranscriptReader).mockImplementation(
+        () =>
+          ({
+            readTurnIndexPage: vi.fn().mockRejectedValue(error),
+          }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+      );
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTurnIndex, {
+          sessionId: VALID_SESSION_ID,
+          ...(snapshot ? { snapshot } : {}),
+        }),
+      ).rejects.toMatchObject(expected);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('rejects a turn-index start without its snapshot', async () => {
+    const { agent, agentPromise } =
+      await bootCoreSettingsAgent(makeCoreSettings());
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTurnIndex, {
+        sessionId: VALID_SESSION_ID,
+        start: 0,
+      }),
+    ).rejects.toThrow('Invalid transcript turn index start');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('passes snapshot-bound transcript anchors and response metadata through', async () => {
+    const settings = makeCoreSettings();
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      targetRecordId: 'u1',
+      hasOlder: true,
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+        atRecordId: 'u1',
+        snapshot: 'snapshot-1',
+      },
+    );
+
+    expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
+      atRecordId: 'u1',
+      snapshot: 'snapshot-1',
+      maxBytes: 4 * 1024 * 1024,
+    });
+    expect(result).toMatchObject({ targetRecordId: 'u1', hasOlder: true });
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -17294,15 +17814,27 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       name: 'invalid cursors',
       error: new InvalidSessionTranscriptCursorError(),
       cursor: undefined,
+      snapshot: undefined,
       expected: {
         code: -32602,
         data: { errorKind: 'invalid_transcript_cursor' },
       },
     },
     {
+      name: 'invalid turn anchors',
+      error: new InvalidSessionTranscriptTurnAnchorError(),
+      cursor: undefined,
+      snapshot: 'snapshot-1',
+      expected: {
+        code: -32602,
+        data: { errorKind: 'invalid_turn_anchor' },
+      },
+    },
+    {
       name: 'unavailable snapshots',
       error: new SessionTranscriptSnapshotUnavailableError(VALID_SESSION_ID),
       cursor: undefined,
+      snapshot: undefined,
       expected: {
         code: -32010,
         data: {
@@ -17315,6 +17847,20 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       name: 'missing cursor snapshots',
       error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
       cursor: 'cursor-1',
+      snapshot: undefined,
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'missing anchored snapshots',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      cursor: undefined,
+      snapshot: 'snapshot-1',
       expected: {
         code: -32010,
         data: {
@@ -17327,6 +17873,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       name: 'missing first-page transcripts',
       error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
       cursor: undefined,
+      snapshot: undefined,
       expected: {
         code: -32002,
         data: { uri: `session:${VALID_SESSION_ID}` },
@@ -17334,7 +17881,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   ])(
     'qwen/status/session/transcript maps $name',
-    async ({ error, cursor, expected }) => {
+    async ({ error, cursor, snapshot, expected }) => {
       const settings = makeCoreSettings();
       vi.mocked(SessionTranscriptReader).mockImplementation(
         () =>
@@ -17348,6 +17895,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
           sessionId: VALID_SESSION_ID,
           ...(cursor ? { cursor } : {}),
+          ...(snapshot ? { atRecordId: 'turn-1', snapshot } : {}),
         }),
       ).rejects.toMatchObject(expected);
 
@@ -20219,7 +20767,7 @@ describe('QwenAgent sessionIdContext binding', () => {
   });
 });
 
-describe('QwenAgent extMethod renameSession routing', () => {
+describe('QwenAgent session-management routing (rename / delete / list / branch / close)', () => {
   type AgentSideConnectionLike = { closed: Promise<void> };
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
@@ -20780,6 +21328,46 @@ describe('QwenAgent extMethod renameSession routing', () => {
       perRequestSettings,
     );
     expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
+      '/tmp/workspace-a',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('resolves non-live qwen/session/loadUpdates settings per request, not from the this.settings cache', async () => {
+    const innerConfig = makeLiveSessionInnerConfig(null);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    // No newSession: the target is not live in this process, so loadUpdates
+    // takes the disk-only SessionService branch. `this.settings` holds the
+    // boot workspace's settings; the request names another cwd whose own
+    // settings must pin the read.
+    const perRequestSettings = makeAcpSettings();
+    vi.mocked(loadSettings).mockReturnValue(perRequestSettings);
+    const loadSession = vi.fn().mockResolvedValue(null);
+    vi.mocked(SessionService).mockImplementation(
+      () => ({ loadSession }) as unknown as InstanceType<typeof SessionService>,
+    );
+    vi.mocked(runWithAcpRuntimeOutputDir).mockClear();
+
+    await expect(
+      agent.extMethod('qwen/session/loadUpdates', {
+        cwd: '/tmp/workspace-a',
+        sessionId: '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+      }),
+    ).resolves.toEqual({ updates: [] });
+
+    expect(SessionService).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(loadSession).toHaveBeenCalledWith(
+      '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+    );
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(runWithAcpRuntimeOutputDir).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![0]).toBe(
+      perRequestSettings,
+    );
     expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
       '/tmp/workspace-a',
     );
@@ -22820,6 +23408,35 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         expect(
           innerConfig.suppressRestorableAskUserQuestionPreservation,
         ).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s leaves worktree sidecar validation to the daemon when requested',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          _meta: {
+            [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+          },
+        };
+        if (action === 'load') {
+          await agent.loadSession(params);
+        } else {
+          await agent.unstable_resumeSession(params);
+        }
+
+        expect(mockRestoreWorktreeContext).not.toHaveBeenCalled();
       } finally {
         mockConnectionState.resolve();
         await agentPromise;
@@ -29930,5 +30547,61 @@ describe('createManagedExternalToolGuard', () => {
 
     await expect(pending).rejects.toThrow('aborted');
     expect(extMethod).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('QwenAgent runtime-root pinning choke point', () => {
+  it('routes every per-request runtime-root pin through runWithPinnedRuntimeBaseDir', () => {
+    // #10095 fixed handlers that composed the runtime-root routing by hand
+    // and picked up the stale `this.settings` cache. Per-request handlers now
+    // go through `runWithPinnedRuntimeBaseDirForRequest`, which resolves the
+    // settings from the request cwd itself, and everything else through the
+    // shared helper. A handler naming `runWithAcpRuntimeOutputDir` directly —
+    // as a call, via an alias, or via an aliased import — is exactly the
+    // shape that regressed, and no behavioral test can see the difference
+    // (both spellings reach the same function), so pin the source. Walk the
+    // AST rather than lines: comments, string literals and import formatting
+    // cannot false-positive, the canonical un-aliased import specifier is the
+    // one exempt mention, and the only other mention must be the shared
+    // helper's own delegation. The per-request handlers themselves are pinned
+    // behaviorally (settings/cwd reaching the mock) by the routing tests above.
+    const sourcePath = 'src/acp-integration/acpAgent.ts';
+    const source = readFileSync(sourcePath, 'utf8');
+    const lines = source.split('\n');
+    const sourceFile = ts.createSourceFile(
+      sourcePath,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const mentions: string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (ts.isIdentifier(node) && node.text === 'runWithAcpRuntimeOutputDir') {
+        // `import { runWithAcpRuntimeOutputDir } from …` binds the name
+        // without an alias (`propertyName` is unset). An aliased specifier
+        // (`runWithAcpRuntimeOutputDir as pin`) keeps this identifier under
+        // `propertyName` and is reported like any other mention.
+        const isCanonicalImport =
+          ts.isImportSpecifier(node.parent) &&
+          node.parent.propertyName === undefined;
+        if (!isCanonicalImport) {
+          const { line } = sourceFile.getLineAndCharacterOfPosition(
+            node.getStart(sourceFile),
+          );
+          mentions.push(`${line + 1}: ${lines[line]!.trim()}`);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    expect(
+      mentions,
+      `acpAgent.ts must not name runWithAcpRuntimeOutputDir directly. Handlers serving a caller-supplied cwd route through this.runWithPinnedRuntimeBaseDirForRequest; only callers holding deliberately scoped settings may use this.runWithPinnedRuntimeBaseDir (see #10095). Direct mentions at:\n${mentions.join('\n')}`,
+    ).toEqual([
+      expect.stringMatching(
+        /^\d+: return runWithAcpRuntimeOutputDir\(settings, cwd, operation\);$/,
+      ),
+    ]);
   });
 });

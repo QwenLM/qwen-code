@@ -3518,6 +3518,11 @@ export abstract class ChannelBase {
     envelope: Envelope,
     error: unknown,
   ): Promise<void> {
+    if (error instanceof Error && error.cause !== undefined) {
+      process.stderr.write(
+        `[${sanitizeLogText(this.name, 64)}] named-session operation failed: ${this.lifecycleError(error)} | cause: ${this.lifecycleError(error.cause)}\n`,
+      );
+    }
     const message =
       error instanceof Error
         ? sanitizeDisplayText(error.message, 500)
@@ -3598,20 +3603,25 @@ export abstract class ChannelBase {
           return true;
         }
         case 'new': {
-          if (parts.includes('--worktree')) {
-            await this.sendThreadMessage(
-              envelope.chatId,
-              envelope.threadId,
-              'Worktree tasks are planned for Part 4. Create a shared task with /session new <name>.',
-            );
-            return true;
+          const isolation =
+            parts.length === 2 && parts[1] === '--worktree'
+              ? 'worktree'
+              : 'shared';
+          if (
+            (isolation === 'shared' && parts.length !== 1) ||
+            (isolation === 'worktree' && parts.length !== 2)
+          ) {
+            break;
           }
-          if (parts.length !== 1) break;
-          const created = await namedSessions.create(owner, parts[0]!);
+          const created = await namedSessions.create(
+            owner,
+            parts[0]!,
+            isolation,
+          );
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            `Created and selected task "${created.name}" (shared workspace).`,
+            `Created and selected task "${created.name}" (${created.isolation} workspace).`,
           );
           return true;
         }
@@ -3697,7 +3707,7 @@ export abstract class ChannelBase {
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
-      'Usage: /session current | /session new <name> | /session use <name> | /session close <name> | /session cancel [<name>]',
+      'Usage: /session current | /session new <name> [--worktree] | /session use <name> | /session close <name> | /session cancel [<name>]',
     );
     return true;
   }
