@@ -201,6 +201,13 @@ export interface CreateDaemonSessionActionsArgs {
    * turn finished. No-op when nothing is restored.
    */
   settleRestoredActivePrompt: () => void;
+  /**
+   * Apply the provider's buffered transcript batch (`TRANSCRIPT_DISPATCH_BATCH_MS`)
+   * so a read of the store sees every event delivered so far. Every
+   * provider-side settle path flushes first; an action that settles a turn has
+   * to do the same or it reads a store up to one batch window stale.
+   */
+  flushTranscript: () => void;
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
     workspaceCwd?: string,
@@ -357,6 +364,7 @@ export function createDaemonSessionActions({
   passiveAssistantDoneTimerRef,
   daemonActivePromptRef,
   settleRestoredActivePrompt,
+  flushTranscript,
   getCreateSessionRequest,
   createDetachedSession,
   createDetachedStandaloneSession,
@@ -891,13 +899,20 @@ export function createDaemonSessionActions({
           activePromptsRef.current.has(`${backstopSessionId}:shell`));
       if (locallySubmitted) return;
       settleRestoredActivePrompt();
+      // Commit the buffered batch before reading the store. Without this the
+      // read races the 16ms window: a chunk burst still buffered at flip time
+      // lands *after* the `assistant.done` below, and the reducer mints a fresh
+      // `streaming: true` block that nothing is left to close — the final
+      // message then renders a streaming cursor forever. Flushing first folds
+      // that burst into the block this settle closes.
+      flushTranscript();
       if (store.getSnapshot().activeAssistantBlockId) {
         store.dispatch({ type: 'assistant.done', reason: 'daemon_idle' });
         clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       }
-      // No active block: the transcript batch (16ms) may still flush one after
-      // this settle. An armed passive timer is then the only closer left, so
-      // keep it; it sees the ref flipped to false and settles normally.
+      // Still no active block after the flush: nothing to close, and an armed
+      // passive timer (if any) stays armed harmlessly — it no-ops without an
+      // active block.
       setPromptStatus('idle');
     },
 

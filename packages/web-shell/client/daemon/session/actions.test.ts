@@ -4146,6 +4146,7 @@ function createActionsHarness(
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
     daemonActivePromptRef?: { current: boolean | undefined };
+    flushTranscript?: ReturnType<typeof vi.fn>;
     getSnapshot?: () => { activeAssistantBlockId: string | undefined };
     hasSessionActivePrompt?: () => boolean;
     manualSessionClearRef?: { current: boolean };
@@ -4208,6 +4209,7 @@ function createActionsHarness(
     skipNextCleanupDetachSessionRef: { current: undefined },
     passiveAssistantDoneTimerRef,
     daemonActivePromptRef: opts.daemonActivePromptRef ?? { current: undefined },
+    flushTranscript: opts.flushTranscript ?? vi.fn(),
     settleRestoredActivePrompt,
     getCreateSessionRequest: () => ({ workspaceCwd: '/workspace' }),
     createDetachedSession: (opts.createDetachedSession ??

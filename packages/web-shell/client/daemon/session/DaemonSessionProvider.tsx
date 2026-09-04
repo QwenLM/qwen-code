@@ -1182,6 +1182,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     useState<DaemonWorkspaceEventSignals>(INITIAL_WORKSPACE_EVENT_SIGNALS);
   const hasCurrentSessionActivePromptRef = useRef<() => boolean>(() => false);
   const settleCurrentSessionRestoredPromptRef = useRef<() => void>(() => {});
+  // Apply the buffered transcript batch from outside the connect closure. The
+  // action layer must settle against a committed store, not one that is still
+  // 16ms behind (#9487).
+  const flushCurrentTranscriptRef = useRef<() => void>(() => {});
   const mountedRef = useRef(false);
 
   useEffect(() => {
@@ -1294,6 +1298,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       cancelTranscriptFlush();
       runTranscriptFlush(true);
     };
+    flushCurrentTranscriptRef.current = flushTranscriptSync;
     const dispatchTranscriptNow = (events: DaemonUiEvent | DaemonUiEvent[]) => {
       flushTranscriptSync();
       store.dispatch(events);
@@ -4003,6 +4008,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           hasCurrentSessionActivePromptRef.current(),
         settleRestoredActivePrompt: () =>
           settleCurrentSessionRestoredPromptRef.current(),
+        flushTranscript: () => flushCurrentTranscriptRef.current(),
         resetCurrentSessionActivePrompt: () => {
           hasCurrentSessionActivePromptRef.current = () => false;
           settleCurrentSessionRestoredPromptRef.current = () => {};

@@ -9954,18 +9954,104 @@ describe('DaemonSessionProvider', () => {
     let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
     let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
     let actions: DaemonSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
 
     function Harness() {
       promptStatus = useDaemonPromptStatus();
       streamingState = useDaemonStreamingState();
       actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
       return null;
     }
+
+    const streamingAssistantBlocks = () =>
+      blocks.filter(
+        (block) => block.kind === 'assistant' && block.streaming === true,
+      );
 
     beforeEach(() => {
       promptStatus = 'idle';
       streamingState = 'idle';
       actions = undefined;
+      blocks = [];
+    });
+
+    it('closes a chunk still buffered when the daemon settles the turn', async () => {
+      vi.useFakeTimers();
+      try {
+        // The backstop reads the store to decide what to close, but transcript
+        // events are batched for TRANSCRIPT_DISPATCH_BATCH_MS. A chunk burst
+        // still inside that window when live state flips must be folded into
+        // the block this settle closes — otherwise it lands after the
+        // `assistant.done`, the reducer mints a fresh streaming block, and
+        // nothing is left to close it: the message keeps a streaming cursor
+        // for the life of the pane.
+        const tailGate = createDeferred<void>();
+        const chunk = (id: number, text: string) => ({
+          id,
+          v: 1,
+          type: 'session_update',
+          originatorClientId: 'client-other',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+            },
+          },
+        });
+        sdkMocks.sessions.push(
+          createMockSession({
+            events: async function* bufferedTail(
+              opts: { signal?: AbortSignal } = {},
+            ) {
+              yield chunk(9, 'starting');
+              await tailGate.promise;
+              yield chunk(10, ' tail');
+              await new Promise<void>((resolve) => {
+                if (opts.signal?.aborted) {
+                  resolve();
+                  return;
+                }
+                opts.signal?.addEventListener('abort', () => resolve(), {
+                  once: true,
+                });
+              });
+            },
+          }),
+        );
+
+        await renderWithProvider(<Harness />, { autoConnect: true });
+        await act(async () => {
+          await flushPromises();
+          await vi.advanceTimersByTimeAsync(20);
+          await flushPromises();
+        });
+        expect(streamingAssistantBlocks()).toHaveLength(1);
+
+        await act(async () => {
+          actions?.setDaemonActivePrompt(true);
+          await flushPromises();
+        });
+
+        // Release the tail chunk but do not advance the batch window, so it is
+        // still buffered when the daemon reports the turn finished.
+        await act(async () => {
+          tailGate.resolve();
+          await flushPromises();
+          actions?.setDaemonActivePrompt(false);
+          await flushPromises();
+        });
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(60_000);
+          await flushPromises();
+        });
+
+        expect(promptStatus).toBe('idle');
+        expect(streamingAssistantBlocks()).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('keeps the pane loading while the daemon reports the prompt in flight', async () => {
