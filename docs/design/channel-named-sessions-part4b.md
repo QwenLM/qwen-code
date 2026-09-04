@@ -262,8 +262,10 @@ re-asserted before the response, as in create/load.
 If `S_old`'s sidecar already records `supersededBy: S_new`, a previous reset
 crashed mid-transfer. The route then revalidates the recorded replacement:
 when `S_new` exists in the catalog, its own sidecar is strict-valid for the
-same worktree, and it is quiescent, the route completes the interrupted
-transfer for that same `S_new` (idempotent resume). When `S_new` does not
+same worktree, its `supersedes` link names `S_old`, and it is quiescent, the
+route completes the interrupted transfer for that same `S_new` — a marker
+that already names `S_new` short-circuits the transfer step, so a crash after
+the rename resumes as a no-op (idempotent resume). When `S_new` does not
 validate, the route rolls the partial attempt back to the pre-transfer state —
 remove `supersededBy` from `S_old`'s sidecar, delete `S_new`'s sidecar,
 orphan-confirmed-remove `S_new` — and then proceeds with a fresh replacement.
@@ -456,9 +458,11 @@ side effect; an old worker never sends the request.
 3. If the task is worktree-isolated, require `!isBusy(task.sessionId)` and
    throw the actionable busy message otherwise. Then call the new router
    operation below, swap `sessionId` in the task record (name, cwd,
-   isolation, target, timestamps preserved), commit the registry atomically,
-   activate the new session with the task's stored cwd, and forget the old
-   session — the same post-success steps as a shared reset.
+   isolation, target, and creation timestamp preserved; the update and
+   selection timestamps bump as they do on a shared reset), commit the
+   registry atomically, activate the new session with the task's stored cwd,
+   and forget the old session — the same post-success steps as a shared
+   reset.
 
 Registry schema stays version 1: only the task's `sessionId` value changes.
 
