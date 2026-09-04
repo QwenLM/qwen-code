@@ -52,6 +52,7 @@ import { gh, ghWithInput } from './gh.js';
 import { readClaim } from './ledger.js';
 import {
   CRITICAL_PREFIX,
+  FIX_INDUCED_TOKEN_RE,
   LEADING_INVISIBLE_RE,
   SUGGESTION_PREFIX,
   severityOf,
@@ -270,9 +271,10 @@ export function carriedFindingOf(body: unknown): {
  * the root and the marker disagree exactly as they did before stamps).
  * Returns the body unchanged when there is nothing to stamp into (no
  * marker), nothing to stamp (an id already leads), or the stamp would
- * break what the gate validated — a body whose code fence or HTML-block
- * opener opens on the marker's projected first line, a blockquote
- * prefix ahead of it included (#9940 review).
+ * break what the gate validated — a body whose code fence, HTML block,
+ * blockquote, heading, list item, thematic break or raw-HTML opener
+ * opens on the marker's projected first line, or whose indented code /
+ * non-`1.` ordered list sits directly under the marker (#9940 review).
  */
 export function stampCarriedId(body: string, id: string): string {
   if (carriedFindingOf(body) !== null) return body;
@@ -282,7 +284,7 @@ export function stampCarriedId(body: string, id: string): string {
   const lead = LEADING_INVISIBLE_RE.exec(body)?.[0] ?? '';
   const visible = body.slice(lead.length);
   if (!visible.startsWith(marker)) return body;
-  const rest = stripSeverityPrefix(visible);
+  let rest = stripSeverityPrefix(visible);
   // The insertion lands between the marker and the body; when a code
   // fence or an HTML-block opener (`<div>`, `</div>`, `<pre>`, …)
   // OPENS on the marker's projected first line, text before it stops
@@ -315,6 +317,7 @@ export function stampCarriedId(body: string, id: string): string {
   // documented safe degradation (#9940 review).
   const residue = LEADING_INVISIBLE_RE.exec(rest)?.[0] ?? '';
   const fromResidue = rest.slice(residue.length);
+  const firstLine = fromResidue.split(/\r\n?|\n/)[0];
   // Same-line residue is stripped again AFTER the unquote: a quoted
   // opener led by an HTML comment (`> <!-- x -->` + fence) renders the
   // comment as nothing, so the fence still opens the quoted line — and
@@ -322,8 +325,7 @@ export function stampCarriedId(body: string, id: string): string {
   // Confined to the already-split single line, the strip cannot cross a
   // rendered line; on an unquoted line it is a no-op — the leading
   // residue run above already consumed the maximal residue.
-  const unquoted = fromResidue
-    .split(/\r\n?|\n/)[0]
+  const unquoted = firstLine
     .replace(QUOTE_PREFIX_RE, '')
     .replace(LEADING_INVISIBLE_RE, '');
   // Through the line model's OWN opener rule (`fenceOpener`, the one
@@ -334,14 +336,93 @@ export function stampCarriedId(body: string, id: string): string {
   // 25).
   const opensFence = fenceOpener(unquoted) !== null;
   const opensHtmlBlock = HTML_BLOCK_OPEN_RE.test(unquoted.trimStart());
-  if (
-    (opensFence || opensHtmlBlock) &&
-    !/\r\n?|\n/.test(residue.replace(/<!--[\s\S]*?(?:-->|$)/g, ''))
-  ) {
-    return body;
+  // Every OTHER line-leading construct the insertion demotes the same
+  // way: text before a `>` parses no blockquote at all (whatever the
+  // quote wraps — the unquote above serves the fence/HTML tests, the
+  // quote itself is the construct here), and an ATX heading, a list
+  // item, a thematic break or a type-3/4/5 raw-HTML opener (`<?…`,
+  // `<!DOCTYPE`, `<![CDATA[`) each turn into paragraph text under the
+  // attribution-off post, silently, in a structure the gate never
+  // validated (#9940 review, round 26). Stamp-local on purpose:
+  // `HTML_BLOCK_OPEN_RE` stays the line model's (blank-line-terminated
+  // types 1/6), and a fresh draft leading with such a construct takes
+  // the documented id-less degradation instead of a flipped post.
+  const opensBlockquote = QUOTE_PREFIX_RE.test(firstLine);
+  const opensOtherLeader = OTHER_LEADER_RE.test(unquoted);
+  // A line break in the residue OUTSIDE comments pushes the construct to
+  // a later rendered line, which a line-1 insertion cannot flip — with
+  // one exception: a construct that CANNOT interrupt a paragraph
+  // (indented code, an ordered list not starting at 1) directly under
+  // the marker was a block of its own behind the empty attribution-off
+  // first line, and becomes continuation text of the `R<n>-<k>:`
+  // paragraph the stamp writes above it (#9940 review, round 26). A
+  // blank line in between ends that paragraph first, so the block
+  // survives and the stamp applies.
+  const commentSpans = [...residue.matchAll(/<!--[\s\S]*?(?:-->|$)/g)].map(
+    (m) => [m.index, m.index + m[0].length] as const,
+  );
+  const breaks = [...residue.matchAll(/\r\n?|\n/g)].filter(
+    (m) => !commentSpans.some(([a, b]) => m.index >= a && m.index < b),
+  );
+  if (breaks.length === 0) {
+    if (opensFence || opensHtmlBlock || opensBlockquote || opensOtherLeader) {
+      return body;
+    }
+  } else {
+    let blankBetween = false;
+    for (let i = 1; i < breaks.length; i++) {
+      const prev = breaks[i - 1]!;
+      const between = residue.slice(
+        prev.index + prev[0].length,
+        breaks[i]!.index,
+      );
+      if (/^[ \t]*$/.test(between)) {
+        blankBetween = true;
+        break;
+      }
+    }
+    const last = breaks[breaks.length - 1]!;
+    const constructLine = rest
+      .slice(last.index + last[0].length)
+      .split(/\r\n?|\n/)[0];
+    const cannotInterrupt =
+      /^(?: {4,}|\t)/.test(constructLine) ||
+      (/^ {0,3}\d{1,9}[.)](?:[ \t]|$)/.test(constructLine) &&
+        !/^ {0,3}1[.)]/.test(constructLine));
+    if (cannotInterrupt && !blankBetween) return body;
   }
-  return `${lead}${marker} ${id}: ${rest}`;
+  let stamped = `${lead}${marker} ${id}: ${rest}`;
+  // A FRESH claim that happens to start with the `(fix-induced)` prose
+  // token: read on the draft it is prose (no id for a marking to hang
+  // on — the head-slot contract), but spliced behind the minted id it
+  // becomes a genuine marking the readback honours from then on, and a
+  // later still-standing carry would reply into this mislabelled root
+  // ahead of the true original (marked threads lead the pairing). The
+  // readback is the arbiter: while it reads the stamped body as marked,
+  // the head-slot token is removed — the FIRST occurrence on the claim
+  // line, which is the one the tokeniser reached (tags cannot contain
+  // it; residue ahead of it would have stopped the read). Genuine
+  // carries never reach here — they returned verbatim above (#9940
+  // review, round 26).
+  for (;;) {
+    if (carriedFindingOf(stamped)?.fixInduced !== true) return stamped;
+    const nl = rest.search(/\r\n?|\n/);
+    const line1 = nl === -1 ? rest : rest.slice(0, nl);
+    const unmarked = line1.replace(FIX_INDUCED_TOKEN_RE, '');
+    if (unmarked === line1) return stamped;
+    rest = unmarked + rest.slice(line1.length);
+    stamped = `${lead}${marker} ${id}: ${rest}`;
+  }
 }
+
+/**
+ * The line-leading CommonMark constructs beyond fences and type-1/6 HTML
+ * blocks that text inserted before them demotes to paragraph text: an ATX
+ * heading, a bullet or ordered list item, a thematic break, and the
+ * type-3/4/5 raw-HTML openers. Stamp-local — see `stampCarriedId`.
+ */
+const OTHER_LEADER_RE =
+  /^(?:#{1,6}(?:[ \t]|$)|(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)|(?:-[ \t]*){3,}$|(?:\*[ \t]*){3,}$|(?:_[ \t]*){3,}$|<\?|<!\[CDATA\[|<![A-Za-z])/i;
 
 export interface ThreadActionPlan {
   /** Carried drafted-comment index → the original thread it replies into. */

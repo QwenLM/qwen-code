@@ -238,9 +238,16 @@ export function unmarkedComments(
  * The fix-induced marking, read from the head of the CLAIM — after the id
  * and its separator, never inside the id grammar. Case-insensitive, and
  * tolerant of inner spacing, because it governs only whether a comment
- * counts as first-time work — never which finding it is.
+ * counts as first-time work — never which finding it is. The token is
+ * stated ONCE, unanchored (`FIX_INDUCED_TOKEN_RE`): the readback anchors
+ * it at the head slot, and the stamp removes it from a FRESH claim it
+ * would otherwise promote into a marking (#9940 review, round 26).
  */
-export const FIX_INDUCED_READBACK = /^\(\s*fix-induced\s*\)[:.,-]?\s*/i;
+export const FIX_INDUCED_TOKEN_RE = /\(\s*fix-induced\s*\)[:.,-]?\s*/i;
+export const FIX_INDUCED_READBACK = new RegExp(
+  `^${FIX_INDUCED_TOKEN_RE.source}`,
+  'i',
+);
 
 // Built from the core lists, never spelled a fourth time: a value added
 // there that this tokeniser did not know would stop the head scan at the

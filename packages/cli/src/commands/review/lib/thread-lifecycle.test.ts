@@ -532,6 +532,121 @@ describe('stampCarriedId — the write side of the readback', () => {
     }
   });
 
+  it('leaves every other line-leading construct un-stamped — blockquote, heading, list, thematic break, raw-HTML opener (#9940 review, round 26)', () => {
+    // Text before any of these demotes it to paragraph text under the
+    // attribution-off post — the same flip the fence and HTML-block arms
+    // prevent; the guard covered only those two.
+    for (const draft of [
+      '**[Critical]** > quoted line\nmore text',
+      '**[Critical]** - item one\nmore text',
+      '**[Critical]** * item one\nmore text',
+      '**[Critical]** 1. first item\nmore text',
+      '**[Critical]** # Heading\nmore text',
+      '**[Critical]** ---\nmore text',
+      '**[Critical]** * * *\nmore text',
+      '**[Critical]** <?php x ?> the claim',
+      '**[Critical]** <!DOCTYPE html> the claim',
+      '**[Critical]** <![CDATA[x]]> the claim',
+    ]) {
+      expect(stampCarriedId(draft, 'R5-3')).toBe(draft);
+    }
+    // Look-alikes that open nothing keep their stamp: no space after the
+    // hash, a negative number, a dash inside a word, a construct on line
+    // 2 that CAN interrupt a paragraph.
+    for (const [draft, stamped] of [
+      ['**[Critical]** #hashtag claim', '**[Critical]** R5-3: #hashtag claim'],
+      ['**[Critical]** -1 is returned', '**[Critical]** R5-3: -1 is returned'],
+      [
+        '**[Critical]** re-check the guard',
+        '**[Critical]** R5-3: re-check the guard',
+      ],
+      [
+        '**[Critical]** the claim\n> quoted',
+        '**[Critical]** R5-3: the claim\n> quoted',
+      ],
+      ['**[Critical]**\n- item one', '**[Critical]** R5-3: \n- item one'],
+      ['**[Critical]**\n# Heading', '**[Critical]** R5-3: \n# Heading'],
+    ]) {
+      expect(stampCarriedId(draft, 'R5-3')).toBe(stamped);
+    }
+  });
+
+  it('leaves a non-interrupting block directly under the marker un-stamped — indented code, a non-1 ordered list (#9940 review, round 26)', () => {
+    // Behind the empty attribution-off first line these were blocks of
+    // their own; the `R<n>-<k>:` paragraph the stamp writes above them
+    // cannot be interrupted by them, so they became its continuation
+    // text. A blank line in between ends that paragraph first.
+    for (const draft of [
+      '**[Critical]**\n    const x = leaked();\n\nthe claim',
+      '**[Critical]**\n\tconst x = leaked();\n\nthe claim',
+      '**[Critical]**\r\n    const x = leaked();\r\n\r\nthe claim',
+      '**[Critical]**\n2. second item\nthe claim',
+      '**[Critical]**\n   7) seventh\nthe claim',
+    ]) {
+      expect(stampCarriedId(draft, 'R5-4')).toBe(draft);
+    }
+    for (const [draft, stamped] of [
+      // A blank line ends the id paragraph — the block survives.
+      [
+        '**[Critical]**\n\n    const x = leaked();\n\nthe claim',
+        '**[Critical]** R5-4: \n\n    const x = leaked();\n\nthe claim',
+      ],
+      // `1.` CAN interrupt a paragraph, so can a bullet and a fence.
+      ['**[Critical]**\n1. first item', '**[Critical]** R5-4: \n1. first item'],
+      ['**[Critical]**\n- item', '**[Critical]** R5-4: \n- item'],
+      [
+        '**[Critical]**\n```diff\n-old\n+new\n```\nthe claim',
+        '**[Critical]** R5-4: \n```diff\n-old\n+new\n```\nthe claim',
+      ],
+      // Same-line content before the block: the block was already
+      // continuation text pre-stamp — nothing to protect.
+      [
+        '**[Critical]** the claim\n    code',
+        '**[Critical]** R5-4: the claim\n    code',
+      ],
+    ]) {
+      expect(stampCarriedId(draft, 'R5-4')).toBe(stamped);
+    }
+  });
+
+  it('strips a (fix-induced) prose token from a FRESH claim the stamp would promote into a marking (#9940 review, round 26)', () => {
+    // On a draft with no id the token is prose (the head-slot contract);
+    // spliced behind the minted id it read back as a genuine marking, and
+    // a later still-standing carry would have paired with this
+    // mislabelled root ahead of the true original.
+    for (const [draft, stamped] of [
+      [
+        '**[Critical]** (fix-induced) the guard drops a valid case',
+        '**[Critical]** R1-5: the guard drops a valid case',
+      ],
+      [
+        '**[Critical]** ( FIX-INDUCED ): the guard drops a valid case',
+        '**[Critical]** R1-5: the guard drops a valid case',
+      ],
+      // Past a leading axis tag — the tokeniser reads the marking anywhere
+      // in the slot, so the strip follows the readback, not position 0.
+      [
+        '**[Critical]** [fails-closed] (fix-induced) the guard drops a valid case',
+        '**[Critical]** R1-5: [fails-closed] the guard drops a valid case',
+      ],
+    ]) {
+      const out = stampCarriedId(draft, 'R1-5');
+      expect(out).toBe(stamped);
+      expect(carriedFindingOf(out)).toEqual({ id: 'R1-5', fixInduced: false });
+    }
+    // The token past the head slot is prose the readback never reads —
+    // left alone.
+    expect(
+      stampCarriedId(
+        '**[Critical]** the claim (fix-induced) by the fix',
+        'R1-5',
+      ),
+    ).toBe('**[Critical]** R1-5: the claim (fix-induced) by the fix');
+    // A genuine carry keeps its marking verbatim (the early return).
+    const carry = '**[Critical]** R1-2: (fix-induced) the new hole';
+    expect(stampCarriedId(carry, 'R3-1')).toBe(carry);
+  });
+
   it('leaves a quoted fence-opening body un-stamped — the stamp must not break the quote (#9940 review)', () => {
     // pr-context quotes every earlier comment containing code as
     // `> ``` …`; the skip classifies the marker's projected first line

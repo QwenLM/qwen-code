@@ -1588,7 +1588,8 @@ function submit(
   // review-thread graph to reach into. The insertion preserves every
   // property the gate above validated — the severity marker, visibility
   // and fence / HTML-block state all sit behind it, untouched — because
-  // a body whose code fence or HTML-block opener OPENS on the marker's
+  // a body whose code fence, HTML block, blockquote, heading, list item,
+  // thematic break or raw-HTML opener OPENS on the marker's
   // first line takes no stamp at all (stampCarriedId leaves it
   // un-stamped, disclosed below): text before the construct would stop
   // the posted first line leading it, flipping the structure the gate
@@ -1610,7 +1611,8 @@ function submit(
         if (body === c.body) {
           // Unchanged although an id was owed: the body carries one
           // already (the model's carry stays verbatim) or it opens a
-          // code fence or HTML block on its first line and the stamp
+          // line-leading construct on its first line (or a block that
+          // cannot interrupt a paragraph right under the marker) and the stamp
           // was skipped — only the latter is a disclosure (#9940
           // review).
           if (carriedFindingOf(c.body) === null) stampSkippedFence++;
@@ -1623,7 +1625,9 @@ function submit(
     if (stampSkippedFence > 0) {
       writeStderrLine(
         `Thread lifecycle: ${stampSkippedFence} draft(s) open a code ` +
-          `fence or HTML block on their first line and were left ` +
+          `fence, HTML block, blockquote, heading, list item or thematic ` +
+          `break on their first line (or an indented code block / ` +
+          `non-\`1.\` ordered list right under the marker) and were left ` +
           `un-stamped — a stamp there would break the structure the ` +
           `gate validated. Their ` +
           `thread roots carry no ledger id, so no later carry or ` +
