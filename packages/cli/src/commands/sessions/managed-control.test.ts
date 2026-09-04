@@ -80,8 +80,8 @@ describe('peekManagedSession', () => {
   });
 
   it('offers no answer hint for a session that is not waiting', async () => {
-    // Answering a working session queues a prompt instead, which is a
-    // different operation; suggesting it here would mislead.
+    // The supervisor refuses an answer to a session that is not waiting
+    // for input, so suggesting one here would mislead.
     const working = handle({
       peek: vi.fn().mockResolvedValue({
         sessionId: SESSION,

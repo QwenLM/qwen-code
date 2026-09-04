@@ -163,8 +163,8 @@ export async function peekManagedSession(
     lines.push(`Last:      ${lastResult}`);
   }
 
-  // Only offered when it would do something: answering a session that is
-  // not waiting queues a prompt, which is `send`, not this command.
+  // Only offered when it would do something: the supervisor refuses an
+  // answer to a session that is not waiting for input.
   if (presentation.taskState === 'waiting') {
     lines.push(
       '',
