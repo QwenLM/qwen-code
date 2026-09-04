@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
+  AgentViewLaunchFile,
   AgentViewSessionSnapshot,
   AgentViewSessionState,
   AgentViewSessionStateFile,
@@ -93,6 +94,23 @@ function workerFile(
     protocolVersion: 1,
     platform: 'linux',
     recentOutputBytes: 0,
+    ...over,
+  };
+}
+
+function launchFile(
+  over: Partial<AgentViewLaunchFile> = {},
+): AgentViewLaunchFile {
+  return {
+    schemaVersion: 1,
+    sessionId: 'managed-1',
+    argv: [],
+    env: {},
+    entrypoint: 'qwen',
+    projectCwd: '/w/app',
+    activeCwd: '/w/app',
+    includeDirectories: [],
+    terminal: { columns: 80, rows: 24 },
     ...over,
   };
 }
@@ -375,6 +393,46 @@ describe('managedSessionRows', () => {
     expect(row.name).toBe('managed-1');
   });
 
+  it('reports the resumable spelling, not the sanitized store id', () => {
+    // The store files the session under the lowercased directory name,
+    // but adoption preserves the raw spelling as resumeSessionId because
+    // the native session store is case-sensitive. The merge dedupes away
+    // the registry record that carried the raw spelling, so this row is
+    // the only id a script can pipe into `qwen --resume`.
+    const [row] = managedSessionRows(
+      [
+        snapshot({
+          state: state({ sessionId: 'managed-1' }),
+          launch: launchFile({ resumeSessionId: 'Managed-1' }),
+        }),
+      ],
+      NOW,
+    );
+    expect(row.sessionId).toBe('Managed-1');
+  });
+
+  it('falls back to the store id when no resume spelling is recorded', () => {
+    // A session created rather than adopted has no resumeSessionId in its
+    // launch file; the sanitized store id is the resumable one then.
+    const [row] = managedSessionRows([snapshot({ launch: launchFile() })], NOW);
+    expect(row.sessionId).toBe('managed-1');
+  });
+
+  it('shows the resumable spelling when the id doubles as the name', () => {
+    // The name fallback is what a user reads and acts on in the table;
+    // it must match the id the row reports.
+    const [row] = managedSessionRows(
+      [
+        snapshot({
+          state: state({ sessionId: 'managed-1' }),
+          launch: launchFile({ resumeSessionId: 'Managed-1' }),
+        }),
+      ],
+      NOW,
+    );
+    expect(row.name).toBe('Managed-1');
+  });
+
   it('drops an unparseable createdAt instead of dating the row to 1970', () => {
     const [row] = managedSessionRows(
       [snapshot({ state: state({ createdAt: 'not-a-date' }) })],
@@ -451,6 +509,28 @@ describe('mergeSessionRows', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].managed).toBe(true);
     expect(rows[0].sessionId).toBe('managed-1');
+  });
+
+  it('keeps the resumable spelling when it dedupes a mixed-case session', () => {
+    // The deduped registry record was the only other carrier of the raw
+    // spelling, so the surviving managed row must keep reporting it —
+    // the comparison stays sanitized on both sides, only the emitted
+    // value carries the raw spelling.
+    const rows = mergeSessionRows(
+      [record({ sessionId: 'Managed-1', name: 'app-ab' })],
+      managedSessionRows(
+        [
+          snapshot({
+            state: state({ sessionId: 'managed-1' }),
+            launch: launchFile({ resumeSessionId: 'Managed-1' }),
+          }),
+        ],
+        NOW,
+      ),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].managed).toBe(true);
+    expect(rows[0].sessionId).toBe('Managed-1');
   });
 
   it('lets a live registry record survive the adopting window', () => {

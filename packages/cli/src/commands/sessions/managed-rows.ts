@@ -24,9 +24,11 @@
  * keep closed:
  *
  * - the store files a session under a sanitized (lowercased) directory
- *   name and reports that as the id, while the registry keeps the raw
- *   spelling the worker registered with, so the merge canonicalizes
- *   through `sanitizeSessionId` before comparing;
+ *   name while the registry keeps the raw spelling the worker registered
+ *   with, so the merge canonicalizes through `sanitizeSessionId` before
+ *   comparing — and the row reports the spelling `--resume` needs, which
+ *   the launch file preserves, because the native session store is
+ *   case-sensitive;
  * - the registry verifies a pid with a recorded start token plus
  *   namespace and boot-id guards, so a managed pid is held to the same
  *   standard rather than to a bare liveness probe.
@@ -119,6 +121,17 @@ export function managedSessionRows(
         now: new Date(now),
       });
       const createdAt = Date.parse(snapshot.state.createdAt);
+      // The id a consumer acts on. `state.sessionId` is the sanitized
+      // directory name the store canonicalizes to; the launch file's
+      // `resumeSessionId` is the spelling passed to `--resume`, which the
+      // native session store keeps verbatim on a case-sensitive
+      // filesystem. The merge below dedupes this row against registry
+      // records that carry the same raw spelling, so the row is the only
+      // carrier left — emitting the sanitized id here would hand scripts
+      // an id that cannot resume the session. Store keying stays
+      // untouched; only the reported value changes.
+      const sessionId =
+        snapshot.launch?.resumeSessionId ?? snapshot.state.sessionId;
       return {
         // `title` is derived from the roster entry, the activity file
         // and the launch record in that order, so it is the same label
@@ -126,17 +139,17 @@ export function managedSessionRows(
         // the roster can afford identical "Untitled session" rows because
         // a user arrows onto one, while here the id is the only thing
         // that tells two of them apart — and the only thing they can be
-        // acted on by.
+        // acted on by, so it must match the resumable spelling above.
         name:
           presentation.title === AGENT_VIEW_UNTITLED_TITLE ||
           !presentation.title
-            ? snapshot.state.sessionId
+            ? sessionId
             : presentation.title,
         pid: liveWorkerPid(snapshot.worker),
         startedAt: Number.isNaN(createdAt) ? undefined : createdAt,
         cwd: snapshot.state.activeCwd,
         taskState: presentation.taskState,
-        sessionId: snapshot.state.sessionId,
+        sessionId,
         managed: true,
       };
     });
