@@ -28,7 +28,11 @@ describe('deepseekProvider', () => {
     });
 
     const models = plan.modelProviders?.[0]?.models;
-    expect(models).toHaveLength(2);
+    expect(models?.map((model) => model.id)).toEqual([
+      'deepseek-v4-flash',
+      'deepseek-v4-pro',
+      'DeepSeek-V4-Pro',
+    ]);
     expect(models?.[0]).toMatchObject({
       id: 'deepseek-v4-flash',
       name: '[DeepSeek] deepseek-v4-flash',
@@ -36,12 +40,14 @@ describe('deepseekProvider', () => {
     expect(models?.[0]?.generationConfig).toEqual({
       contextWindowSize: 1000000,
     });
-    expect(models?.[1]).toMatchObject({
+    expect(models?.[2]).toMatchObject({
       id: 'DeepSeek-V4-Pro',
       name: '[DeepSeek] DeepSeek-V4-Pro',
-      generationConfig: { contextWindowSize: 1000000 },
     });
-    expect(models?.[1]?.capabilities?.reasoning).toEqual({
+    expect(models?.[2]?.generationConfig).toEqual({
+      contextWindowSize: 1000000,
+    });
+    expect(models?.[2]?.capabilities?.reasoning).toEqual({
       thinking: true,
       efforts: ['high', 'max'],
       defaultEffort: 'high',

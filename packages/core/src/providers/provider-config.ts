@@ -166,15 +166,7 @@ function buildModelConfigs(
   } else if (config.models && config.modelsEditable) {
     // Editable ModelSpec[] — look up per-model metadata for known IDs
     const specMap = new Map(config.models.map((s) => [s.id.toLowerCase(), s]));
-    const requestedModels = new Map<string, string>();
-    for (const id of inputs.modelIds) {
-      const normalizedId = id.toLowerCase();
-      requestedModels.set(
-        specMap.has(normalizedId) ? `known:${normalizedId}` : `custom:${id}`,
-        id,
-      );
-    }
-    models = [...requestedModels.values()].map((id) => {
+    models = inputs.modelIds.map((id) => {
       const spec = specMap.get(id.toLowerCase());
       if (spec) {
         return specToModelConfig(
