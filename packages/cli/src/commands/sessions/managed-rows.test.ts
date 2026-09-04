@@ -12,6 +12,7 @@ import type {
   AgentViewWorkerFile,
 } from '../../agent-view/protocol.js';
 import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
+import type { AgentViewTaskState } from '../../agent-view/presentation.js';
 
 const isPidAlive = vi.fn((pid: number) => pid > 0);
 
