@@ -80,6 +80,8 @@ import {
   type ServeSessionStatsStatus,
   type ServeSessionContextStatus,
   type ServeSessionLspStatus,
+  type ServeSessionResourcesStatus,
+  type ServeSessionSavedWorkflowStatus,
   type ServeSessionTasksStatus,
   type ServeSessionTaskOutputStatus,
   type ServeSessionWorkflowTaskStatus,
@@ -12049,6 +12051,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return requestSessionStatus<ServeSessionLspStatus>(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionLspStatus,
+      );
+    },
+
+    async getSessionResourcesStatus(sessionId) {
+      return requestSessionStatus<ServeSessionResourcesStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionResources,
+      );
+    },
+
+    async getSessionSavedWorkflow(sessionId, name) {
+      return requestSessionStatus<ServeSessionSavedWorkflowStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow,
+        { name },
       );
     },
 

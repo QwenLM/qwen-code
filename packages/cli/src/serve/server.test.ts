@@ -159,6 +159,7 @@ import type {
   ServeSessionContextUsageStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
+  ServeSessionResourcesStatus,
   ServeSessionStatsStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTaskOutputStatus,
@@ -220,6 +221,7 @@ import {
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { getActiveSseCount } from './routes/sse-events.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -604,6 +606,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_monitor_tool_correlation',
   'session_stats',
   'session_lsp',
+  'session_resources',
   'session_status',
   'session_close',
   'session_archive',
@@ -969,6 +972,10 @@ interface FakeBridgeOpts {
     taskKind: 'shell' | 'monitor',
   ) => Promise<ServeSessionTaskOutputStatus>;
   sessionLspImpl?: (sessionId: string) => Promise<ServeSessionLspStatus>;
+  sessionResourcesImpl?: (
+    sessionId: string,
+  ) => Promise<ServeSessionResourcesStatus>;
+  sessionSavedWorkflowImpl?: AcpSessionBridge['getSessionSavedWorkflow'];
   sessionTranscriptImpl?: AcpSessionBridge['getSessionTranscriptPage'];
   cancelSessionTaskImpl?: (
     sessionId: string,
@@ -1282,6 +1289,8 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'shell' | 'monitor';
   }>;
   sessionLspCalls: string[];
+  sessionResourcesCalls: string[];
+  sessionSavedWorkflowCalls: Array<{ sessionId: string; name: string }>;
   sessionTranscriptCalls: Array<
     Parameters<AcpSessionBridge['getSessionTranscriptPage']>[0]
   >;
@@ -1497,6 +1506,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionTaskOutputCalls: FakeBridge['sessionTaskOutputCalls'] = [];
   const sessionLspCalls: string[] = [];
+  const sessionResourcesCalls: string[] = [];
+  const sessionSavedWorkflowCalls: FakeBridge['sessionSavedWorkflowCalls'] = [];
   const sessionTranscriptCalls: FakeBridge['sessionTranscriptCalls'] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const controlSessionWorkflowTaskCalls: FakeBridge['controlSessionWorkflowTaskCalls'] =
@@ -1831,6 +1842,22 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       output: '',
       truncated: false,
     }));
+  const sessionSavedWorkflowImpl: AcpSessionBridge['getSessionSavedWorkflow'] =
+    opts.sessionSavedWorkflowImpl ??
+    (async (sessionId, name) => ({
+      v: 1 as const,
+      sessionId,
+      name,
+      workflow: {
+        v: 1 as const,
+        sessionId,
+        name,
+        source: 'project' as const,
+        scriptPath: `${WS_BOUND}/.qwen/workflows/${name}.js`,
+        script: `export const meta = { name: '${name}', description: 'd' }`,
+        meta: { name, description: 'd' },
+      },
+    }));
   const sessionLspImpl =
     opts.sessionLspImpl ??
     (async (sessionId) => ({
@@ -1844,6 +1871,26 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       inProgressServers: 0,
       notStartedServers: 0,
       servers: [],
+    }));
+  const sessionResourcesImpl =
+    opts.sessionResourcesImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      workspaceCwd: WS_BOUND,
+      skills: {
+        v: 1 as const,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        skills: [],
+      },
+      mcp: {
+        v: 1 as const,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        discoveryState: 'completed' as const,
+        servers: [],
+      },
     }));
   const sessionTranscriptImpl =
     opts.sessionTranscriptImpl ??
@@ -2129,6 +2176,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionTasksOptions,
     sessionTaskOutputCalls,
     sessionLspCalls,
+    sessionResourcesCalls,
+    sessionSavedWorkflowCalls,
     sessionTranscriptCalls,
     cancelSessionTaskCalls,
     controlSessionWorkflowTaskCalls,
@@ -2431,6 +2480,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionLspStatus(sessionId) {
       sessionLspCalls.push(sessionId);
       return sessionLspImpl(sessionId);
+    },
+    async getSessionResourcesStatus(sessionId) {
+      sessionResourcesCalls.push(sessionId);
+      return sessionResourcesImpl(sessionId);
+    },
+    async getSessionSavedWorkflow(sessionId, name) {
+      sessionSavedWorkflowCalls.push({ sessionId, name });
+      return sessionSavedWorkflowImpl(sessionId, name);
     },
     async getSessionTranscriptPage(req) {
       sessionTranscriptCalls.push(req);
@@ -5365,6 +5422,13 @@ describe('createServeApp', () => {
     });
   });
 
+  // `vi.waitFor` defaults to a 1000ms deadline, which is a developer-machine
+  // figure: on the shared pool the archive install and its settle take longer
+  // than that, and release run 33713579913 lost both of these cases with
+  // --retry=2 already on. The wait is scaffolding for the state these cases
+  // assert, never the thing under test, so it gets the room the host needs.
+  const ARCHIVE_WAIT = { timeout: 15_000 };
+
   describe('read-only status routes', () => {
     it('registers workspace permissions without settings persistence and requires a live session for writes', async () => {
       const wsRoot = await fsp.mkdtemp(
@@ -6240,7 +6304,7 @@ describe('createServeApp', () => {
             source: 'upload:DEMO.TAR.GZ',
             name: 'uploaded-ext',
           });
-        });
+        }, ARCHIVE_WAIT);
         expect(recordedSource).toMatch(
           /^upload:v1:[0-9a-f-]{36}:DEMO\.TAR\.GZ$/,
         );
@@ -6265,7 +6329,7 @@ describe('createServeApp', () => {
             status: 'installed',
             source: `upload:${maxLengthFilename}`,
           });
-        });
+        }, ARCHIVE_WAIT);
         expect(recordedSource).toMatch(/^upload:v1:[0-9a-f-]{36}:/);
         expect(recordedSource.endsWith(`:${maxLengthFilename}`)).toBe(true);
         expect(localSourcePath).toMatch(/extension\.zip$/);
@@ -6611,7 +6675,10 @@ describe('createServeApp', () => {
             .send(Buffer.from('archive'));
 
         const first = await upload();
-        await vi.waitFor(() => expect(requestSetting).toBeDefined());
+        await vi.waitFor(
+          () => expect(requestSetting).toBeDefined(),
+          ARCHIVE_WAIT,
+        );
         const second = await upload();
         await vi.waitFor(async () => {
           const poll = await request(app)
@@ -6619,7 +6686,7 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
             .set('Authorization', 'Bearer secret');
           expect(poll.body.status).toBe('succeeded');
-        });
+        }, ARCHIVE_WAIT);
         releaseFirst?.();
         await vi.waitFor(async () => {
           const poll = await request(app)
@@ -6627,7 +6694,7 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
             .set('Authorization', 'Bearer secret');
           expect(poll.body.status).toBe('succeeded');
-        });
+        }, ARCHIVE_WAIT);
 
         await expect(
           requestSetting?.({
@@ -9828,12 +9895,31 @@ describe('createServeApp', () => {
           },
         ],
       };
+      const resources: ServeSessionResourcesStatus = {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: WS_BOUND,
+        skills: {
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          skills: [],
+        },
+        mcp: {
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          discoveryState: 'completed',
+          servers: [],
+        },
+      };
       const bridge = fakeBridge({
         sessionContextImpl: async () => context,
         sessionSupportedCommandsImpl: async () => commands,
         sessionStatsImpl: async () => stats,
         sessionTasksImpl: async () => tasks,
         sessionLspImpl: async () => lsp,
+        sessionResourcesImpl: async () => resources,
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -9859,6 +9945,9 @@ describe('createServeApp', () => {
       const lspRes = await request(app)
         .get('/session/s-1/lsp')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const resourcesRes = await request(app)
+        .get('/session/s-1/resources')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(200);
       expect(contextRes.body).toEqual(context);
@@ -9873,6 +9962,8 @@ describe('createServeApp', () => {
       expect(workflowTasksRes.body).toEqual(tasks);
       expect(lspRes.status).toBe(200);
       expect(lspRes.body).toEqual(lsp);
+      expect(resourcesRes.status).toBe(200);
+      expect(resourcesRes.body).toEqual(resources);
       expect(bridge.sessionContextCalls).toEqual(['s-1']);
       expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
       expect(bridge.sessionStatsCalls).toEqual(['s-1']);
@@ -9882,6 +9973,7 @@ describe('createServeApp', () => {
         { includeWorkflows: true },
       ]);
       expect(bridge.sessionLspCalls).toEqual(['s-1']);
+      expect(bridge.sessionResourcesCalls).toEqual(['s-1']);
     });
 
     it('dispatches read-only session snapshots through the live owner runtime', async () => {
@@ -9907,6 +9999,23 @@ describe('createServeApp', () => {
           kind: taskKind,
           output: 'secondary output',
           truncated: false,
+        }),
+        sessionResourcesImpl: async (sessionId) => ({
+          v: 1,
+          sessionId,
+          workspaceCwd: WS_DIFFERENT,
+          skills: {
+            v: 1,
+            workspaceCwd: WS_DIFFERENT,
+            initialized: true,
+            skills: [],
+          },
+          mcp: {
+            v: 1,
+            workspaceCwd: WS_DIFFERENT,
+            initialized: true,
+            servers: [],
+          },
         }),
       });
       const registry = createWorkspaceRegistry([
@@ -9935,6 +10044,9 @@ describe('createServeApp', () => {
       const outputRes = await request(app)
         .get('/session/s-secondary/tasks/shell-1/output?kind=shell')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const resourcesRes = await request(app)
+        .get('/session/s-secondary/resources')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
@@ -9955,6 +10067,10 @@ describe('createServeApp', () => {
           taskKind: 'shell',
         },
       ]);
+      expect(resourcesRes.status).toBe(200);
+      expect(resourcesRes.body.workspaceCwd).toBe(WS_DIFFERENT);
+      expect(primaryBridge.sessionResourcesCalls).toEqual([]);
+      expect(secondaryBridge.sessionResourcesCalls).toEqual(['s-secondary']);
     });
 
     it('rejects task output requests with an invalid kind', async () => {
@@ -10117,6 +10233,9 @@ describe('createServeApp', () => {
         sessionLspImpl: async (sessionId) => {
           throw new SessionNotFoundError(sessionId);
         },
+        sessionResourcesImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -10139,6 +10258,9 @@ describe('createServeApp', () => {
       const lspRes = await request(app)
         .get('/session/missing/lsp')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const resourcesRes = await request(app)
+        .get('/session/missing/resources')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(404);
       expect(contextRes.body.sessionId).toBe('missing');
@@ -10150,6 +10272,8 @@ describe('createServeApp', () => {
       expect(tasksRes.body.sessionId).toBe('missing');
       expect(lspRes.status).toBe(404);
       expect(lspRes.body.sessionId).toBe('missing');
+      expect(resourcesRes.status).toBe(404);
+      expect(resourcesRes.body.sessionId).toBe('missing');
     });
 
     it('rejects task cancellation with invalid kind', async () => {
@@ -10202,6 +10326,53 @@ describe('createServeApp', () => {
           context: { clientId: 'client-1' },
         },
       ]);
+    });
+
+    it('reads a saved workflow definition and fails closed for an untrusted workspace', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .get('/session/s-1/saved-workflows/deep-review')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        v: 1,
+        sessionId: 's-1',
+        name: 'deep-review',
+        workflow: {
+          source: 'project',
+          scriptPath: `${WS_BOUND}/.qwen/workflows/deep-review.js`,
+          meta: { name: 'deep-review', description: 'd' },
+        },
+      });
+      expect(bridge.sessionSavedWorkflowCalls).toEqual([
+        { sessionId: 's-1', name: 'deep-review' },
+      ]);
+
+      const untrustedBridge = fakeBridge();
+      const untrustedApp = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge: untrustedBridge, primaryWorkspaceTrusted: false },
+      );
+      const closedRes = await request(untrustedApp)
+        .get('/session/s-1/saved-workflows/deep-review')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(closedRes.status).toBe(200);
+      expect(closedRes.body).toEqual({
+        v: 1,
+        sessionId: 's-1',
+        name: 'deep-review',
+        workflow: null,
+      });
+      expect(untrustedBridge.sessionSavedWorkflowCalls).toEqual([]);
     });
 
     it('controls live runs, saved definitions, and history through one route', async () => {
@@ -32415,7 +32586,10 @@ describe('runQwenServe', () => {
     // promptly; this assertion mainly proves the close didn't hang on the
     // live connection. Even if the connection had stayed open, the 5s
     // force-close timer would unblock us.
-    expect(elapsed).toBeLessThan(5_500);
+    // The bound must stay under the pool's 60s testTimeout or vitest — not
+    // the assertion — decides a hung close; 10x covers a force-close window
+    // stretched by host contention while a real stall still fails the timeout.
+    expectWithinLatencyBudget(elapsed, 5_500, { poolMultiplier: 10 });
     // Drain the fetch promise so vitest doesn't complain about open handles.
     try {
       const res = await sseFetch;

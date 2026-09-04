@@ -1606,6 +1606,16 @@
             "refuse"
           ]
         },
+        "crossSessionHeldExpiry": {
+          "description": "How long a message held for your review waits before it expires and the sending session is told nobody answered. \"never\" keeps held messages until the session ends. Only affects messages that are held; accepted and refused ones are settled on arrival. Options: 1m, 5m, 10m, never",
+          "enum": [
+            "1m",
+            "5m",
+            "10m",
+            "never"
+          ],
+          "default": "5m"
+        },
         "modelGrades": {
           "type": "object",
           "additionalProperties": {

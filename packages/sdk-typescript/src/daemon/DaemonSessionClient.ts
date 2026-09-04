@@ -38,6 +38,7 @@ import type {
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
   DaemonSessionLspStatus,
+  DaemonSessionResourcesStatus,
   DaemonSessionRecapResult,
   DaemonSessionSummary,
   DaemonShellCommandResult,
@@ -53,6 +54,7 @@ import type {
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
+  DaemonSessionSavedWorkflowStatus,
   HeartbeatResult,
   GoalControlRequest,
   GoalStateResponse,
@@ -1012,8 +1014,20 @@ export class DaemonSessionClient {
     return this.client.sessionWorkflowTasks(this.sessionId, this.clientId);
   }
 
+  savedWorkflow(name: string): Promise<DaemonSessionSavedWorkflowStatus> {
+    return this.client.sessionSavedWorkflow(
+      this.sessionId,
+      name,
+      this.clientId,
+    );
+  }
+
   lspStatus(): Promise<DaemonSessionLspStatus> {
     return this.client.sessionLspStatus(this.sessionId, this.clientId);
+  }
+
+  resources(): Promise<DaemonSessionResourcesStatus> {
+    return this.client.sessionResources(this.sessionId, this.clientId);
   }
 
   cancelTask(

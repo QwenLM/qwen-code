@@ -326,6 +326,7 @@ const WS_READ_METHODS = new Set([
   '_qwen/session/tasks',
   '_qwen/session/tasks/output',
   '_qwen/session/lsp',
+  '_qwen/session/saved_workflow',
   '_qwen/session/artifacts',
   '_qwen/workspace/mcp',
   '_qwen/workspace/skills',
