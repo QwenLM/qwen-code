@@ -705,6 +705,12 @@ export async function main() {
           )
         : injectStdinIntoArgs(process.argv, stdinData);
 
+      // The seatbelt spawn merges `{ ...process.env, ...childEnv }`, so the
+      // marker must not be sitting in process.env at the handoff: auth
+      // validation above re-runs the environment load, and the accepted
+      // provenance travels in `privateAcpChildEnv`, which is spread last.
+      delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
+
       await relaunchOnExitCode(
         () =>
           start_sandbox(

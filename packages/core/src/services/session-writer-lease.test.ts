@@ -33,7 +33,7 @@ import {
   ChatRecordingService,
   type ChatRecord,
 } from './chatRecordingService.js';
-import { readPidNamespaceId } from '../utils/process-liveness.js';
+import * as processLiveness from '../utils/process-liveness.js';
 import { SessionService } from './sessionService.js';
 import {
   getSessionWriterLockPath,
@@ -1036,7 +1036,9 @@ describe('SessionWriterLease', () => {
       const lockRecord = JSON.parse(await fs.readFile(lockPath, 'utf8')) as {
         pid_namespace_id?: number;
       };
-      expect(lockRecord.pid_namespace_id).toBe(readPidNamespaceId());
+      expect(lockRecord.pid_namespace_id).toBe(
+        processLiveness.readPidNamespaceId(),
+      );
       await lease.release();
     },
   );
@@ -1068,6 +1070,47 @@ describe('SessionWriterLease', () => {
       });
       await expect(
         SessionWriterLease.acquire(foreignBoot.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+    },
+  );
+
+  it.runIf(process.platform === 'linux').each([
+    ['an unparseable identity', () => 'linux:zz'],
+    [
+      'an identity truncated before the start ticks',
+      () => `linux:${processLiveness.readLocalBootId()}`,
+    ],
+    [
+      'a darwin identity read by a Linux reader',
+      () => 'darwin:Tue Sep 1 00:00:00 2026',
+    ],
+    [
+      'a win32 identity read by a Linux reader',
+      () => 'win32:638000000000000000',
+    ],
+  ])('fences a dead writer carrying %s', async (_label, identity) => {
+    const fenced = await deadOwnerRecord((record) => {
+      record['process_start_identity'] = identity();
+    });
+    await expect(
+      SessionWriterLease.acquire(fenced.options),
+    ).rejects.toBeInstanceOf(SessionWriterConflictError);
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'fences a dead writer when the local identity domain is indeterminate',
+    async () => {
+      const bootFenced = await deadOwnerRecord();
+      vi.spyOn(processLiveness, 'readLocalBootId').mockReturnValue(null);
+      await expect(
+        SessionWriterLease.acquire(bootFenced.options),
+      ).rejects.toBeInstanceOf(SessionWriterConflictError);
+      vi.restoreAllMocks();
+
+      const namespaceFenced = await deadOwnerRecord();
+      vi.spyOn(processLiveness, 'readPidNamespaceId').mockReturnValue(null);
+      await expect(
+        SessionWriterLease.acquire(namespaceFenced.options),
       ).rejects.toBeInstanceOf(SessionWriterConflictError);
     },
   );

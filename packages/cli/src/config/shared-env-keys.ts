@@ -259,6 +259,20 @@ export function isHardcodedProjectEnvExclusion(key: string): boolean {
   );
 }
 
+// Private daemon→child provenance markers. Unlike the private ACP capability
+// (a random per-spawn nonce), these are fixed constants, so a home-scoped
+// `.env` could forge one — and home-scoped files are deliberately exempt from
+// the hardcoded project exclusions above. No env file at any scope may set
+// them: the only legitimate carrier is the spawner's child env, which the CLI
+// entry point captures and deletes before any environment-file load.
+const PRIVATE_PROVENANCE_ENV_KEYS: ReadonlySet<string> = new Set([
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV.toLowerCase(),
+]);
+
+export function isPrivateProvenanceEnvKey(key: string): boolean {
+  return PRIVATE_PROVENANCE_ENV_KEYS.has(key.toLowerCase());
+}
+
 export const HOME_ENV_BOOTSTRAP_KEYS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
