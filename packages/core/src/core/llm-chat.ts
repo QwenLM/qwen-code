@@ -119,6 +119,8 @@ import {
 import {
   getStartupContextLength,
   isSystemReminderContent,
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
 } from './environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import {
@@ -1413,6 +1415,13 @@ const PROTOCOL_TAG_PREFIXES = [
   '</analysis',
   '<summary',
   '</summary',
+  // Harness-style tool-result scaffolding that some models emit as raw XML
+  // before their real reply (#10797 Shape A): a fake `<file_path>` /
+  // `<action>` block closed by a dangling `</tool_result>`. qwen-code never
+  // generates these tags itself, so a response opening with one is a leak.
+  '<file_path',
+  '<action',
+  '</tool_result',
 ] as const;
 const LEAKED_TOOL_CALL_TAGS = /[}\]]\s*<\/parameter>\s*<\/function>/iy;
 
@@ -1512,6 +1521,248 @@ class LeadingProtocolTagLeakDetector {
 
   get blockingOutput(): boolean {
     return this.state !== 'clean';
+  }
+}
+
+/**
+ * Cap on how many bytes an unresolved echo candidate may buffer before the
+ * filter gives up and releases it verbatim (fail-open). Real reminder echoes
+ * are a few hundred bytes; the cap only guards against a pathological
+ * unterminated candidate starving the visible stream.
+ */
+const SYSTEM_REMINDER_ECHO_MAX_BUFFER = 16_000;
+
+/**
+ * Strips `<system-reminder>…</system-reminder>` blocks that the model echoes
+ * back verbatim inside a backtick code span or fence (#10797 Shape B).
+ *
+ * Injected reminders (stale-todo nudges, ACP context) never belong in
+ * user-visible model output, but such an echo is nearly indistinguishable
+ * from a legitimately quoted example, so this filter is deliberately
+ * conservative and fails open:
+ *
+ *   - only blocks whose opening backtick run (1-3 ticks) sits at stream start
+ *     or at the start of a line are candidates — an inline mid-sentence
+ *     mention never triggers;
+ *   - the block must be COMPLETE: `</system-reminder>` followed (after
+ *     optional gap whitespace) by a backtick run at least as long as the
+ *     opener. Anything else — unterminated block, early-closing code span,
+ *     oversized candidate — is released unchanged;
+ *   - a backtick run before the close tag means the code span closed early
+ *     (an inline mention like "`<system-reminder>`"), which also releases
+ *     everything unchanged.
+ *
+ * Unlike the leading protocol-tag detector this never retries the turn: the
+ * echo is stripped in place and the surrounding reply is preserved, because
+ * the reported shape pairs the echo with a real tool call that must survive.
+ */
+class SystemReminderEchoFilter {
+  private holding = false;
+  private buffer = '';
+  private carry = '';
+  private carryAnchored = false;
+  private atStreamStart = true;
+  private openingTicks = 0;
+  private openingRunEnd = 0;
+
+  /**
+   * Evaluate `s`, which starts at a candidate line start, against the echo
+   * trigger grammar: `[ \t]* (`{1,3}) [ \t]* (\r?\n)? [ \t]* <system-reminder>`.
+   * Returns undefined when `s` can no longer become a trigger.
+   */
+  private static matchTrigger(
+    s: string,
+  ): { ticks: number; triggered: boolean } | undefined {
+    let i = 0;
+    while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
+    let ticks = 0;
+    while (i < s.length && s[i] === '`' && ticks < 3) {
+      ticks++;
+      i++;
+    }
+    if (ticks === 0) {
+      return i === s.length ? { ticks: 0, triggered: false } : undefined;
+    }
+    if (i === s.length) return { ticks, triggered: false };
+    let j = i;
+    while (j < s.length && (s[j] === ' ' || s[j] === '\t')) j++;
+    if (j < s.length && s[j] === '\r') {
+      j++;
+      if (j < s.length && s[j] === '\n') j++;
+    } else if (j < s.length && s[j] === '\n') {
+      j++;
+    }
+    while (j < s.length && (s[j] === ' ' || s[j] === '\t')) j++;
+    if (j === s.length) return { ticks, triggered: false };
+    const tag = s.slice(j);
+    if (tag.startsWith(SYSTEM_REMINDER_OPEN)) {
+      return { ticks, triggered: true };
+    }
+    if (SYSTEM_REMINDER_OPEN.startsWith(tag)) {
+      return { ticks, triggered: false };
+    }
+    return undefined;
+  }
+
+  /** Longest backtick run of length ≥ minTicks inside [from, to), or -1. */
+  private static findTickRun(
+    text: string,
+    from: number,
+    to: number,
+    minTicks: number,
+  ): number {
+    let run = 0;
+    for (let i = from; i < to; i++) {
+      run = text[i] === '`' ? run + 1 : 0;
+      if (run >= minTicks) return i - minTicks + 1;
+    }
+    return -1;
+  }
+
+  accept(text: string): string {
+    if (this.holding) {
+      this.buffer += text;
+      return this.resolveHeld();
+    }
+    return this.scan(this.carry + text);
+  }
+
+  /** True while the filter withholds unresolved bytes (held block or carry). */
+  get pending(): boolean {
+    return this.holding || this.carry !== '';
+  }
+
+  finish(): string {
+    if (this.holding) return this.resolveHeld(true) + this.flushCarry();
+    return this.flushCarry();
+  }
+
+  private flushCarry(): string {
+    const out = this.carry;
+    this.carry = '';
+    this.carryAnchored = false;
+    return out;
+  }
+
+  /**
+   * Passthrough scan: emit everything that cannot be part of a trigger and
+   * keep an ambiguous tail in `carry` for the next chunk.
+   */
+  private scan(text: string): string {
+    if (!text) return '';
+    // `text` may begin with the previous carry, which was held precisely
+    // because it starts at a line start (or at the absolute stream start).
+    const startIsLineStart = this.atStreamStart || this.carryAnchored;
+    this.carry = '';
+    this.carryAnchored = false;
+    let emit = '';
+    let lineStart: number | null = startIsLineStart ? 0 : null;
+    for (;;) {
+      if (lineStart === null) {
+        const nl = text.indexOf('\n');
+        if (nl === -1) break;
+        lineStart = nl + 1;
+      }
+      const candidate = text.slice(lineStart);
+      const match = SystemReminderEchoFilter.matchTrigger(candidate);
+      if (match === undefined) {
+        if (lineStart === 0) this.atStreamStart = false;
+        // A candidate may itself start with '\n' (empty line), so advance
+        // from `lineStart`, not `lineStart + 1`, or the next line start
+        // would be skipped.
+        const nl = text.indexOf('\n', lineStart);
+        if (nl === -1) break;
+        lineStart = nl + 1;
+        continue;
+      }
+      if (match.triggered) {
+        emit += text.slice(0, lineStart);
+        this.atStreamStart = false;
+        this.holding = true;
+        this.buffer = candidate;
+        this.openingTicks = match.ticks;
+        this.openingRunEnd = candidate.indexOf('`') + match.ticks;
+        return emit + this.resolveHeld();
+      }
+      // Still ambiguous: hold from this line start onward.
+      emit += text.slice(0, lineStart);
+      this.carry = candidate;
+      this.carryAnchored = true;
+      this.atStreamStart = false;
+      return emit;
+    }
+    // No resolved anchor; hold back a trailing partial line that could still
+    // grow into one (e.g. "\n  `<system-rem").
+    const nl = text.lastIndexOf('\n');
+    const tail = nl === -1 ? text : text.slice(nl + 1);
+    const holdable = SystemReminderEchoFilter.matchTrigger(tail);
+    if (nl >= 0 && holdable !== undefined) {
+      this.carry = text.slice(nl + 1);
+      this.carryAnchored = true;
+      emit += text.slice(0, nl + 1);
+    } else if (this.atStreamStart && holdable !== undefined) {
+      this.carry = text;
+      this.carryAnchored = true;
+    } else {
+      emit += text;
+      if (text.length > 0) this.atStreamStart = false;
+    }
+    return emit;
+  }
+
+  /** Resolve the held candidate: strip complete echoes, release otherwise. */
+  private resolveHeld(final = false): string {
+    let emitted = '';
+    for (;;) {
+      if (!this.holding) return emitted;
+      const closeIdx = this.buffer.indexOf(SYSTEM_REMINDER_CLOSE);
+      const searchEnd = closeIdx === -1 ? this.buffer.length : closeIdx;
+      const earlyClose =
+        SystemReminderEchoFilter.findTickRun(
+          this.buffer,
+          this.openingRunEnd,
+          searchEnd,
+          this.openingTicks,
+        ) !== -1;
+      if (closeIdx !== -1) {
+        const after = closeIdx + SYSTEM_REMINDER_CLOSE.length;
+        const gap = /^[ \t]*\r?\n?[ \t]*/.exec(this.buffer.slice(after))![0];
+        let ticksAfter = 0;
+        const ticksAt = after + gap.length;
+        while (
+          ticksAt + ticksAfter < this.buffer.length &&
+          this.buffer[ticksAt + ticksAfter] === '`'
+        ) {
+          ticksAfter++;
+        }
+        if (ticksAfter >= this.openingTicks) {
+          let end = ticksAt + ticksAfter;
+          if (this.buffer[end] === '\r' && this.buffer[end + 1] === '\n') {
+            end += 2;
+          } else if (this.buffer[end] === '\n' || this.buffer[end] === '\r') {
+            end += 1;
+          }
+          const remainder = this.buffer.slice(end);
+          this.holding = false;
+          this.buffer = '';
+          emitted += this.scan(remainder);
+          continue;
+        }
+      }
+      if (
+        earlyClose ||
+        this.buffer.length > SYSTEM_REMINDER_ECHO_MAX_BUFFER ||
+        final
+      ) {
+        // Fail-open: release the candidate verbatim.
+        const release = this.buffer;
+        this.holding = false;
+        this.buffer = '';
+        emitted += this.scan(release);
+        continue;
+      }
+      return emitted;
+    }
   }
 }
 
@@ -5253,6 +5504,38 @@ export class LlmChat {
       return released;
     };
     let protocolTextWasSuppressed = false;
+    // #10797 Shape B: strips backtick-wrapped <system-reminder> echoes from
+    // user-visible text. Strip-only (never retries), so mid-stream holds do
+    // not need the whole-chunk atomicity that a leak-retry requires.
+    const systemReminderEchoFilter = new SystemReminderEchoFilter();
+    // True once any text has been released by the leading detector (i.e. the
+    // pending text parts' bytes now live in a detector/filter buffer rather
+    // than only in the parts themselves). Flush sites use this to decide
+    // between verbatim part replay (leading detector still owns the text)
+    // and the stripped rebuild below.
+    let textReleasedThroughDetectors = false;
+    const takePendingProtocolPartsStripped = (): Part[] => {
+      const parts = pendingProtocolParts;
+      pendingProtocolParts = [];
+      const released: Part[] = [];
+      for (const part of parts) {
+        // Pure text parts routed here while a detector held them; their text
+        // re-enters through the filter's released string instead.
+        if (isValidNonThoughtTextPart(part)) continue;
+        released.push(part);
+      }
+      return released;
+    };
+    const finishEchoFilterAndTakePending = (): Part[] => {
+      const tail = systemReminderEchoFilter.finish();
+      if (!textReleasedThroughDetectors) {
+        // The leading detector never released: pending parts still carry the
+        // full text verbatim and the echo filter saw no bytes.
+        return takePendingProtocolParts();
+      }
+      const released = takePendingProtocolPartsStripped();
+      return tail ? [...released, { text: tail }] : released;
+    };
     const currentUserTurn = this.history[this.history.length - 1];
     const isToolResultContinuation =
       currentUserTurn?.role === 'user' &&
@@ -5297,7 +5580,7 @@ export class LlmChat {
             if (protocolTagDetector.leaked) {
               pendingProtocolParts = [];
             } else {
-              const parts = takePendingProtocolParts();
+              const parts = finishEchoFilterAndTakePending();
               if (parts.length > 0) {
                 content = {
                   ...content,
@@ -5331,14 +5614,42 @@ export class LlmChat {
               }
               const text = protocolTagDetector.accept(part.text);
               if (text) {
-                if (pendingProtocolParts.length > 0) {
-                  outputParts.push(...takePendingProtocolParts(), part);
-                } else {
-                  outputParts.push({ ...part, text });
+                textReleasedThroughDetectors = true;
+                const filteredText = systemReminderEchoFilter.accept(text);
+                if (filteredText) {
+                  if (pendingProtocolParts.length > 0) {
+                    // Held parts' text flowed through the detector buffers
+                    // and is represented by `filteredText`; keep only their
+                    // non-text payloads (thoughts, tool calls, ...).
+                    outputParts.push(...takePendingProtocolPartsStripped(), {
+                      ...part,
+                      text: filteredText,
+                    });
+                  } else {
+                    outputParts.push({ ...part, text: filteredText });
+                  }
+                  continue;
                 }
+                // The echo filter is holding mid-stream: park the part (its
+                // text re-enters through a later filter release). Unlike a
+                // leading-tag hold this never retries the turn, so parts of
+                // this chunk that already resolved stay in `outputParts` and
+                // remain yieldable — no whole-chunk withdrawal.
+                pendingProtocolParts.push(part);
+                protocolTextWasSuppressed ||= part.text.length > 0;
                 continue;
               }
-              pendingProtocolParts.push(...outputParts.splice(0), part);
+              if (
+                protocolTagDetector.blockingOutput ||
+                !systemReminderEchoFilter.pending
+              ) {
+                pendingProtocolParts.push(...outputParts.splice(0), part);
+              } else {
+                // Empty text while only the echo filter withholds bytes: a
+                // withdrawal would park already-released parts whose bytes
+                // are no longer in any buffer, so park just this part.
+                pendingProtocolParts.push(part);
+              }
               protocolTextWasSuppressed ||= part.text.length > 0;
             }
             content.parts = outputParts;
@@ -5347,7 +5658,7 @@ export class LlmChat {
               if (protocolTagDetector.leaked) {
                 pendingProtocolParts = [];
               } else {
-                content.parts.push(...takePendingProtocolParts());
+                content.parts.push(...finishEchoFilterAndTakePending());
               }
             }
             content.parts = normalizeModelToolCallIds(
@@ -5493,7 +5804,7 @@ export class LlmChat {
         pendingProtocolParts = [];
       } else {
         const parts = normalizeModelToolCallIds(
-          takePendingProtocolParts(),
+          finishEchoFilterAndTakePending(),
           usedToolCallIds,
           rawToolCallIdsInCurrentTurn,
           reservedToolCallIds,
