@@ -41,6 +41,8 @@ import type {
 } from './sessionArtifacts.js';
 import type { SessionAttachmentReference } from './sessionAttachments.js';
 import type {
+  ServeSessionAgentsStatus,
+  ServeSessionAgentTrace,
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
@@ -521,6 +523,8 @@ export interface BridgeRestoredSession extends BridgeSession {
 export interface BridgeSessionTranscriptPageRequest {
   sessionId: string;
   cursor?: string;
+  atRecordId?: string;
+  snapshot?: string;
   beforeRecordId?: string;
   /** Internal newest-page read used to refresh an attached session's UI. */
   direction?: 'backward';
@@ -537,6 +541,36 @@ export interface BridgeSessionTranscriptPage {
   lastUpdated?: string;
   partial?: true;
   replayError?: string;
+  targetRecordId?: string;
+  hasOlder?: boolean;
+}
+
+export interface BridgeSessionTurnIndexPageRequest {
+  sessionId: string;
+  snapshot?: string;
+  start?: number;
+  limit?: number;
+}
+
+export interface BridgeSessionTurnIndexEntry {
+  ordinal: number;
+  turnId: string;
+  kind: 'prompt' | 'realtime' | 'scheduled';
+  promptId?: string;
+  timestamp?: string;
+  label: string;
+  detail?: string;
+}
+
+export interface BridgeSessionTurnIndexPage {
+  v: 1;
+  sessionId: string;
+  snapshot: string;
+  totalTurns: number;
+  start: number;
+  turns: BridgeSessionTurnIndexEntry[];
+  startTime?: string;
+  lastUpdated?: string;
 }
 
 export interface BridgeBranchSessionRequest {
@@ -1845,6 +1879,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     opts?: { includeWorkflows?: boolean },
   ): Promise<ServeSessionTasksStatus>;
 
+  /** Read persisted and live subagents for a live session. */
+  getSessionAgentsStatus(sessionId: string): Promise<ServeSessionAgentsStatus>;
+
+  /** Read the persisted subagent lineage for a live session. */
+  getSessionAgentTrace(
+    sessionId: string,
+    rootAgentId?: string,
+  ): Promise<ServeSessionAgentTrace>;
+
   /** Read sanitized LSP server status for a live session. */
   getSessionLspStatus(sessionId: string): Promise<ServeSessionLspStatus>;
 
@@ -1871,6 +1914,14 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getSessionTranscriptPage(
     req: BridgeSessionTranscriptPageRequest,
   ): Promise<BridgeSessionTranscriptPage>;
+
+  /** Flush pending transcript writes for a live session. */
+  flushSessionTranscript?(sessionId: string): Promise<void>;
+
+  /** Read a sparse page of persisted navigation turns through the ACP child. */
+  getSessionTurnIndexPage(
+    req: BridgeSessionTurnIndexPageRequest,
+  ): Promise<BridgeSessionTurnIndexPage>;
 
   /** Cancel a background task in a live session. */
   cancelSessionTask(
@@ -2157,6 +2208,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     attachmentId: string,
     context?: BridgeClientRequestContext,
   ): Promise<{ data: Buffer; mimeType: string } | undefined>;
+
+  /** List every attachment currently stored for the session, upload order. */
+  listSessionAttachments(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionAttachmentReference[]>;
 
   removeSessionAttachment(
     sessionId: string,
