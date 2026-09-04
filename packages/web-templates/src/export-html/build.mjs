@@ -25,6 +25,19 @@ const reactUmdVersion = '18.2.0';
 const reactDomUmdVersion = '18.2.0';
 const exportTranscriptMaxBlocks = 1_000;
 const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
+// The document renderer runtime is inlined into every exported file and has
+// no CDN fallback by design (exports must open offline and keep rendering
+// identically), so its size is bounded here instead. Mirrors the hard
+// bundle-size assertions in packages/sdk-typescript/scripts/build.js.
+// Before #11031 was fixed, the document entry imported the @qwen-code/web-shell
+// package root and inlined the full interactive shell into every export:
+// 19,523,259 runtime bytes. The hard limit sits below that so the same
+// regression fails the build instead of landing silently.
+// Baseline: 17,963,937 bytes after the #11031 fix, measured with
+// `cd packages/web-templates && node src/export-html/build.mjs`
+// (the build prints the document runtime size).
+const DOCUMENT_RUNTIME_WARNING_BYTES = 18_500_000;
+const MAX_DOCUMENT_RUNTIME_BYTES = 19_000_000;
 const { version: exportTranscriptRendererVersion } = JSON.parse(
   await readFile(join(assetsDir, '..', '..', 'package.json'), 'utf8'),
 );
@@ -134,6 +147,23 @@ const documentCssBundle = documentBuildResult.outputFiles.find((file) =>
 );
 if (!documentJsBundle || !documentCssBundle) {
   throw new Error('Failed to generate document export bundles.');
+}
+const documentRuntimeBytes =
+  Buffer.byteLength(documentJsBundle.text) +
+  Buffer.byteLength(documentCssBundle.text);
+console.log(`Document export runtime is ${documentRuntimeBytes} bytes`);
+if (documentRuntimeBytes > MAX_DOCUMENT_RUNTIME_BYTES) {
+  throw new Error(
+    `Document export runtime is ${documentRuntimeBytes} bytes; expected <= ${MAX_DOCUMENT_RUNTIME_BYTES}. ` +
+      'The export document inlines its renderer into every generated file; ' +
+      'import only what the transcript needs (see packages/web-shell/client/transcript.ts) ' +
+      'or raise the budget deliberately.',
+  );
+}
+if (documentRuntimeBytes > DOCUMENT_RUNTIME_WARNING_BYTES) {
+  console.warn(
+    `Document export runtime exceeds the ${DOCUMENT_RUNTIME_WARNING_BYTES}-byte warning threshold`,
+  );
 }
 const documentJs = documentJsBundle.text
   .trim()

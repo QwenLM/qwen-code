@@ -108,7 +108,15 @@ function injectCssModules(): Plugin {
       const escapedCss = JSON.stringify(css);
       for (const item of Object.values(bundle)) {
         if (item.type !== 'chunk') continue;
-        if (!item.facadeModuleId?.endsWith('/client/index.tsx')) {
+        // Every entry that renders components must carry the scoped
+        // stylesheet. The transcript entry is consumed on its own by the
+        // `/export html` document build, so it cannot inherit the CSS from
+        // the root entry; runtime injection stays idempotent (the style tag
+        // is only appended when missing).
+        const isComponentEntryFacade =
+          item.facadeModuleId?.endsWith('/client/index.tsx') ||
+          item.facadeModuleId?.endsWith('/client/transcript.ts');
+        if (!isComponentEntryFacade) {
           continue;
         }
         item.code =
@@ -121,13 +129,22 @@ function injectCssModules(): Plugin {
   };
 }
 
-export default defineConfig({
+// The transcript entry is built in its own rollup run (`--mode transcript`)
+// so it only carries the CSS reachable from the read-only transcript
+// renderer. Built alongside the root entry, it would inherit the full
+// component stylesheet (editor, sidebar, …) that the `/export html`
+// document renderer inlines into every exported file (#11031).
+export default defineConfig(({ mode }) => ({
   plugins: [react(), tailwindcss(), injectCssModules()],
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
         __dirname,
         './client/daemon-react-sdk.ts',
+      ),
+      '@qwen-code/web-shell/transcript': resolve(
+        __dirname,
+        './client/transcript.ts',
       ),
       '@': resolve(__dirname, './client'),
     },
@@ -138,10 +155,13 @@ export default defineConfig({
   build: {
     emptyOutDir: false,
     lib: {
-      entry: {
-        index: 'client/index.tsx',
-        'daemon-react-sdk': 'client/daemon-react-sdk.ts',
-      },
+      entry:
+        mode === 'transcript'
+          ? { transcript: 'client/transcript.ts' }
+          : {
+              index: 'client/index.tsx',
+              'daemon-react-sdk': 'client/daemon-react-sdk.ts',
+            },
       formats: ['es'],
       fileName: (_format, entryName) => `${entryName}.js`,
     },
@@ -183,4 +203,4 @@ export default defineConfig({
   define: {
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
   },
-});
+}));
