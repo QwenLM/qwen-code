@@ -20,6 +20,7 @@ import {
   getAutoModePermissionDeniedReason,
   isAutoModeProtectedWritePath,
   isInSafeToolAllowlist,
+  prepareAutoModeFallback,
   shouldFirePermissionDeniedForAutoMode,
   passesAcceptEditsFastPath,
   shouldClassifyAllShellForAutoMode,
@@ -1357,6 +1358,30 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
     });
     expect(setAutoModeDenialState).not.toHaveBeenCalled();
   });
+
+  it('consumes a matching retry token when a threshold fallback takes precedence', () => {
+    const setAutoModeDenialState = vi.fn();
+    const actionFingerprint = 'same-action';
+    const result = applyAutoModeDecision(
+      { via: 'fallback', reason: 'consecutive_block' },
+      { setAutoModeDenialState } as unknown as Config,
+      {
+        ...denialState,
+        consecutiveBlock: 3,
+        pendingManualRetryFingerprint: actionFingerprint,
+      },
+      actionFingerprint,
+    );
+
+    expect(result).toMatchObject({
+      kind: 'fallback',
+      reason: 'consecutive_block',
+    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith({
+      ...denialState,
+      consecutiveBlock: 3,
+    });
+  });
 });
 
 describe('getAutoModeActionFingerprint', () => {
@@ -1501,6 +1526,22 @@ describe('PermissionDenied hook gating', () => {
         message: 'Review manually.',
       }),
     ).toBe(true);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
+        kind: 'fallback',
+        reason: 'total_denial',
+        message: 'Review manually.',
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
+        kind: 'fallback',
+        reason: 'classifier_blocked_retry',
+        message: 'Review manually.',
+      }),
+    ).toBe(false);
 
     expect(
       shouldFirePermissionDeniedForAutoMode(classifierBlock, {
@@ -1714,6 +1755,50 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
     expect(decision.via).not.toBe('blocked:destructive-command');
   });
 
+  it('preserves an armed retry when the destructive guard preempts it', async () => {
+    const actionFingerprint = getAutoModeActionFingerprint(
+      ToolNames.SHELL,
+      { command: 'git reset --hard' },
+      cwd,
+    );
+    let denialState = {
+      consecutiveBlock: 1,
+      consecutiveUnavailable: 0,
+      totalBlock: 1,
+      totalUnavailable: 0,
+      pendingManualRetryFingerprint: actionFingerprint,
+    };
+    const config = {
+      ...baseConfig,
+      getAutoModeDenialState: () => denialState,
+      setAutoModeDenialState: (next: typeof denialState) => {
+        denialState = next;
+      },
+    } as unknown as Config;
+    const prepared = prepareAutoModeFallback(config, actionFingerprint);
+
+    const decision = await evaluateAutoMode({
+      ctx: { toolName: ToolNames.SHELL, command: 'git reset --hard' },
+      pmForcedAsk: false,
+      toolParams: { command: 'git reset --hard' },
+      messages: [{ role: 'user', parts: [{ text: 'fix the bug' }] }],
+      config,
+      signal: new AbortController().signal,
+      skipClassifierReason: prepared.fallback.fallback
+        ? prepared.fallback.reason
+        : undefined,
+    });
+    const outcome = applyAutoModeDecision(
+      decision,
+      config,
+      prepared.denialState,
+      actionFingerprint,
+    );
+
+    expect(outcome.kind).toBe('blocked');
+    expect(denialState.pendingManualRetryFingerprint).toBe(actionFingerprint);
+  });
+
   it('does not block non-shell tools', async () => {
     const decision = await evaluateAutoMode({
       ctx: { toolName: ToolNames.READ_FILE, filePath: '/any/file.txt' },
@@ -1761,6 +1846,10 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
     if (result.kind === 'blocked') {
       expect(result.errorMessage).toContain('Blocked destructive git command');
       expect(result.errorMessage).toContain('Do not try to complete');
+      expect(result.errorMessage).not.toContain('retry the same tool call');
+      expect(result.errorMessage).toContain(
+        'ask the user for explicit approval',
+      );
     }
     expect(setAutoModeDenialState).toHaveBeenCalled();
   });

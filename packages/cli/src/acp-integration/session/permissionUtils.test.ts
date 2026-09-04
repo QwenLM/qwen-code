@@ -130,6 +130,26 @@ describe('permissionUtils', () => {
       ]);
     });
 
+    it('offers switch-to-Default after consecutive classifier failures', () => {
+      const options = toPermissionOptions({
+        type: 'exec',
+        title: 'Confirm Shell Command',
+        command: 'touch /tmp/marker',
+        rootCommand: 'touch',
+        autoModeFallback: {
+          reason: 'consecutive_unavailable',
+          message: 'Auto Mode could not classify consecutive actions.',
+        },
+        onConfirm: async () => undefined,
+      });
+
+      expect(options).toContainEqual({
+        optionId: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+        name: 'Switch to Default Mode and allow once (recommended)',
+        kind: 'allow_once',
+      });
+    });
+
     it('keeps blocked retries in Auto Mode and hides persistent choices', () => {
       const options = toPermissionOptions({
         type: 'exec',

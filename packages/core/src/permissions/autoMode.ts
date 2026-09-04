@@ -553,7 +553,7 @@ export function getAutoModeActionFingerprint(
   return getToolCallRepeatKey(toolName, { cwd, toolParams });
 }
 
-/** Resolve and synchronously consume a one-shot exact-action retry. */
+/** Resolve a fallback without consuming its one-shot retry yet. */
 export function prepareAutoModeFallback(
   config: Config,
   actionFingerprint: string,
@@ -561,12 +561,8 @@ export function prepareAutoModeFallback(
   denialState: AutoModeDenialState;
   fallback: ReturnType<typeof shouldFallback>;
 } {
-  let denialState = config.getAutoModeDenialState();
+  const denialState = config.getAutoModeDenialState();
   const fallback = shouldFallback(denialState, actionFingerprint);
-  if (fallback.fallback && fallback.reason === 'classifier_blocked_retry') {
-    denialState = consumePendingManualRetry(denialState);
-    config.setAutoModeDenialState(denialState);
-  }
   return { denialState, fallback };
 }
 
@@ -591,7 +587,7 @@ export function applyAutoModeDecision(
       config.setAutoModeDenialState(recordBlock(denialState));
       return {
         kind: 'blocked',
-        errorMessage: `${decision.reason}\n${AUTO_MODE_DENIAL_GUIDANCE}`,
+        errorMessage: `${decision.reason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
         reason: 'classifier_blocked',
       };
     case 'classifier':
@@ -631,6 +627,12 @@ export function applyAutoModeDecision(
       );
       return { kind: 'approved' };
     case 'fallback':
+      if (
+        actionFingerprint !== undefined &&
+        denialState.pendingManualRetryFingerprint === actionFingerprint
+      ) {
+        config.setAutoModeDenialState(consumePendingManualRetry(denialState));
+      }
       if (decision.reason === 'external_write') {
         return {
           kind: 'fallback',
@@ -689,6 +691,9 @@ export function getAutoModePermissionDeniedReason(
  */
 export const AUTO_MODE_DENIAL_GUIDANCE =
   'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. To request manual approval for this exact action, retry the same tool call without changing its arguments. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
+
+const AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE =
+  'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If this action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
 
 function formatDenialFallbackMessage(
   reason: DenialFallbackReason,

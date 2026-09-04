@@ -184,6 +184,19 @@ describe('shouldFallback', () => {
     });
   });
 
+  it.each([
+    ['a fingerprint-less block', recordBlock],
+    ['classifier unavailability', recordUnavailable],
+    ['an unrelated fallback approval', recordFallbackApprove],
+  ])('preserves an exact-action retry across %s', (_name, transition) => {
+    const blocked = recordBlock(FRESH, 'blocked-action');
+
+    expect(shouldFallback(transition(blocked), 'blocked-action')).toEqual({
+      fallback: true,
+      reason: 'classifier_blocked_retry',
+    });
+  });
+
   it('triggers fallback after 2 consecutive unavailable', () => {
     let s: AutoModeDenialState = FRESH;
     s = recordUnavailable(s);
@@ -282,6 +295,21 @@ describe('recordFallbackApprove', () => {
     expect(s.totalBlock).toBe(0);
     expect(s.totalUnavailable).toBe(0);
     expect(shouldFallback(s)).toEqual({ fallback: false });
+  });
+
+  it('preserves an unrelated retry when resetting the total denial cap', () => {
+    const state = {
+      ...FRESH,
+      totalBlock: AUTO_MODE_DENIAL_LIMITS.maxTotalDenials,
+      pendingManualRetryFingerprint: 'blocked-action',
+    };
+
+    expect(
+      shouldFallback(recordFallbackApprove(state), 'blocked-action'),
+    ).toEqual({
+      fallback: true,
+      reason: 'classifier_blocked_retry',
+    });
   });
 
   it('resets all counters when total and consecutive caps overlap', () => {

@@ -63,7 +63,8 @@ export const ToolConfirmationMessage: React.FC<
   const { onConfirm } = confirmationDetails;
   const autoModeFallback = confirmationDetails.autoModeFallback;
   const offersSwitchToDefault =
-    autoModeFallback?.reason === 'classifier_unavailable';
+    autoModeFallback?.reason === 'classifier_unavailable' ||
+    autoModeFallback?.reason === 'consecutive_unavailable';
   const hidesAlwaysAllow =
     'hideAlwaysAllow' in confirmationDetails &&
     confirmationDetails.hideAlwaysAllow === true;

@@ -4206,6 +4206,86 @@ describe('CoreToolScheduler', () => {
     );
   });
 
+  it('reclassifies an exact action after its one-shot retry is rejected', async () => {
+    runSideQueryMock
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({
+        shouldBlock: true,
+        reason: 'dangerous shell command',
+      })
+      .mockResolvedValueOnce({ shouldBlock: true })
+      .mockResolvedValueOnce({
+        shouldBlock: true,
+        reason: 'still dangerous',
+      });
+    const originalOnConfirm = vi.fn().mockResolvedValue(undefined);
+    const tool = new MockTool({
+      name: ToolNames.SHELL,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: async () => ({
+        type: 'exec',
+        title: 'Confirm shell command',
+        command: 'dangerous command',
+        rootCommand: 'dangerous',
+        onConfirm: originalOnConfirm,
+      }),
+      execute: vi.fn(),
+    });
+    const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([[tool.name, tool]]),
+        approvalMode: ApprovalMode.AUTO,
+      });
+    const signal = new AbortController().signal;
+    const schedule = async (callId: string): Promise<void> => {
+      await scheduler.schedule(
+        {
+          callId,
+          name: ToolNames.SHELL,
+          args: { command: 'dangerous command' },
+          isClientInitiated: false,
+          prompt_id: `prompt-${callId}`,
+        },
+        signal,
+      );
+    };
+
+    await schedule('blocked-before-retry');
+    await vi.waitFor(() =>
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+    );
+    expect(runSideQueryMock).toHaveBeenCalledTimes(2);
+
+    onAllToolCallsComplete.mockClear();
+    onToolCallsUpdate.mockClear();
+    await schedule('rejected-retry');
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(runSideQueryMock).toHaveBeenCalledTimes(2);
+
+    await waiting.confirmationDetails.onConfirm(ToolConfirmationOutcome.Cancel);
+    await vi.waitFor(() =>
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+    );
+
+    onAllToolCallsComplete.mockClear();
+    onToolCallsUpdate.mockClear();
+    await schedule('blocked-after-rejection');
+    await vi.waitFor(() =>
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+    );
+    expect(runSideQueryMock).toHaveBeenCalledTimes(4);
+    const completedCall = onAllToolCallsComplete.mock
+      .calls[0][0][0] as CompletedToolCall;
+    expect(completedCall.status).toBe('error');
+    expect(originalOnConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.Cancel,
+      undefined,
+    );
+  });
+
   it.each([
     {
       name: 'consecutive limit',
@@ -4282,6 +4362,52 @@ describe('CoreToolScheduler', () => {
       );
     },
   );
+
+  it('routes a consecutive classifier outage to manual confirmation without re-querying', async () => {
+    runSideQueryMock.mockReset();
+    const hookSystem = {
+      firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    const tool = new MockTool({
+      name: ToolNames.SHELL,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+      execute: vi.fn(),
+    });
+    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([[tool.name, tool]]),
+      approvalMode: ApprovalMode.AUTO,
+      autoModeDenialState: {
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 2,
+        totalBlock: 0,
+        totalUnavailable: 2,
+      },
+      hookSystem,
+      disableHooks: false,
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'consecutive-unavailable',
+        name: ToolNames.SHELL,
+        args: { command: 'dangerous command' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-consecutive-unavailable',
+      },
+      new AbortController().signal,
+    );
+
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(waiting.confirmationDetails).toMatchObject({
+      autoModeFallback: { reason: 'consecutive_unavailable' },
+    });
+    expect(runSideQueryMock).not.toHaveBeenCalled();
+    expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+  });
 
   it('marks invalid PermissionRequest rewrites as pre-execution span failures', async () => {
     const execute = vi.fn();

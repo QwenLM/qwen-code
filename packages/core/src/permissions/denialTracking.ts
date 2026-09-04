@@ -19,6 +19,8 @@
  * `total*` counters are cumulative for the session and trigger a total
  * denial cap even when the model avoids consecutive-cap thresholds by
  * alternating blocks, unavailable verdicts, and allowed calls.
+ * Only one pending retry fingerprint is stored; a later classifier block for
+ * another action replaces it.
  */
 
 /** Reasons the orchestrator may choose to fall back to manual approval. */
@@ -114,6 +116,7 @@ export function recordBlock(
   actionFingerprint?: string,
 ): AutoModeDenialState {
   return {
+    ...state,
     consecutiveBlock: state.consecutiveBlock + 1,
     consecutiveUnavailable: 0,
     totalBlock: state.totalBlock + 1,
@@ -133,6 +136,7 @@ export function recordUnavailable(
   state: AutoModeDenialState,
 ): AutoModeDenialState {
   return {
+    ...state,
     consecutiveBlock: 0,
     consecutiveUnavailable: state.consecutiveUnavailable + 1,
     totalBlock: state.totalBlock,
@@ -201,18 +205,18 @@ export function recordFallbackApprove(
   state: AutoModeDenialState,
 ): AutoModeDenialState {
   if (hasReachedTotalCap(state)) {
-    return createDenialState();
+    return {
+      ...state,
+      consecutiveBlock: 0,
+      consecutiveUnavailable: 0,
+      totalBlock: 0,
+      totalUnavailable: 0,
+    };
   }
-  if (
-    state.consecutiveBlock === 0 &&
-    state.consecutiveUnavailable === 0 &&
-    state.pendingManualRetryFingerprint === undefined
-  ) {
+  if (state.consecutiveBlock === 0 && state.consecutiveUnavailable === 0) {
     return state;
   }
-  const next = { ...state, consecutiveBlock: 0, consecutiveUnavailable: 0 };
-  delete next.pendingManualRetryFingerprint;
-  return next;
+  return { ...state, consecutiveBlock: 0, consecutiveUnavailable: 0 };
 }
 
 // (No `recordFallbackReject` helper: rejection deliberately leaves
