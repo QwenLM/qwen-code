@@ -2531,6 +2531,15 @@ export class DingtalkChannel extends ChannelBase {
       this.backgroundResponseAggregations.delete(key);
       current = undefined;
     }
+    if (
+      !current &&
+      text.trim().length > 0 &&
+      parked?.turnComplete === true &&
+      parked.retryTimer
+    ) {
+      parked = { resolvers: 0 };
+      this.pendingBackgroundResponseTerminals.set(key, parked);
+    }
     if (!current && text.trim().length === 0) {
       // The first segment's target resolution can suspend (named-session owner
       // lock), so a turn's terminal marker may arrive before the aggregation
@@ -2571,6 +2580,11 @@ export class DingtalkChannel extends ChannelBase {
             );
           } else {
             parked.resolutionDropped = true;
+            const existing = this.backgroundResponseAggregations.get(key);
+            if (existing) {
+              existing.resolutionDropped = true;
+              parked.resolutionDropped = undefined;
+            }
           }
           throw error;
         }
@@ -2588,6 +2602,11 @@ export class DingtalkChannel extends ChannelBase {
             );
           } else {
             parked.resolutionDropped = true;
+            const existing = this.backgroundResponseAggregations.get(key);
+            if (existing) {
+              existing.resolutionDropped = true;
+              parked.resolutionDropped = undefined;
+            }
           }
           return;
         }
@@ -2605,10 +2624,18 @@ export class DingtalkChannel extends ChannelBase {
             delivery.target,
             delivery.sourceLabel,
           );
-        current.resolutionDropped ||= parked.resolutionDropped;
+        if (parked.resolutionDropped) {
+          current.resolutionDropped = true;
+          parked.resolutionDropped = undefined;
+        }
       } finally {
         parked.resolvers--;
-        if (parked.resolvers === 0 && !parked.retryTimer) {
+        if (
+          this.pendingBackgroundResponseTerminals.get(key) === parked &&
+          parked.resolvers === 0 &&
+          !parked.retryTimer &&
+          !parked.resolutionDropped
+        ) {
           this.pendingBackgroundResponseTerminals.delete(key);
         }
       }
@@ -2842,7 +2869,8 @@ export class DingtalkChannel extends ChannelBase {
       aggregation.completionDelivered !== true &&
       aggregation.retiring !== true &&
       aggregation.completionPartial !== true &&
-      aggregation.dropped !== true
+      aggregation.dropped !== true &&
+      aggregation.resolutionDropped !== true
     );
   }
 
@@ -2941,20 +2969,88 @@ export class DingtalkChannel extends ChannelBase {
     }
     pending.retryTimer = setTimeout(() => {
       pending.retryTimer = undefined;
-      void this.dispatchBackgroundResponse(sessionId, text, context)
+      void this.retryBackgroundResponseResolution(
+        key,
+        sessionId,
+        text,
+        context,
+        pending,
+      )
         .catch((error: unknown) => {
           process.stderr.write(
             `[DingTalk:${this.name}] background response target resolution failed: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
           );
         })
         .finally(() => {
-          if (pending.resolvers === 0 && !pending.retryTimer) {
+          if (
+            this.pendingBackgroundResponseTerminals.get(key) === pending &&
+            pending.resolvers === 0 &&
+            !pending.retryTimer &&
+            !pending.resolutionDropped
+          ) {
             this.pendingBackgroundResponseTerminals.delete(key);
           }
         });
     }, BACKGROUND_RESPONSE_AGGREGATION_RETRY_MS);
     pending.retryTimer.unref?.();
-    this.pendingBackgroundResponseTerminals.set(key, pending);
+    const active = this.pendingBackgroundResponseTerminals.get(key);
+    if (!active || active === pending) {
+      this.pendingBackgroundResponseTerminals.set(key, pending);
+    }
+  }
+
+  private async retryBackgroundResponseResolution(
+    key: string,
+    sessionId: string,
+    text: string,
+    context: BackgroundResponseContext,
+    pending: PendingBackgroundResponseTerminal,
+  ): Promise<void> {
+    if (this.pendingBackgroundResponseTerminals.get(key) === pending) {
+      await this.dispatchBackgroundResponse(sessionId, text, context);
+      return;
+    }
+
+    let delivery: Awaited<
+      ReturnType<DingtalkChannel['resolveBackgroundResponseDelivery']>
+    >;
+    try {
+      delivery = await this.resolveBackgroundResponseDelivery(sessionId);
+    } catch (error) {
+      this.scheduleBackgroundResponseResolutionRetry(
+        key,
+        sessionId,
+        text,
+        context,
+        pending,
+      );
+      throw error;
+    }
+    if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
+      this.scheduleBackgroundResponseResolutionRetry(
+        key,
+        sessionId,
+        text,
+        context,
+        pending,
+      );
+      return;
+    }
+
+    const aggregation: BackgroundResponseAggregation = {
+      key,
+      sessionId,
+      target: delivery.target,
+      sourceLabel: delivery.sourceLabel,
+      status: pending.status ?? context.status,
+      label: pending.label ?? context.label,
+      parts: [text],
+      turnComplete: pending.turnComplete,
+      completionPartial: pending.completionPartial,
+      resolutionDropped: pending.resolutionDropped,
+    };
+    this.detachedBackgroundResponseAggregations.add(aggregation);
+    await this.flushBackgroundResponseAggregation(key, aggregation);
   }
 
   private scheduleBackgroundResponseAggregationFlush(
