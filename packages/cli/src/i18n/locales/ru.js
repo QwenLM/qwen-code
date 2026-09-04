@@ -476,6 +476,15 @@ export default {
   'Auto Edit': 'Авторедактирование',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Включение/выключение режима vim',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'переключить режим фокуса (скрыть рассуждения и шум вызовов инструментов)',
+  'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':
+    'Режим фокуса включён. Рассуждения и завершённые вызовы инструментов скрыты. Запустите /focus ещё раз, чтобы отключить, или нажмите Ctrl+O для полной стенограммы.',
+  'Focus mode disabled.': 'Режим фокуса отключён.',
+  '1 tool call hidden (/focus to show)':
+    'Скрыт 1 вызов инструмента (/focus — показать)',
+  '{{count}} tool calls hidden (/focus to show)':
+    'Скрыто вызовов инструментов: {{count}} (/focus — показать)',
   'Show model-specific usage statistics.':
     'Показать статистику использования модели.',
   'Show tool-specific usage statistics.':

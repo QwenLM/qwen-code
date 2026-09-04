@@ -1190,6 +1190,16 @@ const SETTINGS_SCHEMA = {
           'Retired: compact view is always on in both the TUI and the web shell. The key is kept so existing settings files do not warn.',
         showInDialog: false,
       },
+      focusMode: {
+        type: 'boolean',
+        label: 'Focus Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Hide reasoning output and collapse completed successful tool call groups into a single summary line to reduce transcript noise. Tool groups with errors or pending confirmations stay fully visible. Toggle at runtime with /focus; Ctrl+O still opens the full transcript.',
+        showInDialog: true,
+      },
       useTerminalBuffer: {
         type: 'boolean',
         label: 'Virtualized History (reduces flicker on long sessions)',

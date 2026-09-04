@@ -157,6 +157,7 @@ import {
   useVimModeState,
   useVimModeActions,
 } from './contexts/VimModeContext.js';
+import { useFocusModeActions } from './contexts/FocusModeContext.js';
 import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
@@ -1857,6 +1858,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { vimEnabled, vimMode } = useVimModeState();
   const { toggleVimEnabled } = useVimModeActions();
+  const { toggleFocusMode } = useFocusModeActions();
 
   useLayoutEffect(() => {
     if (vimEnabled && buffer.text.length > 0) {
@@ -2120,6 +2122,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.updateItem,
     setSessionName,
     extensionRefreshState,
+    toggleFocusMode,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage

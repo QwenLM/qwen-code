@@ -781,6 +781,14 @@ export default {
   'Auto Edit': 'Auto Edit',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'toggle vim mode on/off',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'toggle focus mode (hide reasoning and tool call noise)',
+  'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':
+    'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.',
+  'Focus mode disabled.': 'Focus mode disabled.',
+  '1 tool call hidden (/focus to show)': '1 tool call hidden (/focus to show)',
+  '{{count}} tool calls hidden (/focus to show)':
+    '{{count}} tool calls hidden (/focus to show)',
   'Show usage statistics dashboard.': 'Show usage statistics dashboard.',
   'Show model-specific usage statistics.':
     'Show model-specific usage statistics.',

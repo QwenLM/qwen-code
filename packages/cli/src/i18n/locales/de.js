@@ -457,6 +457,15 @@ export default {
   'Auto Edit': 'Automatisch bearbeiten',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim-Modus ein-/ausschalten',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'Fokus-Modus ein-/ausschalten (Reasoning und Tool-Aufruf-Rauschen ausblenden)',
+  'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':
+    'Fokus-Modus aktiviert. Reasoning und abgeschlossene Tool-Aufrufe werden ausgeblendet. Führen Sie /focus erneut aus, um ihn zu deaktivieren, oder drücken Sie Strg+O für das vollständige Transkript.',
+  'Focus mode disabled.': 'Fokus-Modus deaktiviert.',
+  '1 tool call hidden (/focus to show)':
+    '1 Tool-Aufruf ausgeblendet (/focus zum Anzeigen)',
+  '{{count}} tool calls hidden (/focus to show)':
+    '{{count}} Tool-Aufrufe ausgeblendet (/focus zum Anzeigen)',
   'Show model-specific usage statistics.':
     'Modellspezifische Nutzungsstatistiken anzeigen.',
   'Show tool-specific usage statistics.':

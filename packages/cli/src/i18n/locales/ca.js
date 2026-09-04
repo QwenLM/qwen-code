@@ -524,6 +524,15 @@ export default {
   'Auto Edit': 'Edició automàtica',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activa/desactiva el mode Vim',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'activa/desactiva el mode focus (amaga el raonament i el soroll de crides d’eines)',
+  'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':
+    'Mode focus activat. El raonament i les crides d’eines completades queden amagats. Executeu /focus de nou per desactivar-lo, o premeu Ctrl+O per a la transcripció completa.',
+  'Focus mode disabled.': 'Mode focus desactivat.',
+  '1 tool call hidden (/focus to show)':
+    '1 crida d’eina amagada (/focus per mostrar)',
+  '{{count}} tool calls hidden (/focus to show)':
+    '{{count}} crides d’eines amagades (/focus per mostrar)',
   'Show model-specific usage statistics.':
     "Mostra les estadístiques d'ús específiques del model.",
   'Show tool-specific usage statistics.':

@@ -11,7 +11,8 @@ import {
   escapeAnsiCtrlCodes,
   sanitizeSensitiveText,
 } from '../utils/textUtils.js';
-import type { HistoryItem } from '../types.js';
+import type { HistoryItem, IndividualToolCallDisplay } from '../types.js';
+import { ToolCallStatus } from '../types.js';
 import {
   UserMessage,
   UserShellMessage,
@@ -63,6 +64,8 @@ import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
+import { useFocusModeEnabled } from '../contexts/FocusModeContext.js';
+import { t } from '../../i18n/index.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
 import { useContextMenu } from '../context-menu/ContextMenuContext.js';
@@ -74,7 +77,7 @@ import {
   layoutRowForEvent,
 } from '../utils/measure-element-position.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
-import { ICON } from '../constants.js';
+import { ICON, TOOL_STATUS } from '../constants.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -209,6 +212,16 @@ const ClickableThinkMessage: React.FC<{
   );
 };
 
+function isSubagentToolCall(tool: IndividualToolCallDisplay): boolean {
+  const rd = tool.resultDisplay;
+  return (
+    typeof rd === 'object' &&
+    rd !== null &&
+    'type' in rd &&
+    (rd as { type?: string }).type === 'task_execution'
+  );
+}
+
 function getHistoryItemMarginTop(item: HistoryItem): number {
   switch (item.type) {
     case 'gemini':
@@ -280,10 +293,34 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       (allExpanded || expandedHeadIds.has(thoughtGroupHeadId)));
   const settings = useSettings();
   const showTimestamps = settings.merged.output?.showTimestamps === true;
+  const focusModeEnabled = useFocusModeEnabled();
+  // Ctrl+O full-detail always pierces focus mode (escape hatch).
+  const focusActive = focusModeEnabled && !fullDetail;
 
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
+
+  if (
+    focusActive &&
+    (item.type === 'gemini_thought' || item.type === 'gemini_thought_content')
+  ) {
+    return null;
+  }
+
+  // Collapse only finalized, fully-successful groups: errors, confirmations,
+  // cancellations, running tools (incl. focused embedded shells) and
+  // user-initiated batches all fail the every-Success / !isPending checks and
+  // stay expanded, matching ToolGroupMessage's forceExpandAll exceptions.
+  // Subagent groups stay visible so their scrollback summaries land.
+  const collapseToolGroup =
+    focusActive &&
+    item.type === 'tool_group' &&
+    !isPending &&
+    !item.isUserInitiated &&
+    item.tools.length > 0 &&
+    item.tools.every((tool) => tool.status === ToolCallStatus.Success) &&
+    !item.tools.some(isSubagentToolCall);
 
   return (
     <Box
@@ -416,22 +453,36 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           width={boxWidth}
         />
       )}
-      {itemForDisplay.type === 'tool_group' && (
-        <ToolGroupMessage
-          toolCalls={itemForDisplay.tools}
-          groupId={itemForDisplay.id}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth}
-          isFocused={isFocused}
-          isPending={isPending}
-          activeShellPtyId={activeShellPtyId}
-          embeddedShellFocused={embeddedShellFocused}
-          memoryWriteCount={itemForDisplay.memoryWriteCount}
-          memoryReadCount={itemForDisplay.memoryReadCount}
-          isUserInitiated={itemForDisplay.isUserInitiated}
-          fullDetail={fullDetail}
-        />
-      )}
+      {itemForDisplay.type === 'tool_group' &&
+        (collapseToolGroup ? (
+          <Box flexDirection="row">
+            <Box width={2} flexShrink={0}>
+              <Text dimColor>{TOOL_STATUS.SUCCESS}</Text>
+            </Box>
+            <Text dimColor>
+              {itemForDisplay.tools.length === 1
+                ? t('1 tool call hidden (/focus to show)')
+                : t('{{count}} tool calls hidden (/focus to show)', {
+                    count: String(itemForDisplay.tools.length),
+                  })}
+            </Text>
+          </Box>
+        ) : (
+          <ToolGroupMessage
+            toolCalls={itemForDisplay.tools}
+            groupId={itemForDisplay.id}
+            availableTerminalHeight={availableTerminalHeight}
+            contentWidth={contentWidth}
+            isFocused={isFocused}
+            isPending={isPending}
+            activeShellPtyId={activeShellPtyId}
+            embeddedShellFocused={embeddedShellFocused}
+            memoryWriteCount={itemForDisplay.memoryWriteCount}
+            memoryReadCount={itemForDisplay.memoryReadCount}
+            isUserInitiated={itemForDisplay.isUserInitiated}
+            fullDetail={fullDetail}
+          />
+        ))}
       {itemForDisplay.type === 'tool_use_summary' && (
         <Box flexDirection="row">
           <Box width={2} flexShrink={0}>

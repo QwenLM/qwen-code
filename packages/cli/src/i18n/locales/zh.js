@@ -782,6 +782,14 @@ export default {
   'Auto Edit': '自动编辑',
   YOLO: 'YOLO',
   'toggle vim mode on/off': '切换 vim 模式开关',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    '切换专注模式（隐藏推理内容和工具调用噪音）',
+  'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':
+    '专注模式已开启。推理内容和已完成的工具调用将被隐藏。再次运行 /focus 可关闭，或按 Ctrl+O 查看完整记录。',
+  'Focus mode disabled.': '专注模式已关闭。',
+  '1 tool call hidden (/focus to show)': '已隐藏 1 个工具调用（/focus 显示）',
+  '{{count}} tool calls hidden (/focus to show)':
+    '已隐藏 {{count}} 个工具调用（/focus 显示）',
   'Show usage statistics dashboard.': '显示使用统计面板。',
   'Show model-specific usage statistics.': '显示模型相关的使用统计信息',
   'Show tool-specific usage statistics.': '显示工具相关的使用统计信息',

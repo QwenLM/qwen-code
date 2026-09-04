@@ -364,6 +364,15 @@ export default {
   'Auto Edit': '自動編集',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim モードのオン/オフを切り替え',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'フォーカスモードの切り替え（推論とツール呼び出しのノイズを非表示）',
+  'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.':
+    'フォーカスモードが有効になりました。推論と完了したツール呼び出しは非表示になります。/focus を再実行すると無効になり、Ctrl+O で完全なトランスクリプトを表示できます。',
+  'Focus mode disabled.': 'フォーカスモードが無効になりました。',
+  '1 tool call hidden (/focus to show)':
+    '1 件のツール呼び出しを非表示（/focus で表示）',
+  '{{count}} tool calls hidden (/focus to show)':
+    '{{count}} 件のツール呼び出しを非表示（/focus で表示）',
   'exit the cli': 'CLIを終了',
   Timeout: 'タイムアウト',
   'Max Retries': '最大リトライ回数',
