@@ -9196,26 +9196,28 @@ class QwenAgent implements Agent {
         }
 
         try {
-          const settings = loadSettingsCached(cwd);
-          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
-            if (rawSnapshot === undefined) {
-              await this.sessions
-                .get(sessionId)
-                ?.getConfig()
-                .getChatRecordingService()
-                ?.flush();
-            }
-            return (await new SessionTranscriptReader(cwd).readTurnIndexPage(
-              sessionId,
-              {
-                ...(typeof rawSnapshot === 'string'
-                  ? { snapshot: rawSnapshot }
-                  : {}),
-                ...(typeof rawStart === 'number' ? { start: rawStart } : {}),
-                ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
-              },
-            )) as unknown as Record<string, unknown>;
-          });
+          return await this.runWithPinnedRuntimeBaseDirForRequest(
+            cwd,
+            async () => {
+              if (rawSnapshot === undefined) {
+                await this.sessions
+                  .get(sessionId)
+                  ?.getConfig()
+                  .getChatRecordingService()
+                  ?.flush();
+              }
+              return (await new SessionTranscriptReader(cwd).readTurnIndexPage(
+                sessionId,
+                {
+                  ...(typeof rawSnapshot === 'string'
+                    ? { snapshot: rawSnapshot }
+                    : {}),
+                  ...(typeof rawStart === 'number' ? { start: rawStart } : {}),
+                  ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+                },
+              )) as unknown as Record<string, unknown>;
+            },
+          );
         } catch (error) {
           if (
             error instanceof InvalidSessionTranscriptCursorError ||
