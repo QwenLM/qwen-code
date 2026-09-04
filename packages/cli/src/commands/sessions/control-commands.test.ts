@@ -53,7 +53,10 @@ describe('session control command reporting', () => {
     // in the success channel of a `qwen sessions peek <id> > last.log`.
     connectExistingAgentViewSupervisor.mockResolvedValue(undefined);
     await run(peekCommand, { session: SESSION });
-    expect(stderr.join('\n')).toContain('No background sessions');
+    expect(stderr.join('\n')).toContain(
+      'No background supervisor is reachable',
+    );
+    expect(stderr.join('\n')).toContain('qwen sessions ps');
     expect(stdout).toEqual([]);
     expect(process.exitCode).toBe(1);
   });

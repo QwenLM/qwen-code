@@ -52,10 +52,14 @@ export interface ManagedControlResult {
   exitCode: number;
 }
 
+// Worded after what the code knows — the supervisor socket is unreachable.
+// Detached workers keep their state on disk, so sessions may still exist;
+// `sessions ps` reads the store directly and reports what is on record.
 const NO_SUPERVISOR: ManagedControlResult = {
   lines: [
-    'No background sessions are running (no supervisor to ask).',
-    'Start one with: qwen --bg "<prompt>"',
+    'No background supervisor is reachable, so there is nothing to show.',
+    'Sessions may still be on record: check `qwen sessions ps`.',
+    'Start a new one with: qwen --bg "<prompt>"',
   ],
   exitCode: 1,
 };

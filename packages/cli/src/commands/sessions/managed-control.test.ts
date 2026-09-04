@@ -243,8 +243,13 @@ describe('peekManagedSession', () => {
   it('does not start a supervisor to report that none is running', async () => {
     const result = await peekManagedSession(SESSION, noSupervisor);
     expect(result.exitCode).toBe(1);
-    expect(result.lines.join('\n')).toContain('No background sessions');
-    expect(result.lines.join('\n')).toContain('qwen --bg');
+    const text = result.lines.join('\n');
+    expect(text).toContain('No background supervisor is reachable');
+    expect(text).toContain('qwen sessions ps');
+    expect(text).toContain('qwen --bg');
+    // The code only knows the socket is unreachable; detached workers keep
+    // their state on disk, so the message must not claim sessions are gone.
+    expect(text).not.toContain('No background sessions');
   });
 });
 
@@ -277,7 +282,9 @@ describe('answerManagedSession', () => {
     // it needs its own pin: deleting it would throw instead of reporting.
     const result = await answerManagedSession(SESSION, 'yes', noSupervisor);
     expect(result.exitCode).toBe(1);
-    expect(result.lines.join('\n')).toContain('No background sessions');
+    expect(result.lines.join('\n')).toContain(
+      'No background supervisor is reachable',
+    );
   });
 });
 
@@ -304,6 +311,8 @@ describe('stopManagedSession', () => {
     // deleting it would throw instead of reporting.
     const result = await stopManagedSession(SESSION, noSupervisor);
     expect(result.exitCode).toBe(1);
-    expect(result.lines.join('\n')).toContain('No background sessions');
+    expect(result.lines.join('\n')).toContain(
+      'No background supervisor is reachable',
+    );
   });
 });
