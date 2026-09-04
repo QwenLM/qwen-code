@@ -15071,6 +15071,68 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('resolves sessionTurnStatus settings per request, not from the this.settings cache', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId,
+      records: [],
+      hasMore: false,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // Multi-workspace daemon shape: the live session and `this.settings`
+    // belong to the boot workspace; the status request names another cwd
+    // whose own settings (and therefore advanced.runtimeOutputDir) must pin
+    // the transcript read. Routing through the stale cache would scan the
+    // wrong runtime root.
+    const perRequestSettings = makeSessionSettings();
+    vi.mocked(loadSettings).mockClear();
+    vi.mocked(loadSettings).mockReturnValue(perRequestSettings);
+    vi.mocked(runWithAcpRuntimeOutputDir).mockClear();
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTurnStatus, {
+        cwd: '/tmp/workspace-a',
+        sessionId,
+        promptId: 'prompt-1',
+      }),
+    ).resolves.toEqual({ v: 1, sessionId, turnResult: null });
+
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(runWithAcpRuntimeOutputDir).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![0]).toBe(
+      perRequestSettings,
+    );
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
+      '/tmp/workspace-a',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('still scans the transcript when the pre-read flush fails', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -16636,6 +16698,66 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       skipSkillManager: true,
       skipFileCheckpointing: true,
       lenientToolWarmup: true,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('resolves qwen/status/session/transcript settings per request, not from the this.settings cache', async () => {
+    const settings = makeCoreSettings();
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    const transcriptConfig = {
+      ...makeInnerConfig(),
+      enableFileCheckpointing: vi.fn(),
+    };
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      transcriptConfig as unknown as Config,
+    );
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    // Multi-workspace daemon shape: `this.settings` holds the boot
+    // workspace's settings; the transcript request names another cwd whose
+    // own settings must pin the read (and seed the replay config).
+    // A different outputLanguage makes the request's settings distinguishable
+    // from the boot settings by content, not just by identity.
+    const perRequestSettings = makeCoreSettings('French');
+    vi.mocked(loadSettings).mockClear();
+    vi.mocked(loadSettings).mockReturnValue(perRequestSettings);
+    vi.mocked(runWithAcpRuntimeOutputDir).mockClear();
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+      cwd: '/tmp/workspace-a',
+      sessionId: VALID_SESSION_ID,
+    });
+
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    // The outer pin is the handler's; the replay-config build inside it may
+    // pin again with the same settings. Every pin must carry the request's.
+    const pins = vi.mocked(runWithAcpRuntimeOutputDir).mock.calls;
+    expect(pins.length).toBeGreaterThanOrEqual(1);
+    expect(pins[0]![0]).toBe(perRequestSettings);
+    expect(pins[0]![1]).toBe('/tmp/workspace-a');
+    expect(pins.every(([s]) => s === perRequestSettings)).toBe(true);
+    // The replay config built inside the pinned scope was seeded from the
+    // request's settings (the operation receives them), not this.settings.
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[0]).toMatchObject({
+      general: { outputLanguage: 'French' },
     });
 
     mockConnectionState.resolve();
@@ -29920,20 +30042,25 @@ describe('createManagedExternalToolGuard', () => {
 
 describe('QwenAgent runtime-root pinning choke point', () => {
   it('routes every per-request runtime-root pin through runWithPinnedRuntimeBaseDir', () => {
-    // #10095 fixed handlers that composed `loadSettingsCached` →
-    // `runWithAcpRuntimeOutputDir` by hand and picked up the stale
-    // `this.settings` cache. The private helper is the one place that
-    // decision is made, so a handler calling `runWithAcpRuntimeOutputDir`
-    // directly is exactly the shape that regressed. No behavioral test can
-    // see the difference (both spellings reach the same function), so pin
-    // the source: the only call left is the helper's own delegation.
+    // #10095 fixed handlers that composed the runtime-root routing by hand
+    // and picked up the stale `this.settings` cache. Per-request handlers now
+    // go through `runWithPinnedRuntimeBaseDirForRequest`, which resolves the
+    // settings from the request cwd itself, and everything else through the
+    // shared helper. A handler naming `runWithAcpRuntimeOutputDir` directly —
+    // as a call or via an alias — is exactly the shape that regressed, and
+    // no behavioral test can see the difference (both spellings reach the
+    // same function), so pin the source: outside imports and comments the
+    // only mention left is the shared helper's own delegation. The per-request
+    // handlers themselves are pinned behaviorally (settings/cwd reaching the
+    // mock) by the routing tests above.
     const source = readFileSync('src/acp-integration/acpAgent.ts', 'utf8');
     const directCalls = source
       .split('\n')
       .map((line, index) => ({ line: index + 1, text: line.trim() }))
       .filter(
         ({ text }) =>
-          /\brunWithAcpRuntimeOutputDir\(/.test(text) &&
+          /\brunWithAcpRuntimeOutputDir\b/.test(text) &&
+          !text.startsWith('import ') &&
           !text.startsWith('//') &&
           !text.startsWith('*') &&
           !text.startsWith('/*'),
