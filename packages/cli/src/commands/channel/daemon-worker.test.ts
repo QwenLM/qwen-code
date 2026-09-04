@@ -1182,10 +1182,14 @@ describe('runChannelDaemonWorker', () => {
     const drain = new Promise<void>((resolve) => {
       releaseDrain = resolve;
     });
+    const disconnect = vi.fn();
     const channel = {
       connect: vi.fn().mockResolvedValue(undefined),
-      disconnect: vi.fn(),
-      waitForDisconnect: vi.fn(() => drain),
+      disconnect,
+      waitForDisconnect: vi.fn(() => {
+        expect(disconnect).toHaveBeenCalledOnce();
+        return drain;
+      }),
       name: 'telegram',
       runLoopPrompt: vi.fn().mockResolvedValue('done'),
       validateWebhookTask: vi.fn(),
@@ -1204,6 +1208,9 @@ describe('runChannelDaemonWorker', () => {
       expect(channel.waitForDisconnect).toHaveBeenCalled(),
     );
     expect(channel.disconnect).toHaveBeenCalledOnce();
+    expect(channel.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
+      channel.waitForDisconnect.mock.invocationCallOrder[0]!,
+    );
     expect(mockBridgeStop).not.toHaveBeenCalled();
 
     releaseDrain();
@@ -2140,6 +2147,43 @@ describe('runChannelDaemonWorker', () => {
     expect(disconnect).toHaveBeenCalled();
     expect(mockSanitizeLogText).toHaveBeenCalledWith('connect boom', 512);
     expect(mockBridgeStop).toHaveBeenCalled();
+  });
+
+  it('waits for a failed adapter to drain during startup rollback', async () => {
+    const sdk = createSdk();
+    let releaseDrain!: () => void;
+    const drain = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    const disconnect = vi.fn();
+    const waitForDisconnect = vi.fn(() => {
+      expect(disconnect).toHaveBeenCalled();
+      return drain;
+    });
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockRejectedValue(new Error('connect boom')),
+      disconnect,
+      waitForDisconnect,
+      name: 'telegram',
+    });
+
+    const starting = runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const rejection = starting.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(waitForDisconnect).toHaveBeenCalled());
+
+    expect(mockBridgeStop).not.toHaveBeenCalled();
+
+    releaseDrain();
+    expect(await rejection).toEqual(
+      expect.objectContaining({ message: 'No channels connected.' }),
+    );
+
+    expect(mockBridgeStop).toHaveBeenCalledOnce();
   });
 
   it('waits for each startup failure report before connecting the next channel', async () => {

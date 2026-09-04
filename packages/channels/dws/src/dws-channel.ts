@@ -173,7 +173,6 @@ interface MessageStartResolver {
 interface ReplayDispatch {
   sourceKind: DwsImSource['kind'];
   conversationId: string;
-  completed: Promise<void>;
 }
 
 interface ActiveReaction {
@@ -557,6 +556,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   // Replay-started dispatches only. The cap must not be consumed by
   // live or followup traffic, whose queue entries outlive their turn.
   private readonly replayDispatches = new Map<string, ReplayDispatch>();
+  private readonly attemptedPendingMessages = new Set<string>();
   private readonly conversationTails = new Map<string, ConversationTail>();
   private readonly messageStartResolvers = new Map<
     string,
@@ -877,6 +877,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.sessionReactionKeys.clear();
     this.queuedMessages.clear();
     this.replayDispatches.clear();
+    this.attemptedPendingMessages.clear();
     for (const { resolve } of this.messageStartResolvers.values()) resolve();
     this.messageStartResolvers.clear();
     this.conversationTails.clear();
@@ -895,7 +896,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
   }
 
-  async waitForDisconnect(): Promise<void> {
+  override async waitForDisconnect(): Promise<void> {
     while (
       this.pendingImStartups.size > 0 ||
       this.drainingImSubscriptions.size > 0
@@ -1192,6 +1193,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   protected async pollOnce(): Promise<void> {
     const signal = this.pollAbortController.signal;
     if (!this.connected || signal.aborted) return;
+    this.attemptedPendingMessages.clear();
     const endTime = Date.now();
     await this.replayPendingMessages(signal);
     if (signal.aborted || !this.connected) return;
@@ -1647,6 +1649,15 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return { completion: Promise.resolve() };
     }
     if (this.shouldFilterImMessage(source, message)) {
+      if (source.kind === 'group' || source.kind === 'group-all') {
+        const envelope = this.createImEnvelope(source, message);
+        if (
+          this.groupGate.check(envelope, { createPairingRequest: false })
+            .reason === 'mention_required'
+        ) {
+          this.recordPendingGroupHistory(envelope);
+        }
+      }
       this.removePersistedPendingMessageForSource(key, source);
       return { completion: Promise.resolve() };
     }
@@ -1763,8 +1774,19 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     for (const pending of [...(this.cursor.pendingMessages ?? [])]) {
       if (pending.message.conversationId !== conversationId) continue;
       const key = messageKey(pending.message);
+      if (this.attemptedPendingMessages.has(key)) continue;
       if (this.queuedMessages.has(key)) continue;
-      this.receiveImMessage(pending.source, pending.message, true, true);
+      const dispatch = this.receiveImMessage(
+        pending.source,
+        pending.message,
+        true,
+        true,
+      );
+      void dispatch.admitted.catch((error: unknown) => {
+        process.stderr.write(
+          `[Channel:${this.name}] pending DWS message remains degraded: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+        );
+      });
     }
   }
 
@@ -1922,27 +1944,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return;
     }
 
-    const isGroup = source.kind !== 'direct';
-    const envelope: Envelope = {
-      channelName: this.name,
-      senderId: message.senderId,
-      senderName: message.senderName,
-      chatId: message.conversationId,
-      chatName: message.conversationId,
-      messageId: message.messageId,
-      text,
-      ...(message.referencedText
-        ? { referencedText: message.referencedText }
-        : {}),
-      isGroup,
-      isMentioned: source.kind === 'at',
-      isReplyToBot: false,
-      metadata: [
-        `DWS event type: ${message.type}`,
-        `DingTalk conversation: ${message.conversationId}`,
-        `DWS event ID: ${message.eventId}`,
-      ].join('\n'),
-    };
+    const envelope = this.createImEnvelope(source, message);
     this.rememberInboundReactionTarget(
       message.conversationId,
       message.messageId,
@@ -1950,6 +1952,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     try {
       await this.handleInbound(envelope);
     } catch (error) {
+      this.attemptedPendingMessages.add(key);
       // Under budget the throw propagates so redelivery observes the failure
       // while persisted replay can retry it. Once the budget is spent the
       // message is marked processed and the error is swallowed, which is the
@@ -1968,6 +1971,33 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.removePendingMessage(key);
     this.markProcessedMessage(key);
     this.saveCursor();
+  }
+
+  private createImEnvelope(
+    source: DwsImSource,
+    message: DwsImMessage,
+  ): Envelope {
+    const text = message.content.trim();
+    return {
+      channelName: this.name,
+      senderId: message.senderId,
+      senderName: message.senderName,
+      chatId: message.conversationId,
+      chatName: message.conversationId,
+      messageId: message.messageId,
+      text,
+      ...(message.referencedText
+        ? { referencedText: message.referencedText }
+        : {}),
+      isGroup: source.kind !== 'direct',
+      isMentioned: source.kind === 'at',
+      isReplyToBot: false,
+      metadata: [
+        `DWS event type: ${message.type}`,
+        `DingTalk conversation: ${message.conversationId}`,
+        `DWS event ID: ${message.eventId}`,
+      ].join('\n'),
+    };
   }
 
   /**
@@ -2317,7 +2347,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       const replay = {
         sourceKind: pending.source.kind,
         conversationId: pending.message.conversationId,
-        completed,
       };
       this.replayDispatches.set(key, replay);
       void dispatch.admitted.catch((error: unknown) => {

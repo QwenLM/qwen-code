@@ -48,6 +48,7 @@ import {
   createChannelLoopController,
   isChannelCronEnabled,
 } from './loop-runtime.js';
+import { disconnectChannels } from './disconnect-channels.js';
 
 export { resolveExtensionChannelEntrySpecifier } from './runtime.js';
 export { resolveProxy } from './proxy.js';
@@ -106,28 +107,6 @@ async function writeServiceInfoOrExit(
     }
     throw err;
   }
-}
-
-async function disconnectChannels(
-  channels: Iterable<ChannelBase>,
-): Promise<void> {
-  const drains: Array<Promise<void>> = [];
-  for (const channel of channels) {
-    try {
-      channel.disconnect();
-      const waitForDisconnect = (
-        channel as ChannelBase & {
-          waitForDisconnect?: () => Promise<void>;
-        }
-      ).waitForDisconnect;
-      if (waitForDisconnect) {
-        drains.push(waitForDisconnect.call(channel).catch(() => undefined));
-      }
-    } catch {
-      // best-effort
-    }
-  }
-  await Promise.all(drains);
 }
 
 async function cleanupStartedChannels(
@@ -268,6 +247,7 @@ function createBridgeRecovery(options: BridgeRecoveryOptions): {
           `[Channel] Bridge crashed (${recentCrashCount}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
         );
         await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS));
+        if (isShuttingDown()) return;
 
         const bridge = new AcpBridge(bridgeOpts);
         setBridge(bridge);
@@ -411,19 +391,24 @@ async function startSingle(
   registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
   let serviceInfoWritten = false;
-  const shutdown = async () => {
-    if (shuttingDown) {
+  let shutdownTask: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    const runningShutdown = shutdownTask;
+    if (runningShutdown) {
       process.exit(1);
-      return;
+      return runningShutdown!;
     }
     shuttingDown = true;
-    writeStdoutLine('\n[Channel] Shutting down...');
-    scheduler?.stop();
-    await disconnectChannels([channel]);
-    bridge.stop();
-    router.clearAll();
-    if (serviceInfoWritten) removeServiceInfo();
-    process.exit(0);
+    shutdownTask = (async () => {
+      writeStdoutLine('\n[Channel] Shutting down...');
+      scheduler?.stop();
+      await disconnectChannels([channel]);
+      bridge.stop();
+      router.clearAll();
+      if (serviceInfoWritten) removeServiceInfo();
+      process.exit(0);
+    })();
+    return shutdownTask;
   };
   const detachShutdownHandlers = () => {
     process.off('SIGINT', shutdown);
@@ -435,7 +420,7 @@ async function startSingle(
   try {
     await channel.connect();
   } catch (err) {
-    if (shuttingDown) return;
+    if (shuttingDown) return shutdownTask;
     detachShutdownHandlers();
     writeStderrLine(
       `Error: ${err instanceof Error ? err.message : String(err)}`,
@@ -443,11 +428,12 @@ async function startSingle(
     await cleanupStartedChannels([channel], bridge, router);
     process.exit(1);
   }
-  if (shuttingDown) return;
+  if (shuttingDown) return shutdownTask;
   try {
-    await writeServiceInfoOrExit([name], () =>
-      cleanupStartedChannels([channel], bridge, router),
-    );
+    await writeServiceInfoOrExit([name], () => {
+      detachShutdownHandlers();
+      return cleanupStartedChannels([channel], bridge, router);
+    });
     serviceInfoWritten = true;
   } catch (error) {
     detachShutdownHandlers();
@@ -565,36 +551,27 @@ async function startAll(
       })
     : undefined;
   let serviceInfoWritten = false;
-  const shutdown = async () => {
-    if (shuttingDown) {
+  let shutdownTask: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    const runningShutdown = shutdownTask;
+    if (runningShutdown) {
       process.exit(1);
-      return;
+      return runningShutdown!;
     }
     shuttingDown = true;
-    writeStdoutLine('\n[Channel] Shutting down...');
-    scheduler?.stop();
-    for (const [name, channel] of channels) {
-      try {
-        channel.disconnect();
+    shutdownTask = (async () => {
+      writeStdoutLine('\n[Channel] Shutting down...');
+      scheduler?.stop();
+      await disconnectChannels(channels.values());
+      for (const name of channels.keys()) {
         writeStdoutLine(`[Channel] "${name}" disconnected.`);
-      } catch {
-        // best-effort
       }
-    }
-    await Promise.all(
-      [...channels.values()].map(async (channel) => {
-        const waitForDisconnect = (
-          channel as ChannelBase & {
-            waitForDisconnect?: () => Promise<void>;
-          }
-        ).waitForDisconnect;
-        await waitForDisconnect?.call(channel).catch(() => undefined);
-      }),
-    );
-    bridge.stop();
-    router.clearAll();
-    if (serviceInfoWritten) removeServiceInfo();
-    process.exit(0);
+      bridge.stop();
+      router.clearAll();
+      if (serviceInfoWritten) removeServiceInfo();
+      process.exit(0);
+    })();
+    return shutdownTask;
   };
   const detachShutdownHandlers = () => {
     process.off('SIGINT', shutdown);
@@ -606,15 +583,15 @@ async function startAll(
   // Connect all channels
   let connectedCount = 0;
   for (const [name, channel] of channels) {
-    if (shuttingDown) return;
+    if (shuttingDown) return shutdownTask;
     try {
       await channel.connect();
-      if (shuttingDown) return;
+      if (shuttingDown) return shutdownTask;
       connectedChannels.set(name, channel);
       connectedCount++;
       writeStdoutLine(`[Channel] "${name}" connected.`);
     } catch (err) {
-      if (shuttingDown) return;
+      if (shuttingDown) return shutdownTask;
       writeStderrLine(
         `[Channel] Failed to connect "${name}": ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -630,7 +607,10 @@ async function startAll(
   try {
     await writeServiceInfoOrExit(
       parsed.map((p) => p.name),
-      () => cleanupStartedChannels(channels.values(), bridge, router),
+      () => {
+        detachShutdownHandlers();
+        return cleanupStartedChannels(channels.values(), bridge, router);
+      },
     );
     serviceInfoWritten = true;
   } catch (error) {

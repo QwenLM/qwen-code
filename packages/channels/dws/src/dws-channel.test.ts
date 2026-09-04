@@ -1104,6 +1104,7 @@ describe('DwsChannel', () => {
         releaseReplacement = resolve;
       });
       let groupSubscriptionCalls = 0;
+      let replacementSubscription: FakeSubscription | undefined;
       client.subscribeToIm = vi.fn(async (source, onMessage, onError) => {
         if (source.kind !== 'group-all') {
           return subscribeToIm(source, onMessage, onError);
@@ -1113,6 +1114,7 @@ describe('DwsChannel', () => {
           return subscribeToIm(source, onMessage, onError);
         }
         const subscription = new FakeSubscription();
+        replacementSubscription = subscription;
         client.streams.push({ source, onMessage, onError, subscription });
         await replacementReady;
         return subscription;
@@ -1151,6 +1153,7 @@ describe('DwsChannel', () => {
       await expect(delivery).resolves.toBeUndefined();
       await reconnect;
 
+      expect(replacementSubscription?.stop).toHaveBeenCalledOnce();
       expect(groupSubscriptionCalls).toBe(2);
       expect(channel.pendingMessageIds().slice(-3)).toEqual([
         'replacement-startup-first',
@@ -1845,6 +1848,19 @@ describe('DwsChannel', () => {
           'conversation-independent',
         ]),
       );
+      channel.appendPendingMessage(
+        { kind: 'direct' },
+        message(
+          'user_im_message_receive_o2o_all',
+          'later-independent-replay',
+          'later independent request',
+          { conversationId: 'conversation-later-independent' },
+        ),
+      );
+      await channel.poll();
+      await vi.waitFor(() =>
+        expect(started).toContain('conversation-later-independent'),
+      );
     } finally {
       release();
     }
@@ -2280,6 +2296,10 @@ describe('DwsChannel', () => {
     );
     channel.disconnect();
     await channel.connect();
+    channel.releasePendingMessage(
+      'conversation-reconnect-order',
+      'reconnected-newer',
+    );
 
     const latestDelivery = client.emit(
       client.streams.length - 1,
@@ -2303,9 +2323,47 @@ describe('DwsChannel', () => {
     expect(started).toEqual([
       'reconnected-same-key',
       'reconnected-same-key',
-      'reconnected-newer',
       'reconnected-latest',
     ]);
+  });
+
+  it('preserves ambient group history filtered before admission', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        groupHistoryLimit: 5,
+        groups: {
+          '*': { requireMention: false },
+          'conversation-shadowed': { dispatchMode: 'followup' },
+        },
+      }),
+      'filtered-group-history-dws',
+      { groupHistoryPath: join(qwenHome, 'group-history.json') },
+    );
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_group_all',
+        'ambient-shadowed',
+        'ambient chatter in the shadowed group',
+        { conversationId: 'conversation-shadowed' },
+      ),
+    );
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'mention-shadowed',
+        '@QwenBot summarize the conversation',
+        { conversationId: 'conversation-shadowed' },
+      ),
+    );
+
+    expect(vi.mocked(bridge.prompt).mock.calls[0]?.[1]).toContain(
+      'ambient chatter in the shadowed group',
+    );
   });
 
   it('rejects full-capacity admission without waiting', async () => {
@@ -2550,6 +2608,37 @@ describe('DwsChannel', () => {
 
     expect(channel.pendingMessageIds()).toEqual([]);
     expect(channel.inbound).toEqual([]);
+  });
+
+  it('reports a pending-conversation admission failure', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.seedPendingMessages(1);
+    channel.markPendingMessageProcessed('conversation-capacity', 'parked-0');
+    channel.nextCursorSaveError = new Error('disk unavailable');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    try {
+      await client.emit(
+        1,
+        message(
+          'user_im_message_receive_o2o_all',
+          'live-after-save-failure',
+          'new request',
+          { conversationId: 'conversation-capacity' },
+        ),
+      );
+
+      await vi.waitFor(() =>
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'pending DWS message remains degraded: disk unavailable',
+          ),
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('turns a document mention notification into a document task and replies to its comment', async () => {
@@ -2868,6 +2957,65 @@ describe('DwsChannel', () => {
       ]);
     },
   );
+
+  it('uses a group-level followup mode for ordinary group messages', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(
+      client,
+      makeConfig({
+        dispatchMode: 'collect',
+        groups: {
+          'conversation-policy': {
+            requireMention: false,
+            dispatchMode: 'followup',
+          },
+        },
+      }),
+      'group-followup-override-dws',
+    );
+    let releaseFirst!: (value: string) => void;
+    const firstPrompt = new Promise<string>((resolve) => {
+      releaseFirst = resolve;
+    });
+    vi.mocked(bridge.prompt)
+      .mockImplementationOnce(() => firstPrompt)
+      .mockResolvedValueOnce('second response');
+
+    const firstDelivery = client.emit(
+      1,
+      message(
+        'user_im_message_receive_group',
+        'group-followup-first',
+        'first',
+        {
+          conversationId: 'conversation-policy',
+        },
+      ),
+    );
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+    let secondSettled = false;
+    const secondDelivery = client
+      .emit(
+        1,
+        message(
+          'user_im_message_receive_group',
+          'group-followup-second',
+          'second',
+          { conversationId: 'conversation-policy' },
+        ),
+      )
+      .finally(() => {
+        secondSettled = true;
+      });
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(secondSettled).toBe(false);
+    expect(bridge.prompt).toHaveBeenCalledOnce();
+
+    releaseFirst('first response');
+    await Promise.all([firstDelivery, secondDelivery]);
+    expect(bridge.prompt).toHaveBeenCalledTimes(2);
+  });
 
   it('preserves a document request at the end of the comment budget', async () => {
     const client = new FakeDwsClient();
@@ -6275,6 +6423,46 @@ describe('DwsChannel', () => {
     expect(channel.inbound.map((item) => item.text)).toEqual(['please retry']);
   });
 
+  it('spends one pending retry before another poll starts', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.seedPendingMessages(1);
+    let pendingAttempts = 0;
+    channel.inboundHandler = async (envelope) => {
+      if (envelope.messageId === 'parked-0') {
+        pendingAttempts += 1;
+        throw new Error('agent unavailable');
+      }
+      channel.inbound.push(envelope);
+    };
+
+    await channel.poll();
+    await vi.waitFor(() => expect(pendingAttempts).toBe(1));
+    await vi.waitFor(() =>
+      expect(
+        channel.queuedMessage('conversation-capacity\0parked-0'),
+      ).toBeUndefined(),
+    );
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'live-after-failed-replay',
+        'new request',
+        { conversationId: 'conversation-capacity' },
+      ),
+    );
+
+    expect(pendingAttempts).toBe(1);
+    expect(channel.inbound.map((item) => item.messageId)).toEqual([
+      'live-after-failed-replay',
+    ]);
+
+    await channel.poll();
+    await vi.waitFor(() => expect(pendingAttempts).toBe(2));
+  });
+
   it('does not automatically rerun an event after inbound dispatch fails', async () => {
     vi.useFakeTimers();
     try {
@@ -6423,6 +6611,76 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('round-trips a failed mention through persisted replay', async () => {
+    const name = 'pending-mention-dws';
+    const firstClient = new FakeDwsClient();
+    const first = await readyChannel(firstClient, makeConfig(), name);
+    first.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_at',
+      'mention-restart',
+      '@QwenBot please retry this request',
+    );
+
+    await expect(firstClient.emit(0, event)).rejects.toThrow(
+      'agent unavailable',
+    );
+    first.disconnect();
+
+    const restarted = await readyChannel(
+      new FakeDwsClient(),
+      makeConfig(),
+      name,
+    );
+    expect(restarted.pendingMessageIds()).toContain('mention-restart');
+    await restarted.poll();
+    await vi.waitFor(() =>
+      expect(restarted.pendingMessageIds()).not.toContain('mention-restart'),
+    );
+    expect(restarted.inbound).toEqual([
+      expect.objectContaining({ messageId: 'mention-restart' }),
+    ]);
+  });
+
+  it('removes a parked message after its sender becomes self', async () => {
+    const config = makeConfig({
+      groups: { '*': { requireMention: false } },
+    });
+    const name = 'late-self-pending-dws';
+    const firstClient = new FakeDwsClient();
+    firstClient.identity = {
+      profile: 'corp:bot',
+      selfSenderIds: ['open-self-current'],
+    };
+    const first = await readyChannel(firstClient, config, name);
+    first.inboundError = new Error('agent unavailable');
+    await expect(
+      firstClient.emit(
+        1,
+        message(
+          'user_im_message_receive_group_all',
+          'late-self-pending',
+          'own echo',
+          { senderId: 'open-self-late' },
+        ),
+      ),
+    ).rejects.toThrow('agent unavailable');
+    first.disconnect();
+
+    const secondClient = new FakeDwsClient();
+    secondClient.identity = {
+      profile: 'corp:bot',
+      selfSenderIds: ['open-self-late'],
+    };
+    const second = await readyChannel(secondClient, config, name);
+    expect(second.pendingMessageIds()).toContain('late-self-pending');
+
+    await second.poll();
+
+    expect(second.pendingMessageIds()).not.toContain('late-self-pending');
+    expect(second.inbound).toEqual([]);
+  });
+
   it('retains a capacity-blocked ambient message across a disconnect', async () => {
     const name = 'pending-capacity-disconnect-dws';
     const config = makeConfig({
@@ -6481,6 +6739,7 @@ describe('DwsChannel', () => {
       releaseFirstGroupSubscription = resolve;
     });
     let groupSubscriptionCalls = 0;
+    let firstGroupSubscription: FakeSubscription | undefined;
     client.subscribeToIm = vi.fn(async (source, onMessage, onError) => {
       if (source.kind !== 'group-all') {
         return subscribeToIm(source, onMessage, onError);
@@ -6490,6 +6749,7 @@ describe('DwsChannel', () => {
         return subscribeToIm(source, onMessage, onError);
       }
       const subscription = new FakeSubscription();
+      firstGroupSubscription = subscription;
       client.streams.push({ source, onMessage, onError, subscription });
       await firstGroupSubscriptionReady;
       return subscription;
@@ -6536,6 +6796,7 @@ describe('DwsChannel', () => {
     await expect(delivery).resolves.toBeUndefined();
     await reconnect;
 
+    expect(firstGroupSubscription?.stop).toHaveBeenCalledOnce();
     expect(groupSubscriptionCalls).toBe(2);
     expect(channel.inboundAttempts).toBe(0);
     expect(channel.pendingMessageIds().slice(-3)).toEqual([

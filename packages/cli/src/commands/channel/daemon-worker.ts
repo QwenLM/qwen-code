@@ -95,6 +95,7 @@ import {
   createChannelLoopController,
   isChannelCronEnabled,
 } from './loop-runtime.js';
+import { disconnectChannels } from './disconnect-channels.js';
 
 // Typed against the registry so renaming a capability key fails the build here
 // instead of silently degrading the worker to the pre-capability behavior.
@@ -581,26 +582,6 @@ export async function runChannelDaemonWorker(
     ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
     workerEnv: process.env,
   };
-  const disconnectAll = async () => {
-    const drains: Array<Promise<void>> = [];
-    for (const channel of channels.values()) {
-      try {
-        channel.disconnect();
-        const waitForDisconnect = (
-          channel as ChannelBase & {
-            waitForDisconnect?: () => Promise<void>;
-          }
-        ).waitForDisconnect;
-        if (waitForDisconnect) {
-          drains.push(waitForDisconnect.call(channel).catch(() => undefined));
-        }
-      } catch {
-        // best-effort
-      }
-    }
-    await Promise.all(drains);
-  };
-
   let router: SessionRouter | undefined;
   try {
     await abortableStartup(bridge.start(), startupSignal);
@@ -825,7 +806,7 @@ export async function runChannelDaemonWorker(
       },
       async close() {
         scheduler?.stop();
-        await disconnectAll();
+        await disconnectChannels(channels.values());
         try {
           bridge.stop();
         } finally {
@@ -835,7 +816,7 @@ export async function runChannelDaemonWorker(
     };
   } catch (err) {
     scheduler?.stop();
-    await disconnectAll();
+    await disconnectChannels(channels.values());
     try {
       bridge.stop();
     } catch {
