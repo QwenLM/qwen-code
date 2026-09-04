@@ -270,7 +270,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // exactly (Enter then submits instead of accepting a suggestion).
   const slashStateRef = useRef<{
     range: { start: number; end: number };
-    perfect: boolean;
   } | null>(null);
   // Sequence guard for async argument completion (drops stale results).
   const slashSearchSeqRef = useRef(0);
@@ -380,7 +379,6 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       const parsed = parseSlashCommandQuery(target.query, pool);
       slashStateRef.current = {
         range: slashCompletionPositions(target.query, parsed),
-        perfect: isPerfectSlashMatch(parsed),
       };
 
       // Argument completion: the leaf command's async completion() supplies
@@ -697,9 +695,28 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       // command match submits directly; if the user navigated away from the
       // highlighted default, Enter fills the navigated suggestion instead.
       const showing = suggestions.length > 0;
+      // The editor mutates synchronously, while completion state is refreshed
+      // by a React effect. Re-parse the live buffer so Enter immediately after
+      // the final character of an exact command submits instead of accepting a
+      // stale suggestion.
+      const lines = el.plainText.split('\n');
+      const cursor = el.logicalCursor;
+      const target = detectCompletionTarget(
+        lines,
+        cursor.row,
+        displayColToCodePointIndex(lines[cursor.row] ?? '', cursor.col),
+        el.plainText,
+        displayOffsetToCodePointIndex(el.plainText, cursor.offset),
+        commandsRef.current,
+      );
       const isPerfectMatch =
-        completionModeRef.current === CompletionMode.SLASH &&
-        (slashStateRef.current?.perfect ?? false);
+        target?.mode === CompletionMode.SLASH &&
+        isPerfectSlashMatch(
+          parseSlashCommandQuery(
+            target.query,
+            slashCommandPool(target, commandsRef.current),
+          ),
+        );
       if (showing && (!isPerfectMatch || suggestionNavigatedRef.current)) {
         key.preventDefault();
         acceptSuggestion(activeIndex, true);
