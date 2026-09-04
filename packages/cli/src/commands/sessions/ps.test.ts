@@ -71,6 +71,9 @@ function record(
 function managedSnapshot(
   over: Record<string, unknown> = {},
 ): Record<string, unknown> {
+  // Split the state override off: spreading `over` whole at the end
+  // would shadow the constructed state object with the partial override.
+  const { state: stateOver, ...rest } = over;
   const state = {
     schemaVersion: 1,
     sessionId: 'managed-1',
@@ -84,7 +87,7 @@ function managedSnapshot(
     createdAt: new Date(Date.now() - 5_000).toISOString(),
     updatedAt: new Date(Date.now()).toISOString(),
     worktree: { mode: 'none' },
-    ...((over['state'] as Record<string, unknown>) ?? {}),
+    ...((stateOver as Record<string, unknown>) ?? {}),
   };
   return {
     sessionId: state['sessionId'],
@@ -104,7 +107,7 @@ function managedSnapshot(
       platform: 'linux',
       recentOutputBytes: 0,
     },
-    ...over,
+    ...rest,
   };
 }
 
@@ -310,6 +313,33 @@ describe('qwen sessions ps', () => {
     expect(stdout[1]).toContain('777');
     expect(stdout[1]).toContain('needs input');
     expect(stdout[1]).toContain('/w/svc');
+  });
+
+  it('labels every managed task state with its documented STATE text', async () => {
+    // The docs promise the STATE column reads `working`, `ready`,
+    // `stopped` or `failed` for a managed session. Before this only
+    // `needs input` had a rendering test, so any swap among the other
+    // four labels shipped green — "ready" beside a session that failed.
+    const cases: Array<[string, string]> = [
+      ['working', 'working'],
+      ['idle', 'ready'],
+      ['stopped', 'stopped'],
+      ['failed', 'failed'],
+    ];
+    for (const [sessionState, label] of cases) {
+      stdout.length = 0;
+      listLiveSessions.mockResolvedValue([]);
+      listAgentViewSessionSnapshots.mockResolvedValue([
+        managedSnapshot({ state: { sessionState } }),
+      ]);
+      await run({ json: false });
+
+      const stateCell = stdout[1].slice(
+        NAME_COL + PID_COL + AGE_COL,
+        NAME_COL + PID_COL + AGE_COL + STATE_COL,
+      );
+      expect(stateCell).toBe(label.padEnd(STATE_COL));
+    }
   });
 
   it('puts managed rows above interactive ones', async () => {

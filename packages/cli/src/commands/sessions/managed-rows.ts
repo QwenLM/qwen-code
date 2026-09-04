@@ -92,7 +92,9 @@ export interface SessionRow {
  * adopting snapshot reuses the id of a session that is still live and
  * registered. Mapping any of those would list a ghost, or let the merge
  * below replace a registry row that knows a live pid with one that does
- * not. The supervisor's own listing skips the same shapes.
+ * not. The supervisor's own listing skips unmanaged and removing snapshots; it
+ * shows sessions mid-adoption, which this listing must not, because the merge
+ * below would trade their live registry pid for none.
  *
  * The name and the state both come from `deriveAgentViewPresentation`, so
  * this listing and the roster UI cannot drift into describing the same
