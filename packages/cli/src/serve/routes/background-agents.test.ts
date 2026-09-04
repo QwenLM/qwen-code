@@ -12,6 +12,15 @@ import { registerBackgroundAgentRoutes } from './background-agents.js';
 
 const SESSION = '0f8e1c42-9d3a-4d21-8f77-2b6a7c9e0c31';
 
+/**
+ * A pid that is genuinely running, because `managedSessionRows` verifies
+ * liveness before reporting one: a hardcoded number is a dead process on
+ * any machine that happens not to be running it, and the row would
+ * arrive with no pid at all. Using this process's own pid tests the real
+ * path instead of stubbing the check away.
+ */
+const LIVE_PID = process.pid;
+
 function snapshot(
   over: Partial<AgentViewSessionSnapshot> = {},
 ): AgentViewSessionSnapshot {
@@ -55,7 +64,7 @@ describe('GET /background-agents', () => {
           },
           worker: {
             schemaVersion: 1,
-            workerPid: 777,
+            workerPid: LIVE_PID,
             protocolVersion: 1,
             platform: 'linux',
             recentOutputBytes: 0,
@@ -71,7 +80,7 @@ describe('GET /background-agents', () => {
         name: 'release audit',
         taskState: 'waiting',
         cwd: '/w/app',
-        pid: 777,
+        pid: LIVE_PID,
         startedAt: '2026-09-04T11:58:00.000Z',
       },
     ]);
@@ -112,7 +121,7 @@ describe('GET /background-agents', () => {
           state: { ...snapshot().state, createdAt: 'not-a-date' },
           worker: {
             schemaVersion: 1,
-            workerPid: 777,
+            workerPid: LIVE_PID,
             protocolVersion: 1,
             platform: 'linux',
             recentOutputBytes: 0,
@@ -122,7 +131,7 @@ describe('GET /background-agents', () => {
     ).get('/background-agents');
 
     const agent = response.body.agents[0];
-    expect(agent.pid).toBe(777);
+    expect(agent.pid).toBe(LIVE_PID);
     expect(agent).not.toHaveProperty('startedAt');
   });
 
