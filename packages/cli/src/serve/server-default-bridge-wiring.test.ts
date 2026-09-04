@@ -46,7 +46,20 @@ function makeBridge(
   } as unknown as AcpSessionBridge;
 }
 
+// The ecs-qwen pool runs several jobs at once; under that contention these
+// tests pass alone in milliseconds but blow the 15s ceiling without any
+// real hang. Give that pool the raised budget its other suites already use.
+const timeoutMs = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 60_000
+  : 15_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
+
 describe('createServeApp default bridge wiring', () => {
+  // Every test below resets the module registry and re-imports the full
+  // serve module graph; under heavy parallel CI load that can exceed the
+  // default timeout without any real hang.
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
   afterEach(() => {
     vi.doUnmock('./acp-session-bridge.js');
     vi.resetModules();
@@ -125,7 +138,7 @@ describe('createServeApp default bridge wiring', () => {
     ).toEqual({
       kind: 'not_found',
     });
-  }, 15_000);
+  });
 
   it('keeps the same-host write route disabled for an injected filesystem factory', async () => {
     let bridgeOptions: BridgeOptions | undefined;
@@ -182,7 +195,7 @@ describe('createServeApp default bridge wiring', () => {
       }),
     ).rejects.toBe(boundaryError);
     expect(writeSameHostToolText).not.toHaveBeenCalled();
-  }, 15_000);
+  });
 
   it('wires total admission into the internally-created bridge', async () => {
     let freshSessionAdmission: BridgeFreshSessionAdmission | undefined;

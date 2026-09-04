@@ -585,18 +585,13 @@ fn send_click_synthesized_mods_impl(
                 actual.0
             );
         }
-        let foreground_target = if activate {
-            match crate::win32::capture_foreground_target(target.0 as usize as u64) {
-                Some(target) => Some(target),
-                None => bail!(
-                    "foreground_unavailable: exact target HWND {:?} disappeared before mouse \
-                     input could be sent",
-                    target.0
-                ),
-            }
-        } else {
-            None
-        };
+        if activate && crate::win32::capture_foreground_target(target.0 as usize as u64).is_none() {
+            bail!(
+                "foreground_unavailable: exact target HWND {:?} disappeared before mouse \
+                 input could be sent",
+                target.0
+            );
+        }
         let noactivate = (!activate).then(|| crate::input::NoActivateGuard::arm(target));
         if !activate {
             let _ = SetWindowPos(
@@ -694,21 +689,11 @@ fn send_click_synthesized_mods_impl(
                  foreground click."
             );
         }
-        if activate {
-            let actual = GetForegroundWindow();
-            if !crate::win32::foreground_matches_target_or_owned_window(
-                foreground_target.expect("foreground target captured before input"),
-                actual.0 as usize as u64,
-            ) {
-                bail!(
-                    "foreground_unavailable: exact target HWND {:?} or a verified same-process \
-                     post-action window was not foreground after the click \
-                     (actual foreground HWND {:?})",
-                    target.0,
-                    actual.0
-                );
-            }
-        }
+        // The exact target was proven foreground before SendInput, and all
+        // requested mouse records were accepted above. From this point the
+        // action is committed. A click may synchronously open a modal, popup,
+        // or another application window, so post-action foreground state must
+        // not retroactively turn the committed input into a refusal.
     }
 
     Ok(())

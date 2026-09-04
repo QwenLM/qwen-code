@@ -4,6 +4,11 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
+import {
+  TranscriptDocumentExpandedProvider,
+  TranscriptRenderModeProvider,
+  type TranscriptRenderMode,
+} from '../../transcriptRenderMode';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -32,12 +37,25 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
+function render(
+  node: ReactNode,
+  language: 'en' | 'zh-CN' = 'en',
+  renderMode: TranscriptRenderMode = 'interactive',
+  documentExpanded = true,
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    root.render(<I18nProvider language={language}>{node}</I18nProvider>);
+    root.render(
+      <I18nProvider language={language}>
+        <TranscriptRenderModeProvider value={renderMode}>
+          <TranscriptDocumentExpandedProvider value={documentExpanded}>
+            {node}
+          </TranscriptDocumentExpandedProvider>
+        </TranscriptRenderModeProvider>
+      </I18nProvider>,
+    );
   });
   mounted.push({ root, container });
   return container;
@@ -99,6 +117,31 @@ describe('AssistantMessage thinking logic', () => {
 
     expect(container.textContent).toContain('Done thinking');
     expect(container.textContent).not.toContain('Thought for');
+  });
+
+  it('keeps thinking content expanded and inert in document mode', () => {
+    const container = render(
+      <ThinkingMessage content="document thinking detail" timestamp={0} />,
+      'en',
+      'document',
+    );
+
+    expect(container.textContent).toContain('document thinking detail');
+    expect(container.querySelector('[aria-expanded]')).toBeNull();
+  });
+
+  it('honors the document-wide collapsed state without enabling controls', () => {
+    const container = render(
+      <ThinkingMessage content="document thinking detail" timestamp={0} />,
+      'en',
+      'document',
+      false,
+    );
+
+    expect(container.textContent).not.toContain('document thinking detail');
+    expect(container.querySelector('button')?.hasAttribute('disabled')).toBe(
+      true,
+    );
   });
 
   it.each([
@@ -561,6 +604,41 @@ describe('AssistantMessage markdown tables', () => {
 
     expect(container.querySelector('table')).not.toBeNull();
     expect(container.textContent).not.toContain('Copy table');
+  });
+});
+
+describe('AssistantMessage copy reset timer', () => {
+  it('leaves no pending reset timer behind on unmount', async () => {
+    vi.useFakeTimers();
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+    try {
+      const container = render(
+        <AssistantMessage content="copy me" showFooterActions />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[title="Copy"]',
+      );
+      await act(async () => {
+        button?.click();
+        await Promise.resolve();
+      });
+      // The 2s reset is pending; unmounting must clear it, or it fires
+      // after the file's environment is torn down and the unit suites'
+      // unhandled-error gate turns an all-green run red.
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      const { root, container: mountedContainer } = mounted.pop()!;
+      act(() => root.unmount());
+      mountedContainer.remove();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(navigator, 'clipboard', descriptor);
+      }
+    }
   });
 });
 

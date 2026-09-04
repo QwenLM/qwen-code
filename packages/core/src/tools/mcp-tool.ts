@@ -46,6 +46,7 @@ import {
   normalizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
 import { isImagePart } from '../services/visionBridge/image-part-utils.js';
+import { buildMcpClassifierInput } from './mcp-classifier-input.js';
 
 const debugLogger = createDebugLogger('MCP_TOOL');
 
@@ -991,6 +992,41 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       // the server in their query ("send a slack message").
       `mcp ${serverName}`,
     );
+  }
+
+  /**
+   * AUTO-mode classifier projection.
+   *
+   * Forwards the server name, the server-side tool name, the server's
+   * self-reported annotations, and a bounded copy of the arguments (see
+   * `mcp-classifier-input.ts` for the caps). Without the arguments the
+   * classifier can only see the tool name, cannot apply its
+   * data-exfiltration or external-write rules, and — being told to err on
+   * the side of blocking — rejects most MCP calls outright, which pushes
+   * users toward blanket `mcp__server` allow rules that skip the
+   * classifier entirely.
+   *
+   * The arguments are the agent's own output (already sent to the model
+   * provider as a function call), so forwarding them to a classifier on
+   * the same model configuration is not a new disclosure. Deployments that
+   * route the classifier elsewhere can opt out with
+   * `permissions.autoMode.mcp.forwardArguments: false`, which restores the
+   * name-only projection.
+   */
+  override toAutoClassifierInput(
+    params: ToolParams,
+  ): Record<string, unknown> | string {
+    if (
+      this.cliConfig?.getAutoModeSettings?.()?.mcp?.forwardArguments === false
+    ) {
+      return '';
+    }
+    return buildMcpClassifierInput({
+      serverName: this.serverName,
+      serverToolName: this.serverToolName,
+      annotations: this.annotations,
+      params,
+    });
   }
 
   asFullyQualifiedTool(): DiscoveredMCPTool {

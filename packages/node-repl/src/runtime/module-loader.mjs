@@ -532,11 +532,11 @@ export function createModuleLoader(options) {
     });
     return {
       module: record.module,
-      async evaluate() {
+      async evaluate(options) {
         await record.module.link((specifier) =>
           linker(specifier, record, previousModule),
         );
-        await record.module.evaluate();
+        await record.module.evaluate(options);
       },
     };
   }

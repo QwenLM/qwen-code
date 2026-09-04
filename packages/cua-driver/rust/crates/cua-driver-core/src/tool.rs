@@ -954,6 +954,50 @@ impl ToolRegistry {
             .await
     }
 
+    /// Invoke the platform implementation after an authenticated UIAccess
+    /// parent has already crossed this registry's canonical authorization,
+    /// coordination, and recording boundary.
+    ///
+    /// The private parent pipe proves the caller PID and SID before parsing.
+    /// Its reserved session evidence is retained only to keep revision and
+    /// element-token state isolated in the worker. Running the canonical
+    /// boundary a second time would publish an action result inside the worker
+    /// and then make the parent publish it again, losing the internal action
+    /// record required for truthful SDK projection.
+    #[doc(hidden)]
+    pub async fn invoke_from_authenticated_uiaccess_parent(
+        &self,
+        name: &str,
+        mut args: Value,
+    ) -> ToolResult {
+        let evidence = TrustedInvocationEvidence::extract_from_adapter_args(&mut args);
+        let context = match crate::session_authorization::configured_registry()
+            .and_then(crate::session_authorization::SessionAuthorizationRegistry::legacy_context)
+        {
+            Ok(context) => context,
+            Err(error) => {
+                return permission_denied_result(format!(
+                    "authorization configuration is invalid: {error}"
+                ))
+            }
+        };
+        let Some(tool) = self.tools.get(name) else {
+            return ToolResult::error(format!("Unknown tool: {name}"));
+        };
+        let runtime_scope = context.runtime_scope_key();
+        DISPATCH_RUNTIME_SCOPE
+            .scope(runtime_scope, async {
+                DISPATCH_TRUSTED_INVOCATION_EVIDENCE
+                    .scope(evidence, async {
+                        DISPATCH_AUTHORIZATION_CONTEXT
+                            .scope(context, tool.invoke(args))
+                            .await
+                    })
+                    .await
+            })
+            .await
+    }
+
     /// Invoke through an immutable context chosen by the trusted runtime host.
     ///
     /// The task-local scope deliberately propagates the same authority through
@@ -2773,6 +2817,12 @@ mod runtime_isolation_tests {
         def: super::ToolDef,
     }
 
+    struct UiAccessParentProbe {
+        identity: Arc<Mutex<Option<super::DispatchSessionIdentity>>>,
+        last_args: Arc<Mutex<Option<serde_json::Value>>>,
+        def: super::ToolDef,
+    }
+
     struct AttestedProbe {
         hits: Arc<AtomicUsize>,
         scope: serde_json::Value,
@@ -2827,6 +2877,23 @@ mod runtime_isolation_tests {
             self.last_args.lock().unwrap().replace(args.clone());
             crate::protocol::ToolResult::text("file operation ran")
                 .with_structured(serde_json::json!({"received": args}))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl super::Tool for UiAccessParentProbe {
+        fn def(&self) -> &super::ToolDef {
+            &self.def
+        }
+
+        async fn invoke(&self, args: serde_json::Value) -> crate::protocol::ToolResult {
+            self.identity
+                .lock()
+                .unwrap()
+                .replace(super::current_dispatch_session_identity().unwrap());
+            self.last_args.lock().unwrap().replace(args);
+            crate::protocol::ToolResult::text("raw platform result")
+                .with_structured(serde_json::json!({"platform": "raw"}))
         }
     }
 
@@ -4085,6 +4152,51 @@ resources:
             serde_json::Value::Bool(true)
         );
         assert!(received.get("_protected_process_fingerprint").is_none());
+    }
+
+    #[tokio::test]
+    async fn authenticated_uiaccess_parent_retains_identity_without_reprojecting() {
+        let identity = Arc::new(Mutex::new(None));
+        let last_args = Arc::new(Mutex::new(None));
+        let mut registry = super::ToolRegistry::new();
+        registry.register(Box::new(UiAccessParentProbe {
+            identity: identity.clone(),
+            last_args: last_args.clone(),
+            def: super::ToolDef {
+                name: "click".into(),
+                description: "test raw UIAccess platform input".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                read_only: false,
+                destructive: false,
+                idempotent: false,
+                open_world: false,
+            },
+        }));
+
+        let result = registry
+            .invoke_from_authenticated_uiaccess_parent(
+                "click",
+                serde_json::json!({
+                    "x": 10,
+                    "y": 20,
+                    "_session_id": "trusted-owner",
+                    "_transport_session_id": "transport-a"
+                }),
+            )
+            .await;
+
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({"platform": "raw"}))
+        );
+        assert!(result.action_record.is_none());
+        let identity = identity.lock().unwrap().clone().unwrap();
+        assert!(identity.session_id.ends_with(":trusted-owner"));
+        assert!(identity.transport_session_id.ends_with(":transport-a"));
+        let received = last_args.lock().unwrap().clone().unwrap();
+        assert!(received.get("_session_id").is_none());
+        assert!(received.get("_transport_session_id").is_none());
     }
 
     #[tokio::test]

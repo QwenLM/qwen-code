@@ -929,7 +929,15 @@ export class SubagentManager {
       const hookSystem = runtimeContext.getHookSystem();
       const hookRegistry = hookSystem?.getRegistry();
       if (config.hooks && Object.keys(config.hooks).length > 0) {
-        if (hookRegistry) {
+        if (config.level === 'project' && !runtimeContext.isTrustedFolder()) {
+          // Project agents load from <repo>/.qwen/agents/ regardless of
+          // trust (read-only use is fine), but their hooks are repo-supplied
+          // code execution — the same gate Config.getProjectHooks() applies
+          // to settings-file hooks.
+          debugLogger.warn(
+            `Subagent "${config.name}" is a project agent in an untrusted folder; ignoring its hooks.`,
+          );
+        } else if (hookRegistry) {
           const agentScope = `agent:${config.name}:${randomUUID()}`;
           unregisterAgentHooks = hookRegistry.addAgentHooks(
             config.hooks as { [K in HookEventName]?: HookDefinition[] },
@@ -1022,6 +1030,27 @@ export class SubagentManager {
     cleanup?: () => Promise<void>;
   }> {
     const subagentContext = deriveConfig(runtimeContext);
+
+    // Session Workflow plan-revision state is session-global on the base
+    // Config. The prototype set/clear assign
+    // `this.sessionWorkflowPlanRevision`, which would land as an OWN property
+    // on this wrapper and shadow the base value — a subagent's divergent
+    // todo_write would clear the approved revision only for itself while the
+    // parent keeps rejecting Agent launches against a plan that no longer
+    // exists. Forward mutations through to the wrapped Config
+    // (runtimeContext may itself be a write-through wrapper — the forwarding
+    // chain bottoms out at the base Config); keep in sync with
+    // `createApprovalModeOverride` in tools/agent/agent.ts.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (subagentContext as any).setSessionWorkflowPlanRevision = (
+      revision: Parameters<Config['setSessionWorkflowPlanRevision']>[0],
+    ): void => {
+      runtimeContext.setSessionWorkflowPlanRevision(revision);
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (subagentContext as any).clearSessionWorkflowPlanRevision = (): void => {
+      runtimeContext.clearSessionWorkflowPlanRevision();
+    };
 
     // Per-agent MCP server overrides. Frontmatter `mcpServers` entries shadow
     // session-level servers on key collision (more-specific-wins, matching

@@ -5,7 +5,21 @@
  */
 
 import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
-import type { ToolInvocation, ToolResult } from '../tools/tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolInvocation,
+  ToolResult,
+} from '../tools/tools.js';
+import { ToolConfirmationOutcome } from '../tools/tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
+import { ApprovalMode } from '../config/config.js';
+import { StructuredToolError } from '../tools/priorReadEnforcement.js';
+import { ToolErrorType } from '../tools/tool-error.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
+import {
+  GoalConflictError,
+  GoalInvalidTransitionError,
+} from './goal-reducer.js';
 import {
   capPreviewBytes,
   GOAL_EVIDENCE_REFERENCE_LIMIT,
@@ -17,6 +31,7 @@ import {
 } from '../tools/tools.js';
 import {
   GOAL_RUNTIME_DISPOSED_MESSAGE,
+  GoalPersistenceUnavailableError,
   STALE_GOAL_TURN_MESSAGE,
   type GoalRuntime,
   type GoalWorkerView,
@@ -24,6 +39,7 @@ import {
 import { goalTurnContext } from './goal-turn-context.js';
 import {
   type GoalBlockerKind,
+  type GoalControlRequest,
   GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
   type GoalRecord,
   type GoalSnapshotV2,
@@ -577,4 +593,345 @@ function summarizeCatalog(
     entries,
     ...(shortenedPreviews > 0 ? { shortenedPreviews } : {}),
   };
+}
+
+// ── propose_goal ────────────────────────────────────────────────────────────
+
+/**
+ * Upper bound on a proposed objective. The whole text is shown in the
+ * approval dialog, so it has to stay readable there; the /goal-draft contract
+ * (Outcome / Done when / Must not / Budget / On block / Context) fits in
+ * well under this.
+ */
+export const PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS = 1500;
+
+export interface ProposeGoalToolParams {
+  objective: string;
+}
+
+/**
+ * A Goal the user approved in the `propose_goal` dialog, waiting for the
+ * turn that proposed it to end. Setting it mid-turn would leave the rest of
+ * that turn without a Goal permit (see `client.ts`, "An active Goal requires
+ * an exact turn permit"), so the tool only parks it here and the client
+ * applies it at the same boundary a typed `/goal set` takes effect.
+ */
+export interface PendingGoalProposal {
+  objective: string;
+  /**
+   * The `prompt_id` of the turn whose dialog approved it. Only that turn's
+   * terminal boundary may set or discard the Goal; unrelated frames leave it
+   * parked for its owner. A new real user query clears any stale approval.
+   */
+  turnKey: string;
+}
+
+export interface ProposeGoalToolConfig extends GoalToolConfig {
+  getGoalRuntimeReady(): Promise<GoalRuntime>;
+  isTrustedFolder(): boolean;
+  getApprovalMode(): ApprovalMode;
+  hasPendingGoalProposal(): boolean;
+  setPendingGoalProposal(proposal: PendingGoalProposal): boolean;
+}
+
+type ProposeGoalRuntime = Pick<GoalRuntime, 'getSnapshot' | 'dispatch'>;
+
+export type ApplyPendingGoalProposalResult =
+  | { applied: true; goal: GoalRecord }
+  | { applied: false; reason: string };
+
+/**
+ * Sets an approved proposal as the session Goal. Called by the client once
+ * the proposing turn has ended; never from inside a turn.
+ *
+ * Re-reads the snapshot because `/goal` may have changed the session since
+ * the dialog: an active Goal is never replaced (someone is already running
+ * it), a stopped one is replaced through its expected version, and no Goal
+ * creates.
+ */
+export async function applyPendingGoalProposal(
+  runtime: ProposeGoalRuntime,
+  proposal: PendingGoalProposal,
+): Promise<ApplyPendingGoalProposalResult> {
+  const objective = proposal.objective.trim();
+  const current = runtime.getSnapshot().goal;
+  if (current?.status === 'active') {
+    return {
+      applied: false,
+      reason: `A Goal became active (revision ${current.revision}) before the approved proposal could be set.`,
+    };
+  }
+  const request: GoalControlRequest = current
+    ? {
+        action: 'replace',
+        objective,
+        expectedGoalId: current.goalId,
+        expectedRevision: current.revision,
+      }
+    : { action: 'create', objective };
+  try {
+    const response =
+      request.action === 'replace'
+        ? await runtime.dispatch(request, { refuseIfActive: true })
+        : await runtime.dispatch(request);
+    const goal = response.snapshot.goal;
+    if (!goal) {
+      return {
+        applied: false,
+        reason: 'The Goal runtime accepted the request but reported no Goal.',
+      };
+    }
+    return {
+      applied: true,
+      goal,
+    };
+  } catch (error) {
+    if (
+      error instanceof GoalConflictError ||
+      error instanceof GoalInvalidTransitionError ||
+      error instanceof GoalPersistenceUnavailableError
+    ) {
+      return { applied: false, reason: error.message };
+    }
+    throw error;
+  }
+}
+
+export const PROPOSE_GOAL_PLAN_MODE_MESSAGE =
+  'Keep planning; propose the Goal after the plan is approved.';
+export const PROPOSE_GOAL_UNTRUSTED_MESSAGE =
+  'Goals can only be set in trusted workspaces. Tell the user to trust the folder with /trust and then run /goal set themselves.';
+export const PROPOSE_GOAL_UNAVAILABLE_MESSAGE =
+  'This session cannot persist Goals, so no Goal can be set.';
+/**
+ * Defensive only: the model never reads this.
+ *
+ * A declined dialog resolves as `ToolConfirmationOutcome.Cancel`, and the
+ * scheduler settles the call as `cancelled` without ever entering
+ * `execute()` -- the model is handed the scheduler's own cancellation
+ * notice instead. The guard below stays for a host that one day runs
+ * `execute()` after a cancelled confirmation, so a decline can never fall
+ * through to parking an approval. It is deliberately not exported: nothing
+ * outside this module should assert on a string the model cannot receive.
+ * What actually keeps the model from re-proposing is the tool description.
+ */
+const PROPOSE_GOAL_NOT_APPROVED_MESSAGE =
+  'The Goal was not set: the user did not approve it. Do not ask why and do not propose the same or a reworded objective again.';
+export const PROPOSE_GOAL_NO_TURN_MESSAGE =
+  'The Goal was not set: this call is not attributable to a turn, so its approval could not be bound to one. Hand the user a `/goal set <objective>` line instead.';
+export const PROPOSE_GOAL_PENDING_MESSAGE =
+  'Another approved Goal proposal is already waiting for this turn to end. Do not propose another one.';
+
+function activeGoalMessage(revision: number): string {
+  return `A Goal is already active (revision ${revision}); this tool does not replace a running Goal. Hand the user a \`/goal edit <objective>\` line to tighten it or a \`/goal set <objective>\` line to replace it, and stop.`;
+}
+
+function proposalPromptHeadline(current: GoalRecord | null): string {
+  if (current) {
+    return `Replace the ${current.status} Goal and start working toward this objective? Approving sets it like /goal set: after each turn an independent verifier checks the transcript, and Qwen Code keeps working until it is met.`;
+  }
+  return 'Set this as the session Goal? Approving sets it like /goal set: after each turn an independent verifier checks the transcript, and Qwen Code keeps working until it is met.';
+}
+
+class ProposeGoalInvocation extends BaseToolInvocation<
+  ProposeGoalToolParams,
+  GoalToolResult
+> {
+  private approved = false;
+
+  constructor(
+    params: ProposeGoalToolParams,
+    private readonly config: ProposeGoalToolConfig,
+  ) {
+    super(params);
+  }
+
+  /**
+   * The description is the one piece of the confirmation every host shows
+   * (the Web Shell does not forward an `info` prompt), so the objective has
+   * to be in it.
+   */
+  getDescription(): string {
+    return `Propose Goal: ${this.params.objective.trim()}`;
+  }
+
+  /**
+   * Consent for an autonomous loop cannot come from a permission rule or an
+   * approval mode: a bare `propose_goal` allow rule, YOLO, or AUTO_EDIT
+   * (which auto-approves `info` confirmations) would otherwise set a Goal
+   * the user never saw.
+   */
+  override requiresUserInteraction(): boolean {
+    return true;
+  }
+
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
+
+  /**
+   * Why a proposal cannot be shown right now, or `undefined` when it can.
+   * Checked before the dialog so the user is never asked to approve a Goal
+   * that could not be set, and again in `execute()` because `/goal` can
+   * change the session while the dialog is open.
+   */
+  private async blocker(): Promise<
+    { message: string; type: ToolErrorType } | undefined
+  > {
+    if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+      return {
+        message: PROPOSE_GOAL_PLAN_MODE_MESSAGE,
+        type: ToolErrorType.EXECUTION_DENIED,
+      };
+    }
+    if (!this.config.isTrustedFolder()) {
+      return {
+        message: PROPOSE_GOAL_UNTRUSTED_MESSAGE,
+        type: ToolErrorType.EXECUTION_DENIED,
+      };
+    }
+    if (this.config.hasPendingGoalProposal()) {
+      return {
+        message: PROPOSE_GOAL_PENDING_MESSAGE,
+        type: ToolErrorType.EXECUTION_DENIED,
+      };
+    }
+    let runtime: ProposeGoalRuntime;
+    try {
+      runtime = await this.config.getGoalRuntimeReady();
+    } catch {
+      return {
+        message: PROPOSE_GOAL_UNAVAILABLE_MESSAGE,
+        type: ToolErrorType.EXECUTION_DENIED,
+      };
+    }
+    const current = runtime.getSnapshot().goal;
+    if (current?.status === 'active') {
+      return {
+        message: activeGoalMessage(current.revision),
+        type: ToolErrorType.EXECUTION_DENIED,
+      };
+    }
+    return undefined;
+  }
+
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    const blocker = await this.blocker();
+    if (blocker) {
+      throw new StructuredToolError(blocker.message, blocker.type);
+    }
+    const current = this.config.getGoalRuntime().getSnapshot().goal;
+    return {
+      type: 'info',
+      title: 'Set this as the session Goal?',
+      prompt: `${proposalPromptHeadline(current)}\n\n${this.params.objective.trim()}`,
+      renderPromptAsPlainText: true,
+      onConfirm: async (outcome: ToolConfirmationOutcome) => {
+        this.approved = outcome !== ToolConfirmationOutcome.Cancel;
+      },
+    };
+  }
+
+  async execute(_signal: AbortSignal): Promise<GoalToolResult> {
+    if (!this.approved) {
+      return this.errorResult(
+        PROPOSE_GOAL_NOT_APPROVED_MESSAGE,
+        ToolErrorType.EXECUTION_DENIED,
+      );
+    }
+    const blocker = await this.blocker();
+    if (blocker) return this.errorResult(blocker.message, blocker.type);
+
+    const objective = this.params.objective.trim();
+    const current = this.config.getGoalRuntime().getSnapshot().goal;
+    // Parked, not dispatched: the client sets it when this turn ends. Doing
+    // it here would strip the rest of the turn of its Goal permit. The
+    // approval is bound to this turn's prompt id so no other frame can
+    // apply it.
+    const turnKey = promptIdContext.getStore();
+    if (!turnKey) {
+      return this.errorResult(
+        PROPOSE_GOAL_NO_TURN_MESSAGE,
+        ToolErrorType.EXECUTION_DENIED,
+      );
+    }
+    if (!this.config.setPendingGoalProposal({ objective, turnKey })) {
+      return this.errorResult(
+        PROPOSE_GOAL_PENDING_MESSAGE,
+        ToolErrorType.EXECUTION_DENIED,
+      );
+    }
+    const payload = {
+      approved: true,
+      objective,
+      ...(current ? { replacesGoalId: current.goalId } : {}),
+      next: 'The user approved the Goal. It is set the moment this turn ends: reply with one sentence acknowledging it and stop. Do not call more tools and do not begin the objective; the Goal runtime starts the first Goal turn on its own.',
+    };
+    return {
+      llmContent: JSON.stringify(payload),
+      returnDisplay: `Goal approved · ${capDisplay(objective)}`,
+    };
+  }
+
+  private errorResult(message: string, type: ToolErrorType): GoalToolResult {
+    return {
+      llmContent: message,
+      returnDisplay: message,
+      error: { message, type },
+    };
+  }
+}
+
+function capDisplay(objective: string): string {
+  const firstLine = objective.split('\n')[0] ?? objective;
+  return firstLine.length > 96 ? `${firstLine.slice(0, 95)}…` : firstLine;
+}
+
+export class ProposeGoalTool extends BaseDeclarativeTool<
+  ProposeGoalToolParams,
+  GoalToolResult
+> {
+  static readonly Name = ToolNames.PROPOSE_GOAL;
+
+  constructor(private readonly config: ProposeGoalToolConfig) {
+    super(
+      ProposeGoalTool.Name,
+      ToolDisplayNames.PROPOSE_GOAL,
+      `Propose a session Goal for the user to approve. The user sees the objective in an approval dialog and decides; only their approval sets the Goal. This tool never sets one on its own, and no permission rule or approval mode skips the dialog. Propose only when the user asked for an outcome with a verifiable end state that spans multiple turns ("make the tests pass", "migrate every call site", or after /goal-draft produced an objective), and never to widen scope: the objective must follow from their request. Write the objective so an independent verifier can judge it from transcript evidence alone: one outcome; numbered binary "Done when" checks that name a command and ask to paste its output; what must not change; a budget; what to do when blocked. At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters, on one line. One Goal is active at a time: if a Goal is active this tool refuses and you must hand the user a \`/goal edit …\` or \`/goal set …\` line instead; a stopped Goal (paused, blocked, complete, usage-limited) is replaced on approval. If the user declines you will not be told why: do not ask about it and do not propose the same or a reworded objective again. After approval the Goal is set the moment the current turn ends: acknowledge it in one sentence and stop, without further tool calls; the Goal runtime starts the first Goal turn on its own. Unavailable in plan mode, in subagents, and in headless runs.`,
+      Kind.Other,
+      {
+        type: 'object',
+        properties: {
+          objective: {
+            type: 'string',
+            minLength: 1,
+            maxLength: PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS,
+            description: `The objective to propose, written so the Goal verifier can judge it from the transcript (e.g. "Outcome: … Done when: 1) npm test exits 0 (paste the summary line) … Must not: … Budget: stop as blocked after 20 turns. On block: …"). At most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters; the user reads all of it in the approval dialog.`,
+          },
+        },
+        required: ['objective'],
+        additionalProperties: false,
+      },
+    );
+  }
+
+  protected override validateToolParamValues(
+    params: ProposeGoalToolParams,
+  ): string | null {
+    if (typeof params.objective !== 'string' || !params.objective.trim()) {
+      return 'objective must be a non-empty string.';
+    }
+    if (params.objective.length > PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS) {
+      return `objective must be at most ${PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS} characters.`;
+    }
+    return null;
+  }
+
+  protected createInvocation(
+    params: ProposeGoalToolParams,
+  ): ToolInvocation<ProposeGoalToolParams, GoalToolResult> {
+    return new ProposeGoalInvocation(params, this.config);
+  }
 }

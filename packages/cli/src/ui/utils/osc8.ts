@@ -88,7 +88,7 @@ export function isSafeOscScheme(url: string): boolean {
   return SAFE_OSC8_SCHEMES.has(match[1]!.toLowerCase());
 }
 
-const BARE_URL_BREAK_CHARACTERS = String.raw`\u3001-\u3004\u3008-\u3020\u302e-\u3030\u3036-\u3037\u303d-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65\ufe10-\ufe1f\ufe30-\ufe32\ufe35-\ufe6f`;
+export const BARE_URL_BREAK_CHARACTERS = String.raw`\u3001-\u3004\u3008-\u3020\u302e-\u3030\u3036-\u3037\u303d-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65\ufe10-\ufe1f\ufe30-\ufe32\ufe35-\ufe6f`;
 // The escaped CJK ranges do not contain literal combining characters.
 // eslint-disable-next-line no-misleading-character-class
 const BARE_URL_BREAK_PATTERN = new RegExp(`[${BARE_URL_BREAK_CHARACTERS}]`);

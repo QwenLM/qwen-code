@@ -117,7 +117,8 @@ By default, HTTP hooks cannot target private or link-local IP ranges. In platfor
 
 - This setting is **only honored from User, System, and SystemDefaults settings scopes**. A value set in Workspace (project) settings is ignored and logged as a warning, so a cloned repository can never self-grant this bypass.
 - The flag relaxes only the general private/CGNAT/link-local **range** checks. Cloud metadata endpoints stay blocked in every configuration: the `BLOCKED_HOSTS` list is matched literally (`metadata.google.internal`, `metadata.azure.internal`, ...), and the metadata IPs `169.254.169.254` and `100.100.100.200` are blocked in all serialized forms (including IPv4-mapped IPv6 such as `::ffff:a9fe:a9fe`) and after DNS resolution.
-- The `security.allowedHttpHookUrls` whitelist still applies independently. In managed environments, pair this flag with a whitelist so only the intended internal endpoints are reachable.
+- The `security.allowedHttpHookUrls` whitelist still applies independently. In managed environments, pair this flag with a whitelist so only the intended internal endpoints are reachable. A whitelist in Workspace (project) settings is honored only when no User, System, or SystemDefaults scope sets one; otherwise it is ignored and logged as a warning, so a repository can narrow where its hooks send data but never replace a whitelist you configured (an empty whitelist means "allow all").
+- HTTP hooks never follow redirects. A 3xx response is treated like any other non-2xx status: a non-blocking hook failure, and the redirect target is never contacted.
 
 > **Warning:** Enabling this flag lets hooks reach internal infrastructure on your network. Enable it only in trusted, managed settings — never in a repository you do not control.
 
