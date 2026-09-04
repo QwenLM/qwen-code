@@ -223,6 +223,12 @@ async function main() {
   // Redirect @qwen-code/qwen-code-core to its TypeScript source so the harness
   // runs without a build and can never pick up a stale dist. Registered before
   // the dynamic imports below, which is what routes them through the hook.
+  //
+  // No CI test executes this loader: the harness is exercised manually only,
+  // via `npm run test:terminal-bench` (vitest.terminal-bench.config.ts). Keep
+  // the `named` map in sync with the named entries in the exports map of
+  // packages/core/package.json; scripts/check-core-subpath-exports.mjs gates
+  // the real (compiled) resolution path in CI.
   const repoRoot = path.resolve(
     path.dirname(fileURLToPath(import.meta.url)),
     '../../..',
