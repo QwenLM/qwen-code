@@ -1146,6 +1146,118 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
     });
 
+    it('an own carry-reply carries the re-post exemption once its root is replied-to (#9940 review, round 24)', async () => {
+      // Three-round steady state: the lifecycle replied R1-2's carry INTO
+      // its root C_A (so C_A is replied-to → `resolved`, never a target),
+      // and a sibling root C_B carrying R1-3 overlaps the same location.
+      // The reply is the only comment still carrying R1-2 here; excluded
+      // outright, R1-2 had no carrier and the drop rule discarded its
+      // still-standing re-post as C_B's duplicate. Both posted shapes.
+      for (const replyBody of [
+        '**[Critical]** R1-2: still stands at HEAD _— model via Qwen Code /review (v0.21.3)_',
+        'R1-2: still stands at HEAD\n\n<!-- qwen-review critical -->',
+      ]) {
+        const result = await presubmitWithComments(
+          [
+            {
+              ...CARRIED_COMMENT,
+              id: 1,
+              body: '**[Critical]** R1-2: the guard drops a valid case _— model via Qwen Code /review (v0.21.3)_',
+            },
+            { ...CARRIED_COMMENT, id: 2, body: replyBody, in_reply_to_id: 1 },
+            {
+              ...CARRIED_COMMENT,
+              id: 3,
+              body: '**[Critical]** R1-3: the parser trusts unbounded input _— model via Qwen Code /review (v0.21.3)_',
+            },
+          ],
+          [
+            { path: 'src/parse-args.ts', line: 44, id: 'R1-2' },
+            { path: 'src/parse-args.ts', line: 44, id: 'R1-3' },
+          ],
+        );
+        expect(result.existingComments.byBucket).toMatchObject({
+          resolved: 1,
+          overlap: 1,
+          repost: 2,
+        });
+        const matched = (
+          result.existingComments.repost as Array<{ matchedIds: string[] }>
+        ).flatMap((r) => r.matchedIds);
+        expect(matched.sort()).toEqual(['R1-2', 'R1-3']);
+        // The reply is a carrier, not an overlap: the top-level count and
+        // the overlap list are untouched by it.
+        expect(result.existingComments.total).toBe(2);
+        expect(
+          (result.existingComments.overlap as Array<{ id: number }>).map(
+            (o) => o.id,
+          ),
+        ).toEqual([3]);
+        expect(result.blockOnExistingComments).toBe(true);
+      }
+    });
+
+    it('a reply carries nothing from another account, at a stale SHA, or without a wanted id (#9940 review, round 24)', async () => {
+      const root = {
+        ...CARRIED_COMMENT,
+        id: 1,
+        body: '**[Critical]** R1-2: the guard drops a valid case _— model via Qwen Code /review (v0.21.3)_',
+      };
+      const sibling = {
+        ...CARRIED_COMMENT,
+        id: 3,
+        body: '**[Critical]** R1-3: the parser trusts unbounded input _— model via Qwen Code /review (v0.21.3)_',
+      };
+      const findings = [
+        { path: 'src/parse-args.ts', line: 44, id: 'R1-2' },
+        { path: 'src/parse-args.ts', line: 44, id: 'R1-3' },
+      ];
+      const carry =
+        '**[Critical]** R1-2: still stands at HEAD _— model via Qwen Code /review (v0.21.3)_';
+      for (const reply of [
+        // Another account's reply: ledger ids are per-account.
+        {
+          ...CARRIED_COMMENT,
+          id: 2,
+          body: carry,
+          in_reply_to_id: 1,
+          user: { login: 'someone-else' },
+        },
+        // A stale reply (its root's commit): not this SHA's carrier.
+        {
+          ...CARRIED_COMMENT,
+          id: 2,
+          body: carry,
+          in_reply_to_id: 1,
+          commit_id: 'old-sha',
+        },
+        // A fixed-ruling reply: no marker, retired id — inert.
+        {
+          ...CARRIED_COMMENT,
+          id: 2,
+          body: 'R1-2 fixed by the guard rewrite\n\n_— model via Qwen Code /review (v0.21.3)_',
+          in_reply_to_id: 1,
+        },
+        // A reply carrying an id no finding wants.
+        {
+          ...CARRIED_COMMENT,
+          id: 2,
+          body: '**[Critical]** R1-9: unrelated _— model via Qwen Code /review (v0.21.3)_',
+          in_reply_to_id: 1,
+        },
+      ]) {
+        const result = await presubmitWithComments(
+          [root, reply, sibling],
+          findings,
+        );
+        const matched = (
+          result.existingComments.repost as Array<{ matchedIds: string[] }>
+        ).flatMap((r) => r.matchedIds);
+        expect(matched).toEqual(['R1-3']);
+        expect(result.existingComments.total).toBe(2);
+      }
+    });
+
     it('marks an id-matched overlap comment as a re-post target', async () => {
       const result = await presubmitWithComments(
         [CARRIED_COMMENT],

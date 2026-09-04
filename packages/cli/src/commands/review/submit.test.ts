@@ -4119,6 +4119,64 @@ describe('the thread lifecycle', () => {
     });
   });
 
+  it('drops the clause under attribution OFF too — the guard counts the marked set, not the stripped posted bodies (#9940 review, round 24)', () => {
+    // The attribution-off rewrite strips the visible markers `severityOf`
+    // classifies by BEFORE the diversion runs, so a guard counting the
+    // posted arrays saw zero Suggestions on both sides and never fired:
+    // the round-23 fix closed the attribution-on input and reopened the
+    // same post for attribution-off runs.
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: 'R1-2: the retry guard drops a valid case\n\n<!-- qwen-review suggestion -->',
+      },
+    ]);
+    const review = payload([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: '**[Suggestion]** R1-2: still stands at HEAD — the retry guard drops a valid case',
+      },
+    ]);
+    runSubmit(authorizedPost({ review }), '0.21.3', { attribution: false });
+
+    expect(reviewPost().comments).toEqual([]);
+    expect(replyCalls()).toHaveLength(1);
+    const body = reviewPost().body as string;
+    expect(body).not.toContain('Suggestions are inline.');
+    expect(body).not.toContain('建议见行内评论。');
+    expect(body).not.toContain('  ');
+    expect(reviewPost().event).toBe('COMMENT');
+    expect(stdoutJson()).toMatchObject({ posted: true, inlineComments: 0 });
+  });
+
+  it('keeps the clause under attribution OFF when a fresh Suggestion still posts inline (#9940 review, round 24)', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: 'R1-2: the retry guard drops a valid case\n\n<!-- qwen-review suggestion -->',
+      },
+    ]);
+    const review = payload([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: '**[Suggestion]** R1-2: still stands at HEAD',
+      },
+      {
+        path: 'src/bar.ts',
+        line: 30,
+        body: '**[Suggestion]** a brand new finding',
+      },
+    ]);
+    runSubmit(authorizedPost({ review }), '0.21.3', { attribution: false });
+    expect(reviewPost().comments).toHaveLength(1);
+    expect(replyCalls()).toHaveLength(1);
+    expect(reviewPost().body).toContain('Suggestions are inline.');
+  });
+
   it('a fixed ruling replies `R<id> fixed by <what>` and resolves the thread', () => {
     seedThreads([
       {

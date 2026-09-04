@@ -663,6 +663,12 @@ function classifyExistingComments(
   newFindings: FindingAnchor[],
   commitSha: string,
   currentUserLogin: string,
+  /**
+   * The reviewing account's own REPLIES that carry a posting signal —
+   * the thread lifecycle's carry re-posts (`submit`, #9906). Re-post
+   * carriers only: see the leg at the end of this function.
+   */
+  ownReplies: RawComment[] = [],
 ) {
   const buckets: Record<
     'stale' | 'resolved' | 'overlap' | 'repost' | 'noConflict',
@@ -789,7 +795,71 @@ function classifyExistingComments(
       buckets.noConflict.push(summary);
     }
   }
+
+  // Own-account REPLIES as re-post carriers — never as overlap carriers.
+  // The thread lifecycle answers a still-standing carry INSIDE its
+  // original thread (`submit`, #9906), which makes the root replied-to —
+  // bucketed `resolved` above, never a target — while the reply, now the
+  // only comment at the location still carrying the id, is excluded from
+  // the top-level set (a fixed-ruling reply must not act as an overlap
+  // drop carrier — #9940 review, round 16). With another own root
+  // overlapping the location, the carried finding then had NO carrier and
+  // the deterministic drop discarded its re-post as that root's duplicate
+  // every round while the ledger kept carrying it (#9940 review, round
+  // 24). A reply contributes exactly what a root's id match contributes —
+  // a `repost` entry keyed on the ids it carries — and nothing else: not
+  // the overlap bucket (a reply is not a finding at the location), not
+  // the id-less ambiguity count (it is not an original), not the id-less
+  // fallback (a reply carrying no id names nothing). Same gates as the
+  // root match: this account only (ledger ids are per-account), the
+  // current SHA only (a reply inherits its root's commit), an id the
+  // findings actually carry. A fixed-ruling reply stays inert either
+  // way: it carries no marker, and its id is retired — no finding wants
+  // it.
+  if (currentUserLogin !== '') {
+    for (const c of ownReplies) {
+      if (c.commit_id !== commitSha) continue;
+      if (
+        (c.user?.login ?? '').toLowerCase() !== currentUserLogin.toLowerCase()
+      )
+        continue;
+      const wantedIds = carriedIdsByLocation.get(`${c.path}:${c.line}`);
+      if (!wantedIds) continue;
+      const matchedIds = extractCarriedIds(c.body || '').filter((id) =>
+        wantedIds.has(id),
+      );
+      if (matchedIds.length === 0) continue;
+      buckets.repost.push({
+        id: c.id,
+        path: c.path ?? '',
+        line: c.line ?? 0,
+        commit_id: c.commit_id ?? '',
+        body: (c.body || '').slice(0, 80),
+        ...(c.user?.login ? { user: c.user.login } : {}),
+        matchedIds,
+      });
+    }
+  }
   return buckets;
+}
+
+/**
+ * The reviewing account's own replies that carry a posting signal — the
+ * shape the thread lifecycle's carry re-post has (a severity marker, or
+ * the attribution-off trailing marker, or the footer). Stated once for
+ * both platform paths; the account gate is what keeps a foreign reply
+ * from ever carrying an exemption.
+ */
+function ownSignalReplies(comments: RawComment[], me: string): RawComment[] {
+  if (me === '') return [];
+  return comments.filter(
+    (c) =>
+      !!c.in_reply_to_id &&
+      (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
+      (/via Qwen Code \/review/.test(c.body ?? '') ||
+        carriesCommentMarker(c.body ?? '') ||
+        severityOf(c) !== null),
+  );
 }
 
 /**
@@ -953,7 +1023,9 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   // the same footer (`R<id> fixed by …`), inherits its thread's commit_id,
   // and an ungated footer match bucketed it into `overlap`, where the drop
   // rule discarded a genuinely NEW finding at the location citing the fixed
-  // note (#9940 review, round 16). Attribution-off
+  // note (#9940 review, round 16). Own-account replies still reach the
+  // classifier separately, as re-post EXEMPTION carriers only (round 24 —
+  // see `ownSignalReplies`). Attribution-off
   // posts from OTHER accounts still escape detection — no footer, no
   // authorship signal — and the setting's description says so.
   const qwenComments = allComments.filter(
@@ -976,6 +1048,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     newFindings ?? [],
     commitSha,
     me,
+    ownSignalReplies(allComments, me),
   );
 
   writePresubmitReport({
@@ -1087,9 +1160,11 @@ function writePresubmitReport(input: {
       // the drop rule exempts those findings (#9208). Matched by the carried
       // ledger id the comment's claim line leads with, or — when the target
       // is unambiguous — by the id-less fallback for a truly id-less
-      // own-account original (#9212 review). A comment appears here IN
-      // ADDITION TO `overlap`; the double count is deliberate (one comment,
-      // two roles).
+      // own-account original (#9212 review). A top-level comment appears
+      // here IN ADDITION TO `overlap`; the double count is deliberate (one
+      // comment, two roles). An own-account REPLY carrying a wanted id
+      // appears here ONLY — the thread lifecycle's carry re-post is an
+      // exemption carrier, never an overlap (#9940 review, round 24).
       repost: buckets.repost,
       stale: buckets.stale,
       resolved: buckets.resolved,
@@ -1232,7 +1307,8 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
   // account; the short marker/severity shapes match only the reviewing
   // account's own top-level comments; replies stay excluded on every
   // disjunct, the footer one included — the fixed-ruling reply carries the
-  // footer too, #9940 review, round 16).
+  // footer too, #9940 review, round 16 — and reach the classifier only as
+  // re-post exemption carriers, round 24).
   const allRaw = listMrComments(mrId, ownerRepo);
   const allComments = allRaw.map((c) =>
     aoneCommentToPresubmitComment(c, commitSha),
@@ -1271,6 +1347,7 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
     newFindings ?? [],
     commitSha,
     me,
+    ownSignalReplies(allComments, me),
   );
 
   writePresubmitReport({

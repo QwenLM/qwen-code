@@ -1738,10 +1738,19 @@ function submit(
         // Reconcile the CLAUSE only: the event stays keyed to the
         // confirmed count, carried findings included — a diverted finding
         // still stands, it just answers in its own thread (#9940 review,
-        // round 23).
+        // round 23). Counted on the MARKED posting set, never on the
+        // posted bodies: under attribution off the rewrite above already
+        // stripped the visible markers `severityOf` classifies by, so the
+        // posted arrays counted zero Suggestions whatever they carried and
+        // the guard never fired there — the clause posted over an empty
+        // array on exactly the attribution-off runs (#9940 review, round
+        // 24). `finalComments` is a 1:1 map over the marked set, so the
+        // diverted indices address both.
+        const marked = payload.comments ?? [];
         if (
-          countInlineFindings(finalComments).suggestionsInline > 0 &&
-          countInlineFindings(reviewComments).suggestionsInline === 0
+          countInlineFindings(marked).suggestionsInline > 0 &&
+          countInlineFindings(marked.filter((_, i) => !diverted.has(i)))
+            .suggestionsInline === 0
         ) {
           body = stripInlineSuggestionsClause(body);
         }
