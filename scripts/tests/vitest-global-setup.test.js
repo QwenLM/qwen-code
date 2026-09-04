@@ -138,6 +138,16 @@ describe('vitest-global-setup prerequisite guard', () => {
     expect(missing[0]).toContain('has not been built');
   });
 
+  it('reports an unbuilt channel-base dist for core tests', () => {
+    root = buildFixtureRoot();
+    rmSync(path.join(root, 'packages/channels/base/dist/index.js'));
+
+    const missing = findMissingPrerequisites('packages/core', root);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain('packages/channels/base');
+    expect(missing[0]).toContain('has not been built');
+  });
+
   it('names the fix command and the git-commit remedy only when applicable', () => {
     const withGenerated = formatPrerequisiteMessage([
       '  - packages/cli/src/generated/git-commit.ts: generated file does not exist',

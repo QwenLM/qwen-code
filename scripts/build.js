@@ -38,9 +38,9 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
 const cliOnly = process.argv.includes('--cli-only');
 
 // Build in dependency order:
-// 1. core (foundation package, includes test-utils)
-// 2. web-templates (embeddable web templates - used by cli)
-// 3. channel-base (base channel infrastructure - used by channel adapters and cli)
+// 1. channel-base (recall primitives used by core; base for channel adapters)
+// 2. core (foundation package, includes test-utils)
+// 3. web-templates (embeddable web templates - used by cli)
 // 4. channel adapters (depend on channel-base)
 // 5. audio-capture (native microphone backend used by cli)
 // 6. acp-bridge (depends on core - used by cli)
@@ -51,9 +51,9 @@ const cliOnly = process.argv.includes('--cli-only');
 // 11. vscode-ide-companion (depends on webui)
 // 12. external-context integrations (private Qwen extensions)
 const buildOrder = [
+  'packages/channels/base',
   'packages/core',
   'packages/web-templates',
-  'packages/channels/base',
   'packages/channels/telegram',
   'packages/channels/weixin',
   'packages/channels/dingtalk',

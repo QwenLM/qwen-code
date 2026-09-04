@@ -1,5 +1,6 @@
 import { PROMPT_UNSAFE_INVISIBLES } from './sanitize.js';
 import type { ChannelMemoryEntry } from './types.js';
+import { codePointBigrams, normalizeRecallText } from './recall-tokenizer.js';
 
 export const CHANNEL_MEMORY_RECALL_MAX_ENTRIES = 3;
 export const CHANNEL_MEMORY_RECALL_MAX_CODE_POINTS = 1_200;
@@ -26,10 +27,7 @@ export interface ChannelMemoryRecallIndex {
 }
 
 function normalize(text: string): string {
-  return text
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(PROMPT_UNSAFE_INVISIBLES, ' ');
+  return normalizeRecallText(text).replace(PROMPT_UNSAFE_INVISIBLES, ' ');
 }
 
 function terms(normalized: string): Set<string> {
@@ -57,8 +55,8 @@ function terms(normalized: string): Set<string> {
         : /\p{Script_Extensions=Katakana}/u.test(first)
           ? 'katakana'
           : 'hangul';
-    for (let index = 0; index + 1 < run.length; index += 1) {
-      result.add(`${namespace}:${run[index]}${run[index + 1]}`);
+    for (const bigram of codePointBigrams(match[0])) {
+      result.add(`${namespace}:${bigram}`);
     }
   }
 

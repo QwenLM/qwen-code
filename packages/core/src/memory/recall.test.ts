@@ -379,6 +379,29 @@ describe('auto-memory relevant recall', () => {
     ).toEqual(['latin.md', 'han.md']);
   });
 
+  it('forms bigrams across adjacent CJK scripts', () => {
+    const mixedScript = memoryDoc(
+      'mixed-script.md',
+      'reference',
+      '漢あ',
+      '',
+      '',
+    );
+
+    expect(selectRelevantAutoMemoryDocuments('漢あ', [mixedScript])).toEqual([
+      mixedScript,
+    ]);
+  });
+
+  it('keeps adjacent letters and numbers in one token', () => {
+    const combined = memoryDoc('combined.md', 'reference', 'abc123', '', '');
+    const partial = memoryDoc('partial.md', 'reference', 'abc', '', '');
+
+    expect(
+      selectRelevantAutoMemoryDocuments('abc123', [partial, combined]),
+    ).toEqual([combined]);
+  });
+
   it('still ignores runs shorter than three characters', () => {
     const doc = memoryDoc('go.md', 'reference', 'go go go', '', '');
 
