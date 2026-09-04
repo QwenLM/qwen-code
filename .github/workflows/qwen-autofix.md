@@ -2776,11 +2776,14 @@ In `review-scan` · `Scan for PRs with new feedback`.
 ```text
 Delay-window fallback: a review run parked BEFORE its job
 starts (the 10-minute environment wait) has no review-pr
-check-run yet, but a push now would still cancel it via
-synchronize. Only pull_request_target runs are cancelable —
-comment/review-triggered runs use per-run concurrency groups
-that a synchronize never cancels, so holding the round for
-one would defer autofix for nothing (R2-1). Match against the
+check-run yet, but a push now would still supersede it
+(#10110): a parked or pre-threshold run yields to the push
+and its work is discarded exactly as the old synchronize
+cancel did. Only pull_request_target runs share the PR-scoped
+concurrency group — comment/review-triggered runs use per-run
+groups that a push never queues behind or supersedes, so
+holding the round for one would defer autofix for nothing
+(R2-1). Match against the
 scan's REVIEW_RUNS_JSON fetch — one page of the review
 workflow's runs, empty on lookup failure — by immutable head
 SHA or PR number, never by fork-controlled bare branch name.

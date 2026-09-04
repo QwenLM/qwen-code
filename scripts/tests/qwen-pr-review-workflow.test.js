@@ -77,6 +77,25 @@ function realUtilityPath(name) {
   }
 }
 
+// The review lane exports the production QWEN_CI_REAL_* captures into the
+// reviewed agent's environment, and every replay harness below spreads
+// process.env: inherited, a capture resolves a replayed
+// `"${QWEN_CI_REAL_X:-x}"` read to the REAL utility instead of the
+// bin-planted stub — the FIFO wedge tests then pass without a FIFO ever
+// being swapped in, and a bound-removing regression ships green on exactly
+// the lane the suite is documented to run on (R28-1). Neutralize EVERY
+// inherited capture up front (empty reads as unset to the :- fallbacks,
+// restoring PATH-stub resolution); the per-harness pins after the spread
+// still override. A sweep, not a name list: the next capture production
+// adds must not reopen the door.
+function neutralizedRealPins() {
+  return Object.fromEntries(
+    Object.keys(process.env)
+      .filter((k) => k.startsWith('QWEN_CI_REAL_'))
+      .map((k) => [k, '']),
+  );
+}
+
 // The CEDE kill-scope replay signals real processes, so it needs a real
 // pkill(1) plus the real pgrep(1) that resolves the process group the
 // escalation signals (R25-1). Capability probe, not a platform check
@@ -506,6 +525,10 @@ function runScenario(
         timeout: 30_000,
         env: {
           ...process.env,
+          // Every inherited QWEN_CI_REAL_* capture neutralized first
+          // (R28-1); the pins below re-establish the ones this replay
+          // needs to point somewhere specific.
+          ...neutralizedRealPins(),
           // The review lane exports QWEN_CI_REAL_GH; inherited, it would
           // bypass the PATH gh stub every replay decides through. Empty
           // restores the stub — the production :-gh fallback treats it as
@@ -4925,6 +4948,11 @@ describe('review supersede salvage (#10110)', () => {
           timeout: 30_000,
           env: {
             ...process.env,
+            // Every inherited QWEN_CI_REAL_* capture neutralized first:
+            // TIMEOUT/HEAD/NODE inherited from the review lane resolved
+            // the bounded reads to the real utilities and let both
+            // rename-swap wedge tests pass without a swap (R28-1).
+            ...neutralizedRealPins(),
             // Neutralize an inherited QWEN_CI_REAL_GH (the review lane
             // exports one): empty restores the PATH gh stub via the :-gh
             // fallback; the R14-1 spread below still overrides when armed
@@ -6604,7 +6632,7 @@ describe('review supersede salvage (#10110)', () => {
   // ships green under shape checks alone.
   function salvageOutputsSource() {
     const start = run.indexOf(
-      'if [ -f "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" ] && live_head_moved; then',
+      'if [ "${AUTO_REVIEW:-false}" = "true" ] && [ -f "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" ] && live_head_moved; then',
     );
     const end = run.indexOf('\nfi', start) + '\nfi'.length;
     expect(start).toBeGreaterThan(-1);
@@ -6666,7 +6694,13 @@ describe('review supersede salvage (#10110)', () => {
       const r = spawnSync('bash', ['-c', harness], {
         encoding: 'utf8',
         timeout: 30_000,
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        env: {
+          ...process.env,
+          // Inherited captures would route the bounded read past the
+          // bin stubs (R28-1).
+          ...neutralizedRealPins(),
+          PATH: `${bin}:${process.env.PATH}`,
+        },
       });
       expect(r.status).toBe(0);
       return readFileSync(summary, 'utf8');
@@ -6676,6 +6710,7 @@ describe('review supersede salvage (#10110)', () => {
   }
 
   function runSalvageOutputs({
+    autoReview = true,
     marker = 'head-a',
     movedTo = null,
     liveHead = 'head-b',
@@ -6733,10 +6768,16 @@ describe('review supersede salvage (#10110)', () => {
         timeout: 30_000,
         env: {
           ...process.env,
-          // Neutralize an inherited QWEN_CI_REAL_GH: the replayed
-          // live_head_moved gate must decide through the PATH gh stub
-          // (R16-1).
+          // Every inherited QWEN_CI_REAL_* capture neutralized (R28-1); the
+          // replayed live_head_moved gate must decide through the PATH gh
+          // stub (R16-1), and the swap witnesses through the bin
+          // timeout/head stubs.
+          ...neutralizedRealPins(),
           QWEN_CI_REAL_GH: '',
+          // The block is AUTO_REVIEW-gated like every cede consumer: an
+          // explicit run never arms the marker, so a marker there is a
+          // forgery and must not turn into a historical-head note.
+          AUTO_REVIEW: autoReview ? 'true' : 'false',
           PATH: `${bin}:${process.env.PATH}`,
         },
       });
@@ -6755,6 +6796,11 @@ describe('review supersede salvage (#10110)', () => {
     // No marker: an ordinary run emits neither output (a flipped condition
     // would post the historical-head note on every run).
     expect(runSalvageOutputs({ marker: null })).toEqual([]);
+    // Explicit runs (/review, review_requested, dispatch) arm no watcher,
+    // so an armed marker plus a moved head there can only be a forgery:
+    // the gate matches the five cede sites (R6-1/R7-1) and no
+    // historical-head note posts from an explicit run.
+    expect(runSalvageOutputs({ autoReview: false })).toEqual([]);
     // Marker armed but the watcher died before recording a destination.
     expect(runSalvageOutputs({})).toEqual([
       'salvaged=true',
@@ -6882,6 +6928,14 @@ describe('review supersede salvage (#10110)', () => {
     expect(parsePct('150')).toBe('100');
     expect(parsePct('08')).toBe('8');
     expect(parsePct('050')).toBe('50');
+    expect(parsePct('0050')).toBe('50');
+    expect(parsePct('000')).toBe('0');
+    expect(parsePct('1000')).toBe('100');
+    // Bash wraps >= 2^63 silently: 2^63 read as a huge negative and 2^64
+    // as exactly 0 — both made a one-second-old attempt KEEP, i.e. never
+    // cede. The digit-count bound runs BEFORE the arithmetic.
+    expect(parsePct('9223372036854775808')).toBe('100');
+    expect(parsePct('18446744073709551616')).toBe('100');
   });
 
   it('skips a queued run whose event head went stale before review-pr spends setup', () => {

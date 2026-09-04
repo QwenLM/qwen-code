@@ -1548,9 +1548,19 @@ jobs:
           case "$SALVAGE_ELAPSED_PERCENT" in
             ''|*[!0-9]*) SALVAGE_ELAPSED_PERCENT=50 ;;
           esac
-          # Force decimal: a leading-zero value is octal to $(( )) — `08`
-          # would kill the watcher's first salvage arithmetic ("value too
-          # great for base") and `050` silently apply a 40% threshold.
+          # Strip leading zeros (a leading-zero value is octal to $(( )) —
+          # `08` would kill the watcher's first salvage arithmetic, `050`
+          # silently apply a 40% threshold), then bound the DIGIT COUNT
+          # before any arithmetic: bash wraps a value >= 2^63 silently, and
+          # a wrapped value landing in [0,100] applies a threshold nobody
+          # chose — 2^64 wraps to exactly 0, "salvage always", so the run
+          # never cedes. Four or more digits are over range either way, so
+          # they take the same 100 clamp a 3-digit overflow does.
+          SALVAGE_ELAPSED_PERCENT="${SALVAGE_ELAPSED_PERCENT#"${SALVAGE_ELAPSED_PERCENT%%[!0]*}"}"
+          SALVAGE_ELAPSED_PERCENT="${SALVAGE_ELAPSED_PERCENT:-0}"
+          if [ "${#SALVAGE_ELAPSED_PERCENT}" -gt 3 ]; then
+            SALVAGE_ELAPSED_PERCENT=100
+          fi
           SALVAGE_ELAPSED_PERCENT=$((10#$SALVAGE_ELAPSED_PERCENT))
           if [ "$SALVAGE_ELAPSED_PERCENT" -gt 100 ]; then
             SALVAGE_ELAPSED_PERCENT=100
@@ -1681,7 +1691,7 @@ jobs:
             # killed mid-verification, nothing posted). Recomputed per attempt
             # so a retry gets a fresh deadline; ignored by CLIs that predate
             # the gate.
-            QWEN_REVIEW_DEADLINE_EPOCH="$(( $(date +%s) + attempt_timeout ))"
+            QWEN_REVIEW_DEADLINE_EPOCH="$(( $("${QWEN_CI_REAL_DATE:-date}" +%s) + attempt_timeout ))"
             export QWEN_REVIEW_DEADLINE_EPOCH
             # The budget itself is chosen outside this file — repository
             # variable, workflow input, or a /review --timeout=N comment — so
@@ -1720,7 +1730,7 @@ jobs:
             # token is random per attempt, so no output the agent produces can
             # guess it and re-enable parsing early.
             local stop_token
-            stop_token="qwen-review-stop-$(date +%s%N)-${RANDOM}${RANDOM}"
+            stop_token="qwen-review-stop-$("${QWEN_CI_REAL_DATE:-date}" +%s%N)-${RANDOM}${RANDOM}"
             echo "::stop-commands::${stop_token}"
             # GNU timeout times out command children unless --foreground is used.
             # The agent runs no-sandbox with the full job environment, and
@@ -2280,7 +2290,7 @@ jobs:
                 supersede_watcher &
                 WATCHER_PID=$!
               fi
-              sleep "$RETRY_BACKOFF_SECONDS"
+              "${QWEN_CI_REAL_SLEEP:-sleep}" "$RETRY_BACKOFF_SECONDS"
               attempt=$(( attempt + 1 ))
               continue
             fi
@@ -2311,7 +2321,10 @@ jobs:
             wait "$WATCHER_PID" 2>/dev/null || true
             WATCHER_PID=""
           fi
-          if [ -f "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" ] && live_head_moved; then
+          # AUTO_REVIEW-gated like the five cede sites: an explicit run arms
+          # no watcher, so a marker there is forged, and it must not become
+          # a historical-head note.
+          if [ "${AUTO_REVIEW:-false}" = "true" ] && [ -f "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" ] && live_head_moved; then
             # Same live-head re-check the cede sites apply: the marker path
             # AND its expected content are exported into the agent's
             # environment, so a forged marker on an UNMOVED head must not

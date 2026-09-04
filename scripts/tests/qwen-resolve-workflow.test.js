@@ -38,6 +38,25 @@ const hasMkfifo = (() => {
   return probe.error?.code !== 'ENOENT';
 })();
 
+// The review lane exports the production QWEN_CI_REAL_* captures into the
+// reviewed agent's environment, and every replay harness below spreads
+// process.env: inherited, a capture resolves a replayed
+// `"${QWEN_CI_REAL_X:-x}"` read to the REAL utility instead of the
+// bin-planted stub — the FIFO wedge tests then pass without a FIFO ever
+// being swapped in, and a bound-removing regression ships green on exactly
+// the lane the suite is documented to run on (R28-1). Neutralize EVERY
+// inherited capture up front (empty reads as unset to the :- fallbacks,
+// restoring PATH-stub resolution); the per-harness pins after the spread
+// still override. A sweep, not a name list: the next capture production
+// adds must not reopen the door.
+function neutralizedRealPins() {
+  return Object.fromEntries(
+    Object.keys(process.env)
+      .filter((k) => k.startsWith('QWEN_CI_REAL_'))
+      .map((k) => [k, '']),
+  );
+}
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -188,6 +207,9 @@ function runReviewGhWrapper(
       timeout: 30_000,
       env: {
         ...process.env,
+        // Inherited review-lane captures would route the guard's bounded
+        // marker read past the bin timeout/head stubs (R28-1).
+        ...neutralizedRealPins(),
         PATH: `${binDir}:${process.env.PATH}`,
         FAKE_GH_LOG: ghLogPath,
         FAKE_HEAD_SHA: currentHead,
