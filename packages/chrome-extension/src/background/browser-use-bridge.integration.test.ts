@@ -140,6 +140,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   const postedMessages: unknown[] = [];
   let releaseSlowCreate: (() => void) | undefined;
   let nextTabId = 5;
+  let failUngroupTabId: number | undefined;
   let hangOverlayCleanup = false;
   let hangCursorOverlay = false;
   let nextGroupId = 100;
@@ -217,6 +218,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
         },
         async remove(tabId: number) {
           tabs.delete(tabId);
+          await listeners.tabRemoved?.(tabId);
         },
         async update() {},
         async group({
@@ -239,6 +241,12 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
         },
         async ungroup(tabIds: number | number[]) {
           const ids = Array.isArray(tabIds) ? tabIds : [tabIds];
+          if (
+            failUngroupTabId !== undefined &&
+            ids.includes(failUngroupTabId)
+          ) {
+            throw new Error('ungroup failed');
+          }
           ungroupCalls.push(ids);
           for (const tabId of ids) {
             const tab = tabs.get(tabId);
@@ -376,6 +384,10 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
     },
   ]);
   await assert.rejects(api.dispatch('tabs.attach', { tabId: 9 }), /http\(s\)/);
+  await assert.rejects(
+    api.dispatch('tabs.close', { tabId: 9 }),
+    /not controlled/,
+  );
 
   await api.dispatch('tabs.attach', { tabId: 1 });
   hangOverlayCleanup = true;
@@ -538,6 +550,48 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   assert.ok(overlayBootstrap);
   assertOverlayLifecycle(String(overlayBootstrap.params.source));
 
+  failUngroupTabId = 5;
+  const createdTab = tabs.get(5);
+  assert.ok(createdTab);
+  createdTab.url = 'data:text/plain,finished';
+  await assert.rejects(
+    api.dispatch('tabs.release', { tabId: 5 }),
+    /ungroup failed/,
+  );
+  assert.deepEqual(
+    plain(sessionState.agentOwnedTabs),
+    [3, 5],
+    'a failed ungroup must retain ownership for cleanup or retry',
+  );
+  failUngroupTabId = undefined;
+  await api.dispatch('tabs.release', { tabId: 5 });
+  assert.ok(
+    detachedTabIds.includes(5),
+    'releasing a created tab must detach the debugger',
+  );
+  assert.ok(
+    ungroupCalls.some((tabIds) => tabIds.includes(5)),
+    'releasing a created tab must remove its Browser Use grouping',
+  );
+  assert.deepEqual(
+    plain(sessionState.agentOwnedTabs),
+    [3],
+    'releasing a created tab must clear extension ownership',
+  );
+
+  const disposable = (await api.dispatch('tabs.create')) as {
+    providerTabId: number;
+  };
+  const disposableTab = tabs.get(disposable.providerTabId);
+  assert.ok(disposableTab);
+  disposableTab.url = 'data:text/plain,disposable';
+  await api.dispatch('tabs.close', { tabId: disposable.providerTabId });
+  assert.equal(
+    tabs.has(disposable.providerTabId),
+    false,
+    'cleanup must close an owned tab even after it navigates off HTTP(S)',
+  );
+
   assert.deepEqual(
     plain(
       await api.dispatch('history.query', { queries: ['invoice'], limit: 5 }),
@@ -601,6 +655,7 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
 
   detachedTabIds.length = 0;
   releaseSlowCreate = () => undefined;
+  const slowCreatedTabId = nextTabId;
   listeners['nativeMessage']?.({
     type: 'request',
     id: 'slow-create',
@@ -625,14 +680,11 @@ test('smoke: openTabs lists eligible user tabs and derived popups need recent ag
   hangOverlayCleanup = true;
   listeners['nativeDisconnect']?.();
   releaseSlowCreate();
-  await waitFor(() => detachedTabIds.length === 2);
-  assert.deepEqual(
-    [...detachedTabIds].sort((a, b) => a - b),
-    [1, 5],
-  );
-  assert.deepEqual(ungroupCalls, [[3], [5]]);
+  await waitFor(() => detachedTabIds.length === 1);
+  assert.deepEqual(detachedTabIds, [1]);
+  assert.deepEqual(ungroupCalls, [[5], [3]]);
   assert.equal(
-    groupCalls.some((call) => call.tabIds.includes(6)),
+    groupCalls.some((call) => call.tabIds.includes(slowCreatedTabId)),
     false,
     'a tab created after disconnect must not regain Browser Use ownership',
   );

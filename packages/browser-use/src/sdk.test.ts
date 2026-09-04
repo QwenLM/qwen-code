@@ -26,6 +26,7 @@ const backend = vi.hoisted(() => ({
     if (method === 'browser.user.history') return [];
     if (method === 'tabs.new') return { id: 'tab-1' };
     if (method === 'tab.goto') return null;
+    if (method === 'tabs.finalize') return null;
     if (method === 'tab.dialog.accept' || method === 'tab.dialog.dismiss')
       return null;
     if (method === 'locator.click' || method === 'locator.downloadMedia')
@@ -321,6 +322,24 @@ describe('Browser SDK in the existing Node REPL', () => {
       args: {
         tabId: 'tab-1',
         steps: [{ kind: 'locator', selector: 'img' }],
+      },
+    });
+  });
+
+  it('maps tab dispositions to the shared command contract', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+
+    await browser.tabs.finalize({
+      keep: [{ tab, status: 'handoff' }],
+    });
+
+    expect(backend.calls.at(-1)).toEqual({
+      method: 'tabs.finalize',
+      args: {
+        browserId: 'chrome',
+        keep: [{ tabId: 'tab-1', status: 'handoff' }],
       },
     });
   });

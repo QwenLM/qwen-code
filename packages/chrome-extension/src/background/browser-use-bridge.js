@@ -467,9 +467,28 @@ async function dispatch(method, params, generation = connectionGeneration) {
       await detach(tabId);
       return null;
     }
+    case 'tabs.release': {
+      const tabId = numberParam(params, 'tabId');
+      assertActiveGeneration(generation);
+      await detach(tabId);
+      assertActiveGeneration(generation);
+      if (agentOwnedTabs.has(tabId)) {
+        await chrome.tabs.ungroup(tabId);
+        assertActiveGeneration(generation);
+        agentOwnedTabs.delete(tabId);
+        derivedTabParents.delete(tabId);
+        await persistState(generation);
+      }
+      return null;
+    }
     case 'tabs.close': {
       const tabId = numberParam(params, 'tabId');
-      await requireControllableTab(tabId);
+      if (!attachedTabs.has(tabId) && !agentOwnedTabs.has(tabId)) {
+        throw bridgeError(
+          'TAB_NOT_OWNED',
+          'Chrome tab is not controlled by this Browser Use session',
+        );
+      }
       assertActiveGeneration(generation);
       await chrome.tabs.remove(tabId);
       return null;

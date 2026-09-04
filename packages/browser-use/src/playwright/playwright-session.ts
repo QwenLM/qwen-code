@@ -16,7 +16,12 @@ import {
 
 import type { ChromeBridge } from '../bridge/index.js';
 import { BrowserRuntimeError, staleSessionError } from '../core/errors.js';
-import type { BrowserUserTabInfo, TabInfo } from '../core/primitives.js';
+import type {
+  BrowserUserTabInfo,
+  FinalizeTabDisposition,
+  FinalizeTabStatus,
+  TabInfo,
+} from '../core/primitives.js';
 import {
   playwrightTransportAdapter,
   QwenPlaywrightTransport,
@@ -64,7 +69,7 @@ export class PlaywrightSession {
             .request('tabs.get', { tabId: event.tabId })
             .then(async (value) => {
               const provider = providerTab(value);
-              await this.registerTab(provider);
+              await this.registerTab(provider, 'created', true);
             })
             .catch(() => undefined);
         }
@@ -142,6 +147,7 @@ export class PlaywrightSession {
     this.stopped = true;
     await this.starting?.catch(() => undefined);
     if (this.bridge.isConnected()) {
+      await this.finalizeTabs([]).catch(() => undefined);
       await Promise.allSettled(
         [...this.tabs.values()].map(async (tab) =>
           this.bridge.request(
@@ -164,7 +170,7 @@ export class PlaywrightSession {
 
   async newTab(): Promise<TabInfo> {
     const provider = providerTab(await this.bridge.request('tabs.create'));
-    return await this.registerTab(provider);
+    return await this.registerTab(provider, 'created', true);
   }
 
   async listTabs(): Promise<TabInfo[]> {
@@ -244,16 +250,21 @@ export class PlaywrightSession {
         'STALE_TAB',
         'The Chrome tab changed after discovery; list open tabs again',
       );
-    return await this.registerTab(current);
+    return await this.registerTab(current, 'claimed', true);
   }
 
-  private async registerTab(provider: ProviderTab): Promise<TabInfo> {
+  private async registerTab(
+    provider: ProviderTab,
+    ownership: 'created' | 'claimed',
+    select: boolean,
+  ): Promise<TabInfo> {
     const tabIdPrefix = this.tabIdPrefix;
     const existing = [...this.tabs.values()].find(
       (tab) => tab.providerTabId === provider.providerTabId && !tab.stale,
     );
     if (existing !== undefined) {
-      this.selectedTabId = existing.id;
+      if (ownership === 'created') existing.ownership = 'created';
+      if (select) this.selectedTabId = existing.id;
       const info = await this.tabInfo(existing);
       if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
       return info;
@@ -264,7 +275,8 @@ export class PlaywrightSession {
         (tab) => tab.providerTabId === provider.providerTabId && !tab.stale,
       );
       if (registered !== undefined) {
-        this.selectedTabId = registered.id;
+        if (ownership === 'created') registered.ownership = 'created';
+        if (select) this.selectedTabId = registered.id;
         const info = await this.tabInfo(registered);
         if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
         return info;
@@ -310,10 +322,11 @@ export class PlaywrightSession {
         logs: [],
         fileChoosers: new Map(),
         navigationWaiters: new Map(),
+        ownership,
       };
       this.installPageObservers(tab);
       this.tabs.set(tab.id, tab);
-      this.selectedTabId = tab.id;
+      if (select) this.selectedTabId = tab.id;
       const info = await this.tabInfo(tab);
       if (tabIdPrefix !== this.tabIdPrefix) throw staleSessionError();
       return info;
@@ -377,21 +390,11 @@ export class PlaywrightSession {
   }
 
   private async syncDerivedTabs(): Promise<void> {
-    const controlledProviders = new Set(
-      [...this.tabs.values()].map((tab) => tab.providerTabId),
-    );
-    const derived = providerTabs(
+    const providers = providerTabs(
       await this.bridge.request('tabs.queryDerived'),
     );
-    for (const provider of derived) {
-      if (
-        !controlledProviders.has(provider.providerTabId) &&
-        provider.derivedFromProviderTabId !== undefined &&
-        controlledProviders.has(provider.derivedFromProviderTabId)
-      ) {
-        await this.registerTab(provider);
-        controlledProviders.add(provider.providerTabId);
-      }
+    for (const provider of providers) {
+      await this.registerTab(provider, 'created', false);
     }
   }
 
@@ -410,6 +413,47 @@ export class PlaywrightSession {
 
   async closeTab(tab: TabState): Promise<void> {
     await this.bridge.request('tabs.close', { tabId: tab.providerTabId });
+    tab.stale = 'tab';
+    this.tabs.delete(tab.id);
+    await this.transport?.unregisterTab(tab.providerTabId);
+    if (this.selectedTabId === tab.id) this.selectedTabId = undefined;
+  }
+
+  async finalizeTabs(keep: FinalizeTabDisposition[]): Promise<void> {
+    await this.registration;
+    await this.syncDerivedTabs();
+    await this.registration;
+    const dispositions = new Map<string, FinalizeTabStatus>();
+    for (const { tabId, status } of keep) {
+      if (dispositions.has(tabId)) {
+        throw new BrowserRuntimeError(
+          'INVALID_ARGUMENT',
+          `Tab appears more than once in finalize(): ${tabId}`,
+        );
+      }
+      this.claimed(tabId);
+      dispositions.set(tabId, status);
+    }
+    const operations = [...this.tabs.values()]
+      .filter((tab) => tab.stale !== 'session')
+      .map(async (tab) => {
+        const status = dispositions.get(tab.id);
+        if (status === 'handoff') return;
+        if (status === 'deliverable' || tab.ownership === 'claimed') {
+          await this.releaseTab(tab);
+          return;
+        }
+        await this.closeTab(tab);
+      });
+    const results = await Promise.allSettled(operations);
+    const failed = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (failed !== undefined) throw failed.reason;
+  }
+
+  private async releaseTab(tab: TabState): Promise<void> {
+    await this.bridge.request('tabs.release', { tabId: tab.providerTabId });
     tab.stale = 'tab';
     this.tabs.delete(tab.id);
     await this.transport?.unregisterTab(tab.providerTabId);

@@ -25,6 +25,8 @@
     "dist/sdk/types.d.ts",
     "dist/native-host.js",
     "dist/scripts/native-host-setup.js",
+    "skills",
+    "qwen-extension.json",
     "NOTICE"
   ],
   "engines": {
@@ -48,5 +50,8 @@
   },
   "dependencies": {
     "playwright-core": "1.62.1"
-  }
+  },
+  "bundledDependencies": [
+    "playwright-core"
+  ]
 }

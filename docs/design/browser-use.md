@@ -43,6 +43,24 @@ Playwright's browser-level CDP adapter.
 `chromium.connectOverCDP(transport)`. Qwen therefore keeps Native Messaging and
 does not add a local WebSocket server.
 
+The Browser Use extension is distributed as an npm package whose tarball ships
+the Browser SDK and its pinned Playwright dependency. Its skill uses the
+reported skill base directory to register the installed extension's
+`node_modules` with the existing Node REPL and imports the installed SDK
+directly; users do not install the SDK into each workspace. Raw source installs
+are unsupported because they do not contain built output or bundled
+dependencies.
+
+Native Host registration is native-side product setup, not a Chrome-extension
+operation. On macOS and Linux, the first Browser runtime initialization
+idempotently installs the launcher and manifests for existing Google Chrome,
+Chrome for Testing, and Chromium profile roots. It refuses to overwrite
+foreign files: a conflicting launcher aborts initialization, while a
+conflicting browser manifest is skipped. Running
+`node <extension-root>/dist/scripts/native-host-setup.js uninstall` removes
+files owned by Browser Use. The Chrome extension only opens the registered host
+through `connectNative()`.
+
 ## Responsibilities
 
 | Component                  | Responsibility                                                                                                  |
@@ -202,7 +220,8 @@ The Node Kernel directly owns the local Chrome extension transport:
 - one Browser Use session may be active for the current OS user;
 - one session may control multiple tabs;
 - a second session fails with `BROWSER_USE_BUSY`;
-- closing the session detaches its tabs and releases the local socket;
+- closing the session closes still-controlled agent-created tabs, including
+  handoffs, releases claimed tabs, and then releases the local socket;
 - a transport disconnect invalidates the current Playwright connection;
 - tab-scoped objects from the disconnected connection fail with
   `STALE_BROWSER_SESSION` and are never silently rebound.
@@ -222,6 +241,20 @@ Chrome closes its Native Messaging port. The extension handles that port
 disconnect by detaching the session's controlled tabs, removing Browser Use
 overlays, clearing ownership and derived-tab state, ungrouping managed tabs
 without closing them, and reconnecting the Native Host for a future backend.
+
+At the end of a browser turn, `tabs.finalize()` treats `keep` as the complete
+set for that call: it closes unlisted agent-created tabs and releases unlisted
+claimed tabs. Deliverable tabs remain open but are released; handoff tabs
+remain open and controlled until the next finalization or runtime close. A
+handoff that is still needed must be included again in the next turn. An
+agent-created popup keeps that ownership if its opener closes before
+finalization. The extension is the source of browser-side ownership, while the
+runtime keeps the corresponding session projection; agent-created ownership
+takes precedence if a derived tab is observed through both paths.
+
+`tabs.finalize()` validates the complete `keep` set before closing anything. An
+unknown, stale, or duplicate entry aborts finalization so a malformed keep list
+cannot accidentally close a page the model intended to preserve.
 
 The first release adds no separate Browser Use authorization or process
 authentication layer.
@@ -267,6 +300,8 @@ does not require a repository-wide upgrade.
 For the first release:
 
 - installing the Qwen Chrome extension authorizes Browser Use;
+- first use on macOS or Linux automatically registers the Native Host without
+  a separate prompt;
 - Browser Use may enumerate and claim top-level HTTP(S) tabs by default;
 - History is declared with the other required extension permissions; there is
   no Browser Use permission-management UI;
@@ -280,6 +315,12 @@ For the first release:
 - **Sessions:** One Browser Use session may be active per OS user, and that
   session may control multiple tabs. Future support for concurrent sessions
   must isolate tab ownership, event routing, cleanup, and reconnect behavior.
+- **Turn cleanup:** Finalization is an explicit final browser action. Closing
+  the runtime provides a fallback, but interrupting a model turn does not close
+  the persistent runtime; still-controlled tabs remain managed until a later
+  finalization or runtime close. A transport disconnect releases them without
+  closing their pages. A future Qwen turn-lifecycle hook should invoke
+  finalization independently of model behavior.
 - **Browser backends:** The Qwen extension currently connects the SDK to
   Chrome. Other browser families or an in-app browser should be added together
   with capability discovery when products need them.

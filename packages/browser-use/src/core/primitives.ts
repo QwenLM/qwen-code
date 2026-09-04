@@ -17,6 +17,13 @@ export interface TabInfo {
   url: string | null;
 }
 
+export type FinalizeTabStatus = 'handoff' | 'deliverable';
+
+export interface FinalizeTabDisposition {
+  tabId: string;
+  status: FinalizeTabStatus;
+}
+
 export interface BrowserUserTabInfo {
   id: string;
   title: string | null;

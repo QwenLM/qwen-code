@@ -238,6 +238,22 @@ export const commandSchemas = {
   'tabs.list': browserArgs,
   'tabs.get': z.object({ browserId: id, tabId: id }).strict(),
   'tabs.selected': browserArgs,
+  'tabs.finalize': z
+    .object({
+      browserId: id,
+      keep: z
+        .array(
+          z
+            .object({
+              tabId: id,
+              status: z.enum(['handoff', 'deliverable']),
+            })
+            .strict(),
+        )
+        .max(100)
+        .optional(),
+    })
+    .strict(),
 
   'tab.goto': z
     .object({
