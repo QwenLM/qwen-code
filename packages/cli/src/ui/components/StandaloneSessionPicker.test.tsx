@@ -17,9 +17,16 @@ import type {
   SessionListItem,
   ListSessionsResult,
 } from '@qwen-code/qwen-code-core';
+import { getGitBranch } from '@qwen-code/qwen-code-core/utils/gitUtils.js';
 
-vi.mock('@qwen-code/qwen-code-core', async () => {
-  const actual = await vi.importActual('@qwen-code/qwen-code-core');
+// The picker imports getGitBranch from this module, not from the package
+// root, so the mock has to name the same specifier to intercept it. Mocking
+// the root barrel instead leaves the override dead and drags core's whole
+// index into this suite's module graph.
+vi.mock('@qwen-code/qwen-code-core/utils/gitUtils.js', async () => {
+  const actual = await vi.importActual(
+    '@qwen-code/qwen-code-core/utils/gitUtils.js',
+  );
   return {
     ...actual,
     getGitBranch: vi.fn().mockReturnValue('main'),
@@ -81,6 +88,17 @@ function createMockSessionService(
       .mockResolvedValue(sessions.length > 0 ? {} : undefined),
   };
 }
+
+describe('mock wiring', () => {
+  it('stubs getGitBranch on the subpath module the picker imports', () => {
+    // StandaloneSessionPicker resolves getGitBranch through this specifier.
+    // If the vi.mock above moves back to the package root, this import sees
+    // the real implementation again and the wrapper's branch fixture ('main')
+    // silently stops applying.
+    expect(vi.isMockFunction(getGitBranch)).toBe(true);
+    expect(getGitBranch('/does/not/matter')).toBe('main');
+  });
+});
 
 describe('SessionPicker', () => {
   const flush = async () => {
