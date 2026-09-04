@@ -12,6 +12,7 @@ import type {
   OmniMemoryRecallKind,
 } from './config.js';
 import type { MediaResourceRegistry } from './registry.js';
+import { resolveMediaReference } from './registry.js';
 import { MediaMemoryStore } from './store.js';
 import type {
   MediaChannel,
@@ -555,9 +556,18 @@ export class MediaMemoryRecallService {
     );
   }
 
-  /** Shared request validation (M §9.2): every handle must have been
-   * issued by THIS session's registry; an empty list or an unknown handle
-   * rejects the whole request. */
+  /** Shared request validation (M §9.2): every identifier must resolve to a
+   * binding THIS session issued; an empty list or an unresolvable identifier
+   * rejects the whole request.
+   *
+   * A model-visible local source is annotated with its ABSOLUTE PATH rather
+   * than a handle, and the model passes that path here. `resolveMediaReference`
+   * resolves each identifier as a handle first (the common case), then as a
+   * session-bound fileRef — unescaping the displayed path so a native Windows
+   * path or a `：`-bearing name (which arrives escaped) still matches the raw
+   * `fileRef` the registry stores. So the displayed path recalls exactly as
+   * the handle would. An identifier that is neither still rejects the whole
+   * request. */
   private resolveBindings(
     resourceIds: string[],
   ): Array<NonNullable<ReturnType<MediaResourceRegistry['resolve']>>> {
@@ -567,20 +577,30 @@ export class MediaMemoryRecallService {
         'recall request must name at least one resourceId',
       );
     }
-    // Deduplicated: gaps are pushed per binding and the advisor runs per
-    // gap, so a handle repeated in one request would otherwise yield
-    // identical duplicate gaps and duplicate suggested actions — telling
-    // the model to run the same follow-up call twice on the same resource.
-    return [...new Set(resourceIds)].map((resourceId) => {
-      const binding = this.registry.resolve(resourceId);
+    // Deduplicated per resolved binding — not per raw string: a handle and
+    // the path form of the SAME resource both resolve to one binding, and
+    // gaps/advice are pushed per binding, so an undeduplicated pair would
+    // yield identical duplicate gaps and tell the model to run the same
+    // follow-up call twice on one resource.
+    const seen = new Set<string>();
+    const bindings: Array<
+      NonNullable<ReturnType<MediaResourceRegistry['resolve']>>
+    > = [];
+    for (const resourceId of resourceIds) {
+      const binding = resolveMediaReference(this.registry, resourceId);
       if (!binding) {
         throw new MediaMemoryRecallRejection(
           'unknown_resource',
-          `resourceId ${resourceId} was not issued in this session`,
+          `reference ${resourceId} matches no media delivered this session ` +
+            `(neither a session handle nor the path of a file read this ` +
+            `session)`,
         );
       }
-      return binding;
-    });
+      if (seen.has(binding.resourceId)) continue;
+      seen.add(binding.resourceId);
+      bindings.push(binding);
+    }
+    return bindings;
   }
 
   private async recallFromSnapshot(

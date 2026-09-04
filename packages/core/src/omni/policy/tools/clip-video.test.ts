@@ -36,6 +36,20 @@ describe('OmniClipVideoTool', () => {
 
   const tool = new OmniClipVideoTool({});
 
+  it('documents that a provided outputDir must already exist', () => {
+    // clip-video OVERRIDES the shared outputDir property (it is optional here),
+    // so the shared-schema pin does not reach it. The tool still rejects — never
+    // creates — a nonexistent outputDir (assertMediaPolicyIo), and a wrong guess
+    // like <dir>/clips burns a turn, so the same contract must be stated here.
+    const props = (
+      tool.schema.parametersJsonSchema as {
+        properties: { outputDir: { description: string } };
+      }
+    ).properties;
+    expect(props.outputDir.description).toMatch(/must already exist/);
+    expect(props.outputDir.description).toMatch(/not created automatically/);
+  });
+
   const probe = (result: Partial<MediaProbeResult>): void => {
     mocks.probeMediaMetadata.mockResolvedValue(result as MediaProbeResult);
   };

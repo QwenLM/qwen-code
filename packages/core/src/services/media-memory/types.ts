@@ -10,9 +10,12 @@
  * in the collector, persistence in the store, and read access in the
  * recall service. Two invariants shape every type in this file:
  *
- * - Persistent identity is separate from filesystem reality. The model
- *   (and recall consumers) see opaque IDs, never real paths; locators are
- *   sanitized before they enter a record.
+ * - Persistent identity is separate from filesystem reality. These
+ *   persistent IDs are never model-visible; locators are sanitized before
+ *   they enter a record. (Separately, the SESSION registry may surface a
+ *   model-visible local file's own absolute path in its 【媒体资源】
+ *   annotation — see `formatResourcePathText` — but that is the live path
+ *   the model already read, never one of these persistent identifiers.)
  * - Only two collection triggers exist — FileRecognized and
  *   OmniPolicySucceeded — so every record traces back to a completed
  *   recognition or a fully-committed policy execution.
@@ -82,8 +85,10 @@ export interface MediaFileRecord {
    * (identity = localPath + sha256, storage design S §4 — the bytes stay
    * in place), managed object path for derivatives. Keys the idempotent
    * FileRecognized upsert and lets recall detect deleted local files
-   * (artifact_unavailable gap). NEVER surfaced through recall payloads —
-   * the model only sees opaque IDs and sanitized sources. */
+   * (artifact_unavailable gap). This PERSISTENT locator is never surfaced
+   * through recall payloads. (The live SESSION registry separately shows a
+   * model-visible local file its own absolute path in the annotation — the
+   * path it already read — but that is not this record field.) */
   fileRef: string;
   /** Root of the derivation tree this file belongs to. A user/tool file
    * is its own root; a policy derivative inherits its source's root.

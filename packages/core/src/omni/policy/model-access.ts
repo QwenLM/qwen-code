@@ -8,6 +8,7 @@ import type { FunctionDeclaration } from '@google/genai';
 import type { ToolExecutionOrigin } from '../../core/turn.js';
 import type { MediaPolicyToolDescriptor } from '../../tools/tools.js';
 import type { OmniMediaRegistryView } from '../../services/media-memory/registry.js';
+import { resolveMediaReference } from '../../services/media-memory/registry.js';
 import { isPlainRecord } from './types.js';
 import type {
   MediaPolicyToolConfigView,
@@ -198,7 +199,9 @@ export type MediaPolicyCallGateResult =
  * - a model/client-origin call of a media-policy tool requires
  *   `modelAccess.enabled`, may reference its input by opaque session
  *   `resourceId` INSTEAD of `inputPath` (resolved here to the real
- *   locator — memory design M §5.2; the model never learns the path),
+ *   locator — memory design M §5.2; for path-less media the model never
+ *   learns the path, while a model-visible local file was shown its own
+ *   path and may name it here or in `inputPath`),
  *   must not name any lockedArguments key explicitly, and gets
  *   defaults + lockedArguments merged in;
  * - everything else passes untouched.
@@ -244,10 +247,13 @@ export function evaluateMediaPolicyToolCall(params: {
     };
   }
 
-  // Session-handle input (M §5.2): a gated caller may name its source by
-  // the opaque resourceId minted at delivery/recall instead of a real
-  // path. Resolution happens BEFORE the lockedArguments check so a
-  // handle-resolved inputPath cannot sidestep an operator-pinned input.
+  // Session-reference input (M §5.2): a gated caller may name its source by
+  // the reference it was shown in a 【媒体资源】 annotation instead of a real
+  // path — the opaque handle minted at delivery/recall, or, for a
+  // model-visible local file, the absolute path itself. `resolveMediaReference`
+  // accepts either form (reversing a displayed path back to its binding, same
+  // as active recall). Resolution happens BEFORE the lockedArguments check so a
+  // resolved inputPath cannot sidestep an operator-pinned input.
   if (typeof args['resourceId'] === 'string') {
     if (args['inputPath'] !== undefined) {
       return {
@@ -258,19 +264,22 @@ export function evaluateMediaPolicyToolCall(params: {
           `one of "inputPath" or "resourceId", not both.`,
       };
     }
-    const binding = config
-      .getOmniMediaResourceRegistry?.()
-      ?.resolve(args['resourceId']);
+    const registry = config.getOmniMediaResourceRegistry?.();
+    const binding = registry
+      ? resolveMediaReference(registry, args['resourceId'])
+      : undefined;
     if (!binding) {
-      // Unknown = never issued in this session (fabricated or stale
-      // cross-session handle) — reject, never guess (M §9.2 stance).
+      // Neither an issued handle nor the path of a file delivered this
+      // session (fabricated or stale cross-session reference) — reject,
+      // never guess (M §9.2 stance).
       return {
         outcome: 'reject',
         reason: 'invalid_params',
         message:
           `Invalid parameters for tool "${tool.name}": resourceId ` +
-          `"${args['resourceId']}" was not issued in this session. Use a ` +
-          `handle from a 【媒体资源】 annotation or a recall result.`,
+          `"${args['resourceId']}" matches no media delivered this session. ` +
+          `Use a handle or the absolute path from a 【媒体资源】 annotation ` +
+          `or a recall result.`,
       };
     }
     // The handle's modality must be one this tool declares consuming. The

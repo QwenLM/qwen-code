@@ -29,7 +29,9 @@ import { createMediaMemoryRecallService } from './memory-recall.js';
  */
 
 export interface OmniRecallMediaMemoryParams {
-  /** Session resource handles (from 【媒体资源】 annotations). */
+  /** Resource references from 【媒体资源】 annotations: an opaque session
+   * handle for path-less media, or the absolute path for a model-visible
+   * local file. Both resolve to the same session binding. */
   resourceIds: string[];
   query: string;
   kinds?: OmniMemoryRecallKind[];
@@ -132,8 +134,9 @@ export class OmniRecallMediaMemoryTool extends BaseDeclarativeTool<
       'Recalls what is already known about media resources delivered in ' +
         'this session: prior transcripts, extracted keyframes, technical ' +
         'metadata, and processing history persisted by earlier sessions. ' +
-        'Pass the opaque resourceId handles announced in 【媒体资源】 ' +
-        'annotations next to delivered media (handles from recall results ' +
+        'Pass the reference announced in the 【媒体资源】 annotation next to ' +
+        'delivered media — an opaque resourceId handle, or the absolute ' +
+        'path shown for a local file you read (handles from recall results ' +
         'work too). Returns matching entries plus honest gaps — channels ' +
         'never processed or artifacts no longer available — and may ' +
         'suggest follow-up tool calls to gather missing evidence. Use ' +
@@ -145,12 +148,17 @@ export class OmniRecallMediaMemoryTool extends BaseDeclarativeTool<
         properties: {
           resourceIds: {
             type: 'array',
-            items: { type: 'string', minLength: 1, maxLength: 256 },
+            // maxLength admits a full absolute path (the path form), not just
+            // a ~16-char media-<n>-<hex> handle — an over-long bound would let
+            // Ajv reject the very path the annotation displayed, before
+            // resolution, with no shorter identifier to retry.
+            items: { type: 'string', minLength: 1, maxLength: 4096 },
             minItems: 1,
             description:
-              'Session resource handles to consult (from 【媒体资源】 ' +
-              'annotations or prior recall results). Unknown handles ' +
-              'reject the whole request.',
+              'Resource references to consult, each taken from a 【媒体资源】 ' +
+              'annotation or a prior recall result: an opaque session ' +
+              'handle, or the absolute path shown for a local file you ' +
+              'read. An unresolvable reference rejects the whole request.',
           },
           query: {
             type: 'string',
@@ -211,7 +219,7 @@ export class OmniRecallMediaMemoryTool extends BaseDeclarativeTool<
       this.config.getOmniMemoryConfig()?.recall.active.maxFilesPerCall;
     if (maxFiles !== undefined && params.resourceIds.length > maxFiles) {
       return (
-        `resourceIds lists ${params.resourceIds.length} handles; at most ` +
+        `resourceIds lists ${params.resourceIds.length} references; at most ` +
         `${maxFiles} may be consulted per call ` +
         `(omni.memory.recall.active.maxFilesPerCall). Split the request.`
       );

@@ -358,8 +358,9 @@ describe('readMediaViaOmniDelivery result shape', () => {
     );
     const registry = new MediaResourceRegistry();
 
+    const filePath = await realFile('pic.png');
     const result = await readMediaViaOmniDelivery({
-      filePath: await realFile('pic.png'),
+      filePath,
       config: {
         ...deliveryConfig(),
         getOmniMemoryConfig: () => ({
@@ -374,16 +375,123 @@ describe('readMediaViaOmniDelivery result shape', () => {
 
     const parts = result.llmContent as Array<Record<string, unknown>>;
     expect(parts).toHaveLength(3);
-    // Handle part FIRST — the hint/disclosure chain keeps its adjacency
-    // to the media part (D8), and the model learns the recall handle.
+    // Resource part FIRST — the hint/disclosure chain keeps its adjacency
+    // to the media part (D8). A model-visible local source is referenced by
+    // its ABSOLUTE PATH, not an opaque handle.
     const handleText = parts[0]!['text'] as string;
-    expect(handleText).toContain('【媒体资源】pic.png：');
-    const resourceId = handleText.split('：')[1]!;
-    expect(registry.resolve(resourceId)).toMatchObject({
+    expect(handleText).toContain('【媒体资源】');
+    expect(handleText).toContain(filePath);
+    expect(handleText).not.toContain('：media-');
+    // The session handle is still registered and recoverable from the path.
+    expect(registry.resolveByFileRef(filePath)).toMatchObject({
       mediaType: 'image',
     });
+    // The emitted part must be CONSUMABLE by both grammar readers, not merely
+    // contain the right substrings: a writer change that kept the substrings
+    // but broke the grammar (e.g. an unescaped separator) would leave both
+    // consumers dropping the annotation while these substring checks stayed
+    // green. So round-trip it through the actual parsers.
+    const { parseResourcePathText, parseResourceHandleText } = await import(
+      './disclosure.js'
+    );
+    const { extractRequestResourceIds } = await import(
+      './memory-side-query.js'
+    );
+    expect(parseResourcePathText(handleText)).toBe(filePath);
+    expect(parseResourceHandleText(handleText)).toBeUndefined();
+    const registered = registry.resolveByFileRef(filePath)!;
+    expect(
+      extractRequestResourceIds(
+        { getOmniMediaResourceRegistry: () => registry } as unknown as Config,
+        [{ text: handleText }],
+      ),
+    ).toEqual([registered.resourceId]);
     expect(parts[1]!['text']).toContain('zoom_image');
     expect(parts[2]).toHaveProperty('fileData');
+  });
+
+  it('keeps the handle form when the binding fileRef is not the read path', async () => {
+    // Mirror image of the path-form test above: a path-less source (tool /
+    // URL media) binds with an internal object-store `fileRef` that is NOT
+    // the path the model read, so it must keep the opaque handle — there is
+    // no model-visible path to show. The real pipeline never produces a
+    // divergent fileRef for a user read (sourceFileRef === filePath), so the
+    // fallback is exercised at the resolve() seam via a wrapper registry.
+    vi.doMock('./ffmpeg.js', () => ({
+      isFfmpegAvailable: vi.fn().mockResolvedValue(true),
+      isFfprobeAvailable: vi.fn().mockResolvedValue(true),
+    }));
+    vi.doMock('./recognition.js', () => ({
+      recognizeMediaFile: vi
+        .fn()
+        .mockResolvedValue(
+          mockRecognized('image', { width: 1920, height: 1080 }),
+        ),
+      hashFileSha256: vi.fn().mockResolvedValue('a'.repeat(64)),
+      extensionForMime: vi.fn().mockReturnValue('.png'),
+    }));
+    vi.doMock('./storage.js', () => ({
+      OmniObjectStore: class {
+        async putFile() {
+          return { objectPath: '/tmp/obj.png', deduped: false };
+        }
+        getOmniRootDir() {
+          return tmpDir;
+        }
+      },
+    }));
+    vi.doMock('./upload.js', () => ({
+      DashScopeUploader: class {
+        async uploadFile() {
+          return 'oss://bucket/key';
+        }
+      },
+      OSS_URL_PREFIX: 'oss://',
+    }));
+    const { readMediaViaOmniDelivery } = await import('./index.js');
+    const { MediaResourceRegistry } = await import(
+      '../services/media-memory/index.js'
+    );
+    const { parseResourceHandleText } = await import('./disclosure.js');
+    const real = new MediaResourceRegistry();
+    // bind() delegates; resolve() reports a fileRef that differs from the
+    // read path (as an object-store locator would), forcing the handle form.
+    const registry = {
+      bind: (input: Parameters<MediaResourceRegistry['bind']>[0]) =>
+        real.bind(input),
+      resolve: (id: string) => {
+        const b = real.resolve(id);
+        return b ? { ...b, fileRef: `${b.fileRef}.object-store` } : undefined;
+      },
+      resolveByFileRef: (ref: string) => real.resolveByFileRef(ref),
+      resolveVersion: (v: string) => real.resolveVersion(v),
+      activeFileRefs: () => real.activeFileRefs(),
+    } as unknown as InstanceType<typeof MediaResourceRegistry>;
+
+    const filePath = await realFile('pic.png');
+    const result = await readMediaViaOmniDelivery({
+      filePath,
+      config: {
+        ...deliveryConfig(),
+        getOmniMemoryConfig: () => ({
+          collection: { maxInlineTextBytes: 4096 },
+        }),
+        getOmniMediaResourceRegistry: () => registry,
+      } as unknown as Config,
+      displayName: 'pic.png',
+      relativePathForDisplay: 'pic.png',
+      expectedModality: 'image',
+    });
+
+    const parts = result.llmContent as Array<Record<string, unknown>>;
+    const handleText = parts[0]!['text'] as string;
+    // Handle form, NOT the path: the object-store fileRef is not the read
+    // path, so the model gets the opaque handle it can still recall with.
+    expect(handleText).toContain('：media-');
+    expect(handleText).not.toContain(filePath);
+    const resourceId = parseResourceHandleText(handleText);
+    expect(resourceId).toBeDefined();
+    expect(real.resolve(resourceId!)).toMatchObject({ mediaType: 'image' });
   });
 
   it('returns a bare fileData part for audio (no zoom hint)', async () => {
@@ -1948,12 +2056,14 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     expect(result.errorType).toBeUndefined();
   });
 
-  it('readMediaViaOmniDelivery keeps the recall handle on an omitted media', async () => {
+  it('readMediaViaOmniDelivery keeps the recall reference on an omitted media', async () => {
     // The omission branch is the one shape that puts NO media part in front
-    // of the model. Without the handle leading it, the withheld resource has
+    // of the model. Without a reference leading it, the withheld resource has
     // no identity the model can name — it can neither recall what memory
     // knows about it nor ask a policy tool to reprocess it into something
-    // deliverable, and paths are never surfaced (M §5.2).
+    // deliverable. For a model-visible local source that reference is the
+    // absolute path (recall still resolves it via resolveByFileRef); a
+    // path-less source would keep an opaque handle (M §5.2).
     const runMock = vi.fn().mockResolvedValue({
       deliveries: [
         {
@@ -1972,8 +2082,9 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     );
     const registry = new MediaResourceRegistry();
 
+    const filePath = await realFile('pic.png');
     const result = await mod.readMediaViaOmniDelivery({
-      filePath: await realFile('pic.png'),
+      filePath,
       config: {
         ...policyConfig({ maxUploadFileBytes: 500 }),
         getOmniMemoryConfig: () => ({
@@ -1987,13 +2098,16 @@ describe('processMediaForOmniDelivery fixed-policy integration', () => {
     });
 
     // With memory off this branch collapses to a bare notice string (test
-    // above); a bound handle must turn it into a part array led by the
-    // handle, with the notice standing in for the media behind it.
+    // above); a bound resource must turn it into a part array led by the
+    // resource reference, with the notice standing in for the media behind
+    // it. The local source is referenced by its absolute path.
     const parts = result.llmContent as Array<Record<string, unknown>>;
     expect(parts).toHaveLength(2);
     const handleText = parts[0]!['text'] as string;
-    expect(handleText).toContain('【媒体资源】pic.png：');
-    expect(registry.resolve(handleText.split('：')[1]!)).toMatchObject({
+    expect(handleText).toContain('【媒体资源】');
+    expect(handleText).toContain(filePath);
+    expect(handleText).not.toContain('：media-');
+    expect(registry.resolveByFileRef(filePath)).toMatchObject({
       mediaType: 'image',
     });
     expect(parts[1]!['text']).toMatch(/^【媒体省略】pic\.png：/);

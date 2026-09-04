@@ -13,7 +13,11 @@ import {
   type MediaMemoryCandidateSummary,
   type MediaMemoryRecallResult,
 } from '../services/media-memory/index.js';
-import { parseResourceHandleText } from './disclosure.js';
+import {
+  OMNI_RESOURCE_HANDLE_TEXT_PREFIX,
+  parseResourceHandleText,
+  parseResourcePathText,
+} from './disclosure.js';
 import { createMediaMemoryRecallService } from './memory-recall.js';
 
 const debugLogger = createDebugLogger('omni:memory');
@@ -27,10 +31,12 @@ const debugLogger = createDebugLogger('omni:memory');
  *
  * Constitutional bounds, enforced here and in the recall service:
  * - only resources the request explicitly carries (parsed from the
- *   【媒体资源】 handle annotations) are consulted — never a project-wide
- *   scan;
+ *   【媒体资源】 annotations — either the handle form or the path form) are
+ *   consulted — never a project-wide scan;
  * - the selector sees summaries (no raw media, full text, paths, or
- *   secrets) and may ONLY return manifest entryIds — an unknown id,
+ *   secrets — resource-annotation lines, which for a local file carry the
+ *   absolute path, are stripped from the selector's request text) and may
+ *   ONLY return manifest entryIds — an unknown id,
  *   cross-root id, or over-budget selection rejects the WHOLE selection;
  * - any failure (timeout, selector error, rejection) degrades to an empty
  *   recall with a recorded reason; the main request always proceeds.
@@ -66,10 +72,12 @@ const SELECTION_SCHEMA: Record<string, unknown> = {
 /** Bound on the request text handed to the selector for relevance. */
 const MAX_SELECTOR_REQUEST_CHARS = 4000;
 
-/** Extract the session resource handles a request explicitly carries:
- * every 【媒体资源】 annotation part whose handle this session's registry
- * actually issued (M §9.3 — passive recall never guesses beyond what the
- * request references). Deduplicated, in first-appearance order. */
+/** Extract the session resource handles a request explicitly carries: every
+ * 【媒体资源】 annotation part — the handle form directly, or the path form
+ * reversed to its handle via `resolveByFileRef` — that resolves to a binding
+ * this session's registry actually issued (M §9.3 — passive recall never
+ * guesses beyond what the request references). Deduplicated, in
+ * first-appearance order. */
 export function extractRequestResourceIds(
   config: Config,
   parts: readonly PartUnion[],
@@ -88,7 +96,34 @@ export function extractRequestResourceIds(
     if (!text) continue;
     // Annotations may be embedded per-line inside a larger flattened part.
     for (const line of text.split('\n')) {
-      const resourceId = parseResourceHandleText(line.trim());
+      const trimmed = line.trim();
+      // The handle form (path-less media) names the resourceId directly;
+      // surrounding whitespace on an embedded line is not part of the
+      // grammar, so match against the trimmed line.
+      let resourceId = parseResourceHandleText(trimmed);
+      if (!resourceId) {
+        // The path form (model-visible local media) names the absolute
+        // path, which the registry maps back to the SAME session handle it
+        // issued for that file (resolveByFileRef) — so passive recall keys
+        // on both forms. A filename may legally END in whitespace (POSIX),
+        // so prefer the left-trimmed line (which preserves those trailing
+        // characters) and fall back to the fully-trimmed line for the case
+        // where the trailing whitespace was only line formatting. A path
+        // containing a newline cannot survive this per-line split and is
+        // inherently unaddressable here.
+        const leftTrimmed = line.replace(/^\s+/, '');
+        for (const candidate of [
+          parseResourcePathText(leftTrimmed),
+          parseResourcePathText(trimmed),
+        ]) {
+          if (!candidate) continue;
+          const binding = registry.resolveByFileRef(candidate);
+          if (binding) {
+            resourceId = binding.resourceId;
+            break;
+          }
+        }
+      }
       if (!resourceId || seen.has(resourceId)) continue;
       if (!registry.resolve(resourceId)) continue;
       seen.add(resourceId);
@@ -107,8 +142,26 @@ function stripSystemReminders(text: string): string {
   return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '');
 }
 
-/** Plain request text (system reminders removed, bounded) — the selector's
- * only view of what the user is asking. */
+/** Drop every 【媒体资源】 resource-annotation line (either form). Harness-
+ * injected, not the user's question — the selector already has the candidate
+ * manifest and judges relevance from the question alone, so these lines add
+ * no signal. Critically, the PATH form carries the file's absolute local path
+ * (home directory, OS username, project layout); leaving it in would send that
+ * to the selector's model call and its API-traffic logs, violating the §17.5
+ * acceptance item "selector 不接收原始媒体、大文本或本地路径". Matches the marker
+ * as the first non-whitespace of a line (the writer's own line grammar). */
+function stripResourceAnnotationLines(text: string): string {
+  return text
+    .split('\n')
+    .filter(
+      (line) =>
+        !line.replace(/^\s+/, '').startsWith(OMNI_RESOURCE_HANDLE_TEXT_PREFIX),
+    )
+    .join('\n');
+}
+
+/** Plain request text (system reminders and resource annotations removed,
+ * bounded) — the selector's only view of what the user is asking. */
 function selectorRequestText(parts: readonly PartUnion[]): string {
   const texts: string[] = [];
   for (const part of parts) {
@@ -119,7 +172,9 @@ function selectorRequestText(parts: readonly PartUnion[]): string {
           ? (part as { text?: string }).text
           : undefined;
     if (!text) continue;
-    const stripped = stripSystemReminders(text).trim();
+    const stripped = stripResourceAnnotationLines(
+      stripSystemReminders(text),
+    ).trim();
     if (stripped) texts.push(stripped);
   }
   let joined = texts.join('\n');

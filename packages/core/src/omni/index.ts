@@ -44,6 +44,7 @@ import {
   formatDisclosureText,
   formatOmissionText,
   formatResourceHandleText,
+  formatResourcePathText,
   formatTranscriptText,
 } from './disclosure.js';
 import {
@@ -211,9 +212,11 @@ export interface OmniMediaDelivery {
    * primary media Part and before any transcripts. */
   additionalMedia?: OmniAdditionalMediaDelivery[];
   /** Opaque session handle for the SOURCE media (M §5.2), present iff
-   * media memory recorded it. Consumers disclose it next to the delivered
-   * content so the model can reference the resource in recall requests —
-   * the handle stands in for the path the model must never see. */
+   * media memory recorded it. Consumers disclose a reference next to the
+   * delivered content so the model can name the resource in recall requests:
+   * the handle for path-less media (which stands in for a path the model
+   * cannot see), or — for a model-visible local file — its absolute path,
+   * which recall reverses back to this handle (see `formatResourcePathText`). */
   resourceId?: string;
 }
 
@@ -504,8 +507,10 @@ export async function processMediaForOmniDelivery(
     });
   }
   // Session resource registry (M §5.2): every memory-known resource this
-  // delivery puts in front of the model gets an opaque session handle,
-  // making it addressable by recall without ever exposing a path.
+  // delivery puts in front of the model gets a session binding, making it
+  // addressable by recall. Its annotation shows the opaque handle for
+  // path-less sources; for a model-visible local file it shows the
+  // absolute path instead (recall reverses either form).
   const registry = memoryService
     ? (config as OmniMediaRegistryView).getOmniMediaResourceRegistry?.()
     : undefined;
@@ -589,9 +594,10 @@ export async function processMediaForOmniDelivery(
     memoryBinding: sourceBinding,
   };
   // The source is always addressable by recall, even when preprocessing
-  // later replaces the delivered bytes with a derivative. Its handle is
+  // later replaces the delivered bytes with a derivative. Its binding is
   // the one disclosed to the model (M §5.2): recall requests and future
-  // evidence-gathering tool calls reference the SOURCE, never a path.
+  // evidence-gathering tool calls reference the SOURCE — by its handle, or
+  // by the absolute path shown for a model-visible local file.
   const sessionResourceId = bindSessionResource(
     final,
     sourceFileRef,
@@ -1064,9 +1070,26 @@ export async function readMediaViaOmniDelivery(params: {
     // branch — even an omitted/transcript-only delivery leaves the model
     // a handle to recall or reprocess the source. Placed FIRST so the
     // disclosure keeps its D8 adjacency to the media part.
-    const handleParts = delivery.resourceId
-      ? [{ text: formatResourceHandleText(displayName, delivery.resourceId) }]
-      : [];
+    // A model-visible local source — its registry binding's fileRef is the
+    // very path the model read (non-ephemeral user input) — is referenced by
+    // that ABSOLUTE PATH rather than an opaque handle: the model already
+    // holds the path and can re-read it or point tools at it, so the handle
+    // is redundant noise. Recall (active tool and passive selector alike)
+    // still recovers the handle from the path (resolveByFileRef). Path-less
+    // sources (tool/URL media, whose fileRef is an internal object-store
+    // locator) keep the handle form — no usable path exists to show.
+    const handleParts: Array<{ text: string }> = (() => {
+      if (!delivery.resourceId) return [];
+      const binding = config
+        .getOmniMediaResourceRegistry?.()
+        ?.resolve(delivery.resourceId);
+      if (binding && binding.fileRef === filePath) {
+        return [{ text: formatResourcePathText(filePath) }];
+      }
+      return [
+        { text: formatResourceHandleText(displayName, delivery.resourceId) },
+      ];
+    })();
     if (delivery.omission) {
       // Explicit omission (policy design §10.2): the media is withheld and
       // the omission notice text stands in its place. Not an error — the

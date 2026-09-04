@@ -13,6 +13,7 @@ import {
   formatDisclosureText,
   formatOmissionText,
   formatResourceHandleText,
+  formatResourcePathText,
   formatTranscriptText,
 } from './disclosure.js';
 import {
@@ -213,6 +214,132 @@ describe('exportOmniTrajectory', () => {
     const derived = files.find((f) => f.sha256 === 'b'.repeat(64))!;
     expect(derived.producedByExecutionId).toBe(execution!.executionId);
     expect(derived.parentVersionId).toBe(sourceFile.fileVersionId);
+  });
+
+  it('consumes the PATH form of a model-visible local source', async () => {
+    // A local file the model read is annotated with its absolute path and
+    // no session handle (the exporter has no live registry). The exporter
+    // must still register the media entry — keyed by the path's basename,
+    // which is the file record's local source locator — or the turn drops
+    // its media and the session filter never seeds the file's closure.
+    await seedMemory();
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        timestamp: '2026-08-13T00:00:00.000Z',
+        message: {
+          parts: [
+            { text: '分析这部电影' },
+            { text: formatResourcePathText('/movies/film.mkv') },
+            { text: formatDisclosureText('film.mkv', '原 1080p → 480p') },
+          ],
+        },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+
+    const turn = records.find((r) => r.kind === 'turn') as
+      | OmniTrajectoryTurnRecord
+      | undefined;
+    expect(turn).toBeDefined();
+    // The path-form line is consumed as an annotation, not leaked as prose.
+    expect(turn!.request.text).toBe('分析这部电影');
+    // Media entry keyed by basename; no resourceId (transcript-only reader).
+    expect(turn!.request.media).toEqual([
+      {
+        name: 'film.mkv',
+        disclosures: ['原 1080p → 480p'],
+        transcripts: [],
+      },
+    ]);
+
+    // The seeded source file survives the session filter, since the media
+    // name matches its local source locator.
+    const files = records.filter(
+      (r): r is OmniTrajectoryFileRecord => r.kind === 'file',
+    );
+    const sourceFile = files.find((f) => f.origin === 'user');
+    expect(sourceFile?.source).toEqual({
+      protocol: 'local',
+      locator: 'film.mkv',
+    });
+  });
+
+  it('does NOT consume prefixed prose that is not an absolute path', async () => {
+    // A user line that merely opens with the resource prefix (a paste, or an
+    // @-mentioned document whose first line is 【媒体资源】清单) is ordinary
+    // prose: it must stay in request.text and never fabricate a media entry
+    // that could pull an unrelated file's closure into the export.
+    await seedUnrelatedMemory(); // a file whose locator is 'unrelated.png'
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        timestamp: '2026-08-13T00:00:00.000Z',
+        message: {
+          parts: [{ text: '【媒体资源】清单' }, { text: '请分析' }],
+        },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turn = records.find((r) => r.kind === 'turn') as
+      | OmniTrajectoryTurnRecord
+      | undefined;
+    expect(turn).toBeDefined();
+    expect(turn!.request.media).toEqual([]);
+    expect(turn!.request.text).toContain('【媒体资源】清单');
+    // No phantom entry, so the unrelated file is not dragged into the export.
+    const files = records.filter((r) => r.kind === 'file');
+    expect(files).toHaveLength(0);
+  });
+
+  it('preserves a trailing-whitespace filename in the PATH form', async () => {
+    // A filename may legally END in whitespace (POSIX). The path form carries
+    // it at the end of the annotation part; a full trim on export would
+    // truncate the name, so the media entry would no longer match the file
+    // record's local locator and the file (plus its closure) would drop out.
+    const memory = new MediaMemoryService(omniRootDir);
+    await memory.recordFileRecognized({
+      fileRef: '/movies/film.mkv ',
+      sha256: 'a'.repeat(64),
+      mediaType: 'video',
+      metadata: { durationMs: 5000 },
+      sizeBytes: 100,
+      mimeType: 'video/x-matroska',
+      origin: 'user',
+      source: { protocol: 'local', locator: 'film.mkv ' },
+      recognition: {
+        ingestionConfigHash: '',
+        detectorVersion: 'omni-sniff-ffprobe/1',
+        probeStatus: 'complete',
+      },
+    });
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        timestamp: '2026-08-13T00:00:00.000Z',
+        message: {
+          parts: [{ text: formatResourcePathText('/movies/film.mkv ') }],
+        },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turn = records.find((r) => r.kind === 'turn') as
+      | OmniTrajectoryTurnRecord
+      | undefined;
+    // Trailing space preserved, so the name matches the file's local locator.
+    expect(turn!.request.media).toEqual([
+      { name: 'film.mkv ', disclosures: [], transcripts: [] },
+    ]);
+    const files = records.filter(
+      (r): r is OmniTrajectoryFileRecord => r.kind === 'file',
+    );
+    expect(files.find((f) => f.origin === 'user')?.source).toEqual({
+      protocol: 'local',
+      locator: 'film.mkv ',
+    });
   });
 
   it('preserves model-emitted tool arguments verbatim (no scrubbing)', async () => {
@@ -512,10 +639,7 @@ describe('exportOmniTrajectory', () => {
     );
 
     expect(turns.map((t) => t.request.text)).toEqual(['q1', 'q2-survivor']);
-    expect(turns.map((t) => t.response.text)).toEqual([
-      'answer 1',
-      'answer 2',
-    ]);
+    expect(turns.map((t) => t.response.text)).toEqual(['answer 1', 'answer 2']);
   });
 
   it('exports only memory records reachable from this session', async () => {
@@ -557,9 +681,7 @@ describe('exportOmniTrajectory', () => {
       'a'.repeat(64),
       'b'.repeat(64),
     ]);
-    expect(
-      withMedia.filter((r) => r.kind === 'execution'),
-    ).toHaveLength(1);
+    expect(withMedia.filter((r) => r.kind === 'execution')).toHaveLength(1);
   });
 
   it('degrades to transcript-only WITHOUT touching a corrupt ledger', async () => {
