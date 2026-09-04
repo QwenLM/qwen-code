@@ -99,12 +99,18 @@ export const answerCommand: CommandModule<unknown, AnswerArgs> = {
       .middleware((argv) => {
         // Fold the verbatim tail (`answer <id> -- --force`) into the
         // answer text, the way `mcp add` folds `--` into server args.
-        const verbatim = argv['--'];
+        const args = argv as unknown as {
+          text?: string | string[];
+          '--'?: string[];
+        };
+        const verbatim = args['--'];
         if (verbatim && verbatim.length > 0) {
-          argv.text = [
-            ...((argv.text as string[] | undefined) ?? []),
-            ...verbatim.map(String),
-          ];
+          const existing = Array.isArray(args.text)
+            ? args.text
+            : args.text
+              ? [args.text]
+              : [];
+          args.text = [...existing, ...verbatim.map(String)];
         }
       }) as Argv<AnswerArgs>,
   handler: async (argv) => {
