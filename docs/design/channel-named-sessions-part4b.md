@@ -24,10 +24,12 @@ proves exact creation and restart recovery" — and then requires:
 The start gate was judged passed when Part 4A merged under human approval,
 backed by the reviewer-run real-daemon verification on #10643 (Reviewer Plan
 15/15, tamper matrix 17/17). This design satisfies the six transfer
-requirements element by element. It also deletes nothing: the one destructive
-candidate identified during this design's review (orphan-reap worktree
-cleanup) was moved out to follow-up issue #11024, keeping this part's
-contract literally "no deletion".
+requirements element by element. It also deletes no user-visible state: the
+one destructive candidate identified during this design's review
+(orphan-reap worktree cleanup) was moved out to follow-up issue #11024, and
+the transfer's own rollback removes only artifacts the reset created — the
+replacement session's sidecar and record — never the worktree, its files,
+its branch, the ownership marker, or the old session's state.
 
 ## Decision
 
@@ -103,8 +105,8 @@ Re-scoped during this design's review, with reasons recorded in
 ## Goals
 
 1. `/clear`, `/new`, and `/reset` on a selected worktree task produce a fresh
-   conversation in the same verified worktree, with no file deletion
-   anywhere in this part.
+   conversation in the same verified worktree, with no deletion of
+   user-visible or pre-existing state anywhere in this part.
 2. Ownership transfer is compensatable: every crash window either leaves the
    old session authoritative or is completed by an idempotent retry or a
    typed superseded redirect. No window strands the task.
@@ -120,9 +122,12 @@ Re-scoped during this design's review, with reasons recorded in
 
 ## Non-goals
 
-- Deleting any file, directory, worktree, or branch. The orphan-reap
-  cleanup and the sibling `POST /sessions/delete` worktree leak are tracked
-  in follow-up issue #11024.
+- Deleting any user-visible or pre-existing state: the worktree, its branch,
+  the files within it, the ownership marker, or `S_old`'s sidecar,
+  transcript, and record. The transfer's rollback may remove only artifacts
+  the reset itself created — `S_new`'s sidecar and session record. The
+  orphan-reap cleanup and the sibling `POST /sessions/delete` worktree leak
+  are tracked in follow-up issue #11024.
 - Deleting a task or its registry record. Task purge is a separate feature;
   names of closed tasks remain occupied, as in Part 2.
 - Automatic merge-back, push, rebase, or conflict resolution for worktree
@@ -133,9 +138,11 @@ Re-scoped during this design's review, with reasons recorded in
 - Resetting a running or permission-pending task. The user cancels first.
 - Changing Part 3 labels, permission correlation, cancellation, registry
   schema (stays version 1), transcripts, or audit hashes.
-- The R8-1 create-rollback orphan fix, the R8-3 reattach-guard heal, the
-  R1-1 marker-create leak fix, and the F3 parser fix — all land separately
-  (see the disposition section).
+
+In scope, contrary to an earlier draft of this section: the R8-1
+create-rollback orphan fix, the R8-3 reattach-guard heal, the R1-1
+marker-create leak fix, and the F3 parser fix all land in this PR alongside
+the design (see the disposition table).
 
 ## Verified baseline (from Part 4A)
 
@@ -439,17 +446,34 @@ path and is subsumed by the transfer on success. Quiescence is additionally
 re-verified immediately before the marker flip.
 
 If `S_old`'s sidecar already records `supersededBy: S_new`, a previous reset
-crashed mid-transfer. The route then revalidates the recorded replacement:
-when `S_new` exists in the catalog, its own sidecar is strict-valid for the
-same worktree, its `supersedes` link names `S_old`, and it is quiescent, the
-route completes the interrupted transfer for that same `S_new` — a marker
-that already names `S_new` short-circuits the transfer step, so a crash after
-the commit point resumes as a no-op (idempotent resume). When `S_new` does
-not validate, the route rolls the partial attempt back to the pre-transfer
-state — remove `supersededBy` from `S_old`'s sidecar, delete `S_new`'s
-sidecar, orphan-confirmed-remove `S_new` — and then proceeds with a fresh
-replacement. Either way a retried `/clear` converges on exactly one owner
-instead of piling up replacement sessions.
+crashed mid-transfer. The route reads the marker before choosing its
+recovery shape, because the marker is what says which side of the commit
+point the crash landed on:
+
+- **Marker names `S_new` — the transfer committed.** `S_new` is the
+  authoritative owner and is never rolled back. When its catalog record,
+  sidecar, and `supersedes` link revalidate and it is quiescent, the route
+  completes the interrupted transfer for that same `S_new` and returns it —
+  a crash after the rename resumes as a no-op (idempotent resume). When it
+  is busy, the route fails closed with `worktree_reset_active`: a busy
+  replacement is a session in use (for example one reached through the
+  superseded redirect and prompted by another client), not an invalid one,
+  and a later retry converges once it is idle. Any other revalidation
+  failure (missing record, corrupt sidecar, mismatched link, tampered
+  marker) fails closed for operator repair. Deleting the session the marker
+  names would strand the task permanently: the marker would name a deleted
+  session, restore of `S_old` would fail on marker mismatch, and a retried
+  reset would fail precondition 4, which requires the marker to be `valid`
+  naming `S_old` or `missing`.
+- **Marker names `S_old`, or is missing with a valid sidecar — pre-commit.**
+  `S_new` is provably non-authoritative, so the destructive rollback is
+  correct here: remove `supersededBy` from `S_old`'s sidecar, delete
+  `S_new`'s sidecar, orphan-confirmed-remove `S_new` — then proceed with a
+  fresh replacement.
+
+Either way a retried `/clear` converges on exactly one owner instead of
+piling up replacement sessions, and no recovery path deletes the session the
+marker names.
 
 ### Transfer protocol
 
@@ -483,15 +507,18 @@ Ordered steps, with the crash behavior of each:
    Crash: restore of `S_old` now sees the superseded link; because the marker
    still names `S_old`, the redirect target is not yet authoritative, so
    restore fails closed with the interrupted-transfer signal and a retry of
-   the reset resumes and completes the transfer. This is the one window where
+   the reset takes the pre-commit recovery shape: roll the partial attempt
+   back and proceed with a fresh replacement. This is the one window where
    the task is temporarily unrestorable, and retry is the documented repair.
 5. Re-verify quiescence — a prompt admitted in the check-to-arm window and
    still winding down aborts the transfer here — then transfer the marker to
    `S_new` (primitive below). This is the point of no return.
-   Crash before the commit: marker still names `S_old`; a retried reset
-   resumes and completes. Crash after the commit: marker, both sidecars, and
-   the catalog agree that `S_new` owns the worktree; `S_old` restores as
-   superseded and redirects.
+   Crash before the commit: marker still names `S_old`; a retried reset takes
+   the pre-commit recovery shape (rollback plus fresh replacement). Crash
+   after the commit: marker, both sidecars, and the catalog agree that
+   `S_new` owns the worktree; `S_old` restores as superseded and redirects,
+   and a retried reset takes the committed recovery shape (no-op resume or
+   fail-closed on a busy replacement — never rollback).
 6. Re-assert the runtime generation. If `S_old` is live in the bridge, sever
    its residual client attaches and clear its in-memory worktree association,
    so the runtime view matches the transferred on-disk ownership; `S_old`
@@ -885,6 +912,12 @@ implementation and is not committed.
   pre-transfer crashes leave `S_old` authoritative; post-transfer crashes
   restore `S_new`; a retried reset completes a half-finished transfer exactly
   once, and a marker that already names `S_new` makes the resume a no-op.
+- Post-flip resume with a busy replacement: crash past the marker flip, make
+  `S_new` busy (a client reached it through the superseded redirect), retry
+  the reset of `S_old` — the route fails closed with `worktree_reset_active`
+  and the marker, `S_new`'s sidecar, and `S_new`'s record all survive; a
+  later retry once `S_new` is idle completes as a no-op resume. The
+  destructive rollback must never run against the session the marker names.
 - Controlled failure at steps 4–5 compensates to the exact pre-reset state.
 - Marker transfer never follows a swapped-in symlink, never leaves a partial
   or empty marker, and re-reads the owner at the commit point.
@@ -1043,12 +1076,12 @@ is what prevents the old session from reclaiming the worktree.
 
 ### Land the orphan-reap worktree cleanup in this part
 
-Rejected during this design's review. It is the only file-deleting path in
-the series, and review showed its correct shape (call-site placement,
-`kind === 'removed'` gating, supersede-link refusal, the safe-delete branch
-invariant) needs a dedicated review cycle rather than riding beside a part
-whose contract is "no deletion". It is fully specified in follow-up issue
-#11024.
+Rejected during this design's review. It is the only path in the series that
+deletes user-visible state, and review showed its correct shape (call-site
+placement, `kind === 'removed'` gating, supersede-link refusal, the
+safe-delete branch invariant) needs a dedicated review cycle rather than
+riding beside a part whose contract is "no deletion of user-visible state".
+It is fully specified in follow-up issue #11024.
 
 ## Exit criteria
 
@@ -1057,8 +1090,9 @@ busy and deferred-prompt-parked reset refuse cleanly; a missing marker is
 recoverable only through reset; a tampered marker never recovers
 automatically; a half-finished transfer is completed by retry and healed
 through the superseded redirect; the under-attesting restore branch is gone
-and the deferred-prompt visibility fix closes R8-2; and no path in the part
-deletes a file.
+and the deferred-prompt visibility fix closes R8-2; and no path deletes
+user-visible or pre-existing state — rollback removes only the replacement
+session's own sidecar and record.
 
 Issue #10103 closes when the above holds **and** the remaining dispositions
 in the table are satisfied: the four residual fixes (R8-1, R8-3, R1-1, F3),
