@@ -215,6 +215,81 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 }
 ```
 
+#### Worked example: a hosted OpenAI-compatible `/v1` endpoint
+
+The most common mistake with hosted gateways is small but fatal — the model never appears or requests hit the wrong protocol. Three details matter:
+
+1. **`security.auth.selectedType` must be `"openai"`** — the `anthropic`/`gemini` protocols will not be routed to this host.
+2. **`baseUrl` is the `/v1` root**, not `/v1/chat/completions` — the client appends the path.
+3. **Use the built-in `openai` provider key** in `modelProviders` unless you add a top-level `providerProtocol` mapping for a custom id (see [Custom provider ids](#custom-provider-ids-providerprotocol)); an unmapped custom id is skipped with a warning and its models never show up in `/model`.
+
+```json
+{
+  "security": {
+    "auth": {
+      "selectedType": "openai",
+      "apiKey": "sk-your-gateway-key",
+      "baseUrl": "https://gateway.example.com/v1"
+    }
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen3-max",
+        "name": "Qwen3 Max (via gateway)",
+        "baseUrl": "https://gateway.example.com/v1",
+        "generationConfig": {
+          "timeout": 120000,
+          "maxRetries": 3
+        }
+      }
+    ]
+  }
+}
+```
+
+Prefer `envKey` over a literal `apiKey` in shared settings files — with `envKey: "GATEWAY_API_KEY"` the credential is read from the environment at runtime and never persisted.
+
+#### Worked example: MindsHub (OpenAI- and Anthropic-compatible gateway)
+
+[MindsHub](https://mindshub.ai) exposes both an OpenAI Chat Completions endpoint (`POST https://api.mindshub.ai/v1/chat/completions`) and an Anthropic Messages endpoint (`POST https://api.mindshub.ai/v1/messages`) under one bearer-token API key, covering Claude, GPT, Gemini, Kimi, DeepSeek, Qwen, GLM, Grok and more. Either protocol works — pick per model:
+
+```json
+{
+  "env": {
+    "MINDSHUB_API_KEY": "your-mindshub-key"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "deepseek-v3",
+        "name": "DeepSeek V3 (via MindsHub)",
+        "envKey": "MINDSHUB_API_KEY",
+        "baseUrl": "https://api.mindshub.ai/v1",
+        "generationConfig": {
+          "timeout": 120000,
+          "maxRetries": 3
+        }
+      }
+    ],
+    "anthropic": [
+      {
+        "id": "claude-sonnet-4",
+        "name": "Claude Sonnet 4 (via MindsHub)",
+        "envKey": "MINDSHUB_API_KEY",
+        "baseUrl": "https://api.mindshub.ai/v1",
+        "generationConfig": {
+          "timeout": 120000,
+          "maxRetries": 3
+        }
+      }
+    ]
+  }
+}
+```
+
+Both entries share `MINDSHUB_API_KEY`; the same key is presented as a bearer token on either protocol. Model ids are whatever the gateway catalogs — the examples above are placeholders, check the MindsHub model list for current names.
+
 ### Anthropic (`anthropic`)
 
 ```json
