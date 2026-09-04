@@ -27,7 +27,14 @@ jobs:
   dependency-cve:
     name: 'Dependency CVE audit'
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 15
+    # A healthy run finishes in ~4-6 minutes. The ceiling covers the audit
+    # retry below at its worst: three audit sites (the root call plus the two
+    # vendored lockfiles the loop does not skip), two attempts each, every
+    # attempt capped at 300s with a 15s backoff between them — 3 x 615s = 1845s
+    # of audit work — plus checkout, setup and the installs. A ceiling below
+    # that cancels the job mid-outage, so the `not a CVE finding` verdict below
+    # would never be emitted and the run would surface as a bare cancel.
+    timeout-minutes: 40
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -49,10 +56,55 @@ jobs:
       # Hard gate: the high-severity baseline is clean, so any new high CVE
       # fails the check. Keep scripts/tests/security-workflows.test.js in
       # sync with this policy.
+      #
+      # A registry-side audit failure is not a CVE finding, so `audit` retries
+      # it once and then reports it as its own error. npm's retired
+      # `security/audits/quick` route intermittently answers HTTP 400 ("Invalid
+      # package tree") for a tree it accepted minutes earlier — sometimes after
+      # hanging for 6+ minutes — and that used to reach the same `exit 1` as a
+      # real advisory, reading as a CVE failure on branches that changed no
+      # dependency at all. A persistent outage still fails the job; the gate
+      # must not fail open.
+      #
+      # Two details this wrapper depends on:
+      # - Output is captured, not piped. Reading npm's status out of a pipeline
+      #   would tie the verdict to `defaults.run.shell` still implying
+      #   `-o pipefail`; without it a real high-severity finding exits 0.
+      # - Every attempt is capped by `timeout`, which is what keeps the job
+      #   ceiling above reachable only in a real outage.
       - name: 'Audit production dependencies'
         run: |
+          audit() {
+            local attempt=1 out rc retryable
+            while :; do
+              rc=0
+              retryable=0
+              out="$(timeout 300 "$@" 2>&1)" || rc=$?
+              printf '%s\n' "$out"
+              if [ "$rc" -eq 0 ]; then
+                return 0
+              fi
+              case "$out" in
+                *'audit endpoint returned an error'*) retryable=1 ;;
+              esac
+              # 124 = `timeout` killed a stalled audit.
+              if [ "$rc" -eq 124 ]; then
+                retryable=1
+              fi
+              if [ "$retryable" -eq 1 ] && [ "$attempt" -lt 2 ]; then
+                echo "::warning::npm audit returned no verdict (attempt $attempt/2), retrying"
+                attempt=$((attempt + 1))
+                sleep 15
+                continue
+              fi
+              if [ "$retryable" -eq 1 ]; then
+                echo "::error::npm audit returned no verdict after $attempt attempts (registry endpoint error or timeout). This is an audit-infrastructure failure, not a CVE finding - re-run this job."
+              fi
+              return "$rc"
+            done
+          }
           status=0
-          npm audit --omit=dev --audit-level=high || status=$?
+          audit npm audit --omit=dev --audit-level=high || status=$?
           for lockfile in packages/*/package-lock.json; do
             [ -f "$lockfile" ] || continue
             # Covered by the root workspace audit; this vendored lockfile is not installed directly.
@@ -61,7 +113,7 @@ jobs:
             (
               cd "$package_dir"
               npm ci --ignore-scripts --no-audit --progress=false --workspaces=false &&
-                npm audit --omit=dev --audit-level=high --workspaces=false
+                audit npm audit --omit=dev --audit-level=high --workspaces=false
             ) || status=$?
           done
           exit "$status"
