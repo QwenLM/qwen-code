@@ -16,10 +16,16 @@ import {
   ledgerBlockCount,
   ledgerCoversBlockPrefix,
   ledgerForWindow,
+  ledgerInsertIndexForOrdinal,
   ledgerLiveTailFirstBlockId,
   ledgerPageEntries,
+  newerGapAt,
+  olderGapAt,
+  recordLedgerAnchoredPage,
   recordLedgerLoadPage,
   recordLedgerPrependPage,
+  resolveLedgerGap,
+  type TranscriptGap,
   type TranscriptPageLedger,
   type TranscriptPageLedgerEntry,
   type TranscriptPageSpan,
@@ -59,11 +65,15 @@ function entry(
   return created;
 }
 
-/** Compact span rendering: `gap:<older locator>` and `page:<id>`. */
+/** Compact span rendering: `gap:<locator>` and `page:<id>`. */
 function spanSummary(ledger: TranscriptPageLedger): string[] {
   return ledger.spans.map((span) =>
     span.kind === 'gap'
-      ? `gap:${span.gap.older?.beforeRecordId ?? 'unlocated'}`
+      ? `gap:${
+          span.gap.older?.beforeRecordId ??
+          span.gap.newer?.cursor ??
+          'unlocated'
+        }`
       : `page:${span.entry.id}`,
   );
 }
@@ -533,5 +543,181 @@ describe('ledgerForWindow', () => {
     const fresh = ledgerForWindow(loadedLedger(), 's1', []);
     expect(pageIds(fresh)).toEqual([]);
     expect(fresh.sessionId).toBe('s1');
+  });
+});
+
+describe('anchored page placement', () => {
+  const oldPage = [block('o1', { sourceRecordIds: ['ro1'] })];
+  const newPage = [block('n1', { sourceRecordIds: ['rn1'] })];
+  const anchored = [block('a1', { sourceRecordIds: ['ra1'] })];
+
+  /** gap, old page, interior gap, new page. */
+  function anchoredWindow(): TranscriptPageLedger {
+    return {
+      sessionId: 's1',
+      spans: [
+        { kind: 'gap', gap: olderGapAt('ro1') },
+        { kind: 'page', entry: entry('old', oldPage, 'load') },
+        { kind: 'gap', gap: {} },
+        { kind: 'page', entry: entry('new', newPage, 'load') },
+      ],
+    };
+  }
+
+  it('lands a page inside the gap it resolves', () => {
+    const placed = recordLedgerAnchoredPage(
+      anchoredWindow(),
+      entry('mid', anchored, 'anchored'),
+      2,
+      { older: olderGapAt('ra1', 'snap-2'), newer: newerGapAt('cursor-1') },
+    );
+    expect(spanSummary(placed)).toEqual([
+      'gap:ro1',
+      'page:old',
+      'gap:ra1',
+      'page:mid',
+      'gap:cursor-1',
+      'page:new',
+    ]);
+  });
+
+  it('inserts beside a page without consuming it', () => {
+    const placed = recordLedgerAnchoredPage(
+      anchoredWindow(),
+      entry('tail', anchored, 'continuation'),
+      4,
+      {},
+    );
+    expect(pageIds(placed)).toEqual(['old', 'new', 'tail']);
+  });
+
+  it('closes both sides when the read reached its neighbours', () => {
+    const placed = recordLedgerAnchoredPage(
+      anchoredWindow(),
+      entry('mid', anchored, 'anchored'),
+      2,
+      {},
+    );
+    expect(spanSummary(placed)).toEqual([
+      'gap:ro1',
+      'page:old',
+      'page:mid',
+      'page:new',
+    ]);
+  });
+
+  it('places a page by ordinal, skipping gaps', () => {
+    const ordinals = new Map([
+      ['ro1', 10],
+      ['rn1', 40],
+    ]);
+    const ledger = anchoredWindow();
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 5)).toBe(1);
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 25)).toBe(3);
+    expect(ledgerInsertIndexForOrdinal(ledger, ordinals, 90)).toBe(4);
+  });
+
+  it('refuses to place a page when a retained page has no known ordinal', () => {
+    const ledger = recordLedgerLoadPage(
+      createTranscriptPageLedger('s1'),
+      entry('load', blocks('b1', 'b2')),
+      false,
+    );
+    // Guessing a position could interleave two ranges that were never adjacent.
+    expect(
+      ledgerInsertIndexForOrdinal(ledger, new Map([['ra1', 5]]), 5),
+    ).toBeUndefined();
+  });
+});
+
+describe('resolveLedgerGap', () => {
+  const oldPage = [block('o1', { sourceRecordIds: ['ro1'] })];
+  const newPage = [block('n1', { sourceRecordIds: ['rn1'] })];
+
+  function windowWith(gap: TranscriptGap, olderCursor?: string) {
+    return {
+      sessionId: 's1',
+      spans: [
+        {
+          kind: 'page' as const,
+          entry: createLedgerPageEntry(
+            {
+              id: 'old',
+              source: 'load' as const,
+              ...(olderCursor ? { nextCursor: olderCursor } : {}),
+            },
+            oldPage,
+          )!,
+        },
+        { kind: 'gap' as const, gap },
+        {
+          kind: 'page' as const,
+          entry: createLedgerPageEntry(
+            { id: 'new', source: 'anchored' as const, snapshot: 'snap-9' },
+            newPage,
+          )!,
+        },
+      ],
+    } satisfies TranscriptPageLedger;
+  }
+
+  it('prefers the cursor the gap itself carries', () => {
+    expect(resolveLedgerGap(windowWith(newerGapAt('cursor-1')), 1)).toEqual({
+      kind: 'cursor',
+      cursor: 'cursor-1',
+    });
+  });
+
+  it('borrows the forward cursor the older neighbour minted', () => {
+    expect(
+      resolveLedgerGap(windowWith({}, 'cursor-old'), 1, {
+        atRecordId: 'ra1',
+        snapshot: 'snap-2',
+      }),
+    ).toEqual({ kind: 'cursor', cursor: 'cursor-old' });
+  });
+
+  it('re-anchors when no neighbour holds a cursor', () => {
+    expect(
+      resolveLedgerGap(windowWith({}), 1, {
+        atRecordId: 'ra1',
+        snapshot: 'snap-2',
+      }),
+    ).toEqual({ kind: 'anchor', atRecordId: 'ra1', snapshot: 'snap-2' });
+  });
+
+  it('backfills from the newer neighbour across a hole with no turn in it', () => {
+    // A gap lying entirely inside one long turn has no navigation turn to
+    // re-anchor on, so the only way across it is walking newest-to-oldest from
+    // the page that follows.
+    expect(resolveLedgerGap(windowWith({}), 1)).toEqual({
+      kind: 'older',
+      beforeRecordId: 'rn1',
+      snapshot: 'snap-9',
+    });
+  });
+
+  it('falls back to the gap own older locator with no neighbours', () => {
+    const ledger: TranscriptPageLedger = {
+      sessionId: 's1',
+      spans: [{ kind: 'gap', gap: olderGapAt('ro1', 'snap-1') }],
+    };
+    expect(resolveLedgerGap(ledger, 0)).toEqual({
+      kind: 'older',
+      beforeRecordId: 'ro1',
+      snapshot: 'snap-1',
+    });
+  });
+
+  it('reports an unlocated gap with nothing to borrow as unresolvable', () => {
+    const ledger: TranscriptPageLedger = {
+      sessionId: 's1',
+      spans: [{ kind: 'gap', gap: {} }],
+    };
+    expect(resolveLedgerGap(ledger, 0)).toBeUndefined();
+  });
+
+  it('ignores an index that is not a gap', () => {
+    expect(resolveLedgerGap(windowWith({}), 0)).toBeUndefined();
   });
 });

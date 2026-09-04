@@ -115,6 +115,8 @@ interface MockSession {
     nextCursor?: string;
     partial?: true;
     replayError?: string;
+    targetRecordId?: string;
+    hasOlder?: boolean;
   }>;
   getTurnIndexPage: (opts: unknown) => Promise<DaemonSessionTurnIndexPage>;
   replaySnapshot: {
@@ -17570,6 +17572,143 @@ describe('DaemonSessionProvider', () => {
         await flushPromises();
       });
       expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledTimes(1);
+    });
+
+    it('lands an anchored read bound to the snapshot that produced the turn', async () => {
+      const session = pushSession('session-turn-index-open');
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [
+          {
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'anchored content' },
+                _meta: {
+                  'qwen.session.recordId': 'record-0',
+                  qwenTranscript: { sourceRecordIds: ['record-0'] },
+                },
+              },
+            },
+          },
+        ],
+        hasMore: false,
+        hasOlder: false,
+        targetRecordId: 'record-0',
+      });
+      const getIndex = await renderIndexHarness(['session_turn_navigation']);
+
+      let result: Awaited<
+        ReturnType<NonNullable<typeof getIndex>['openTurnAt']>
+      >;
+      await act(async () => {
+        const opened = getIndex()?.openTurnAt('record-0');
+        await flushPromises();
+        result = await opened;
+      });
+
+      // `atRecordId` must travel with the snapshot that produced it and with no
+      // other anchor: the daemon rejects every other combination with 400.
+      expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+        session.sessionId,
+        {
+          atRecordId: 'record-0',
+          snapshot: 'snapshot-1',
+          limit: 200,
+          clientId: session.clientId,
+        },
+      );
+      expect(result).toEqual({ ok: true, targetRecordId: 'record-0' });
+    });
+
+    it('refuses a turn the index does not carry without hitting the daemon', async () => {
+      const session = pushSession('session-turn-index-unknown');
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      const getIndex = await renderIndexHarness(['session_turn_navigation']);
+      let result: { ok: boolean; reason?: string } | undefined;
+      await act(async () => {
+        const opened = getIndex()?.openTurnAt('record-missing');
+        await flushPromises();
+        result = await opened;
+      });
+      expect(result).toEqual({ ok: false, reason: 'unavailable' });
+      expect(sdkMocks.getSessionTranscriptPage).not.toHaveBeenCalled();
+    });
+
+    it('reports an anchor the daemon rejects as invalid', async () => {
+      const session = pushSession('session-turn-index-bad-anchor');
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      sdkMocks.getSessionTranscriptPage.mockRejectedValue(
+        new DaemonHttpError(
+          400,
+          { code: 'invalid_turn_anchor' },
+          'unknown turn anchor',
+        ),
+      );
+      const getIndex = await renderIndexHarness(['session_turn_navigation']);
+      let result: { ok: boolean; reason?: string } | undefined;
+      await act(async () => {
+        const opened = getIndex()?.openTurnAt('record-0');
+        await flushPromises();
+        result = await opened;
+      });
+      expect(result).toEqual({ ok: false, reason: 'invalid_anchor' });
+      // A bad anchor says nothing about the index, so it stays usable.
+      expect(getIndex()?.status).toBe('ready');
+    });
+
+    it('drops the snapshot and re-seeds when the chain moved underneath it', async () => {
+      const session = pushSession('session-turn-index-gone');
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      sdkMocks.getSessionTranscriptPage.mockRejectedValue(
+        new DaemonHttpError(
+          409,
+          { code: 'transcript_snapshot_unavailable' },
+          'snapshot unavailable',
+        ),
+      );
+      const getIndex = await renderIndexHarness(['session_turn_navigation']);
+      let result: { ok: boolean; reason?: string } | undefined;
+      await act(async () => {
+        const opened = getIndex()?.openTurnAt('record-0');
+        await flushPromises();
+        result = await opened;
+      });
+      expect(result).toEqual({ ok: false, reason: 'snapshot_gone' });
+      await act(async () => {
+        await flushPromises();
+      });
+      // Invalidation lands the store on `idle`, which is the seeding effect's
+      // trigger, so the index refetches its tail and the next jump can anchor.
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledTimes(2);
+      expect(getIndex()?.status).toBe('ready');
+    });
+
+    it('refuses a jump entirely when the capability is absent', async () => {
+      pushSession('session-turn-index-open-off');
+      const getIndex = await renderIndexHarness([
+        'session_transcript_pagination',
+      ]);
+      let result: { ok: boolean; reason?: string } | undefined;
+      await act(async () => {
+        const opened = getIndex()?.openTurnAt('record-0');
+        await flushPromises();
+        result = await opened;
+      });
+      expect(result).toEqual({ ok: false, reason: 'unsupported' });
+      expect(sdkMocks.getSessionTranscriptPage).not.toHaveBeenCalled();
     });
   });
 });

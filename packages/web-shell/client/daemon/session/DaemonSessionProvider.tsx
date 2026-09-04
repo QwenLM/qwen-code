@@ -80,7 +80,12 @@ import {
   clipLedgerToRetainedBlocks,
   createLedgerPageEntry,
   createTranscriptPageLedger,
+  ledgerBlockOffset,
   ledgerForWindow,
+  ledgerInsertIndexForOrdinal,
+  newerGapAt,
+  olderGapAt,
+  recordLedgerAnchoredPage,
   recordLedgerLoadPage,
   recordLedgerPrependPage,
   type TranscriptPageLedger,
@@ -92,12 +97,14 @@ import {
   buildTurnLocator,
   classifyTurnIndexFailure,
   createSessionTurnIndexState,
+  findTurnIndexEntry,
   invalidateTurnIndexSnapshot,
   latchTurnIndexUnsupported,
   planEnsurePageRequest,
   planOlderPageRequest,
   planTailRefresh,
   resetToTailPage,
+  turnOrdinalMap,
   withTurnIndexStatus,
   type SessionTurnIndexState,
 } from './turnIndexStore.js';
@@ -193,6 +200,29 @@ export interface DaemonTranscriptHistory {
 }
 
 /**
+ * Why an anchored open could not land its page.
+ *
+ * The three window reasons are kept apart because they mean different things to
+ * a caller: `page_too_large` is the daemon refusing to serialise the page,
+ * `window_full` is this client's retention budget being full right now (freeing
+ * something makes a retry viable), and `window_impossible` is the page alone
+ * exceeding the whole budget (no occupancy can ever admit it, so retrying is
+ * pointless).
+ */
+export type OpenTranscriptAtTurnFailure =
+  | 'unsupported'
+  | 'invalid_anchor'
+  | 'snapshot_gone'
+  | 'page_too_large'
+  | 'window_full'
+  | 'window_impossible'
+  | 'unavailable';
+
+export type OpenTranscriptAtTurnResult =
+  | { ok: true; targetRecordId: string }
+  | { ok: false; reason: OpenTranscriptAtTurnFailure };
+
+/**
  * The session-wide turn index: sparse metadata for every durable turn, paged
  * independently of the transcript blocks.
  *
@@ -207,6 +237,12 @@ export interface DaemonSessionTurnIndex extends SessionTurnIndexState {
   ensurePage(ordinal: number): Promise<void>;
   /** Fetches the next older metadata page, if any older turn is uncovered. */
   loadOlderTurns(): Promise<void>;
+  /**
+   * Lands a random-access transcript page at a persisted turn and reports the
+   * record to focus. Never fails the session, the stream, or access to already
+   * retained history: a refusal only means this jump did not land.
+   */
+  openTurnAt(turnId: string): Promise<OpenTranscriptAtTurnResult>;
 }
 
 interface LiveJournalRepairEpisode {
@@ -554,6 +590,33 @@ function applyTranscriptHistory(
       ...history.unrecognizedDiagnostics,
       ...current.unrecognizedDiagnostics,
     ].slice(-UNRECOGNIZED_DIAGNOSTICS_LIMIT),
+  };
+}
+
+/**
+ * Splices an admitted page into the middle of the window.
+ *
+ * `applyTranscriptHistory` can only prepend, because a sequential older page is
+ * by definition older than everything retained. An anchored random-access read
+ * lands between retained pages, or between the newest page and the live tail, so
+ * the blocks go in at `insertIndex` instead. Everything else — the byte total,
+ * the monotone block-id counter, and the sentinel-aware tool and permission
+ * merges — is position-independent and is reused as-is, which keeps the two
+ * admission paths from drifting apart.
+ */
+function applyTranscriptHistoryAt(
+  current: DaemonTranscriptState,
+  history: TranscriptHistoryMaterialization,
+  insertIndex: number,
+): DaemonTranscriptState {
+  const index = Math.max(0, Math.min(insertIndex, current.blocks.length));
+  return {
+    ...applyTranscriptHistory(current, history),
+    blocks: [
+      ...current.blocks.slice(0, index),
+      ...history.blocks,
+      ...current.blocks.slice(index),
+    ],
   };
 }
 
@@ -951,6 +1014,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     useRef<ReturnType<typeof setTimeout>>(undefined);
   const turnIndexRefreshTimerRef =
     useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Bumped per anchored open so a jump superseded by a newer one cannot commit
+  // its page over the window the newer jump produced.
+  const openTurnGenerationRef = useRef(0);
   const commitTurnIndex = useCallback((next: SessionTurnIndexState) => {
     turnIndexRef.current = next;
     setTurnIndex(next);
@@ -4516,6 +4582,213 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     if (promptStatus !== 'idle') return;
     queueMicrotask(() => tryLiveJournalRepairRef.current?.());
   }, [promptStatus]);
+  /**
+   * Projects one fetched transcript page's wire events into UI events.
+   *
+   * Shared by the sequential prepend and the anchored random-access read so
+   * both normalize identically: history pages must not echo the local prompt,
+   * malformed events are skipped with a notice rather than aborting the page,
+   * and subagent summary mode projects the same way in both directions.
+   */
+  const projectTranscriptPageEvents = useCallback(
+    (
+      events: readonly DaemonEvent[],
+      clientId: string | undefined,
+    ): DaemonUiEvent[] => {
+      const replayOpts = {
+        ...eventOptionsRef.current,
+        suppressOwnUserEcho: false,
+      };
+      const uiEvents: DaemonUiEvent[] = [];
+      for (const replayEvent of events) {
+        try {
+          const transcriptEvents = filterDaemonUiEventsForTranscript(
+            replayEvent,
+            normalizeAndFilterEvent(
+              replayEvent,
+              clientId,
+              replayOpts,
+              setConnection,
+              { updateConnection: false },
+            ),
+            addNotice,
+            dismissNotice,
+          );
+          uiEvents.push(
+            ...(subagentTranscriptModeRef.current === 'summary'
+              ? projectMainTranscriptEvents(transcriptEvents)
+              : transcriptEvents),
+          );
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          addNotice({
+            severity: 'warning',
+            category: 'protocol',
+            operation: 'normalize_event',
+            code: 'daemon.replay_event_malformed',
+            message: 'Skipped malformed history event',
+            debugMessage: message,
+            recoverable: true,
+          });
+          console.warn(
+            '[DaemonSessionProvider] skipped malformed history event:',
+            error,
+          );
+        }
+      }
+      return uiEvents;
+    },
+    [addNotice, dismissNotice],
+  );
+  const openTurnAt = useCallback(
+    async (turnId: string): Promise<OpenTranscriptAtTurnResult> => {
+      const session = sessionRef.current;
+      const index = turnIndexRef.current;
+      if (
+        !session ||
+        index.status !== 'ready' ||
+        index.sessionId !== session.sessionId
+      ) {
+        // No capability, no seeded index, or a stale one: nothing to anchor a
+        // read to, so there is no random access to offer.
+        return { ok: false, reason: 'unsupported' };
+      }
+      const target = findTurnIndexEntry(index, turnId);
+      if (!target) return { ok: false, reason: 'unavailable' };
+      const generation = (openTurnGenerationRef.current += 1);
+      try {
+        // The protocol requires an explicit record anchor to travel with the
+        // snapshot that produced it, and rejects the pair combined with any
+        // other anchor.
+        const page = await session.getTranscriptPage({
+          atRecordId: turnId,
+          snapshot: target.snapshot,
+          limit: historyPageSizeRef.current ?? TURN_INDEX_PAGE_SIZE,
+          clientId: session.clientId,
+        });
+        if (
+          sessionRef.current !== session ||
+          generation !== openTurnGenerationRef.current
+        ) {
+          // A newer jump, a session switch, or an unmount superseded this one.
+          return { ok: false, reason: 'unavailable' };
+        }
+        if (page.partial || page.replayError) {
+          return { ok: false, reason: 'unavailable' };
+        }
+        const focusRecordId = page.targetRecordId ?? turnId;
+        const preCommit = store.getSnapshot();
+        const ledger = ledgerForWindow(
+          transcriptLedgerRef.current,
+          session.sessionId,
+          preCommit.blocks,
+        );
+        const uiEvents = projectTranscriptPageEvents(
+          page.events,
+          session.clientId,
+        );
+        if (uiEvents.length === 0) {
+          // Every record in the page is already displayed, so the turn is
+          // already in the window and only needs focusing.
+          return { ok: true, targetRecordId: focusRecordId };
+        }
+        const admission = materializeTranscriptHistory(
+          preCommit,
+          uiEvents,
+          maxBlocks,
+        );
+        if (!admission.admitted) {
+          return {
+            ok: false,
+            reason: admission.impossible ? 'window_impossible' : 'window_full',
+          };
+        }
+        // Placement comes from snapshot-local ordinals, never from record-id
+        // ordering: ids are not ordered, and guessing a position could
+        // interleave two ranges that were never adjacent. A window the index
+        // cannot fully order takes the page at the tail instead.
+        const insertAt =
+          ledgerInsertIndexForOrdinal(
+            ledger,
+            turnOrdinalMap(index),
+            target.entry.ordinal,
+          ) ?? ledger.spans.length;
+        store.reset(
+          applyTranscriptHistoryAt(
+            preCommit,
+            admission.materialization,
+            ledgerBlockOffset(ledger, insertAt),
+          ),
+        );
+        const entry = createLedgerPageEntry(
+          {
+            id: `page-${(ledgerEntrySeqRef.current += 1)}`,
+            source: 'anchored',
+            // An anchored read continues forward, so its cursor is a forward
+            // continuation and belongs on the entry.
+            ...(page.nextCursor !== undefined
+              ? { nextCursor: page.nextCursor }
+              : {}),
+            snapshot: target.snapshot,
+          },
+          admission.materialization.blocks,
+        );
+        if (entry) {
+          transcriptLedgerRef.current = recordLedgerAnchoredPage(
+            ledger,
+            entry,
+            insertAt,
+            {
+              ...(page.hasOlder === true
+                ? { older: olderGapAt(entry.firstRecordId, target.snapshot) }
+                : {}),
+              ...(page.hasMore && page.nextCursor !== undefined
+                ? { newer: newerGapAt(page.nextCursor) }
+                : {}),
+            },
+          );
+          // Landing at the head moves the window's older boundary, so the
+          // sequential load-older affordance has to follow the page rather than
+          // keep pointing at a record that is no longer the oldest retained one.
+          const history = transcriptHistoryRef.current;
+          if (
+            insertAt === 0 &&
+            history.sessionId === session.sessionId &&
+            entry.firstRecordId !== undefined
+          ) {
+            history.beforeRecordId = entry.firstRecordId;
+            history.cursor = undefined;
+            history.hasMore = page.hasOlder === true;
+          }
+        }
+        return { ok: true, targetRecordId: focusRecordId };
+      } catch (error) {
+        const code = getDaemonErrorCode(error);
+        if (code === 'transcript_snapshot_unavailable') {
+          // The chain moved underneath the snapshot. Dropping it lands the
+          // store on `idle`, which is the seeding effect's trigger, so the
+          // index refetches its tail and the next jump anchors to a live one.
+          if (sessionRef.current === session) {
+            turnIndexAttemptRef.current = 0;
+            commitTurnIndex(invalidateTurnIndexSnapshot(turnIndexRef.current));
+          }
+          return { ok: false, reason: 'snapshot_gone' };
+        }
+        if (code === 'invalid_turn_anchor') {
+          return { ok: false, reason: 'invalid_anchor' };
+        }
+        if (
+          code === 'transcript_page_too_large' ||
+          code === 'transcript_too_large'
+        ) {
+          return { ok: false, reason: 'page_too_large' };
+        }
+        return { ok: false, reason: 'unavailable' };
+      }
+    },
+    [commitTurnIndex, maxBlocks, projectTranscriptPageEvents, store],
+  );
   const loadMoreTranscript = useCallback(
     async (options?: { force?: boolean }) => {
       const history = transcriptHistoryRef.current;
@@ -4599,51 +4872,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           );
         }
 
-        const replayOpts = {
-          ...eventOptionsRef.current,
-          suppressOwnUserEcho: false,
-        };
         const nextBeforeRecordId = page.events
           .map(getPersistedReplayRecordId)
           .find((recordId): recordId is string => recordId !== undefined);
-        const uiEvents: DaemonUiEvent[] = [];
-        for (const replayEvent of page.events) {
-          try {
-            const transcriptEvents = filterDaemonUiEventsForTranscript(
-              replayEvent,
-              normalizeAndFilterEvent(
-                replayEvent,
-                activeSession.clientId,
-                replayOpts,
-                setConnection,
-                { updateConnection: false },
-              ),
-              addNotice,
-              dismissNotice,
-            );
-            uiEvents.push(
-              ...(subagentTranscriptModeRef.current === 'summary'
-                ? projectMainTranscriptEvents(transcriptEvents)
-                : transcriptEvents),
-            );
-          } catch (error) {
-            const message =
-              error instanceof Error ? error.message : String(error);
-            addNotice({
-              severity: 'warning',
-              category: 'protocol',
-              operation: 'normalize_event',
-              code: 'daemon.replay_event_malformed',
-              message: 'Skipped malformed history event',
-              debugMessage: message,
-              recoverable: true,
-            });
-            console.warn(
-              '[DaemonSessionProvider] skipped malformed history event:',
-              error,
-            );
-          }
-        }
+        const uiEvents = projectTranscriptPageEvents(
+          page.events,
+          activeSession.clientId,
+        );
         const admission =
           uiEvents.length > 0
             ? materializeTranscriptHistory(
@@ -4793,7 +5028,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         tryLiveJournalRepairRef.current?.();
       }
     },
-    [addNotice, dismissNotice, maxBlocks, store],
+    [addNotice, maxBlocks, projectTranscriptPageEvents, store],
   );
   const transcriptHistoryValue = useMemo<DaemonTranscriptHistory>(() => {
     const active =
@@ -4818,8 +5053,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       status: active ? turnIndex.status : 'disabled',
       ensurePage: ensureTurnIndexPage,
       loadOlderTurns,
+      openTurnAt,
     };
-  }, [connection.sessionId, ensureTurnIndexPage, loadOlderTurns, turnIndex]);
+  }, [
+    connection.sessionId,
+    ensureTurnIndexPage,
+    loadOlderTurns,
+    openTurnAt,
+    turnIndex,
+  ]);
   const lastHandledSessionIdRef = useRef<
     string | undefined | typeof UNHANDLED_SESSION
   >(UNHANDLED_SESSION);

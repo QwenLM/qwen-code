@@ -28,6 +28,8 @@ export {
 export type {
   DaemonSessionTurnIndex,
   DaemonTranscriptHistory,
+  OpenTranscriptAtTurnFailure,
+  OpenTranscriptAtTurnResult,
 } from './DaemonSessionProvider.js';
 export type {
   LiveTurnEntry,

@@ -131,6 +131,27 @@ export function ledgerBlockCount(ledger: TranscriptPageLedger): number {
 }
 
 /**
+ * How many page blocks precede a span index, i.e. the flat-store offset a page
+ * inserted at that span index must be spliced in at. Gaps contribute nothing:
+ * an unloaded range occupies no blocks.
+ */
+export function ledgerBlockOffset(
+  ledger: TranscriptPageLedger,
+  spanIndex: number,
+): number {
+  let offset = 0;
+  for (
+    let index = 0;
+    index < spanIndex && index < ledger.spans.length;
+    index += 1
+  ) {
+    const span = ledger.spans[index];
+    if (span?.kind === 'page') offset += span.entry.blockCount;
+  }
+  return offset;
+}
+
+/**
  * Block id of the first live-tail block, i.e. the block right after the newest
  * page. Undefined when the ledger holds no page, in which case the whole store
  * is live tail.
@@ -265,6 +286,172 @@ export function recordLedgerPrependPage(
       ? [{ kind: 'gap', gap: olderGap(entry.firstRecordId) }, page, ...rest]
       : [page, ...rest],
   };
+}
+
+/** A gap towards older content, located by the record a fetch stopped at. */
+export function olderGapAt(
+  beforeRecordId?: string,
+  snapshot?: string,
+): TranscriptGap {
+  if (beforeRecordId === undefined) return {};
+  return {
+    older: {
+      beforeRecordId,
+      ...(snapshot !== undefined ? { snapshot } : {}),
+    },
+  };
+}
+
+/** A gap towards newer content, located by a forward continuation cursor. */
+export function newerGapAt(cursor?: string): TranscriptGap {
+  return cursor === undefined ? {} : { newer: { cursor } };
+}
+
+/**
+ * Records a page landed by a random-access read at its position in the window.
+ *
+ * `insertAt` is the span index the page goes in at. A gap span already there is
+ * consumed: the page landed inside that unloaded range, so what is still
+ * missing on either side is described by the gaps passed in, which the caller
+ * derives from the read's own `hasOlder` and forward-continuation facts rather
+ * than from an assumption that the page butted against its neighbours.
+ */
+export function recordLedgerAnchoredPage(
+  ledger: TranscriptPageLedger,
+  entry: TranscriptPageLedgerEntry,
+  insertAt: number,
+  placement: { older?: TranscriptGap; newer?: TranscriptGap },
+): TranscriptPageLedger {
+  const spans = [...ledger.spans];
+  const index = Math.max(0, Math.min(insertAt, spans.length));
+  const consumed = spans[index]?.kind === 'gap' ? 1 : 0;
+  const inserted: TranscriptPageSpan[] = [
+    ...(placement.older
+      ? ([{ kind: 'gap', gap: placement.older }] as TranscriptPageSpan[])
+      : []),
+    { kind: 'page', entry },
+    ...(placement.newer
+      ? ([{ kind: 'gap', gap: placement.newer }] as TranscriptPageSpan[])
+      : []),
+  ];
+  spans.splice(index, consumed, ...inserted);
+  return { ...ledger, spans };
+}
+
+/** The lowest ordinal a page is known to cover, when the index knows any. */
+function pageOrdinal(
+  entry: TranscriptPageLedgerEntry,
+  ordinalByRecordId: ReadonlyMap<string, number>,
+): number | undefined {
+  let lowest: number | undefined;
+  for (const recordId of entry.turnIds) {
+    const ordinal = ordinalByRecordId.get(recordId);
+    if (ordinal === undefined) continue;
+    if (lowest === undefined || ordinal < lowest) lowest = ordinal;
+  }
+  return lowest;
+}
+
+/**
+ * The span index a page landing at `targetOrdinal` belongs in: the first span
+ * covering a newer ordinal, or `spans.length` when the target is newer than
+ * everything retained, so the page lands just before the live tail.
+ *
+ * Order comes from the caller-supplied ordinal lookup because record ids are not
+ * themselves ordered. A page the index cannot place at all makes the window's
+ * order unknown, so this reports undefined rather than guessing a position that
+ * could interleave two ranges that were never adjacent.
+ */
+export function ledgerInsertIndexForOrdinal(
+  ledger: TranscriptPageLedger,
+  ordinalByRecordId: ReadonlyMap<string, number>,
+  targetOrdinal: number,
+): number | undefined {
+  for (const [index, span] of ledger.spans.entries()) {
+    if (span.kind === 'gap') continue;
+    const ordinal = pageOrdinal(span.entry, ordinalByRecordId);
+    if (ordinal === undefined) return undefined;
+    if (ordinal > targetOrdinal) return index;
+  }
+  return ledger.spans.length;
+}
+
+/** How to fetch the range a gap describes. */
+export type LedgerGapFetch =
+  | { kind: 'older'; beforeRecordId: string; snapshot?: string }
+  | { kind: 'cursor'; cursor: string }
+  | { kind: 'anchor'; atRecordId: string; snapshot: string };
+
+function neighbourPage(
+  ledger: TranscriptPageLedger,
+  gapIndex: number,
+  direction: 'older' | 'newer',
+): TranscriptPageLedgerEntry | undefined {
+  const step = direction === 'older' ? -1 : 1;
+  for (
+    let index = gapIndex + step;
+    index >= 0 && index < ledger.spans.length;
+    index += step
+  ) {
+    const span = ledger.spans[index];
+    if (span?.kind === 'page') return span.entry;
+  }
+  return undefined;
+}
+
+/**
+ * Chooses how to resolve a gap.
+ *
+ * The protocol has no "page after record X" operation, so a gap's newer side is
+ * resolvable three ways and they are tried in this order: the forward cursor the
+ * older neighbour's read minted, which is self-bound and must be sent alone;
+ * re-anchoring on a navigation turn inside the gap, which the caller supplies
+ * from the turn index and which is the only option once the older neighbour —
+ * and the cursor with it — has been evicted; and backfilling from the newer
+ * neighbour with `beforeRecordId`, which walks newest-to-oldest into the gap and
+ * is the only way across a hole that holds no navigation turn at all, because
+ * such a hole lies entirely inside one long turn.
+ *
+ * The gap's own older side needs no strategy and is the fallback: it already
+ * carries its locator. Undefined means the gap is unresolvable — no locator on
+ * either side and no neighbour to borrow one from.
+ */
+export function resolveLedgerGap(
+  ledger: TranscriptPageLedger,
+  gapIndex: number,
+  reanchor?: { atRecordId: string; snapshot: string },
+): LedgerGapFetch | undefined {
+  const span = ledger.spans[gapIndex];
+  if (span?.kind !== 'gap') return undefined;
+  const gap = span.gap;
+  if (gap.newer) return { kind: 'cursor', cursor: gap.newer.cursor };
+  const older = neighbourPage(ledger, gapIndex, 'older');
+  if (older?.nextCursor) return { kind: 'cursor', cursor: older.nextCursor };
+  if (reanchor) {
+    return {
+      kind: 'anchor',
+      atRecordId: reanchor.atRecordId,
+      snapshot: reanchor.snapshot,
+    };
+  }
+  const newer = neighbourPage(ledger, gapIndex, 'newer');
+  if (newer?.firstRecordId) {
+    return {
+      kind: 'older',
+      beforeRecordId: newer.firstRecordId,
+      ...(newer.snapshot !== undefined ? { snapshot: newer.snapshot } : {}),
+    };
+  }
+  if (gap.older) {
+    return {
+      kind: 'older',
+      beforeRecordId: gap.older.beforeRecordId,
+      ...(gap.older.snapshot !== undefined
+        ? { snapshot: gap.older.snapshot }
+        : {}),
+    };
+  }
+  return undefined;
 }
 
 /** What the store reported when it dropped blocks from one end. */

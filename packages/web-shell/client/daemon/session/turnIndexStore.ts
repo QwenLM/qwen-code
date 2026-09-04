@@ -518,6 +518,36 @@ export function reconcileLiveEntries(
   };
 }
 
+/**
+ * The cached page carrying `turnId`, with the snapshot that minted it.
+ *
+ * The snapshot comes from the page, not from the store: an append-only refresh
+ * legitimately leaves pages minted by different snapshots, and an anchored read
+ * must bind to the one that produced the ordinal it is addressing.
+ */
+export function findTurnIndexEntry(
+  state: SessionTurnIndexState,
+  turnId: string,
+): { entry: DaemonSessionTurnIndexEntry; snapshot: string } | undefined {
+  for (const page of state.pages.values()) {
+    for (const entry of page.turns) {
+      if (entry.turnId === turnId) return { entry, snapshot: page.snapshot };
+    }
+  }
+  return undefined;
+}
+
+/** Record id → snapshot-local ordinal, across every cached page. */
+export function turnOrdinalMap(
+  state: SessionTurnIndexState,
+): ReadonlyMap<string, number> {
+  const ordinals = new Map<string, number>();
+  for (const page of state.pages.values()) {
+    for (const entry of page.turns) ordinals.set(entry.turnId, entry.ordinal);
+  }
+  return ordinals;
+}
+
 /** Turn ids the durable index currently knows, across every cached page. */
 function indexedTurnIds(state: SessionTurnIndexState): Set<string> {
   const ids = new Set<string>();
