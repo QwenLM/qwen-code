@@ -1023,8 +1023,47 @@ export function transcriptBlocksToDaemonMessages(
   }
 
   synchronizeToolGroupSourceIdentity(messages);
-  if (!retainSourceIdentity) stripSourceIdentity(messages);
+  if (retainSourceIdentity) stampPersistedIdentity(messages, blocks);
+  else stripSourceIdentity(messages);
   return messages;
+}
+
+/**
+ * Carries the persisted identity of the blocks folded into each message onto
+ * the message itself.
+ *
+ * `sourceBlockIds` already records which blocks a message folds — including
+ * the tool-group union computed just above — so the record ids and prompt id
+ * are derived from it in one pass here rather than threaded through every
+ * branch that builds or merges a message. Runs only on the identity-retaining
+ * path: callers that strip `sourceBlockIds` get no persisted identity either.
+ */
+function stampPersistedIdentity(
+  messages: DaemonMessage[],
+  blocks: readonly DaemonTranscriptBlock[],
+): void {
+  if (messages.length === 0) return;
+  const blockById = new Map<string, DaemonTranscriptBlock>();
+  for (const block of blocks) {
+    blockById.set(block.id, block);
+  }
+  for (const message of messages) {
+    const recordIds: string[] = [];
+    const seen = new Set<string>();
+    let promptId: string | undefined;
+    for (const blockId of message.sourceBlockIds ?? []) {
+      const block = blockById.get(blockId);
+      if (block === undefined) continue;
+      promptId ??= block.promptId;
+      for (const recordId of block.sourceRecordIds ?? []) {
+        if (seen.has(recordId)) continue;
+        seen.add(recordId);
+        recordIds.push(recordId);
+      }
+    }
+    if (recordIds.length > 0) message.sourceRecordIds = recordIds;
+    if (promptId !== undefined) message.promptId = promptId;
+  }
 }
 
 function synchronizeToolGroupSourceIdentity(messages: DaemonMessage[]): void {

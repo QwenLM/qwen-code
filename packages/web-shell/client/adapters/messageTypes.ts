@@ -90,6 +90,24 @@ export interface DaemonMessageMeta {
   timestamp?: number;
   /** Stable transcript blocks folded into this rendered message. */
   sourceBlockIds?: string[];
+  /**
+   * Persisted ChatRecord identities behind this rendered message, in
+   * transcript order and deduplicated. Unlike `sourceBlockIds` these survive a
+   * reload, an eviction, or a browser restart, which makes them the canonical
+   * navigation identity: a durable turn is addressed by its persisted
+   * user-record UUID, so a loaded message can be tied to its turn without
+   * depending on client-local block ids. Populated only when the caller asks
+   * for source identity, exactly like `sourceBlockIds`.
+   */
+  sourceRecordIds?: readonly string[];
+  /**
+   * Prompt correlation id the daemon stamped on the source blocks, when any
+   * carried one. A message folds blocks from a single prompt, so this is the
+   * first of them. Lets a provisional live entry reconcile with its persisted
+   * turn by exact identity rather than by label or timestamp. Absent on
+   * sessions whose records predate prompt-id stamping.
+   */
+  promptId?: string;
 }
 
 export interface DaemonUserMessage extends DaemonMessageMeta {
