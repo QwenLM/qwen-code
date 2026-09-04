@@ -55,8 +55,7 @@ workspace-qualified routing is encapsulated):
 - `getTurnIndexPage({ snapshot?, start?, limit? })`
   → `DaemonSessionTurnIndexPage`
   `{ v: 1, sessionId, snapshot, totalTurns, start, turns: DaemonSessionTurnIndexEntry[] }`,
-  entry = `{ ordinal, turnId, kind: 'prompt' | 'realtime' | 'scheduled',
-promptId?, timestamp?, label, detail? }`
+  entry = `{ ordinal, turnId, kind: 'prompt' | 'realtime' | 'scheduled', promptId?, timestamp?, label, detail? }`
   (`sdk-typescript/src/daemon/types.ts:1388-1416`;
   `DaemonSessionClient.ts:988`).
   The first call omits `snapshot` and returns the newest page; `start`
@@ -93,6 +92,15 @@ Error mapping the stores must implement (verified at
 Session-resolution failures (archived, conflict, draining, unavailable owner)
 follow the existing transcript-route codes and are already handled by the
 provider's session-load error paths.
+
+Footnote on `transcript_page_too_large`: both route families structurally
+share the same serialization guard, but an index page can never actually reach
+the cap — entries are capped at 500 per page (`SESSION_TRANSCRIPT_MAX_LIMIT`,
+`session-transcript-reader.ts:86`) with hard-truncated previews (label ≤ 160 /
+detail ≤ 240 code points, `compactPreviewText` at `:1130` / `:1153`), bounding
+a page near ~250 KB, two orders of magnitude below 32 MiB. The index store
+therefore has no 413 branch of its own; a 413 from an index fetch is treated
+as a generic transient index failure.
 
 ## Current client state (verified)
 
@@ -209,7 +217,7 @@ points at a cheaper shape:
 The reuse boundary is honest, though: the existing admission machinery is
 **prepend-only**. `applyTranscriptHistory` hardcodes
 `blocks: [...history.blocks, ...current.blocks]`
-(`DaemonSessionProvider.tsx:501`), and `materializeTranscriptHistory`'s dedup
+(`DaemonSessionProvider.tsx:502`), and `materializeTranscriptHistory`'s dedup
 is built around the oldest retained block (`:332-360`) — both assume the new
 page is older than everything retained. Anchored opens and newer-direction
 continuations land _between_ retained pages or between the newest page and the
@@ -232,6 +240,9 @@ interface TranscriptPageLedgerEntry {
   lastBlockId: string; // inclusive
   firstRecordId?: string; // persisted boundaries, when known
   lastRecordId?: string;
+  nextCursor?: string; // forward continuation minted by this page's fetch;
+  // present only on forward reads with hasMore (load / anchored /
+  // forward continuation — never on backward prepends)
   byteSize: number;
   turnIds: readonly string[]; // canonical turn ids present (from sourceRecordIds)
   snapshot?: string; // index snapshot that produced an anchored page
@@ -239,10 +250,22 @@ interface TranscriptPageLedgerEntry {
 
 interface TranscriptGap {
   /** Direction in which the gap can be resolved. */
-  older?: { beforeRecordId: string };
-  newer?: { afterRecordId: string; snapshot: string };
+  older?: { beforeRecordId: string; snapshot?: string };
+  newer?: { cursor: string }; // self-bound, sent alone — see Consumed contract
 }
 ```
+
+The protocol has no "page after record X" operation (`afterRecordId` does not
+exist), so a gap's newer side is resolvable only two ways:
+
+1. the `nextCursor` stored on the **older** neighboring ledger entry, when
+   that entry came from a forward read; or
+2. re-anchoring — pick a navigation turn inside the gap from the turn-index
+   store and issue `atRecordId` with that entry's page snapshot.
+
+The second is the universal resolver: it covers gaps whose older neighbor was
+evicted (its cursor is evicted with it) and gaps left by backward-only
+paging, whose pages never mint a forward cursor.
 
 Invariants:
 
@@ -271,7 +294,7 @@ bounded memory, random access — without a cross-package store rewrite.
 
 New provider-side store, exposed through a context following the existing
 `DaemonTranscriptHistory` pattern (interface at `DaemonSessionProvider.tsx:162-169`,
-context at line 657):
+context at `:655-657`):
 
 ```ts
 interface SessionTurnIndexState {
@@ -319,14 +342,31 @@ Rules:
   and requests the largest non-overlapping slice inside it. Ordinals are
   frozen within a snapshot, so the grid is stable until a refresh — and a
   refresh re-validates retained pages by identity before keeping anything.
-- Tail refresh on prompt terminal: re-request the newest page without a
-  snapshot and merge:
-  - **append-only** — every ordinal present in both old and new tail pages has
-    the same `turnId`: adopt the new `snapshot`/`totalTurns`, keep old pages,
-    replace overlapping tail pages.
-  - **divergent or zero overlap**: clear all snapshot-bound pages, keep only
-    the new tail page. Deliberately conservative — it cannot retain a page
-    from a rewritten active chain.
+- Tail refresh on prompt terminal is a **two-step merge**, because a refresh
+  deliberately omits `snapshot` and therefore cannot choose its `start` — the
+  response always covers the server-computed newest window
+  `max(0, totalTurns - limit)`, which partially overlaps the retained tail
+  page whenever the appended count is not a multiple of the page size:
+  1. **Validate**: fetch the newest page without a snapshot and compare every
+     ordinal present in both the response and the retained pages by `turnId`.
+     All matching → append-only; any mismatch, or zero overlap after a large
+     gap → divergent.
+  2. **Land on the grid** (append-only only): issue a clamped fill request
+     against the new snapshot — `start` = one past the largest covered
+     ordinal, `limit = totalTurns - start`, iterating in page-sized chunks
+     when the uncovered tail exceeds one page — and admit the fill page(s).
+     The validation response itself is never admitted, since it overlaps
+     retained coverage by construction.
+  - **append-only**: adopt the new `snapshot`/`totalTurns`, keep old pages,
+    add the fill page(s).
+  - **divergent or zero overlap**: clear all snapshot-bound pages and admit
+    the validation response as the new tail page. Deliberately conservative —
+    it cannot retain a page from a rewritten active chain.
+
+  "Pages never overlap" is the stable-state invariant after a merge
+  completes; the transient overlap inside a refresh response is forced by the
+  protocol and resolved before anything is admitted.
+
 - Reconciliation: a `live:` prompt provisional is removed exactly when an
   index entry appears with the same `promptId`, or (legacy records without a
   prompt id) when its persisted record UUID is observed in admitted blocks'
@@ -361,9 +401,10 @@ The three size-related failures are deliberately distinct, mirroring the
 existing admission contract:
 
 - `page_too_large` — the **server** refused: 413 `transcript_page_too_large`.
-  Note this code is the daemon's whole-response cap (32 MiB = 2 × the 16 MiB
-  expanded-page budget, `session.ts:274-277`) and is thrown by **both** route
-  families, turn-index included — it is not an anchored-page-specific budget.
+  This code is the daemon's whole-response serialization cap (32 MiB = 2 × the
+  16 MiB expanded-page budget, `session.ts:274-277`), shared by both route
+  families; on the index path it is unreachable in practice (see the contract
+  footnote), so this reason only arises from anchored transcript reads.
 - `window_full` — the **client** window rejected the page but eviction can
   plausibly free enough: retryable. Carries over the existing
   `capacityReached` + `rejectedPage` latch semantics
@@ -501,19 +542,18 @@ The SDK, daemon routes, and core reader are unchanged.
 
 ## Error and degradation matrix (client view)
 
-| Condition                                                           | Store reaction                                                                                       | User-visible result                                                       |
-| ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| capability absent                                                   | `disabled`                                                                                           | current loaded-turn rail                                                  |
-| index fetch fails transiently                                       | `error` + bounded backoff retry                                                                      | rail placeholders; transcript unaffected                                  |
-| 400 `invalid_transcript_cursor` on index                            | drop snapshot, re-seed tail                                                                          | rail briefly placeholders                                                 |
-| 400 `invalid_turn_anchor` on jump                                   | refresh index; keep viewport                                                                         | jump aborted, current page intact                                         |
-| 409 `transcript_snapshot_unavailable`                               | invalidate snapshot + pages, re-seed                                                                 | rail refreshes; current page intact                                       |
-| 413 `transcript_page_too_large` on an **index** fetch               | index store `error` + bounded backoff (the 32 MiB whole-response cap applies to both route families) | rail placeholders; no "turn too large" notice — the page contains no turn |
-| 413 `transcript_page_too_large` on an **anchored transcript** fetch | reject the jump with `page_too_large`                                                                | "turn too large to display" notice; rail entry stays                      |
-| client window rejects after eviction                                | `window_full` (retryable latch) or `window_impossible` (terminal)                                    | retry when capacity frees / explicit notice                               |
-| 413 `transcript_too_large`                                          | `unsupported` latch + diagnostic                                                                     | loaded-turn fallback                                                      |
-| rewind/branch                                                       | full invalidation + refetch                                                                          | no stale ticks or cross-session pages                                     |
-| daemon offline                                                      | keep cached pages                                                                                    | retained content readable; jumps report temporary unavailability          |
+| Condition                                                           | Store reaction                                                    | User-visible result                                              |
+| ------------------------------------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------------------------------- |
+| capability absent                                                   | `disabled`                                                        | current loaded-turn rail                                         |
+| index fetch fails transiently                                       | `error` + bounded backoff retry                                   | rail placeholders; transcript unaffected                         |
+| 400 `invalid_transcript_cursor` on index                            | drop snapshot, re-seed tail                                       | rail briefly placeholders                                        |
+| 400 `invalid_turn_anchor` on jump                                   | refresh index; keep viewport                                      | jump aborted, current page intact                                |
+| 409 `transcript_snapshot_unavailable`                               | invalidate snapshot + pages, re-seed                              | rail refreshes; current page intact                              |
+| 413 `transcript_page_too_large` on an **anchored transcript** fetch | reject the jump with `page_too_large`                             | "turn too large to display" notice; rail entry stays             |
+| client window rejects after eviction                                | `window_full` (retryable latch) or `window_impossible` (terminal) | retry when capacity frees / explicit notice                      |
+| 413 `transcript_too_large`                                          | `unsupported` latch + diagnostic                                  | loaded-turn fallback                                             |
+| rewind/branch                                                       | full invalidation + refetch                                       | no stale ticks or cross-session pages                            |
+| daemon offline                                                      | keep cached pages                                                 | retained content readable; jumps report temporary unavailability |
 
 ## Performance model and budgets
 
@@ -529,8 +569,8 @@ The SDK, daemon routes, and core reader are unchanged.
   than a one-way trim. Defaults are frozen only after a measurement pass; the
   constants stay internal, not API.
 - A random jump costs one bounded transcript page of network + normalization.
-  Streaming cost stays independent of retained history size (existing batcher
-  - structural snapshot gating).
+  Streaming cost stays independent of retained history size (the existing
+  batcher and the structural snapshot gating).
 - No IndexedDB or persisted sidecar in this phase.
 
 ## Verification plan (Phase 2 scope)
@@ -548,9 +588,9 @@ Provider/store unit tests (vitest + jsdom, extending the existing
 - reconciliation: provisional replacement by `promptId`, legacy no-prompt-id
   path by record identity, shell overlay lifetime, no label/timestamp
   matching;
-- lifecycle: reconnect dedup, rewind/branch invalidation, `409
-transcript_snapshot_unavailable` invalidation followed by explicit re-seed
-  (the stale-snapshot recovery the #10750 checklist calls out),
+- lifecycle: reconnect dedup, rewind/branch invalidation,
+  `transcript_snapshot_unavailable` (409) invalidation followed by explicit
+  re-seed (the stale-snapshot recovery the #10750 checklist calls out),
   stale-response rejection by generation, bounded retry;
 - fallback: capability-absent and ceiling-exceeded paths keep the existing
   rail behavior.
