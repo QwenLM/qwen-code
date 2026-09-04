@@ -11,8 +11,7 @@
  * the like. Inside the repo those resolve through tsconfig `paths` (for tsc and
  * esbuild) or through vitest aliases (for the suites) — three mechanisms, none
  * of which the published package has. There, the emitted JS keeps the specifier
- * verbatim and Node resolves it against core's `exports`, where a single `./*`
- * entry carries every one of them.
+ * verbatim and Node resolves it against core's `exports` map.
  *
  * Nothing else exercises that entry. Remove it, rename the `dist/src` root, or
  * add a pattern that shadows it, and every suite stays green while `qwen` dies
@@ -20,21 +19,24 @@
  * built package so that failure lands in CI instead.
  */
 
-import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
+import { existsSync, globSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const require = createRequire(pathToFileURL(path.join(root, 'package.json')));
-
-// One specifier per shape the cli emits: a class, a plain function, and a
-// module under a nested directory.
-const PROBES = [
+const EXPORT_PROBES = new Map([
   ['@qwen-code/qwen-code-core/config/storage.js', 'Storage'],
   ['@qwen-code/qwen-code-core/utils/debugLogger.js', 'createDebugLogger'],
   ['@qwen-code/qwen-code-core/utils/errors.js', 'getErrorMessage'],
-];
+  ['@qwen-code/qwen-code-core/noFollowOpen', 'openSyncNoFollow'],
+]);
+const specifiers = new Set(EXPORT_PROBES.keys());
+const cliSrc = path.join(root, 'packages', 'cli', 'src');
+const coreSpecifier = /['"](@qwen-code\/qwen-code-core\/[^'"]+)['"]/g;
+for (const relativePath of globSync('**/*.{ts,tsx}', { cwd: cliSrc })) {
+  const source = readFileSync(path.join(cliSrc, relativePath), 'utf8');
+  for (const match of source.matchAll(coreSpecifier)) specifiers.add(match[1]);
+}
 
 const coreDist = path.join(root, 'packages', 'core', 'dist', 'src');
 if (!existsSync(coreDist)) {
@@ -45,17 +47,25 @@ if (!existsSync(coreDist)) {
 }
 
 let failed = 0;
-for (const [specifier, exportName] of PROBES) {
+for (const specifier of specifiers) {
+  const exportName = EXPORT_PROBES.get(specifier);
   let resolved;
   try {
-    resolved = require.resolve(specifier);
+    resolved = fileURLToPath(import.meta.resolve(specifier));
   } catch (error) {
     console.error(`✗ ${specifier}\n    ${error.code ?? ''} ${error.message}`);
     failed++;
     continue;
   }
-  const mod = await import(pathToFileURL(resolved).href);
-  if (typeof mod[exportName] !== 'function') {
+  if (!existsSync(resolved)) {
+    console.error(
+      `✗ ${specifier}\n    resolved target does not exist: ${resolved}`,
+    );
+    failed++;
+    continue;
+  }
+  const mod = exportName && (await import(pathToFileURL(resolved).href));
+  if (exportName && typeof mod[exportName] !== 'function') {
     console.error(
       `✗ ${specifier}\n    resolved to ${path.relative(root, resolved)} but ${exportName} is ${typeof mod[exportName]}`,
     );
@@ -67,12 +77,12 @@ for (const [specifier, exportName] of PROBES) {
 
 if (failed) {
   console.error(
-    `\n${failed} of ${PROBES.length} core subpath specifiers do not resolve through the package exports map.\n` +
+    `\n${failed} of ${specifiers.size} core subpath specifiers do not resolve through the package exports map.\n` +
       'The published CLI resolves them this way and nothing else does, so this breaks `qwen` at startup\n' +
-      'while every in-repo suite stays green. Check the "./*" entry in packages/core/package.json.',
+      'while every in-repo suite stays green. Check the exports map in packages/core/package.json.',
   );
   process.exit(1);
 }
 console.log(
-  `\nAll ${PROBES.length} core subpath specifiers resolve through the package exports map.`,
+  `\nAll ${specifiers.size} core subpath specifiers resolve through the package exports map.`,
 );

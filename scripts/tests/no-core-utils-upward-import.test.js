@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { Linter } from 'eslint';
 import tsParser from '@typescript-eslint/parser';
-import rule from '../../eslint-rules/no-core-utils-upward-import.js';
+import rule, {
+  resolveExportTarget,
+} from '../../eslint-rules/no-core-utils-upward-import.js';
 
 function runRule(code, filename) {
   const linter = new Linter({ configType: 'flat', cwd: '/' });
@@ -27,6 +29,15 @@ function runRule(code, filename) {
 }
 
 describe('no-core-utils-upward-import', () => {
+  it('uses Node pattern ordering when literal prefixes tie', () => {
+    expect(
+      resolveExportTarget('./tools/x.js', {
+        './tools/*': './dist/src/utils/*',
+        './tools/*.js': './dist/src/tools/*.js',
+      }),
+    ).toBe('./dist/src/tools/x.js');
+  });
+
   it('rejects value imports that leave utils/', () => {
     expect(
       runRule(

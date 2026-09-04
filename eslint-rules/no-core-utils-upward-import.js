@@ -72,17 +72,21 @@ function exportTargetOf(entry) {
 
 // Node resolves a subpath against `exports` by exact key first, then by
 // pattern: among keys containing a single `*`, the one with the longest
-// literal prefix wins, and what `*` captured is substituted into the target.
+// literal prefix wins; ties prefer the longer full key. What `*` captured is
+// substituted into the target.
 // The rule has to follow the same order, because `packages/core/package.json`
 // carries a `./*` catch-all — without pattern matching every deep specifier
 // misses the exact lookup, resolves fine at runtime, and is reported by
 // nothing.
-function resolveExportTarget(exportKey) {
-  const exact = exportTargetOf(CORE_PACKAGE_EXPORTS[exportKey]);
+export function resolveExportTarget(
+  exportKey,
+  packageExports = CORE_PACKAGE_EXPORTS,
+) {
+  const exact = exportTargetOf(packageExports[exportKey]);
   if (typeof exact === 'string') return exact;
 
   let best = null;
-  for (const [pattern, entry] of Object.entries(CORE_PACKAGE_EXPORTS)) {
+  for (const [pattern, entry] of Object.entries(packageExports)) {
     const star = pattern.indexOf('*');
     if (star < 0 || pattern.indexOf('*', star + 1) >= 0) continue;
     const prefix = pattern.slice(0, star);
@@ -90,8 +94,15 @@ function resolveExportTarget(exportKey) {
     if (!exportKey.startsWith(prefix)) continue;
     if (!exportKey.endsWith(suffix)) continue;
     if (exportKey.length < prefix.length + suffix.length) continue;
-    if (best && best.prefix.length >= prefix.length) continue;
-    best = { prefix, suffix, entry };
+    if (
+      best &&
+      (best.prefix.length > prefix.length ||
+        (best.prefix.length === prefix.length &&
+          best.pattern.length >= pattern.length))
+    ) {
+      continue;
+    }
+    best = { pattern, prefix, suffix, entry };
   }
   if (!best) return null;
 
