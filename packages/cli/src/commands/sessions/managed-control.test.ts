@@ -226,6 +226,20 @@ describe('peekManagedSession', () => {
     expect(result.lines[0]).toBe('No Agent View session found for zz.');
   });
 
+  it('refuses a supervisor reply that carries no session state', async () => {
+    // The guard is the only thing standing between a malformed reply and
+    // the presentation code; pin its rejection branch so a weakened guard
+    // cannot pass silently.
+    const malformed = handle({
+      peek: vi.fn().mockResolvedValue({ sessionId: SESSION }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(malformed));
+    expect(result.exitCode).toBe(1);
+    expect(result.lines).toEqual([
+      'The supervisor returned no state for that session.',
+    ]);
+  });
+
   it('does not start a supervisor to report that none is running', async () => {
     const result = await peekManagedSession(SESSION, noSupervisor);
     expect(result.exitCode).toBe(1);
@@ -257,6 +271,14 @@ describe('answerManagedSession', () => {
     expect(result.exitCode).toBe(1);
     expect(result.lines[0]).toContain('not waiting');
   });
+
+  it('reports no supervisor instead of delivering', async () => {
+    // The guard is identical to peek's but answers nothing on its own, so
+    // it needs its own pin: deleting it would throw instead of reporting.
+    const result = await answerManagedSession(SESSION, 'yes', noSupervisor);
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.join('\n')).toContain('No background sessions');
+  });
 });
 
 describe('stopManagedSession', () => {
@@ -275,5 +297,13 @@ describe('stopManagedSession', () => {
     const result = await stopManagedSession(SESSION, connectTo(h));
     expect(result.exitCode).toBe(1);
     expect(result.lines[0]).toContain('already exited');
+  });
+
+  it('reports no supervisor instead of stopping', async () => {
+    // Same guard as peek and answer, unexercised until pinned here:
+    // deleting it would throw instead of reporting.
+    const result = await stopManagedSession(SESSION, noSupervisor);
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.join('\n')).toContain('No background sessions');
   });
 });
