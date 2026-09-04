@@ -4532,6 +4532,23 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('retires a closed named task so buffered output is drained', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+        ch.retiringSessions = [];
+
+        await ch.handleInbound(envelope({ text: '/session close review' }));
+
+        expect(ch.sent.at(-1)!.text).toContain('Closed task "review"');
+        expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+        expect(ch.retiringSessions).toEqual(['s-1']);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it('keeps a named task busy for the full shell command', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       let finishShell!: (result: {
@@ -4567,6 +4584,9 @@ describe('ChannelBase', () => {
         expect(ch.sent.at(-1)!.text).toContain(
           'still running or waiting for permission',
         );
+        // A refused close must not retire the task: draining a live task's
+        // buffer would flush output the turn has not finished producing.
+        expect(ch.retiringSessions).toEqual([]);
 
         finishShell({ exitCode: 0, output: 'ok', aborted: false });
         await running;

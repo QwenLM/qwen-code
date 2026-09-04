@@ -3629,7 +3629,10 @@ export abstract class ChannelBase {
           if (parts.length !== 1) break;
           const closing = await namedSessions.lookup(owner, parts[0]!);
           const result = await namedSessions.close(owner, parts[0]!);
-          if (closing) this.cancelBtw(closing.sessionId);
+          if (closing) {
+            this.cancelBtw(closing.sessionId);
+            this.onSessionRetiring(closing.sessionId);
+          }
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
