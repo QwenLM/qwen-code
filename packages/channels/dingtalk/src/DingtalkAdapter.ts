@@ -838,7 +838,19 @@ interface BackgroundResponseAggregation {
   retiring?: boolean;
   flushing?: boolean;
   delivered?: boolean;
+  /** Whether a card was already delivered after the turn completed. */
+  completionDelivered?: boolean;
+  /** Whether a give-up ever discarded buffered text for this turn. */
+  dropped?: boolean;
   delivery?: BackgroundResponseDelivery;
+}
+
+/** A terminal marker that raced the first segment's target resolution. */
+interface PendingBackgroundResponseTerminal {
+  turnComplete?: boolean;
+  status?: string;
+  label?: string;
+  completionPartial?: boolean;
 }
 
 interface BackgroundResponseDelivery {
@@ -848,6 +860,12 @@ interface BackgroundResponseDelivery {
   partial: boolean;
   attempts: number;
   proactivePlan?: ProactiveTextDelivery;
+  /**
+   * Reply-path body whose `[FILE: ...]` markers were already delivered. A
+   * retry must reuse it: `prepareReplyOutput` sends the file messages, so
+   * re-running it would post every file again.
+   */
+  preparedReplyBody?: string;
 }
 
 interface ProactiveTextDelivery {
@@ -929,6 +947,10 @@ export class DingtalkChannel extends ChannelBase {
   private readonly backgroundResponseAggregations = new Map<
     string,
     BackgroundResponseAggregation
+  >();
+  private readonly pendingBackgroundResponseTerminals = new Map<
+    string,
+    PendingBackgroundResponseTerminal
   >();
 
   constructor(
@@ -2418,36 +2440,65 @@ export class DingtalkChannel extends ChannelBase {
 
     const key = JSON.stringify([sessionId, context.taskId]);
     let current = this.backgroundResponseAggregations.get(key);
+    let parked = this.pendingBackgroundResponseTerminals.get(key);
     if (!current && text.trim().length === 0) {
-      return super.dispatchBackgroundResponse(sessionId, text, context);
+      // The first segment's target resolution can suspend (named-session owner
+      // lock), so a turn's terminal marker may arrive before the aggregation
+      // exists. Park it instead of routing it to the empty-text early return,
+      // or the completed turn only surfaces via the bounded wait, mislabeled.
+      if (!parked) {
+        return super.dispatchBackgroundResponse(sessionId, text, context);
+      }
+      if (context.turnComplete) {
+        parked.turnComplete = true;
+        parked.status = context.status;
+        parked.label = context.label ?? parked.label;
+        parked.completionPartial = context.partial === true;
+      }
+      return;
     }
     if (!current) {
-      const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
-      if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
-        return;
+      parked ??= {};
+      this.pendingBackgroundResponseTerminals.set(key, parked);
+      try {
+        const delivery =
+          await this.resolveBackgroundResponseDelivery(sessionId);
+        if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
+          return;
+        }
+        current =
+          this.backgroundResponseAggregations.get(key) ??
+          this.createBackgroundResponseAggregation(
+            key,
+            sessionId,
+            context,
+            delivery.target,
+            delivery.sourceLabel,
+          );
+      } finally {
+        this.pendingBackgroundResponseTerminals.delete(key);
       }
-      current =
-        this.backgroundResponseAggregations.get(key) ??
-        this.createBackgroundResponseAggregation(
-          key,
-          sessionId,
-          context,
-          delivery.target,
-          delivery.sourceLabel,
-        );
     }
 
     current.status = context.status;
     current.label = context.label ?? current.label;
     if (text.trim().length > 0) current.parts.push(text);
 
-    if (!context.turnComplete) {
+    if (context.turnComplete) {
+      current.turnComplete = true;
+      current.completionPartial = context.partial === true;
+    } else if (parked?.turnComplete) {
+      current.turnComplete = true;
+      current.status = parked.status ?? current.status;
+      current.label = parked.label ?? current.label;
+      current.completionPartial = parked.completionPartial === true;
+    }
+
+    if (!current.turnComplete) {
       this.scheduleBackgroundResponseAggregationFlush(key, current);
       return;
     }
 
-    current.turnComplete = true;
-    current.completionPartial = context.partial === true;
     if (current.timeoutTimer) clearTimeout(current.timeoutTimer);
     current.timeoutTimer = undefined;
     await this.flushBackgroundResponseAggregation(key, current);
@@ -2469,20 +2520,26 @@ export class DingtalkChannel extends ChannelBase {
     let delivery = aggregation.delivery;
     if (!delivery) {
       if (aggregation.parts.length === 0) {
-        this.backgroundResponseAggregations.delete(key);
-        return;
+        // A turn whose text was already drained by the bounded wait still owes
+        // the user its completion: the last card it saw reads `（部分）`.
+        if (!this.owesTerminalBackgroundResponseCard(aggregation)) {
+          this.backgroundResponseAggregations.delete(key);
+          return;
+        }
       }
       if (aggregation.timeoutTimer) clearTimeout(aggregation.timeoutTimer);
       aggregation.timeoutTimer = undefined;
+      const parts = aggregation.parts.splice(0);
       delivery = {
         status: aggregation.status,
         label: aggregation.label,
-        parts: aggregation.parts.splice(0),
+        parts,
         partial:
-          aggregation.delivered === true ||
-          aggregation.retiring === true ||
-          aggregation.completionPartial === true ||
-          aggregation.turnComplete !== true,
+          parts.length > 0 &&
+          (aggregation.delivered === true ||
+            aggregation.retiring === true ||
+            aggregation.completionPartial === true ||
+            aggregation.turnComplete !== true),
         attempts: 0,
       };
       aggregation.delivery = delivery;
@@ -2497,7 +2554,10 @@ export class DingtalkChannel extends ChannelBase {
           aggregation.target,
           delivery.proactivePlan,
         );
-      } else {
+      } else if (
+        this.supportsProactiveSend() &&
+        this.supportsProactiveTarget(aggregation.target)
+      ) {
         await this.deliverBackgroundResponseToTarget(
           aggregation.sessionId,
           body,
@@ -2505,6 +2565,18 @@ export class DingtalkChannel extends ChannelBase {
             target: aggregation.target,
             sourceLabel: aggregation.sourceLabel,
           },
+        );
+      } else {
+        delivery.preparedReplyBody ??= await this.prepareReplyOutput(
+          aggregation.target.chatId,
+          body,
+        );
+        await this.deliverBackgroundReply(
+          aggregation.target.chatId,
+          delivery.preparedReplyBody,
+          aggregation.sessionId,
+          aggregation.sourceLabel,
+          true,
         );
       }
     } catch (caught) {
@@ -2519,13 +2591,15 @@ export class DingtalkChannel extends ChannelBase {
     if (error === undefined) {
       aggregation.delivery = undefined;
       aggregation.delivered = true;
-      if (aggregation.parts.length === 0) {
-        this.backgroundResponseAggregations.delete(key);
-        return;
+      if (aggregation.turnComplete && !aggregation.retiring) {
+        aggregation.completionDelivered = true;
       }
       if (aggregation.retiring || aggregation.turnComplete) {
         await this.flushBackgroundResponseAggregation(key, aggregation);
       } else {
+        // The turn is still open: keep the entry so its later segments re-join
+        // this one (and stay labelled `（部分）`), and re-arm the bounded wait
+        // so a silent turn is still reaped.
         this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
       }
       return;
@@ -2537,6 +2611,7 @@ export class DingtalkChannel extends ChannelBase {
     );
     if (delivery.attempts >= BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES) {
       aggregation.delivery = undefined;
+      aggregation.dropped = true;
       if (aggregation.parts.length === 0) {
         this.backgroundResponseAggregations.delete(key);
       } else if (aggregation.retiring || aggregation.turnComplete) {
@@ -2552,6 +2627,24 @@ export class DingtalkChannel extends ChannelBase {
       void this.flushBackgroundResponseAggregation(key, aggregation);
     }, BACKGROUND_RESPONSE_AGGREGATION_RETRY_MS);
     aggregation.retryTimer.unref?.();
+  }
+
+  /**
+   * A turn that outran the bounded wait had its text delivered under the
+   * `（部分）` label. When it then completes normally with nothing buffered,
+   * a header-only card is the only way the chat ever learns it finished.
+   */
+  private owesTerminalBackgroundResponseCard(
+    aggregation: BackgroundResponseAggregation,
+  ): boolean {
+    return (
+      aggregation.turnComplete === true &&
+      aggregation.delivered === true &&
+      aggregation.completionDelivered !== true &&
+      aggregation.retiring !== true &&
+      aggregation.completionPartial !== true &&
+      aggregation.dropped !== true
+    );
   }
 
   private drainBackgroundResponseAggregations(sessionId?: string): void {
@@ -2616,7 +2709,9 @@ export class DingtalkChannel extends ChannelBase {
           ? '❌'
           : '⏹️';
     const label = this.formatBackgroundAgentLabel(delivery.label);
-    return `## ${icon} Agent · ${label}${delivery.partial ? '（部分）' : ''}\n\n${delivery.parts.join('\n\n')}`;
+    const header = `## ${icon} Agent · ${label}${delivery.partial ? '（部分）' : ''}`;
+    if (delivery.parts.length === 0) return header;
+    return `${header}\n\n${delivery.parts.join('\n\n')}`;
   }
 
   private formatBackgroundAgentResponse(text: string, label?: string): string {
@@ -2637,11 +2732,18 @@ export class DingtalkChannel extends ChannelBase {
     text: string,
     sessionId: string,
     sourceLabel?: string,
+    prepared = false,
   ): Promise<void> {
     if (this.config.blockStreaming !== 'on') {
-      return super.deliverBackgroundReply(chatId, text, sessionId, sourceLabel);
+      return this.sendResponseMessage(
+        chatId,
+        text,
+        sessionId,
+        sourceLabel,
+        prepared,
+      );
     }
-    await this.sendReply(chatId, text, undefined, sourceLabel);
+    await this.sendReply(chatId, text, undefined, sourceLabel, prepared);
   }
 
   protected override async sendResponseMessage(

@@ -7342,6 +7342,248 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
+  it('applies a completion marker that races the first target resolution', async () => {
+    const channel = createChannel({
+      blockStreaming: 'on',
+      aggregateBackgroundAgentResponses: true,
+    });
+    const target: SessionTarget = {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cidGroup==',
+      isGroup: true,
+    };
+    seedSessionTarget(channel, 'session-1', target);
+    const gate = deferredPromise<void>();
+    vi.spyOn(
+      channel as unknown as {
+        resolveBackgroundResponseDelivery(
+          sessionId: string,
+        ): Promise<{ target: SessionTarget } | undefined>;
+      },
+      'resolveBackgroundResponseDelivery',
+    ).mockImplementation(async () => {
+      await gate.promise;
+      return { target };
+    });
+    const pushProactive = vi
+      .spyOn(
+        channel as unknown as {
+          pushProactive(target: SessionTarget, text: string): Promise<void>;
+        },
+        'pushProactive',
+      )
+      .mockResolvedValue(undefined);
+
+    const first = channel.dispatchBackgroundResponse(
+      'session-1',
+      'First result.',
+      {
+        taskId: 'agent-1',
+        status: 'running',
+        kind: 'agent',
+        turnComplete: false,
+        label: 'Worker one',
+      },
+    );
+    await channel.dispatchBackgroundResponse('session-1', '', {
+      taskId: 'agent-1',
+      status: 'completed',
+      kind: 'agent',
+      turnComplete: true,
+      label: 'Worker one',
+    });
+    gate.resolve();
+    await first;
+
+    expect(pushProactive).toHaveBeenCalledOnce();
+    expect(pushProactive.mock.calls[0]![1]).toBe(
+      '## ✅ Agent · Worker one\n\nFirst result.',
+    );
+  });
+
+  it('keeps the tail of a bounded-wait turn labelled partial', async () => {
+    vi.useFakeTimers();
+    try {
+      const channel = createChannel({
+        blockStreaming: 'on',
+        aggregateBackgroundAgentResponses: true,
+      });
+      seedSessionTarget(channel, 'session-1', {
+        channelName: 'test-dingtalk',
+        senderId: 'user-1',
+        chatId: 'cidGroup==',
+        isGroup: true,
+      });
+      const pushProactive = vi
+        .spyOn(
+          channel as unknown as {
+            pushProactive(target: SessionTarget, text: string): Promise<void>;
+          },
+          'pushProactive',
+        )
+        .mockResolvedValue(undefined);
+
+      await channel.dispatchBackgroundResponse('session-1', 'First result.', {
+        taskId: 'agent-1',
+        status: 'running',
+        kind: 'agent',
+        turnComplete: false,
+        label: 'Worker one',
+      });
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(pushProactive).toHaveBeenCalledOnce();
+      expect(pushProactive.mock.calls[0]![1]).toContain('Worker one（部分）');
+
+      await channel.dispatchBackgroundResponse('session-1', 'Final result.', {
+        taskId: 'agent-1',
+        status: 'completed',
+        kind: 'agent',
+        turnComplete: true,
+        label: 'Worker one',
+      });
+
+      expect(pushProactive).toHaveBeenCalledTimes(2);
+      expect(pushProactive.mock.calls[1]![1]).toContain(
+        '## ✅ Agent · Worker one（部分）',
+      );
+      expect(pushProactive.mock.calls[1]![1]).toContain('Final result.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('closes a bounded-wait turn with a completion card', async () => {
+    vi.useFakeTimers();
+    try {
+      const channel = createChannel({
+        blockStreaming: 'on',
+        aggregateBackgroundAgentResponses: true,
+      });
+      seedSessionTarget(channel, 'session-1', {
+        channelName: 'test-dingtalk',
+        senderId: 'user-1',
+        chatId: 'cidGroup==',
+        isGroup: true,
+      });
+      const pushProactive = vi
+        .spyOn(
+          channel as unknown as {
+            pushProactive(target: SessionTarget, text: string): Promise<void>;
+          },
+          'pushProactive',
+        )
+        .mockResolvedValue(undefined);
+
+      await channel.dispatchBackgroundResponse('session-1', 'First result.', {
+        taskId: 'agent-1',
+        status: 'running',
+        kind: 'agent',
+        turnComplete: false,
+        label: 'Worker one',
+      });
+      await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+      expect(pushProactive).toHaveBeenCalledOnce();
+      expect(pushProactive.mock.calls[0]![1]).toContain('Worker one（部分）');
+
+      await channel.dispatchBackgroundResponse('session-1', '', {
+        taskId: 'agent-1',
+        status: 'completed',
+        kind: 'agent',
+        turnComplete: true,
+        label: 'Worker one',
+      });
+
+      expect(pushProactive).toHaveBeenCalledTimes(2);
+      expect(pushProactive.mock.calls[1]![1]).toBe('## ✅ Agent · Worker one');
+      expect(
+        (
+          channel as unknown as {
+            backgroundResponseAggregations: Map<string, unknown>;
+          }
+        ).backgroundResponseAggregations.size,
+      ).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not resend files when an aggregated DM delivery is retried', async () => {
+    vi.useFakeTimers();
+    const file = createTempFile();
+    try {
+      const channel = createChannel({
+        cwd: file.dir,
+        aggregateBackgroundAgentResponses: true,
+      });
+      seedWebhook(channel, 'dm-cid');
+      seedSessionTarget(channel, 'session-1', {
+        channelName: 'test-dingtalk',
+        senderId: 'dm-user-1',
+        chatId: 'dm-cid',
+        isGroup: false,
+      });
+      let markdownSends = 0;
+      let fileSends = 0;
+      vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+        const url = String(input);
+        if (url.includes('/gettoken?')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+            ),
+          );
+        }
+        if (url.includes('/media/upload')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({ errcode: 0, media_id: '@file-media-id' }),
+            ),
+          );
+        }
+        const body = JSON.parse(String((init as RequestInit).body)) as {
+          msgtype: string;
+        };
+        if (body.msgtype === 'file') {
+          fileSends++;
+          return Promise.resolve(new Response('{}'));
+        }
+        markdownSends++;
+        if (markdownSends === 1) {
+          return Promise.reject(new TypeError('fetch failed'));
+        }
+        return Promise.resolve(new Response('{}'));
+      });
+
+      await channel.dispatchBackgroundResponse(
+        'session-1',
+        `[FILE: ${file.path}]\nDone.`,
+        {
+          taskId: 'agent-1',
+          status: 'completed',
+          kind: 'agent',
+          turnComplete: true,
+          label: 'Worker one',
+        },
+      );
+
+      expect(fileSends).toBe(1);
+      expect(markdownSends).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(30 * 1000);
+
+      expect(fileSends).toBe(1);
+      expect(markdownSends).toBe(2);
+    } finally {
+      vi.useRealTimers();
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
   it('does not extend the bounded wait when more segments arrive', async () => {
     vi.useFakeTimers();
     try {
@@ -7551,6 +7793,8 @@ describe('DingtalkChannel outbound file delivery', () => {
       'dm-user-1',
       expect.stringContaining('Worker one（部分）'),
       'session-1',
+      undefined,
+      true,
     );
   });
 
