@@ -11,9 +11,12 @@ on:
     branches:
       - 'main'
       - 'release/**'
+  schedule:
+    # Daily at 02:30 UTC, between the monthly Scorecard and nightly CodeQL.
+    - cron: '30 2 * * *'
 
 concurrency:
-  group: '${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'
+  group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'
   cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
 
 permissions:
@@ -26,6 +29,7 @@ defaults:
 jobs:
   dependency-cve:
     name: 'Dependency CVE audit'
+    if: "github.event_name == 'schedule'"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 15
     steps:
@@ -51,8 +55,25 @@ jobs:
       # sync with this policy.
       - name: 'Audit production dependencies'
         run: |
+          run_npm_audit() {
+            local attempt output result
+            for attempt in 1 2; do
+              result=0
+              output="$(timeout 4m npm audit "$@" 2>&1)" || result=$?
+              printf '%s\n' "$output"
+              [ "$result" -eq 0 ] && return 0
+              if [ "$result" -ne 124 ] &&
+                ! grep -q 'audit endpoint returned an error' <<<"$output"; then
+                return "$result"
+              fi
+              [ "$attempt" -eq 2 ] && return "$result"
+              echo '::warning::npm audit endpoint failed; retrying once in 15 seconds'
+              sleep 15
+            done
+          }
+
           status=0
-          npm audit --omit=dev --audit-level=high || status=$?
+          run_npm_audit --omit=dev --audit-level=high || status=$?
           for lockfile in packages/*/package-lock.json; do
             [ -f "$lockfile" ] || continue
             # Covered by the root workspace audit; this vendored lockfile is not installed directly.
@@ -61,13 +82,14 @@ jobs:
             (
               cd "$package_dir"
               npm ci --ignore-scripts --no-audit --progress=false --workspaces=false &&
-                npm audit --omit=dev --audit-level=high --workspaces=false
+                run_npm_audit --omit=dev --audit-level=high --workspaces=false
             ) || status=$?
           done
           exit "$status"
 
   secret-scan:
     name: 'Secret scan (TruffleHog)'
+    if: "github.event_name != 'schedule'"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 15
     steps:

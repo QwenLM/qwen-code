@@ -39,7 +39,7 @@ describe('security workflows', () => {
     expect(workflow).toContain('persist-credentials: false');
   });
 
-  it('keeps Security Checks a hard gate and audits package locks', () => {
+  it('runs the dependency gate daily and scans PR changes for secrets', () => {
     const workflow = readWorkflow('security-checks.yml');
     const dependencyJob = getWorkflowJob(workflow, 'dependency-cve');
     const dependencyCheckoutStep = getWorkflowStep(dependencyJob, 'Checkout');
@@ -57,8 +57,13 @@ describe('security workflows', () => {
 
     expect(workflow).toContain('pull_request:');
     expect(workflow).toContain('push:');
+    expect(workflow).toContain("- cron: '30 2 * * *'");
+    expect(dependencyJob).toContain('if: "github.event_name == \'schedule\'"');
+    expect(secretScanJob).toContain('if: "github.event_name != \'schedule\'"');
+    expect(dependencyJob).not.toContain('continue-on-error');
+    expect(secretScanJob).not.toContain('continue-on-error');
     expect(workflow).toContain(
-      "group: '${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'",
+      "group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'",
     );
     expect(workflow).toContain(
       'cancel-in-progress: "${{ github.event_name == \'pull_request\' }}"',
@@ -77,9 +82,11 @@ describe('security workflows', () => {
     expect(auditStep).not.toContain('continue-on-error');
     expect(auditStep).toContain('status=0');
     expect(auditStep).toContain('exit "$status"');
-    expect(auditStep).toContain('npm audit --omit=dev --audit-level=high');
+    expect(auditStep).toContain('timeout 4m npm audit "$@"');
+    expect(auditStep).toContain("grep -q 'audit endpoint returned an error'");
+    expect(auditStep).toContain('[ "$attempt" -eq 2 ]');
     expect(auditStep).toContain(
-      'npm audit --omit=dev --audit-level=high || status=$?',
+      'run_npm_audit --omit=dev --audit-level=high || status=$?',
     );
     expect(auditStep).toContain(') || status=$?');
     expect(auditStep).toContain('for lockfile in packages/*/package-lock.json');
@@ -92,7 +99,7 @@ describe('security workflows', () => {
       'npm ci --ignore-scripts --no-audit --progress=false --workspaces=false &&',
     );
     expect(auditStep).toContain(
-      'npm audit --omit=dev --audit-level=high --workspaces=false',
+      'run_npm_audit --omit=dev --audit-level=high --workspaces=false',
     );
     expect(trufflehogStep).not.toContain('continue-on-error');
     const trufflehogPin = trufflehogStep.match(
