@@ -1376,9 +1376,19 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       // reads as "turn finished" (#9487). Terminal events (turn_complete,
       // turn_error, prompt.cancelled) and lifecycle transitions do not ask —
       // they settle unconditionally, which is what makes them terminal.
-      const maySettleToIdle = () =>
-        !hasCurrentSessionActivePrompt() &&
-        daemonActivePromptRef.current !== true;
+      const maySettleToIdle = () => {
+        if (hasCurrentSessionActivePrompt()) return false;
+        if (daemonActivePromptRef.current === true) {
+          // The counterpart to the settle breadcrumb in the action layer:
+          // "the pane has said working for 40 minutes" is otherwise
+          // indistinguishable from a genuinely long silent tool call.
+          console.debug(
+            '[DaemonSessionProvider] settle skipped: daemon reports the prompt in flight',
+          );
+          return false;
+        }
+        return true;
+      };
       if (
         !restoreSessionId &&
         !reconnectSessionId &&

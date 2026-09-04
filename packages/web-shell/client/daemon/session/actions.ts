@@ -919,6 +919,14 @@ export function createDaemonSessionActions({
       // Still no active block after the flush: nothing to close, and an armed
       // passive timer (if any) stays armed harmlessly — it no-ops without an
       // active block.
+      // A turn settled from live state rather than from a terminal event is
+      // the interesting case for an oncall report: it says the event stream
+      // never delivered one.
+      console.debug(
+        '[DaemonSessionActions] settled turn from daemon prompt state (sessionId=%s, daemonActivePrompt=%s)',
+        backstopSessionId,
+        String(active),
+      );
       setPromptStatus('idle');
     },
 
