@@ -31,10 +31,10 @@ React clients can use the binding exported by Web Shell:
 ```tsx
 import {
   DaemonSessionProvider,
-  useDaemonActions,
-  useDaemonConnection,
-  useDaemonPendingPermissions,
-  useDaemonTranscriptBlocks,
+  useActions,
+  useConnection,
+  usePendingPermissions,
+  useTranscriptBlocks,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 ```
 
@@ -51,7 +51,7 @@ function App() {
 }
 
 function Transcript() {
-  const blocks = useDaemonTranscriptBlocks();
+  const blocks = useTranscriptBlocks();
   return blocks.map((block) => <RenderBlock key={block.id} block={block} />);
 }
 ```
