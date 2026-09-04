@@ -26,11 +26,7 @@
  * nothing and cost all of it.
  */
 
-import {
-  DEFAULT_COMMAND_OPTIONS,
-  TOP_LEVEL_GLOBAL_OPTIONS,
-} from '../config/top-level-options.js';
-import { writeStdoutLine } from '../utils/stdioHelpers.js';
+import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { BACKGROUND_FLAG } from './entry-flags.js';
 
 /**
@@ -45,69 +41,52 @@ export async function runAsAgentViewSupervisor(): Promise<void> {
 }
 
 /**
- * Flags that consume the token after them, derived from the CLI's own
- * option tables rather than listed here.
+ * What a raw argv says about a background launch.
  *
- * A hand-written list is the wrong shape for this: the cost of missing
- * one is that a flag's value is read as part of the prompt, and the list
- * would go stale the first time someone adds an option. `type` in those
- * tables already says which flags take a value.
+ * - `undefined` — no `--bg` before `--`: not a background launch; the
+ *   entry falls through to the normal startup path.
+ * - `{ prompt }` — the prompt to dispatch; possibly empty, which the
+ *   dispatch reports rather than guessing.
+ * - `{ unsupportedFlag }` — a background launch carrying some other flag.
  */
-function valueTakingFlags(): ReadonlySet<string> {
-  const flags = new Set<string>();
-  const entries = [
-    ...Object.entries(TOP_LEVEL_GLOBAL_OPTIONS),
-    ...Object.entries(DEFAULT_COMMAND_OPTIONS),
-  ] as ReadonlyArray<
-    readonly [string, { type?: string; alias?: string | readonly string[] }]
-  >;
-  for (const [name, option] of entries) {
-    if (option.type === 'boolean' || option.type === 'count') continue;
-    flags.add(name.length === 1 ? `-${name}` : `--${name}`);
-    const aliases =
-      option.alias === undefined
-        ? []
-        : Array.isArray(option.alias)
-          ? option.alias
-          : [option.alias as string];
-    for (const alias of aliases) {
-      flags.add(alias.length === 1 ? `-${alias}` : `--${alias}`);
-    }
-  }
-  return flags;
-}
+export type BackgroundPromptRead =
+  | { prompt: string }
+  | { unsupportedFlag: string };
 
 /**
- * The prompt of a `--bg` launch, or undefined when this is not one.
+ * The background launch a raw argv asks for, or undefined when it is not
+ * one.
  *
  * `--bg` is a boolean and takes its prompt where the default command
  * takes it — as the trailing positional query — so `qwen --bg "audit the
  * release"` reads like the interactive form. Everything after `--` is the
- * user's own data and is never scanned.
+ * user's own data and is never scanned, so a `--bg` passed as a prompt
+ * word declines.
  *
- * Returns an empty string for `--bg` with nothing to run, which the
- * caller reports rather than dispatching.
+ * Any other flag declines too, named: `--bg` forwards nothing to the
+ * session (the worker argv carries only the session id and the prompt),
+ * so silently dropping the flag would run the session without the
+ * behavior it asks for — and a hand-rolled scan of which flags take
+ * values misreads the value slots of the ones it cannot model as prompt
+ * words. A flag added later cannot silently start leaking into prompts.
  */
 export function readBackgroundPrompt(
   rawArgv: readonly string[],
-): string | undefined {
+): BackgroundPromptRead | undefined {
   const separator = rawArgv.indexOf('--');
   const argv = separator === -1 ? rawArgv : rawArgv.slice(0, separator);
   if (!argv.includes(BACKGROUND_FLAG)) return undefined;
 
-  const takesValue = valueTakingFlags();
   const words: string[] = [];
-  for (let index = 0; index < argv.length; index += 1) {
-    const token = argv[index];
-    // An attached value (`--model=x`) is one token and consumes nothing
-    // after it; a detached one (`--model x`) consumes the next token.
+  for (const token of argv) {
+    if (token === BACKGROUND_FLAG) continue;
     if (token.startsWith('-')) {
-      if (takesValue.has(token)) index += 1;
-      continue;
+      const eq = token.indexOf('=');
+      return { unsupportedFlag: eq === -1 ? token : token.slice(0, eq) };
     }
     words.push(token);
   }
-  return words.join(' ').trim();
+  return { prompt: words.join(' ').trim() };
 }
 
 /**
@@ -122,8 +101,8 @@ export async function runBackgroundDispatch(
   cwd: string = process.cwd(),
 ): Promise<number> {
   if (!prompt) {
-    process.stderr.write(
-      'qwen --bg needs a prompt: qwen --bg "review the failing release"\n',
+    writeStderrLine(
+      'qwen --bg needs a prompt: qwen --bg "review the failing release"',
     );
     return 1;
   }
@@ -144,7 +123,7 @@ export async function runBackgroundDispatch(
     return 0;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`Could not start a background session: ${reason}\n`);
+    writeStderrLine(`Could not start a background session: ${reason}`);
     return 1;
   }
 }

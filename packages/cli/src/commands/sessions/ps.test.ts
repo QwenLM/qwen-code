@@ -10,9 +10,11 @@ import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
 
 const listLiveSessions = vi.fn();
 const listAgentViewSessionSnapshots = vi.fn();
+const isPidAlive = vi.fn();
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   listLiveSessions: (...args: unknown[]) => listLiveSessions(...args),
+  isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
 }));
 
 vi.mock('../../agent-view/supervisor-store.js', () => ({
@@ -99,6 +101,8 @@ beforeEach(() => {
   listLiveSessions.mockReset();
   listAgentViewSessionSnapshots.mockReset();
   listAgentViewSessionSnapshots.mockResolvedValue([]);
+  isPidAlive.mockReset();
+  isPidAlive.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -304,12 +308,15 @@ describe('qwen sessions ps', () => {
 
     const rows = stdout.map((line) => JSON.parse(line));
     expect(rows.map((row) => row.managed)).toEqual([true, false]);
+    // The JSON carries the stable token; only the table says
+    // "needs input".
     expect(rows[0]).toMatchObject({
       name: 'svc-audit',
       pid: 777,
-      state: 'needs input',
+      taskState: 'waiting',
       sessionId: 'managed-1',
     });
+    expect(rows[0]).not.toHaveProperty('state');
   });
 
   it('prints a dash, not a zero, for a managed session with no process', async () => {
@@ -322,6 +329,21 @@ describe('qwen sessions ps', () => {
     expect(stdout[1].slice(NAME_COL, NAME_COL + PID_COL)).toBe(
       '-'.padEnd(PID_COL),
     );
+  });
+
+  it('does not render a managed pid that no process owns any more', async () => {
+    // The store is durable; a supervisor crash or a reboot can leave a
+    // recorded pid that is dead or recycled. The session stays listed,
+    // but the pid must not be printed for a process it no longer names.
+    listLiveSessions.mockResolvedValue([]);
+    listAgentViewSessionSnapshots.mockResolvedValue([managedSnapshot()]);
+    isPidAlive.mockReturnValue(false);
+    await run({ json: false });
+
+    expect(stdout[1].slice(NAME_COL, NAME_COL + PID_COL)).toBe(
+      '-'.padEnd(PID_COL),
+    );
+    expect(stdout[1]).not.toContain('777');
   });
 
   it('still lists interactive sessions when the supervisor store cannot be read', async () => {
@@ -350,15 +372,20 @@ describe('qwen sessions ps', () => {
   });
 
   it('neutralizes control sequences in a store failure reason', async () => {
-    // The message can carry a path a foreign process chose.
+    // The message can carry a path a foreign process chose. LF and TAB
+    // must go with it: the sibling test pins one note on stderr, and a
+    // preserved LF would forge extra lines out of a single failure.
     listLiveSessions.mockResolvedValue([]);
     listAgentViewSessionSnapshots.mockRejectedValue(
-      new Error('ENOENT: /w/\x1b[31mevil\r'),
+      new Error('ENOENT: /w/\x1b[31mevil\r\n\tFORGED: attacker line'),
     );
     await run({ json: false });
 
+    expect(stderr).toHaveLength(1);
     expect(stderr[0]).not.toContain('\x1b');
     expect(stderr[0]).not.toContain('\r');
+    expect(stderr[0]).not.toContain('\n');
+    expect(stderr[0]).not.toContain('\t');
   });
 
   it('says so plainly when neither source has anything', async () => {

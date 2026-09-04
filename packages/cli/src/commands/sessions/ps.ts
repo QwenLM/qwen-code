@@ -36,6 +36,7 @@ import {
   mergeSessionRows,
   type SessionRow,
 } from './managed-rows.js';
+import type { AgentViewTaskState } from '../../agent-view/presentation.js';
 
 /** Fixed column widths for the human-readable table (exported for tests). */
 export const NAME_COL = 22;
@@ -84,6 +85,37 @@ export function formatAge(ms: number): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
+/**
+ * What the `STATE` column prints for a managed row.
+ *
+ * The mapping lives here rather than on the row because the row reaches
+ * `--json`: a machine contract pinned to display wording breaks every
+ * script the day someone rewords a column, with no type error to warn
+ * them. `taskState` is the stable token; this is the only place it turns
+ * into English.
+ *
+ * Labelled by task state rather than by the roster's display group,
+ * which folds `ready`, `stopped` and `failed` into one `completed`
+ * bucket. The roster UI can afford that because it also paints an icon
+ * tone; a one-line table has no second channel, and printing
+ * "completed" beside a session that failed is a lie the user has no way
+ * to see through.
+ */
+const TASK_STATE_LABEL: Record<AgentViewTaskState, string> = {
+  running: 'working',
+  waiting: 'needs input',
+  ready: 'ready',
+  stopped: 'stopped',
+  failed: 'failed',
+};
+
+/** A registry row knows only that a process is alive. */
+function stateLabel(row: SessionRow): string {
+  return row.taskState === undefined
+    ? 'interactive'
+    : TASK_STATE_LABEL[row.taskState];
+}
+
 function outputHuman(rows: SessionRow[], now: number): void {
   writeStdoutLine(
     padDisplay('NAME', NAME_COL) +
@@ -100,7 +132,7 @@ function outputHuman(rows: SessionRow[], now: number): void {
           row.startedAt === undefined ? '-' : formatAge(now - row.startedAt),
           AGE_COL,
         ) +
-        padDisplay(row.state, STATE_COL) +
+        padDisplay(stateLabel(row), STATE_COL) +
         sanitize(row.cwd),
     );
   }
