@@ -3283,7 +3283,7 @@ export function registerSessionRoutes(
       } catch (error) {
         if (!session.attached) {
           try {
-            const removed = await runWithWorkspaceRuntimeStorage(runtime, () =>
+            await runWithWorkspaceRuntimeStorage(runtime, () =>
               deleteDaemonSessionIfOrphan({
                 sessionId: session.sessionId,
                 service: createWorkspaceRuntimeSessionService(runtime),
@@ -3291,19 +3291,24 @@ export function registerSessionRoutes(
                 coordinator: archiveCoordinator,
               }),
             );
-            if (removed) {
-              if (worktreeMeta) {
-                await new GitWorktreeService(workspaceCwd)
-                  .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
-                  .catch(() => {});
-              }
-            }
           } catch {
             // Runtime disposal remains responsible for final containment.
           }
         } else {
           await runtime.bridge
             .detachClient(session.sessionId, session.clientId)
+            .catch(() => {});
+        }
+        // Relocation is only attempted after this check, so no session has
+        // entered the worktree and nothing can own the checkout regardless of
+        // how session cleanup turned out. This deliberately differs from the
+        // relocation and persistence failure handlers below, which may still
+        // have a live session inside the checkout and so remove it only after
+        // a definitive session delete; leaving the checkout here would orphan
+        // the directory, its git registration, and its branch permanently.
+        if (worktreeMeta) {
+          await new GitWorktreeService(workspaceCwd)
+            .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
             .catch(() => {});
         }
         throw error;

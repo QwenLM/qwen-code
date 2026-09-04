@@ -4387,6 +4387,14 @@ describe('ChannelBase', () => {
           'Usage: /session current | /session new <name> [--worktree]',
         );
         expect(bridge.newSession).not.toHaveBeenCalled();
+
+        // The flag alone is missing the task name: it must return the usage
+        // line, not fall through to a confusing name-validation error.
+        await ch.handleInbound(envelope({ text: '/session new --worktree' }));
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Usage: /session current | /session new <name> [--worktree]',
+        );
+        expect(bridge.newSession).not.toHaveBeenCalled();
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }

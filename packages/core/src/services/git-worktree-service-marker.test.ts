@@ -212,4 +212,27 @@ describe('daemon worktree session markers', () => {
       });
     }
   });
+
+  it('leaves no file behind when the write fails after creation', async () => {
+    const dir = await tempDir();
+    const probe = await fs.open(path.join(dir, 'probe'), 'w');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    await probe.close();
+    const writeSpy = vi
+      .spyOn(prototype, 'writeFile')
+      .mockRejectedValue(new Error('injected write failure'));
+
+    try {
+      await expect(
+        createWorktreeSessionMarkerExclusive(dir, 'session-123'),
+      ).rejects.toThrow('injected write failure');
+      // The failed create must not wedge the path with an EEXIST-raising
+      // empty file: the strict reader sees a clean absence.
+      await expect(readWorktreeSessionMarkerStrict(dir)).resolves.toEqual({
+        state: 'missing',
+      });
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
 });
