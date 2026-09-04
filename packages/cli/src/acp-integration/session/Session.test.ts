@@ -38,6 +38,7 @@ import type {
 import {
   ApprovalMode,
   AuthType,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
@@ -4408,20 +4409,65 @@ describe('Session', () => {
     };
     mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
     mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-    vi.mocked(mockClient.extMethod).mockRejectedValueOnce(
-      new RequestError(-32603, 'selected model is unavailable', {
+    vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
+      code: -32603,
+      message: 'selected model is unavailable',
+      data: {
         code: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE,
-      }),
-    );
+      },
+    });
 
     session.startCronScheduler();
 
     await vi.waitFor(() => {
       expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
-        sessionId: 'test-session-id',
         dispatchFailed: true,
       });
     });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('does not dispatch a scheduled task with an over-long model id', async () => {
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+            modelServiceId: string;
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt: 'review the next PR',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+            modelServiceId: 'm'.repeat(MAX_CRON_TASK_ROUTING_ID_LENGTH + 1),
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+        dispatchFailed: true,
+      });
+    });
+    expect(mockClient.extMethod).not.toHaveBeenCalled();
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
 

@@ -9,6 +9,7 @@ import {
   appendCronRun,
   generateCronTaskId,
   getCronFilePath,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
   MAX_TASK_RUNS,
   readCronTasks,
   removeCronTasks,
@@ -242,6 +243,26 @@ describe('cronTasksFile', () => {
       await writeCronTasks(tmpDir, [task]);
       expect(await readCronTasks(tmpDir)).toEqual([task]);
     });
+
+    it.each(['modelServiceId', 'groupId'] as const)(
+      'rejects an unsafe %s',
+      async (field) => {
+        for (const value of [
+          'x'.repeat(MAX_CRON_TASK_ROUTING_ID_LENGTH + 1),
+          'value\nqwen serve: forged',
+        ]) {
+          await seedTasksFile(
+            tmpDir,
+            JSON.stringify([
+              { ...makeTask(), sessionMode: 'per_run', [field]: value },
+            ]),
+          );
+          await expect(readCronTasks(tmpDir)).rejects.toThrow(
+            /Invalid task entry/,
+          );
+        }
+      },
+    );
 
     it('rejects an unknown session mode', async () => {
       await seedTasksFile(

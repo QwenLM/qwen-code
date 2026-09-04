@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import { SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE } from '../runtime/scheduled-task-run.js';
 
 /** Captures the launcher's operator-facing stderr output. */
 const { stderrLines, updateSessionOrganization } = vi.hoisted(() => ({
@@ -596,7 +597,13 @@ describe('sub-session launcher', () => {
           sourceId: 'scheduled_task_run:task-1',
           callerSessionId: 'caller-1',
         }),
-      ).rejects.toThrow(/model selection failed.*missing-model/i);
+      ).rejects.toMatchObject({
+        code: -32603,
+        message: expect.stringMatching(
+          /model selection failed.*missing-model/i,
+        ),
+        data: { code: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE },
+      });
 
       expect(fake.closes).toEqual(['sub-1']);
       expect(fake.prompts).toEqual([]);

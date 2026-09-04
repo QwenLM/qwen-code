@@ -612,6 +612,12 @@ describe('scheduled-tasks routes', () => {
       sessionMode: 'per_run',
       groupId: 'g'.repeat(129),
     });
+    const unsafeModel = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      modelServiceId: 'model\nqwen serve: forged',
+    });
 
     expect(persistent.status).toBe(400);
     expect(persistent.body.code).toBe('session_routing_requires_per_run');
@@ -619,6 +625,8 @@ describe('scheduled-tasks routes', () => {
     expect(emptyModel.body.code).toBe('invalid_model_service_id');
     expect(longGroup.status).toBe(400);
     expect(longGroup.body.code).toBe('invalid_group_id');
+    expect(unsafeModel.status).toBe(400);
+    expect(unsafeModel.body.code).toBe('invalid_model_service_id');
     expect(h.bridge.spawned).toEqual([]);
   });
 
@@ -646,6 +654,12 @@ describe('scheduled-tasks routes', () => {
       modelServiceId: 'qwen-max(openai)',
       groupId: group.id,
     });
+
+    const unsafeGroup = await request(h.app)
+      .patch(`/scheduled-tasks/${created.body.id}`)
+      .send({ groupId: 'group\nqwen serve: forged' });
+    expect(unsafeGroup.status).toBe(400);
+    expect(unsafeGroup.body.code).toBe('invalid_group_id');
 
     const persistent = await request(h.app)
       .patch(`/scheduled-tasks/${created.body.id}`)

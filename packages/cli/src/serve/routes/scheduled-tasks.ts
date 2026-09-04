@@ -45,7 +45,9 @@ import {
   SessionService,
   Storage,
   stripTerminalControlSequences,
+  isValidCronTaskRoutingId,
   MAX_JOBS,
+  MAX_CRON_TASK_ROUTING_ID_LENGTH,
   type CronRunSessionOutcome,
   type CronTaskDelivery,
   type DurableCronTask,
@@ -87,7 +89,7 @@ const MAX_SCHEDULED_TASKS = MAX_JOBS;
 const MAX_PROMPT_LENGTH = 100_000;
 const MAX_NAME_LENGTH = 200;
 const MAX_CRON_LENGTH = 200;
-const MAX_ROUTING_ID_LENGTH = 128;
+const MAX_ROUTING_ID_LENGTH = MAX_CRON_TASK_ROUTING_ID_LENGTH;
 
 /**
  * The slice of the session bridge this route needs. Narrowed to a structural
@@ -983,25 +985,18 @@ function registerScheduledTaskCrudRoutes(
       const modelServiceId = body['modelServiceId'];
       if (
         modelServiceId !== undefined &&
-        (typeof modelServiceId !== 'string' ||
-          modelServiceId.length === 0 ||
-          modelServiceId.length > MAX_ROUTING_ID_LENGTH)
+        !isValidCronTaskRoutingId(modelServiceId)
       ) {
         res.status(400).json({
-          error: `\`modelServiceId\` must be a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters`,
+          error: `\`modelServiceId\` must be a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters without control characters`,
           code: 'invalid_model_service_id',
         });
         return;
       }
       const groupId = body['groupId'];
-      if (
-        groupId !== undefined &&
-        (typeof groupId !== 'string' ||
-          groupId.length === 0 ||
-          groupId.length > MAX_ROUTING_ID_LENGTH)
-      ) {
+      if (groupId !== undefined && !isValidCronTaskRoutingId(groupId)) {
         res.status(400).json({
-          error: `\`groupId\` must be a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters`,
+          error: `\`groupId\` must be a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters without control characters`,
           code: 'invalid_group_id',
         });
         return;
@@ -1411,12 +1406,9 @@ function registerScheduledTaskCrudRoutes(
         const value = body['modelServiceId'];
         if (value === null || value === '') {
           clearModelServiceId = true;
-        } else if (
-          typeof value !== 'string' ||
-          value.length > MAX_ROUTING_ID_LENGTH
-        ) {
+        } else if (!isValidCronTaskRoutingId(value)) {
           res.status(400).json({
-            error: `\`modelServiceId\` must be null or a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters`,
+            error: `\`modelServiceId\` must be null or a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters without control characters`,
             code: 'invalid_model_service_id',
           });
           return;
@@ -1428,12 +1420,9 @@ function registerScheduledTaskCrudRoutes(
         const value = body['groupId'];
         if (value === null || value === '') {
           clearGroupId = true;
-        } else if (
-          typeof value !== 'string' ||
-          value.length > MAX_ROUTING_ID_LENGTH
-        ) {
+        } else if (!isValidCronTaskRoutingId(value)) {
           res.status(400).json({
-            error: `\`groupId\` must be null or a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters`,
+            error: `\`groupId\` must be null or a non-empty string of at most ${MAX_ROUTING_ID_LENGTH} characters without control characters`,
             code: 'invalid_group_id',
           });
           return;

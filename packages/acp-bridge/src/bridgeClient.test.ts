@@ -1668,6 +1668,33 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
     expect(onCreate).not.toHaveBeenCalled();
   });
 
+  it('rejects unsafe model and group routing values', async () => {
+    const onCreate = vi.fn(async () => ({ sessionId: 'sub-routing' }));
+    const client = makeClientWithCreateSubSession(onCreate);
+    const scheduledSource = {
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    };
+
+    for (const params of [
+      { model: 'm'.repeat(129) },
+      { model: 'model\nqwen serve: forged' },
+      { groupId: 'group\nqwen serve: forged' },
+    ]) {
+      await expect(
+        client.extMethod(METHOD, {
+          prompt: 'x',
+          completion: 'sent',
+          callerSessionId: 'caller-1',
+          ...scheduledSource,
+          ...params,
+        }),
+      ).rejects.toThrow(/control characters|at most 128/i);
+    }
+
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
   it('rejects a callerSessionId this connection does not own', async () => {
     // The key names the launcher's per-caller concurrency bucket. A child that
     // can name any session evades its own cap (a fabricated id starts a fresh

@@ -107,6 +107,7 @@ import {
   createHookOutput,
   wrapUserPromptSubmitContext,
   generateToolUseId,
+  isValidCronTaskRoutingId,
   MessageBusType,
   MessageDisplayDispatcher,
   getPlanModeSystemReminder,
@@ -8580,6 +8581,17 @@ export class Session implements SessionContext {
           );
         });
     };
+    if (
+      (job.modelServiceId !== undefined &&
+        !isValidCronTaskRoutingId(job.modelServiceId)) ||
+      (job.groupId !== undefined && !isValidCronTaskRoutingId(job.groupId))
+    ) {
+      debugLogger.warn(
+        `Scheduled task ${taskId} has invalid model or group routing; it was not dispatched`,
+      );
+      await record({ dispatchFailed: true });
+      return;
+    }
     let sessionId: string;
     try {
       const response = await this.client.extMethod(
@@ -8621,18 +8633,32 @@ export class Session implements SessionContext {
       }
       sessionId = responseSessionId;
     } catch (error) {
+      const errorRecord =
+        typeof error === 'object' && error !== null
+          ? (error as Record<string, unknown>)
+          : undefined;
+      const errorData = errorRecord?.['data'];
       const modelSelectionFailed =
-        error instanceof RequestError &&
-        typeof error.data === 'object' &&
-        error.data !== null &&
-        (error.data as { code?: unknown }).code ===
+        typeof errorData === 'object' &&
+        errorData !== null &&
+        (errorData as { code?: unknown }).code ===
           SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE;
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : typeof errorRecord?.['message'] === 'string'
+            ? errorRecord['message']
+            : String(error);
       debugLogger.warn(
         modelSelectionFailed
-          ? `Scheduled task ${taskId} could not apply its selected model: ${error.message}`
-          : `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${error instanceof Error ? error.message : String(error)}`,
+          ? `Scheduled task ${taskId} could not apply its selected model: ${errorMessage}`
+          : `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${errorMessage}`,
       );
-      await record({ sessionId: this.sessionId, dispatchFailed: true });
+      await record(
+        modelSelectionFailed
+          ? { dispatchFailed: true }
+          : { sessionId: this.sessionId, dispatchFailed: true },
+      );
       if (modelSelectionFailed) return;
       this.#enqueueCronPrompt({
         prompt: job.prompt,

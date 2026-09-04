@@ -16,6 +16,20 @@ import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 import { getProjectHash } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 
+export const MAX_CRON_TASK_ROUTING_ID_LENGTH = 128;
+
+export function isValidCronTaskRoutingId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= MAX_CRON_TASK_ROUTING_ID_LENGTH &&
+    !Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    })
+  );
+}
+
 /**
  * One entry in a recurring task's bounded run history — a record that the
  * task actually fired, surfaced by the Web Shell scheduled-tasks page. Only
@@ -534,10 +548,9 @@ function isValidTask(value: unknown): value is DurableCronTask {
       obj['sessionMode'] === 'persistent' ||
       obj['sessionMode'] === 'per_run') &&
     (obj['modelServiceId'] === undefined ||
-      (typeof obj['modelServiceId'] === 'string' &&
-        obj['modelServiceId'].length > 0)) &&
+      isValidCronTaskRoutingId(obj['modelServiceId'])) &&
     (obj['groupId'] === undefined ||
-      (typeof obj['groupId'] === 'string' && obj['groupId'].length > 0)) &&
+      isValidCronTaskRoutingId(obj['groupId'])) &&
     ((obj['modelServiceId'] === undefined && obj['groupId'] === undefined) ||
       obj['sessionMode'] === 'per_run') &&
     (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
