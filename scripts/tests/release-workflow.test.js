@@ -833,11 +833,28 @@ describe('release workflow', () => {
       '${{ steps.promotion.outputs.reuse_validation }}',
     );
 
-    const source = releaseYaml.jobs.prepare.steps.find(
-      (step) => step.id === 'source',
-    );
+    const prepareSteps = releaseYaml.jobs.prepare.steps;
+    const source = prepareSteps.find((step) => step.id === 'source');
     expect(source.run).toContain('release-source.txt');
-    const sourceEvidence = releaseYaml.jobs.prepare.steps.find(
+    // release_sha must bind to the verified nightly source: the wiring is
+    // promotion.outputs.source_sha -> PROMOTION_SHA env -> release_sha,
+    // with the fallback shape pinned so neither half can be dropped. On a
+    // promotion run the checkout ref is github.sha, so losing this wiring
+    // would silently publish commits no successful Release run validated.
+    expect(source.env.PROMOTION_SHA).toBe(
+      '${{ steps.promotion.outputs.source_sha }}',
+    );
+    expect(source.run).toContain(
+      'release_sha="${PROMOTION_SHA:-$(git rev-parse HEAD)}"',
+    );
+    // The wiring only resolves while the promotion step runs first:
+    // reordered, steps.promotion.outputs.source_sha evaluates to '' and
+    // release_sha silently falls back to the dispatch HEAD while
+    // reuse_validation still skips every validation job.
+    expect(
+      prepareSteps.findIndex((step) => step.id === 'promotion'),
+    ).toBeLessThan(prepareSteps.findIndex((step) => step.id === 'source'));
+    const sourceEvidence = prepareSteps.find(
       (step) => step.name === 'Record release source',
     );
     expect(sourceEvidence.with.name).toBe(
@@ -850,26 +867,48 @@ describe('release workflow', () => {
     // "Release Failed" issue.
     expect(sourceEvidence['continue-on-error']).toBe(true);
 
-    const promotion = releaseYaml.jobs.prepare.steps.find(
-      (step) => step.id === 'promotion',
-    );
+    const promotion = prepareSteps.find((step) => step.id === 'promotion');
     expect(promotion.run).toContain('verify-nightly-promotion.js');
     expect(promotion.run).toContain('force_skip_tests');
+    // Without the gate every scheduled nightly and ordinary dispatch would
+    // run the script with an empty input and fail prepare; inverted, the
+    // promotion input would be silently ignored on promote dispatches.
+    expect(promotion.if).toBe(
+      "${{ github.event.inputs.promote_nightly != '' }}",
+    );
     // The step's outputs are written by the script, not by jq in the
     // workflow, so the output name has to stay in step with it.
     expect(promotionScript).toContain('reuse_validation=true');
     expect(promotionScript).toContain('source_sha=');
+    // The gate's deterministic evidence refusals are a correct outcome, not
+    // a release failure: the script marks them so notify_failure can keep
+    // them out of the release-failed issue and autofix dispatch.
+    expect(promotionScript).toContain('promotion_refusal=true');
+    expect(releaseYaml.jobs.prepare.outputs.promotion_refusal).toBe(
+      '${{ steps.promotion.outputs.promotion_refusal }}',
+    );
 
     // The nightly tag selects the source revision; the stable version is a
     // release decision taken from the `version` input (or derived from the
     // `latest` dist-tag), because the tag's own numeric base is published by
     // the ordinary stable path.
-    const version = releaseYaml.jobs.prepare.steps.find(
-      (step) => step.id === 'version',
-    );
+    const version = prepareSteps.find((step) => step.id === 'version');
     expect(version.run).toContain('--promote_nightly_stable_version=');
     expect(version.run).not.toContain(
       'version cannot be combined with promote_nightly',
+    );
+    // The prepare-time "already shipped" refusal exits 3 and is marked like
+    // the publish-side push-time guard, so a re-dispatched promotion whose
+    // version a first attempt published does not notify as a failure.
+    expect(version.run).toContain('version_refusal=true');
+    expect(releaseYaml.jobs.prepare.outputs.version_refusal).toBe(
+      '${{ steps.version.outputs.version_refusal }}',
+    );
+    expect(releaseYaml.jobs.notify_failure.if).toContain(
+      "needs.prepare.outputs.version_refusal != 'true'",
+    );
+    expect(releaseYaml.jobs.notify_failure.if).toContain(
+      "needs.prepare.outputs.promotion_refusal != 'true'",
     );
 
     // promote_nightly ignores `ref`, which is a required input with a
