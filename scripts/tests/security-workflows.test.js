@@ -39,7 +39,7 @@ describe('security workflows', () => {
     expect(workflow).toContain('persist-credentials: false');
   });
 
-  it('runs the dependency gate daily and scans PR changes for secrets', () => {
+  it('runs the dependency gate only on the daily schedule', () => {
     const workflow = readWorkflow('security-checks.yml');
     const dependencyJob = getWorkflowJob(workflow, 'dependency-cve');
     const dependencyCheckoutStep = getWorkflowStep(dependencyJob, 'Checkout');
@@ -48,23 +48,13 @@ describe('security workflows', () => {
       dependencyJob,
       'Audit production dependencies',
     );
-    const secretScanJob = getWorkflowJob(workflow, 'secret-scan');
     const trackingJob = getWorkflowJob(workflow, 'track-dependency-cve');
-    const checkoutStep = getWorkflowStep(secretScanJob, 'Checkout');
-    const trufflehogStep = getWorkflowStep(
-      secretScanJob,
-      'Scan for verified secrets',
-    );
 
-    expect(workflow).toContain('pull_request:');
+    expect(workflow).not.toContain('pull_request:');
     expect(workflow).not.toContain('\n  push:');
     expect(workflow).toContain("- cron: '30 2 * * *'");
     expect(dependencyJob).toContain('if: "github.event_name == \'schedule\'"');
-    expect(secretScanJob).toContain(
-      'if: "github.event_name == \'pull_request\'"',
-    );
     expect(dependencyJob).not.toContain('continue-on-error');
-    expect(secretScanJob).not.toContain('continue-on-error');
     expect(trackingJob).toContain("needs: 'dependency-cve'");
     expect(trackingJob).toContain(
       "always() && github.event_name == 'schedule' && (needs.dependency-cve.result == 'success' || needs.dependency-cve.result == 'failure')",
@@ -79,11 +69,9 @@ describe('security workflows', () => {
     expect(trackingJob).toContain('github.rest.issues.create');
     expect(trackingJob).toContain("state: 'closed'");
     expect(workflow).toContain(
-      "group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'",
+      "group: '${{ github.workflow }}-${{ github.ref }}'",
     );
-    expect(workflow).toContain(
-      'cancel-in-progress: "${{ github.event_name == \'pull_request\' }}"',
-    );
+    expect(workflow).toContain('cancel-in-progress: false');
     expect(workflow).toContain(
       'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
     );
@@ -91,7 +79,6 @@ describe('security workflows', () => {
       'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e',
     );
     expect(dependencyCheckoutStep).toContain('persist-credentials: false');
-    expect(checkoutStep).toContain('persist-credentials: false');
     expect(installStep).toContain(
       "run: 'npm ci --ignore-scripts --no-audit --progress=false'",
     );
@@ -117,17 +104,7 @@ describe('security workflows', () => {
     expect(auditStep).toContain(
       'run_npm_audit --omit=dev --audit-level=high --workspaces=false',
     );
-    expect(trufflehogStep).not.toContain('continue-on-error');
-    const trufflehogPin = trufflehogStep.match(
-      /trufflesecurity\/trufflehog@[0-9a-f]{40}' # v([\d.]+)/,
-    );
-    expect(trufflehogPin).not.toBeNull();
-    expect(trufflehogStep).toContain(`version: '${trufflehogPin?.[1]}'`);
-    expect(trufflehogStep).not.toContain('github.event.before');
-    expect(trufflehogStep).toContain("extra_args: '--only-verified'");
-    expect(trufflehogStep).toContain(
-      'trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11',
-    );
-    expect(checkoutStep).toContain('fetch-depth: 0');
+    expect(workflow).not.toContain('secret-scan:');
+    expect(workflow).not.toContain('trufflesecurity/trufflehog');
   });
 });
