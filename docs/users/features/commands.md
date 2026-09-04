@@ -119,7 +119,7 @@ Commands for managing AI tools and models.
 | `/permissions`        | Manage permission rules                                                               | `/permissions`                                                                                            |
 | `/agents`             | Manage subagents                                                                      | `/agents manage`, `/agents create`                                                                        |
 | `/arena`              | Manage Arena sessions                                                                 | `/arena start`, `/arena stop`, `/arena status`, `/arena select` (alias `choose`)                          |
-| `/goal`               | Set a goal — keep working until condition met (see [Goals](./goals.md))               | `/goal <condition>`, `/goal clear`                                                                        |
+| `/goal`               | Set a Goal — keep working until a verifier confirms it (see [Goals](./goals.md))      | `/goal <objective>`, `/goal edit <objective>`, `/goal pause`, `/goal resume`, `/goal clear`               |
 | `/tasks`              | List background tasks                                                                 | `/tasks`                                                                                                  |
 | `/workflows`          | Inspect workflow runs; cooperatively pause/resume a background run                    | `/workflows`, `/workflows <runId>`, `/workflows p <runId>`                                                |
 | `/lsp`                | Show LSP server status                                                                | `/lsp`                                                                                                    |
@@ -828,15 +828,23 @@ a message is delivered if the receiving session still reviews each
 action (default or plan mode), or if both sessions are in a mode that
 applies actions without per-action review; otherwise it is held for
 review. Held messages are listed and released with `/peers` in the
-receiving session.
+receiving session, which shows how long each one has left.
+
+A hold does not wait forever. A message nobody decides on expires after
+`agents.crossSessionHeldExpiry` — `1m`, `5m`, `10m`, or `never`, five
+minutes by default — and the sending session is told that no decision
+came. Shortening the setting applies to messages already waiting.
 
 The `send_message` call only confirms the message was handed to the other
 session. What became of it arrives later as a receipt: if it was held,
-declined, expired, or misaddressed (the address changed hands — list the
-agents again) — or released after a hold — a notice appears in the
-sending session's transcript (`Message to <name>: …`). The model that
-sent it is not told; if the other session replies, the reply arrives as a
-cross-session message.
+declined, refused, expired, or misaddressed (the address changed hands —
+list the agents again) — or released after a hold — a notice appears in
+the sending session's transcript (`Message to <name>: …`). Declined and
+refused are different answers: declined means someone reviewed the
+message and said no, while refused means that session's
+`agents.crossSessionInbound` is `refuse` and nobody saw it at all. The
+model that sent it is not told; if the other session replies, the reply
+arrives as a cross-session message.
 
 ### Inbox authentication and scripted injection
 
