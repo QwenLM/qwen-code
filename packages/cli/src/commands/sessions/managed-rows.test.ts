@@ -87,11 +87,14 @@ function record(
 }
 
 describe('managedSessionRows', () => {
-  it('labels each task state in the roster’s own vocabulary', () => {
-    const cases: Array<[AgentViewSessionState, string]> = [
-      ['working', 'working'],
-      ['starting', 'working'],
-      ['needs_input', 'needs input'],
+  it('carries the presentation layer’s own task state, not a label', () => {
+    // The row reaches `--json`, so this field is a machine contract. It
+    // stays the stable token; `ps.ts` turns it into English at the one
+    // place that renders a table.
+    const cases: Array<[AgentViewSessionState, AgentViewTaskState]> = [
+      ['working', 'running'],
+      ['starting', 'running'],
+      ['needs_input', 'waiting'],
       ['idle', 'ready'],
       ['completed', 'ready'],
       ['stopped', 'stopped'],
@@ -102,20 +105,27 @@ describe('managedSessionRows', () => {
         [snapshot({ state: state({ sessionState }) })],
         NOW,
       );
-      expect(row.state).toBe(expected);
+      expect(row.taskState).toBe(expected);
     }
   });
 
-  it('never prints "ready" for a session that failed', () => {
-    // The roster's display group folds ready/stopped/failed together. A
-    // one-line table has no icon to carry the difference, so the label
-    // must: a failed session reported as ready is unrecoverable for a
-    // user reading only this output.
+  it('never reports a failed session as ready', () => {
+    // The roster's display group folds ready/stopped/failed together, so
+    // a consumer reading the group cannot tell a failure from a clean
+    // finish. The task state can, and this is the field that reaches
+    // both the table and `--json`.
     const [row] = managedSessionRows(
       [snapshot({ state: state({ sessionState: 'failed' }) })],
       NOW,
     );
-    expect(row.state).toBe('failed');
+    expect(row.taskState).toBe('failed');
+  });
+
+  it('leaves a registry row with no task state at all', () => {
+    // A registry record knows a process is alive and nothing more;
+    // inventing a task state for it would be a claim nobody made.
+    const rows = mergeSessionRows([record()], []);
+    expect(rows[0].taskState).toBeUndefined();
   });
 
   it('reports the worker pid, falling back to the host that owns the PTY', () => {
@@ -247,7 +257,7 @@ describe('mergeSessionRows', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].managed).toBe(true);
-    expect(rows[0].state).toBe('working');
+    expect(rows[0].taskState).toBe('running');
   });
 
   it('lets a live registry record survive the adopting window', () => {
@@ -291,7 +301,6 @@ describe('mergeSessionRows', () => {
         pid: 4242,
         startedAt: NOW - 90_000,
         cwd: '/w/app',
-        state: 'interactive',
         sessionId: 'sess-1',
         managed: false,
         record: rec,

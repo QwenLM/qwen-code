@@ -308,12 +308,15 @@ describe('qwen sessions ps', () => {
 
     const rows = stdout.map((line) => JSON.parse(line));
     expect(rows.map((row) => row.managed)).toEqual([true, false]);
+    // The JSON carries the stable token; only the table says
+    // "needs input".
     expect(rows[0]).toMatchObject({
       name: 'svc-audit',
       pid: 777,
-      state: 'needs input',
+      taskState: 'waiting',
       sessionId: 'managed-1',
     });
+    expect(rows[0]).not.toHaveProperty('state');
   });
 
   it('prints a dash, not a zero, for a managed session with no process', async () => {

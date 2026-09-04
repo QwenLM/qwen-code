@@ -778,7 +778,8 @@ A table with columns: NAME, PID, AGE, STATE, DIRECTORY.
 
 STATE is `interactive` for a session you started yourself. For a managed
 session it is what that session is actually doing — `needs input`,
-`working`, `ready`, `stopped` or `failed`. PID and AGE print `-` for a
+`working`, `ready`, `stopped` or `failed`. Those are display labels; the
+`--json` output carries stable tokens instead (see below). PID and AGE print `-` for a
 managed session with no process behind it (one that has exited, or has
 not started its worker yet).
 
@@ -798,8 +799,12 @@ qwenVersion, managed
 A managed session has no such record and is emitted as the row itself:
 
 ```
-name, pid, startedAt, cwd, state, sessionId, managed
+name, pid, startedAt, cwd, taskState, sessionId, managed
 ```
+
+`taskState` is the machine-readable form of the STATE column, and is the
+field to script against: `running`, `waiting`, `ready`, `stopped` or
+`failed`. The column's wording can change; these tokens will not.
 
 Nothing else is written to stdout — an empty listing prints nothing at
 all — so `qwen sessions ps --json | jq .` is safe to script against. If
@@ -826,7 +831,7 @@ qwen sessions ps --json | jq -r .cwd
 # Note: `jq -r` renders the raw recorded value in your terminal (see the
 # raw-data note above); a session name is session-generated text, so pipe
 # through a sanitizer if it is untrusted.
-qwen sessions ps --json | jq -r 'select(.state == "needs input") | .name'
+qwen sessions ps --json | jq -r 'select(.taskState == "waiting") | .name'
 ```
 
 ## 6. Messaging Another Running Session

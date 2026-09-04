@@ -34,15 +34,6 @@ import {
   type AgentViewTaskState,
 } from '../../agent-view/presentation.js';
 
-/** What the `STATE` column can say. */
-export type SessionRowState =
-  | 'interactive'
-  | 'needs input'
-  | 'working'
-  | 'ready'
-  | 'stopped'
-  | 'failed';
-
 /** One line of `qwen sessions ps`, from either source. */
 export interface SessionRow {
   name: string;
@@ -55,7 +46,16 @@ export interface SessionRow {
   /** Epoch milliseconds, or undefined when the source's stamp is unusable. */
   startedAt?: number;
   cwd: string;
-  state: SessionRowState;
+  /**
+   * What the session is doing, for a managed row; absent for a registry
+   * row, which only knows that a process is alive.
+   *
+   * Deliberately the presentation layer's own token rather than the
+   * label the table prints: this field reaches `--json`, and pinning a
+   * machine contract to display wording means rewording the column
+   * breaks every script silently. The table maps it at the render site.
+   */
+  taskState?: AgentViewTaskState;
   sessionId: string;
   /** True for an Agent View session, false for a registry record. */
   managed: boolean;
@@ -68,23 +68,6 @@ export interface SessionRow {
    */
   record?: SessionRegistryRecord;
 }
-
-/**
- * Labelled by task state, not by the roster's display group.
- *
- * The group folds `ready`, `stopped` and `failed` into one
- * `completed` bucket, which the roster UI can afford because it also
- * paints an icon tone. A one-line table has no second channel, and
- * printing "completed" beside a session that failed would be a lie the
- * user has no way to see through.
- */
-const TASK_STATE: Record<AgentViewTaskState, SessionRowState> = {
-  running: 'working',
-  waiting: 'needs input',
-  ready: 'ready',
-  stopped: 'stopped',
-  failed: 'failed',
-};
 
 /**
  * Rows for the managed sessions a supervisor knows about.
@@ -135,7 +118,7 @@ export function managedSessionRows(
         pid: liveWorkerPid(snapshot.worker),
         startedAt: Number.isNaN(createdAt) ? undefined : createdAt,
         cwd: snapshot.state.activeCwd,
-        state: TASK_STATE[presentation.taskState],
+        taskState: presentation.taskState,
         sessionId: snapshot.state.sessionId,
         managed: true,
       };
@@ -169,7 +152,6 @@ function registryRow(record: SessionRegistryRecord): SessionRow {
     pid: record.pid,
     startedAt: record.startedAt,
     cwd: record.cwd,
-    state: 'interactive',
     sessionId: record.sessionId,
     managed: false,
     record,
