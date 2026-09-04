@@ -173,7 +173,13 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
   const prefixWidth = getPrefixWidth(prefix);
   const imageHeightBudget =
     availableTerminalHeight !== undefined && images?.length
-      ? Math.max(1, Math.floor(availableTerminalHeight / (images.length + 1)))
+      ? Math.max(
+          1,
+          Math.floor(
+            availableTerminalHeight /
+              (images.length + (text.length > 0 ? 1 : 0)),
+          ),
+        )
       : availableTerminalHeight;
 
   return (
@@ -226,7 +232,13 @@ const ContinuationMarkdownMessage: React.FC<
   const prefixWidth = getPrefixWidth(basePrefix);
   const imageHeightBudget =
     availableTerminalHeight !== undefined && images?.length
-      ? Math.max(1, Math.floor(availableTerminalHeight / (images.length + 1)))
+      ? Math.max(
+          1,
+          Math.floor(
+            availableTerminalHeight /
+              (images.length + (text.length > 0 ? 1 : 0)),
+          ),
+        )
       : availableTerminalHeight;
 
   return (

@@ -42,6 +42,7 @@ export default tseslint.config(
     ignores: [
       'node_modules/*',
       'packages/**/dist/**',
+      'packages/web-templates/src/generated/**',
       'integrations/**/dist/**',
       'bundle/**',
       'package/bundle/**',
@@ -52,6 +53,7 @@ export default tseslint.config(
       'docs-site/.next/**',
       'docs-site/out/**',
       '.qwen/**',
+      'scripts/codemod/fixtures/**', // codemod test data; intentionally non-idiomatic ink input/output
       'packages/desktop-shell/runtime/**',
       'packages/desktop-shell/src-tauri/target/**',
       'packages/live-host/**', // standalone Electron app with its own Node test conventions

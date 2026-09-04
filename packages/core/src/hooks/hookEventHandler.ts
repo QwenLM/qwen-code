@@ -807,7 +807,7 @@ export class HookEventHandler {
       // Get session hooks and merge with registry hooks
       const sessionId = input.session_id;
       const matcherTarget = getHookMatcherTarget(eventName, context)?.target;
-      const sessionHooks =
+      const registeredSessionHooks =
         sessionId !== undefined
           ? matcherTarget === undefined
             ? this.sessionHooksManager.getHooksForEvent(sessionId, eventName)
@@ -817,6 +817,25 @@ export class HookEventHandler {
                 matcherTarget,
               )
           : [];
+      // The second side of the project-skill trust gate: a hook registered
+      // from a repository's `.qwen/skills/` frontmatter (`trustGated`) runs
+      // only while the folder is STILL trusted. `Config.isTrustedFolder()`
+      // is live under an IDE connection, so a revocation mid-session
+      // silences the hook at its next event without a restart or any
+      // per-skill unregistration; trust granted again lets it fire. Only
+      // consulted when a gated entry is present — nothing else changes.
+      const sessionHooks = registeredSessionHooks.some(
+        (entry) => entry.trustGated === true,
+      )
+        ? registeredSessionHooks.filter(
+            (entry) => !entry.trustGated || this.config.isTrustedFolder(),
+          )
+        : registeredSessionHooks;
+      if (sessionHooks.length !== registeredSessionHooks.length) {
+        debugLogger.debug(
+          `Skipping ${registeredSessionHooks.length - sessionHooks.length} project-skill hook(s) for ${eventName}: the folder is no longer trusted`,
+        );
+      }
 
       // Merge hook configs from registry plan and session hooks
       const registryHookConfigs = plan?.hookConfigs || [];

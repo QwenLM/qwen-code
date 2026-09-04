@@ -16,6 +16,7 @@ import {
 } from './mcp-tool.js';
 import type { ToolResult } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
+import type { Config } from '../config/config.js';
 import type { CallableTool, Part } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import {
@@ -3095,5 +3096,72 @@ describe('DiscoveredMCPTool', () => {
 
       vi.useRealTimers();
     });
+  });
+});
+
+describe('DiscoveredMCPTool AUTO-mode classifier projection', () => {
+  const makeTool = (
+    annotations?: McpToolAnnotations,
+    config?: { getAutoModeSettings?: () => Record<string, unknown> },
+  ) =>
+    new DiscoveredMCPTool(
+      mockCallableToolInstance,
+      'slack',
+      'post_message',
+      'Post a message',
+      { type: 'object', properties: {} },
+      undefined,
+      undefined,
+      config as unknown as Config,
+      undefined,
+      undefined,
+      undefined,
+      annotations,
+    );
+
+  it('forwards server, tool, annotations and arguments to the classifier', () => {
+    const tool = makeTool({ readOnlyHint: false, openWorldHint: true });
+    expect(
+      tool.toAutoClassifierInput({
+        channel: '#ops',
+        text: 'AWS_SECRET_ACCESS_KEY=abcd',
+      }),
+    ).toEqual({
+      server: 'slack',
+      tool: 'post_message',
+      annotations: { readOnlyHint: false, openWorldHint: true },
+      // The argument content is the evidence the classifier needs — a
+      // secret in a chat payload is exactly the case it must catch.
+      arguments: { channel: '#ops', text: 'AWS_SECRET_ACCESS_KEY=abcd' },
+    });
+  });
+
+  it('forwards arguments when the config carries no autoMode.mcp settings', () => {
+    const tool = makeTool(undefined, { getAutoModeSettings: () => ({}) });
+    const projected = tool.toAutoClassifierInput({ text: 'hi' });
+    expect(projected).toMatchObject({ arguments: { text: 'hi' } });
+  });
+
+  it('still forwards arguments when the config lacks getAutoModeSettings', () => {
+    const tool = makeTool(undefined, {});
+    expect(tool.toAutoClassifierInput({ text: 'hi' })).toMatchObject({
+      arguments: { text: 'hi' },
+    });
+  });
+
+  it('returns the name-only sentinel when forwardArguments is false', () => {
+    const tool = makeTool(undefined, {
+      getAutoModeSettings: () => ({ mcp: { forwardArguments: false } }),
+    });
+    expect(tool.toAutoClassifierInput({ text: 'hi' })).toBe('');
+  });
+
+  it('marks truncated arguments instead of dropping them silently', () => {
+    const tool = makeTool();
+    const projected = tool.toAutoClassifierInput({
+      body: 'q'.repeat(50_000),
+    }) as Record<string, unknown>;
+    expect(projected['arguments_truncated']).toBe(true);
+    expect(JSON.stringify(projected)).toContain('…[truncated');
   });
 });

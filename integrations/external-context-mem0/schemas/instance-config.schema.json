@@ -1,11 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Mem0 External Context instance configuration v1",
+  "title": "Mem0 External Context instance configuration v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schemaVersion",
-    "preset",
+    "dialectPath",
     "endpoint",
     "credentialEnv",
     "scope",
@@ -13,13 +13,11 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 1
+      "const": 2
     },
-    "preset": {
+    "dialectPath": {
       "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "pattern": "^[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?$"
+      "minLength": 1
     },
     "endpoint": {
       "type": "object",

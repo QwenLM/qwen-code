@@ -64,6 +64,17 @@ function testCommand(dir: string): string {
   return dir === '.' ? 'npm test' : `npm test --workspace=${shellArg(dir)}`;
 }
 /**
+ * npm's completeness marker — `npm ci` writes
+ * `node_modules/.package-lock.json` only once the tree is fully
+ * materialised. This is the gate the install phase below reads, exported so
+ * `prebuild.ts` answers the fetch report's `installed` off the SAME
+ * predicate: the report and Agent 7 can never disagree about whether the
+ * tree needs an install.
+ */
+export function npmInstallComplete(root: string): boolean {
+  return existsSync(join(root, 'node_modules', '.package-lock.json'));
+}
+/**
  * The one grammar `testCommand` above emits. Exported for the `--resume`
  * shape gate: a continuation re-executes report-stored `test[].command`
  * strings verbatim under `shell: true`, and the run-identity check pins a
@@ -738,8 +749,7 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
   // tree is incomplete; a non-npm repo that already has a tree is trusted — the build
   // is the authoritative signal, by this command's own argument.
   const npmLock = existsSync(join(root, 'package-lock.json'));
-  const installComplete = (): boolean =>
-    existsSync(join(root, 'node_modules', '.package-lock.json'));
+  const installComplete = (): boolean => npmInstallComplete(root);
 
   // A non-npm repo (yarn/bun/pnpm — `workspaces` is their syntax too) with no
   // installed tree cannot be installed here: `npm ci` needs the npm lockfile, and
