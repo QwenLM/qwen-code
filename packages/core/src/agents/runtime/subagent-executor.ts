@@ -94,6 +94,17 @@ export interface SubagentExecutor {
     waiter: (signal: AbortSignal) => Promise<AgentExternalInput[]>,
   ): void;
   setExternalMessageWaitPredicate?(predicate: () => boolean): void;
+
+  /**
+   * Releases resources the executor owns beyond the turn itself — for an
+   * external executor, the agent child process. Optional because the
+   * in-process executor owns nothing to release.
+   *
+   * `createAgentHeadless` composes this into the `dispose` it returns, so a
+   * caller's existing `finally { await dispose() }` also reaps the child.
+   * Without that composition an external agent process outlives its subagent.
+   */
+  dispose?(): void | Promise<void>;
 }
 
 /**

@@ -1010,7 +1010,19 @@ export class SubagentManager {
             ...(options?.subagentId ? { subagentId: options.subagentId } : {}),
             runtimeContext: subagentContext,
           });
-          return { subagent, dispose: runCleanup };
+          return {
+            subagent,
+            dispose: async () => {
+              // Reap the external agent's own resources (its child process)
+              // before the hook/registry cleanup, and always run the latter —
+              // a failure to kill the child must not leak hook entries.
+              try {
+                await subagent.dispose?.();
+              } finally {
+                await runCleanup();
+              }
+            },
+          };
         }
         const subagent = await AgentHeadless.create(
           config.name,

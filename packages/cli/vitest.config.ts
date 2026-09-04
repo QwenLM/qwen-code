@@ -43,6 +43,10 @@ export default defineConfig({
         __dirname,
         '../core/src/utils/envVarResolver.ts',
       ),
+      '@qwen-code/qwen-code-core/subagentRuntime': path.resolve(
+        __dirname,
+        '../core/src/subagent-runtime.ts',
+      ),
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
       // cli's daemon-status-provider.test.ts imports `FakeAgent` /
       // `makeChannel` from acp-bridge's package-private
