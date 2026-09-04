@@ -16807,6 +16807,282 @@ describe('createServeApp', () => {
       }
     });
 
+    it('serializes concurrent Channel worktree restores through integrity admission', async () => {
+      const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+      const relocationStarted = deferred<void>();
+      const releaseRelocation = deferred<void>();
+      const queuedRestoreReachedGate = deferred<void>();
+      let loadCount = 0;
+      let sidecarReadCount = 0;
+      let relocated = false;
+      let integrityAdmitted = false;
+      const bridge = fakeBridge({
+        loadImpl: async (req) => {
+          loadCount++;
+          if (loadCount === 2) {
+            expect(integrityAdmitted).toBe(true);
+          }
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            ...(loadCount === 2 ? { currentCwd: worktreePath } : {}),
+            attached: loadCount === 2,
+            clientId: `client-load-${loadCount}`,
+            state: {},
+            hasActivePrompt: loadCount === 2,
+          };
+        },
+        changeSessionCwdImpl: async (sessionId, req) => {
+          relocationStarted.resolve(undefined);
+          await releaseRelocation.promise;
+          relocated = true;
+          return {
+            sessionId,
+            previousCwd: WS_BOUND,
+            newCwd: req.path,
+            warnings: [],
+          };
+        },
+        fireDeferredRestoreAskUserQuestionPromptImpl: (
+          _sessionId,
+          clientId,
+        ) => {
+          if (clientId === 'client-load-1') {
+            expect(relocated).toBe(true);
+            integrityAdmitted = true;
+            return true;
+          }
+          return false;
+        },
+      });
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({ sourceType: 'channel', sourceId: 'telegram' });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.realpath = (p) => p;
+      mockWt.readMarker = () =>
+        Promise.resolve({ state: 'valid', sessionId: 'wt-session' });
+      mockWt.readSidecar = async () => {
+        sidecarReadCount++;
+        if (sidecarReadCount === 3) {
+          queuedRestoreReachedGate.resolve(undefined);
+        }
+        return {
+          slug: 'my-task',
+          worktreePath,
+          worktreeBranch: 'worktree-my-task',
+          originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        };
+      };
+
+      try {
+        const first = request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND })
+          .then((response) => response);
+        await relocationStarted.promise;
+        const second = request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND })
+          .then((response) => response);
+        await queuedRestoreReachedGate.promise;
+        expect(bridge.loadCalls).toHaveLength(1);
+
+        releaseRelocation.resolve(undefined);
+        const [firstResponse, secondResponse] = await Promise.all([
+          first,
+          second,
+        ]);
+
+        expect(firstResponse.status).toBe(200);
+        expect(secondResponse.status).toBe(200);
+        expect(bridge.loadCalls).toHaveLength(2);
+        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
+        expect(bridge.fireDeferredRestoreAskUserQuestionPromptCalls).toEqual([
+          { sessionId: 'wt-session', clientId: 'client-load-1' },
+          { sessionId: 'wt-session', clientId: 'client-load-2' },
+        ]);
+      } finally {
+        releaseRelocation.resolve(undefined);
+        mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
+        mockWt.realpath = undefined;
+        readCreationMetadata.mockRestore();
+      }
+    });
+
+    it('releases a queued Channel worktree restore after integrity rejection', async () => {
+      const worktreePath = `${WS_BOUND}/.qwen/worktrees/my-task`;
+      const markerReadStarted = deferred<void>();
+      const releaseMarkerRead = deferred<void>();
+      const queuedRestoreReachedGate = deferred<void>();
+      let loadCount = 0;
+      let markerReadCount = 0;
+      let sidecarReadCount = 0;
+      const bridge = fakeBridge({
+        loadImpl: async (req) => {
+          loadCount++;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: `client-load-${loadCount}`,
+            state: {},
+            hasActivePrompt: false,
+          };
+        },
+        changeSessionCwdImpl: async (sessionId, req) => ({
+          sessionId,
+          previousCwd: WS_BOUND,
+          newCwd: req.path,
+          warnings: [],
+        }),
+        fireDeferredRestoreAskUserQuestionPromptImpl: () => true,
+      });
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({ sourceType: 'channel', sourceId: 'telegram' });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.realpath = (p) => p;
+      mockWt.readMarker = async () => {
+        markerReadCount++;
+        if (markerReadCount === 1) {
+          markerReadStarted.resolve(undefined);
+          await releaseMarkerRead.promise;
+          return { state: 'missing' };
+        }
+        return { state: 'valid', sessionId: 'wt-session' };
+      };
+      mockWt.readSidecar = async () => {
+        sidecarReadCount++;
+        if (sidecarReadCount === 3) {
+          queuedRestoreReachedGate.resolve(undefined);
+        }
+        return {
+          slug: 'my-task',
+          worktreePath,
+          worktreeBranch: 'worktree-my-task',
+          originalCwd: WS_BOUND,
+          workspaceCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        };
+      };
+
+      try {
+        const first = request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND })
+          .then((response) => response);
+        await markerReadStarted.promise;
+        const second = request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND })
+          .then((response) => response);
+        await queuedRestoreReachedGate.promise;
+        expect(bridge.loadCalls).toHaveLength(1);
+
+        releaseMarkerRead.resolve(undefined);
+        const [firstResponse, secondResponse] = await Promise.all([
+          first,
+          second,
+        ]);
+
+        expect(firstResponse.status).toBe(500);
+        expect(secondResponse.status).toBe(200);
+        expect(bridge.loadCalls).toHaveLength(2);
+        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
+      } finally {
+        releaseMarkerRead.resolve(undefined);
+        mockWt.readSidecar = undefined;
+        mockWt.readMarker = undefined;
+        mockWt.realpath = undefined;
+        readCreationMetadata.mockRestore();
+      }
+    });
+
+    it('keeps Channel restores without a Part 4A sidecar concurrent', async () => {
+      const firstLoadStarted = deferred<void>();
+      const bothLoadsStarted = deferred<void>();
+      const releaseLoads = deferred<void>();
+      let loadCount = 0;
+      const bridge = fakeBridge({
+        loadImpl: async (req) => {
+          const callNumber = ++loadCount;
+          if (callNumber === 1) firstLoadStarted.resolve(undefined);
+          if (callNumber === 2) bothLoadsStarted.resolve(undefined);
+          await releaseLoads.promise;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: callNumber === 2,
+            clientId: `client-load-${callNumber}`,
+            state: {},
+            hasActivePrompt: false,
+          };
+        },
+        fireDeferredRestoreAskUserQuestionPromptImpl: () => false,
+      });
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadata')
+        .mockResolvedValue({ sourceType: 'channel', sourceId: 'telegram' });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.readSidecar = () => Promise.resolve(null);
+
+      try {
+        const first = request(app)
+          .post('/session/shared-channel/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND })
+          .then((response) => response);
+        await firstLoadStarted.promise;
+        const second = request(app)
+          .post('/session/shared-channel/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND })
+          .then((response) => response);
+        const concurrent = await Promise.race([
+          bothLoadsStarted.promise.then(() => true),
+          new Promise<false>((resolve) =>
+            setTimeout(() => resolve(false), 500),
+          ),
+        ]);
+        releaseLoads.resolve(undefined);
+
+        expect(concurrent).toBe(true);
+        const [firstResponse, secondResponse] = await Promise.all([
+          first,
+          second,
+        ]);
+        expect(firstResponse.status).toBe(200);
+        expect(secondResponse.status).toBe(200);
+        expect(bridge.loadCalls).toHaveLength(2);
+      } finally {
+        releaseLoads.resolve(undefined);
+        mockWt.readSidecar = undefined;
+        readCreationMetadata.mockRestore();
+      }
+    });
+
     it.each([true, false])(
       'reconciles a deferred restore question only after admission returns %s',
       async (promptAdmitted) => {

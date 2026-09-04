@@ -778,6 +778,43 @@ export function registerSessionRoutes(
     string,
     SessionTranscriptCursorCodec
   >();
+  // A Channel restore keeps its recovered question deferred until this route
+  // validates and relocates the worktree. Serialize that integrity window so
+  // a second restore cannot enter the bridge and queue cwd behind the prompt.
+  const worktreeRestoreTails = new WeakMap<
+    AcpSessionBridge,
+    Map<string, Promise<void>>
+  >();
+  const acquireWorktreeRestore = async (
+    bridge: AcpSessionBridge,
+    sessionId: string,
+  ): Promise<() => void> => {
+    let tails = worktreeRestoreTails.get(bridge);
+    if (!tails) {
+      tails = new Map();
+      worktreeRestoreTails.set(bridge, tails);
+    }
+    const key = normalizeSessionIdForLookup(sessionId);
+    const previous = tails.get(key);
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const tail = (previous ?? Promise.resolve()).then(() => gate);
+    tails.set(key, tail);
+    if (previous) {
+      await previous;
+    }
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      releaseGate();
+      if (tails.get(key) === tail) {
+        tails.delete(key);
+      }
+    };
+  };
 
   // Tracks workspaces with an active branch session (workspaceCwd → sessionId).
   // Prevents concurrent branch sessions that would conflict on HEAD. The
@@ -3693,6 +3730,7 @@ export function registerSessionRoutes(
       let restoredStorageSessionId = sessionId;
       let suppressWorktreeContextRestore = false;
       let deferRestoreAskUserQuestionPrompt = false;
+      let releaseWorktreeRestore: (() => void) | undefined;
       try {
         // The coordinator canonicalizes lock keys (every case variant of a
         // caller id contends on one key), so the request spelling alone
@@ -3766,6 +3804,7 @@ export function registerSessionRoutes(
             };
             const isChannelRestore =
               restoreRequestMetadata.sourceType === 'channel';
+            let isPart4AWorktreeRestore = false;
             if (
               isChannelRestore &&
               runtime.provenance !== 'live-conversation'
@@ -3773,6 +3812,9 @@ export function registerSessionRoutes(
               const sidecarBeforeRestore = await readWorktreeSessionStrict(
                 sessionService.getWorktreeSessionPath(restoredStorageSessionId),
               );
+              isPart4AWorktreeRestore =
+                sidecarBeforeRestore.state === 'valid' &&
+                sidecarBeforeRestore.session.workspaceCwd !== undefined;
               suppressWorktreeContextRestore = !(
                 sidecarBeforeRestore.state === 'valid' &&
                 sidecarBeforeRestore.session.workspaceCwd === undefined
@@ -3786,6 +3828,12 @@ export function registerSessionRoutes(
                 undefined &&
               runtime.bridge.discardDeferredRestoreAskUserQuestionPrompt !==
                 undefined;
+            if (deferRestoreAskUserQuestionPrompt && isPart4AWorktreeRestore) {
+              releaseWorktreeRestore = await acquireWorktreeRestore(
+                runtime.bridge,
+                sessionId,
+              );
+            }
             assertRuntimeGenerationOpen?.();
             if (isInternalWorkspaceRuntime(runtime)) {
               sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
@@ -4259,6 +4307,7 @@ export function registerSessionRoutes(
         });
       } finally {
         sessionIdReservation?.release();
+        releaseWorktreeRestore?.();
       }
     };
 
