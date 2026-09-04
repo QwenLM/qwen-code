@@ -102,9 +102,9 @@ export const LINE_DEADLINE_MS = 30_000;
  *   directory.
  * - `missing_ancestor`: a parent of the socket directory does not exist.
  * - `path_too_long`: the path exceeds what `sun_path` can hold.
- * - `sibling_too_long`: the path is held by a live session, and the
- *   `<pid>-<8hex>.sock` name we would move aside to does not fit
- *   `sun_path`. The configured path itself is within the limit.
+ * - `sibling_too_long`: the path is in use or could not be verified free,
+ *   and the `<pid>-<8hex>.sock` alternative does not fit `sun_path`. The
+ *   requested path itself is within the limit.
  * - `bind_failed`: `listen()` failed for another reason (the errno is in
  *   `detail`).
  * - `chmod_failed`: the socket could not be restricted to 0600.
@@ -126,15 +126,11 @@ export type PeerInboxFailureCause =
 export interface PeerInboxStartFailure {
   cause: PeerInboxFailureCause;
   /**
-   * The path whose failure is reported: the first candidate tried, which
-   * is the one the user configured.
-   *
-   * Every other name this code may end up handing to `listen()` is one
-   * the process minted -- a fallback nonce directory, or the
-   * `<pid>-<8hex>.sock` sibling a PID collision moves aside to -- and
-   * naming those would send the user after a path that exists nowhere in
-   * their configuration. The name actually attempted stays in `detail`,
-   * which carries Node's errno message verbatim.
+   * The first candidate tried: exactly the requested path when one is
+   * explicit; otherwise derived from `XDG_RUNTIME_DIR` when set, or from a
+   * tmpdir nonce this process minted. Later fallbacks and sibling names are
+   * never reported. The name actually attempted stays in `detail`, which
+   * carries Node's errno message verbatim.
    */
   socketPath: string;
   /** The underlying error, for logs. */
@@ -187,7 +183,7 @@ export function describePeerInboxFailure(
       // telling the user it is over a limit they can measure it against
       // is a claim they can disprove. What does not fit is the name we
       // would move aside to.
-      return `"${failure.socketPath}" is held by another live session, and the alternative name needed to work around it would exceed the ${MAX_SOCKET_PATH_BYTES}-byte socket path limit. ${failure.hint}${attempts}`;
+      return `the socket path "${failure.socketPath}" is in use or could not be verified free, and the alternative name needed to work around it would exceed the ${MAX_SOCKET_PATH_BYTES}-byte socket path limit. ${failure.hint}${attempts}`;
     case 'bind_failed':
       return `the socket could not be bound at "${failure.socketPath}" (${failure.detail}). ${failure.hint}${attempts}`;
     case 'chmod_failed':
@@ -252,6 +248,25 @@ function classify(error: unknown, socketPath: string): PeerInboxStartFailure {
   }
 }
 
+async function classifyMkdirFailure(
+  error: unknown,
+  socketPath: string,
+  socketDir: string,
+): Promise<PeerInboxStartFailure> {
+  if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+    try {
+      await fs.lstat(path.dirname(socketDir));
+      return classify(
+        new InboxSetupError('permission', describe(error)),
+        socketPath,
+      );
+    } catch {
+      // The parent really is absent, so the original ENOENT is accurate.
+    }
+  }
+  return classify(error, socketPath);
+}
+
 /**
  * Only `<digits>.sock`, or the `<digits>-<8 hex>.sock` sibling a PID
  * collision forces, is a socket this code created.
@@ -271,8 +286,8 @@ function pidOfSocketFilename(name: string): number | null {
 }
 
 /**
- * The one classification for "the path is held by a live session and the
- * sibling name we would move aside to does not fit `sun_path`".
+ * The one classification for "the path is in use or could not be verified
+ * free, and the sibling name does not fit `sun_path`".
  *
  * Both producers -- the pre-bind probe and the raced `EADDRINUSE` retry --
  * go through here, so the two orderings cannot report the same condition
@@ -282,7 +297,7 @@ function siblingOverflowFailure(socketPath: string): PeerInboxStartFailure {
   return classify(
     new InboxSetupError(
       'sibling_too_long',
-      `${socketPath} is held by a live session and a sibling name would exceed sun_path`,
+      `${socketPath} is in use or could not be verified free and a sibling name would exceed sun_path`,
       'Set XDG_RUNTIME_DIR or TMPDIR to a shorter directory, then restart.',
     ),
     socketPath,
@@ -292,12 +307,11 @@ function siblingOverflowFailure(socketPath: string): PeerInboxStartFailure {
 /**
  * A sibling path for `socketPath`, keyed by the same PID but distinct.
  *
- * Used when the PID-keyed path is already held by a *live* listener,
- * which happens when two PID namespaces share a runtime directory (a
- * container bind-mounting the host's, most often) and both sessions get
- * the same PID. Returns null when the sibling would not fit in
- * `sun_path`, so the caller falls through to the next candidate rather
- * than binding something that cannot work.
+ * Used when the PID-keyed path is in use or cannot be verified free. A
+ * live listener can arise when two PID namespaces share a runtime
+ * directory and both sessions get the same PID. Returns null when the
+ * sibling would not fit in `sun_path`, so the caller falls through to the
+ * next candidate rather than binding something that cannot work.
  */
 function siblingSocketPath(socketPath: string): string | null {
   const dir = path.dirname(socketPath);
@@ -562,8 +576,12 @@ export async function startPeerInbox(
         );
       }
       // Fire-and-forget: a sweep is housekeeping, and nothing about this
-      // session's own inbox depends on it.
-      void sweepAround(candidate).catch(() => {});
+      // session's own inbox depends on it. Every candidate matters because
+      // a successful earlier path would otherwise leave stale fallback
+      // directories untouched.
+      for (const sweepCandidate of candidates) {
+        void sweepAround(sweepCandidate).catch(() => {});
+      }
       return result.inbox;
     }
     const attempt = { ...result.failure, attempts: index + 1 };
@@ -579,12 +597,12 @@ export async function startPeerInbox(
       failure = { ...attempt, attempts: 1 };
       break;
     }
-    // Report the FIRST candidate's diagnosis, not the last. The first is
-    // the path the user configured; every later candidate is a nonce
-    // directory this process minted, which appears nowhere in their
-    // configuration and which they cannot act on. `attempts` keeps
-    // counting all of them, so the "Tried N candidate paths." sentence
-    // stays true.
+    // Report the FIRST candidate's diagnosis, not the last. It is either
+    // the explicit requested path or the preferred environment-derived
+    // path; every later candidate is a fallback this process selected or
+    // minted, which appears nowhere in configuration and which the user
+    // cannot act on. `attempts` keeps counting all of them, so the "Tried N
+    // candidate paths." sentence stays true.
     if (failure === null) {
       failure = attempt;
     } else {
@@ -610,10 +628,10 @@ async function bindAt(
   options: PeerInboxOptions,
   automaticPath: boolean,
 ): Promise<{ inbox: PeerInbox } | { failure: PeerInboxStartFailure }> {
-  // Moves to a sibling name when a live listener already holds the
-  // PID-keyed path. `socketPath` is what gets bound and what a successful
-  // inbox reports; `requestedPath` is what a *failure* reports, because
-  // the sibling is a name this process minted (see
+  // Moves to a sibling name when the PID-keyed path is not definitively
+  // dead. `socketPath` is what gets bound and what a successful inbox
+  // reports; `requestedPath` is what a *failure* reports, because the
+  // sibling is a name this process minted (see
   // `PeerInboxStartFailure.socketPath`).
   let socketPath = requestedPath;
   if (!isLocalIpcPath(socketPath)) {
@@ -645,18 +663,23 @@ async function bindAt(
   }
 
   const socketDir = path.dirname(socketPath);
-  // A candidate that fails after its directory was created leaves that
-  // directory behind, and no sweep can reach it: `sweepAround` runs only
-  // on the success path and derives its parent from the winning
-  // candidate. Empty-only, so a directory holding someone's live socket
-  // is never touched, and best-effort because losing the race to another
+  // If every candidate fails after creating its directory, the success-path
+  // sweep never runs. Remove it immediately when empty; a directory holding
+  // someone's live socket is never touched, and losing the race to another
   // session's sweep is not an error worth reporting.
   const dropDirIfEmpty = async () => {
     await fs.rmdir(socketDir).catch(() => {});
   };
+  const dir = socketDir;
   try {
-    const dir = socketDir;
     await fs.mkdir(dir, { recursive: true, mode: SOCKET_DIR_MODE });
+  } catch (error) {
+    await dropDirIfEmpty();
+    return {
+      failure: await classifyMkdirFailure(error, requestedPath, socketDir),
+    };
+  }
+  try {
     // Both mkdir(recursive) and chmod succeed straight through a symlink,
     // and a shared temp directory is a place where another user can
     // create our directory first. If they point it at a directory of
@@ -694,8 +717,8 @@ async function bindAt(
   // way), two live sessions can resolve the same path. Unlinking there
   // would leave the other session listening on an inode no peer can reach
   // — silently unreachable, which is the failure this whole path exists
-  // to prevent. So a live socket is left alone and we take a sibling name
-  // instead; only a dead one is removed.
+  // to prevent. So a live or inconclusive socket is left alone and we take
+  // a sibling name instead; only a definitively dead one is removed.
   // Not `=== 'alive'`: an inconclusive probe must take the sibling name
   // too. Unlinking on "could not tell" is the same mistake the sweep
   // guards against, and the sibling costs only a filename.
@@ -706,7 +729,7 @@ async function bindAt(
       return { failure: siblingOverflowFailure(requestedPath) };
     }
     debugLogger.debug(
-      `${socketPath} is held by a live session (a PID collision across namespaces); binding at ${sibling}`,
+      `${socketPath} is in use or could not be verified free; binding at ${sibling}`,
     );
     socketPath = sibling;
   }

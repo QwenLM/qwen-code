@@ -24,6 +24,7 @@ import {
 } from './peer-frames.js';
 import {
   MAX_CONCURRENT_SENDS,
+  probePeerSocketVerdict,
   sendPeerFrame,
   PeerSendError,
 } from './uds-client.js';
@@ -320,14 +321,14 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
   });
 
   it('blames the first candidate when every candidate fails', async () => {
-    // The recorded failure keeps candidate 1's diagnosis -- the path the
-    // user configured -- while `attempts` counts the rest. Report the
-    // last one instead and the banner names a nonce directory this
-    // process minted, which appears in no configuration and which the
-    // user cannot act on, while the "Tried N candidate paths." sentence
+    // The recorded failure keeps candidate 1's diagnosis -- the preferred
+    // environment-derived path -- while `attempts` counts the rest. Report
+    // the last one instead and the banner names a nonce directory this
+    // process minted, which appears in no configuration and which the user
+    // cannot act on, while the "Tried N candidate paths." sentence
     // disappears with it. Every other failure test hands in an explicit
-    // socketPath, so the candidate list has one entry and this path
-    // through `startPeerInbox` is never walked.
+    // socketPath, so the candidate list has one entry and this path through
+    // `startPeerInbox` is never walked.
     const base = await makeShortTmpDir('qwen-inbox-blame-');
     const runtime = path.join(base, 'runtime-file');
     const tmp = path.join(base, 'tmp-file');
@@ -560,7 +561,7 @@ describe.skipIf(isWindows)('framing', () => {
     const started = await startPeerInbox({
       socketPath: path.join(tmpDir, 'socks', 'a.sock'),
       onFrame: (frame) => received.push(frame),
-      lineDeadlineMs: 150,
+      lineDeadlineMs: 400,
     });
     if (!started) throw new Error('inbox failed to start');
     inbox = started;
@@ -569,12 +570,13 @@ describe.skipIf(isWindows)('framing', () => {
     socket.on('close', () => {
       open = false;
     });
-    // Two whole frames 100 ms apart both land; the connection is still
-    // open after the second because each line re-armed the deadline.
+    // Two whole frames 250 ms apart both land. At 450 ms after the first,
+    // the connection is past its first deadline but still inside the one
+    // the second frame armed.
     socket.write(encodePeerFrame(buildUserFrame({ content: 'one' })));
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 250));
     socket.write(encodePeerFrame(buildUserFrame({ content: 'two' })));
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await new Promise((resolve) => setTimeout(resolve, 200));
     expect(received).toHaveLength(2);
     expect(open).toBe(true);
     socket.end();
@@ -654,16 +656,16 @@ describe.skipIf(isWindows)('inbox auth', () => {
       socketPath: path.join(tmpDir, 'socks', 'auth.sock'),
       requiredToken: TOKEN,
       onFrame: (frame) => received.push(frame),
-      lineDeadlineMs: 150,
+      lineDeadlineMs: 400,
     });
     if (!started) throw new Error('inbox failed to start');
     inbox = started;
     const socket = await connectRaw(started.socketPath);
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 250));
     socket.write(buildAuthLine(TOKEN));
-    // 200 ms after connect: past the deadline armed at connect, inside
+    // 500 ms after connect: past the deadline armed at connect, inside
     // the one the auth line armed.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve) => setTimeout(resolve, 250));
     socket.write(encodePeerFrame(buildUserFrame({ content: 'slow' })));
     await settle();
 
@@ -1019,32 +1021,29 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     expect(await fs.readdir(dir)).toEqual([]);
   });
 
-  it.skipIf(process.getuid?.() === 0)(
-    'leaves a fallback directory another uid owns',
-    async () => {
-      // The guard that stops this sweep from reaching into a directory
-      // someone else minted in a shared temp dir. Nothing exercised it:
-      // removing it left the whole suite green while the sweep deleted
-      // another user's sockets and their directory. As in the bind-side
-      // uid test, the spy moves the comparison value rather than the
-      // directory's owner, so it fires whether or not the runner is root.
-      const parent = path.join(tmpDir, 'tmp');
-      const theirs = path.join(parent, `qwen-socks-${'a'.repeat(16)}`);
-      await fs.mkdir(theirs, { recursive: true });
-      await fs.writeFile(path.join(theirs, `${UNALLOCATABLE_PID}.sock`), '');
-      const withUid = process as NodeJS.Process & { getuid: () => number };
-      const uid = vi.spyOn(withUid, 'getuid');
-      uid.mockReturnValue((process.getuid?.() ?? 0) + 1);
-      try {
-        expect(
-          await sweepOrphanSocketDirs(parent, path.join(parent, 'self')),
-        ).toBe(0);
-        await expect(fs.stat(theirs)).resolves.toBeDefined();
-      } finally {
-        uid.mockRestore();
-      }
-    },
-  );
+  it('leaves a fallback directory another uid owns', async () => {
+    // The guard that stops this sweep from reaching into a directory
+    // someone else minted in a shared temp dir. Nothing exercised it:
+    // removing it left the whole suite green while the sweep deleted
+    // another user's sockets and their directory. As in the bind-side
+    // uid test, the spy moves the comparison value rather than the
+    // directory's owner, so it fires whether or not the runner is root.
+    const parent = path.join(tmpDir, 'tmp');
+    const theirs = path.join(parent, `qwen-socks-${'a'.repeat(16)}`);
+    await fs.mkdir(theirs, { recursive: true });
+    await fs.writeFile(path.join(theirs, `${UNALLOCATABLE_PID}.sock`), '');
+    const withUid = process as NodeJS.Process & { getuid: () => number };
+    const uid = vi.spyOn(withUid, 'getuid');
+    uid.mockReturnValue((process.getuid?.() ?? 0) + 1);
+    try {
+      expect(
+        await sweepOrphanSocketDirs(parent, path.join(parent, 'self')),
+      ).toBe(0);
+      await expect(fs.stat(theirs)).resolves.toBeDefined();
+    } finally {
+      uid.mockRestore();
+    }
+  });
 
   it('sweeps every batch when more than one batch of fallback directories accumulates', async () => {
     // One nonce directory per crashed session: 17+ of them span two
@@ -1239,6 +1238,27 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     }
   });
 
+  it('sweeps fallback directories even when the runtime candidate wins', async () => {
+    const runtime = path.join(tmpDir, 'runtime');
+    const temp = await makeShortTmpDir('qwen-inbox-losing-candidate-');
+    const stale = path.join(temp, `qwen-socks-${'a'.repeat(16)}`);
+    await fs.mkdir(stale, { recursive: true });
+    await leaveStaleSocket(path.join(stale, `${UNALLOCATABLE_PID}.sock`));
+    vi.stubEnv('XDG_RUNTIME_DIR', runtime);
+    vi.stubEnv('TMPDIR', temp);
+    try {
+      const started = await startPeerInbox({ onFrame: () => {} });
+      if (!started) throw new Error('inbox failed to start');
+      inbox = started;
+      expect(path.dirname(started.socketPath)).toBe(
+        path.join(runtime, SOCKET_DIR_NAME),
+      );
+      await waitForRemoval(stale);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('sweeps only the directory shapes this code mints', async () => {
     // The sweep is scoped by directory name -- `qwen-socks/` and the
     // nonce directories -- and nothing pinned that. An explicit
@@ -1367,6 +1387,32 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
     }
   });
 
+  it.skipIf(process.getuid?.() === 0)(
+    'binds a sibling when the requested path cannot be verified free',
+    async () => {
+      const taken = path.join(tmpDir, 'socks', '4242.sock');
+      const squatter = await occupy(taken);
+      await fs.chmod(taken, 0o000);
+      try {
+        expect(await probePeerSocketVerdict(taken)).toBe('unknown');
+        const started = await startPeerInbox({
+          socketPath: taken,
+          onFrame: () => {},
+        });
+        if (!started) throw new Error('inbox failed to start');
+        inbox = started;
+        expect(started.socketPath).not.toBe(taken);
+        expect(path.basename(started.socketPath)).toMatch(
+          /^4242-[0-9a-f]{8}\.sock$/,
+        );
+        await expect(fs.stat(taken)).resolves.toBeDefined();
+      } finally {
+        await fs.chmod(taken, 0o600);
+        squatter.close();
+      }
+    },
+  );
+
   it('retries at a sibling when the path is taken between the probe and the listen', async () => {
     // The raced-EADDRINUSE branch, which the probe branch above never
     // reaches. A directory standing where the socket belongs reproduces
@@ -1439,7 +1485,7 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
       expect(failure?.cause).toBe('sibling_too_long');
       expect(failure?.socketPath).toBe(taken);
       expect(describePeerInboxFailure(failure!)).toContain(
-        'held by another live session',
+        'in use or could not be verified free',
       );
     } finally {
       await fs.rm(root, { recursive: true, force: true });
@@ -1541,7 +1587,7 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
       // Not the path_too_long sentence: this path fits, and claiming
       // otherwise is something the user can measure and disprove.
       const rendered = describePeerInboxFailure(getLastPeerInboxFailure()!);
-      expect(rendered).toContain('held by another live session');
+      expect(rendered).toContain('in use or could not be verified free');
       expect(rendered).not.toMatch(/^"[^"]+" is longer than/);
       // The live listener is untouched either way.
       await expect(connectRaw(taken)).resolves.toBeInstanceOf(net.Socket);
@@ -1550,6 +1596,49 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'reports sibling overflow when the requested path cannot be verified free',
+    async (ctx) => {
+      const root = await fs.mkdtemp('/tmp/qs-');
+      const base = path.join(root, 'socks');
+      const padding = 'p'.repeat(
+        Math.max(
+          0,
+          MAX_SOCKET_PATH_BYTES -
+            Buffer.byteLength(path.join(base, '4242.sock')),
+        ),
+      );
+      const dir = base + padding;
+      const taken = path.join(dir, '4242.sock');
+      if (Buffer.byteLength(taken) > MAX_SOCKET_PATH_BYTES) {
+        ctx.skip();
+        return;
+      }
+      expect(Buffer.byteLength(taken) + 9).toBeGreaterThan(
+        MAX_SOCKET_PATH_BYTES,
+      );
+      const squatter = await occupy(taken);
+      await fs.chmod(taken, 0o000);
+      try {
+        expect(await probePeerSocketVerdict(taken)).toBe('unknown');
+        const started = await startPeerInbox({
+          socketPath: taken,
+          onFrame: () => {},
+        });
+        expect(started).toBeNull();
+        const failure = getLastPeerInboxFailure();
+        expect(failure?.cause).toBe('sibling_too_long');
+        expect(describePeerInboxFailure(failure!)).toContain(
+          'in use or could not be verified free',
+        );
+      } finally {
+        await fs.chmod(taken, 0o600);
+        squatter.close();
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('still clears a dead socket file rather than moving aside', async () => {
     const stale = path.join(tmpDir, 'socks', '4242.sock');

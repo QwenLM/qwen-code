@@ -33,11 +33,24 @@ import * as path from 'node:path';
 /** A `chmod` to fail: which path suffix, and with which errno. */
 let chmodFailure: { suffix: string; code: string } | null = null;
 
+/** A recursive `mkdir` to fail: which path suffix, and with which errno. */
+let mkdirFailure: { suffix: string; code: string } | null = null;
+
 /** Set to an errno every `listen()` should fail with; null binds for real. */
 let failListenWith: string | null = null;
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const mkdir = (async (...args: unknown[]) => {
+    const target = String(args[0]);
+    if (mkdirFailure !== null && target.endsWith(mkdirFailure.suffix)) {
+      throw Object.assign(
+        new Error(`${mkdirFailure.code}: mkdir '${target}'`),
+        { code: mkdirFailure.code },
+      );
+    }
+    return (actual.mkdir as (...inner: unknown[]) => Promise<unknown>)(...args);
+  }) as typeof actual.mkdir;
   const chmod: typeof actual.chmod = async (target, mode) => {
     if (chmodFailure !== null && String(target).endsWith(chmodFailure.suffix)) {
       throw Object.assign(
@@ -47,7 +60,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     }
     return actual.chmod(target, mode);
   };
-  return { ...actual, chmod, default: { ...actual, chmod } };
+  return { ...actual, mkdir, chmod, default: { ...actual, mkdir, chmod } };
 });
 
 vi.mock('node:net', async (importOriginal) => {
@@ -89,12 +102,14 @@ let tmpDir: string;
 
 beforeEach(async () => {
   chmodFailure = null;
+  mkdirFailure = null;
   failListenWith = null;
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-bindfail-'));
 });
 
 afterEach(async () => {
   chmodFailure = null;
+  mkdirFailure = null;
   failListenWith = null;
   await fs.rm(tmpDir, { recursive: true, force: true });
 });
@@ -195,6 +210,21 @@ describe.skipIf(isWindows)('a listen that fails at both names', () => {
 });
 
 describe.skipIf(isWindows)('a socket directory that vanishes mid-setup', () => {
+  it('reports permission when mkdir returns ENOENT under an existing parent', async () => {
+    const socketPath = path.join(tmpDir, 'socks', '4242.sock');
+    mkdirFailure = { suffix: `${path.sep}socks`, code: 'ENOENT' };
+
+    const started = await startPeerInbox({ socketPath, onFrame: () => {} });
+
+    expect(started).toBeNull();
+    const failure = getLastPeerInboxFailure();
+    expect(failure?.cause).toBe('permission');
+    expect(failure?.socketPath).toBe(socketPath);
+    expect(describePeerInboxFailure(failure!)).toContain(
+      'cannot create or lock down',
+    );
+  });
+
   it('names the missing ancestor rather than an unknown error', async () => {
     // `mkdir` is recursive, so it creates the ancestors it needs and
     // ENOENT never comes from there -- which left `missing_ancestor` with

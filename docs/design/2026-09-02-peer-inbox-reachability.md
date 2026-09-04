@@ -69,21 +69,21 @@ deleting a live session's socket costs its reachability. Bind time is the
 natural moment — the directory only grows when a session dies.
 
 **Probe before unlink; move aside, never take over.** The bind now dials
-the path before clearing it. If something answers, that is a live inbox
-belonging to another session, and this session binds `<pid>-<8 hex>.sock`
-beside it instead. Only a socket that does not answer is unlinked. If
+the path before clearing it. If something answers, or the probe cannot
+conclusively prove the path dead, this session binds `<pid>-<8 hex>.sock`
+beside it instead. Only a socket proven dead is unlinked. If
 `listen()` still reports `EADDRINUSE` — the path was taken between the
 probe and the listen — one retry at a sibling name settles it, and a second
 failure is reported as a real bind failure. When a sibling name would
 exceed `sun_path` the candidate fails as `sibling_too_long` — its own cause
 and its own sentence, deliberately not `path_too_long`, because the
-configured path itself fits and telling the user it is over a limit they can
-measure is a claim they can disprove — rather than binding something
+requested candidate itself fits and telling the user it is over a limit they
+can measure is a claim they can disprove — rather than binding something
 unusable, and the chain moves on.
 
-A failure always names the path the user configured, never the sibling or
-the nonce directory this process minted; the name actually attempted stays
-in the errno detail.
+A failure always names the first candidate: derived from `XDG_RUNTIME_DIR`
+when it is set, or from a tmpdir nonce otherwise. It never names a later
+fallback or sibling; the name actually attempted stays in the errno detail.
 
 ## Trade-offs
 
