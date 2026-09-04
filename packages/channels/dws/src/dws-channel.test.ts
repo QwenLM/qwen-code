@@ -3062,6 +3062,149 @@ describe('DwsChannel', () => {
     ]);
   }, 60_000);
 
+  it('keeps a slash command after a mention holding a zero-width space as prose', async () => {
+    // Asserted on the envelope rather than the prompt: prompt sanitization
+    // rewrites the invisible separator to a space before the agent sees it.
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const content = '@QwenBot(QwenBot)\u200b /btw what day is it?';
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'hidden-separator-mention',
+        content,
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: content }),
+    ]);
+  });
+
+  it('keeps a slash command glued to the leading mention as prose', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    bridge.btw = vi.fn();
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'glued-command-mention',
+        '@QwenBot(QwenBot)/btw hi',
+      ),
+    );
+
+    expect(bridge.btw).not.toHaveBeenCalled();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('@QwenBot(QwenBot)/btw hi'),
+      expect.any(Object),
+    );
+  });
+
+  it('strips the leading bot mention from a hyphenated slash command', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'hyphenated-command-after-mention',
+        '@QwenBot(QwenBot) /run-tests now',
+      ),
+    );
+
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: '/run-tests now' }),
+    ]);
+  });
+
+  it('routes a slash command whose argument holds an email address', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    const btw = vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      answer: 'queued',
+    });
+    bridge.btw = btw;
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'command-with-email-argument',
+        '@QwenBot(QwenBot) /btw mail bob@example.com',
+      ),
+    );
+
+    expect(btw).toHaveBeenCalledWith(
+      'session-1',
+      'mail bob@example.com',
+      expect.any(AbortSignal),
+    );
+  });
+
+  it.each([
+    ['at stream first', 0, 1],
+    ['group-all stream first', 1, 0],
+  ])(
+    'keeps an ambient group slash command prose when the %s wins dedup',
+    async (_label, winner, loser) => {
+      const client = new FakeDwsClient();
+      const { bridge } = await readyPolicyChannel(
+        client,
+        makeConfig({ groups: { '*': { requireMention: false } } }),
+      );
+      bridge.btw = vi.fn();
+      const content = '@QwenBot(QwenBot) /btw what day is it?';
+
+      await client.emit(
+        winner,
+        message('user_im_message_receive_at', 'ambient-race', content),
+      );
+      await client.emit(
+        loser,
+        message('user_im_message_receive_group_all', 'ambient-race', content),
+      );
+
+      expect(bridge.btw).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        'session-1',
+        expect.stringContaining(content),
+        expect.any(Object),
+      );
+    },
+  );
+
+  it('keeps a slash command before a punctuation-glued mention as prose', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    bridge.btw = vi.fn();
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'command-before-glued-mention',
+        '@Colleague /btw is this right?@QwenBot(QwenBot)',
+      ),
+    );
+
+    expect(bridge.btw).not.toHaveBeenCalled();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining(
+        '@Colleague /btw is this right?@QwenBot(QwenBot)',
+      ),
+      expect.any(Object),
+    );
+  });
+
   it('deduplicates a mention delivered by history and the live stream', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);

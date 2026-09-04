@@ -1510,6 +1510,14 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
   }
 
+  private requiresMention(conversationId: string): boolean {
+    return (
+      this.config.groups[conversationId]?.requireMention ??
+      this.config.groups['*']?.requireMention ??
+      true
+    );
+  }
+
   private async receiveImMessage(
     source: Exclude<DwsImSource, { kind: 'direct' }>,
     message: DwsImMessage,
@@ -1527,9 +1535,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
     if (
       source.kind === 'group-all' &&
-      (this.config.groups[message.conversationId]?.requireMention ??
-        this.config.groups['*']?.requireMention ??
-        true)
+      this.requiresMention(message.conversationId)
     ) {
       return;
     }
@@ -1768,17 +1774,24 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         : { kind: 'group', conversationId: message.conversationId };
     this.rememberImTarget(message.conversationId, target);
 
-    // DWS identifies only that the bot was mentioned somewhere, not which text
-    // token is the bot, so a leading mention is removed only when what follows
-    // is unambiguously a slash command and no later mention could be the one
-    // that caused the at-event. The command lookahead must stay ahead of the
-    // whole-remainder mention scan: swapping them re-runs the scan at every
-    // backtracked space, which is quadratic on attacker-controlled content.
+    // DWS reports only that the bot was mentioned somewhere, not which token is
+    // the bot, so a leading mention goes only when what follows is unambiguously
+    // a slash command and no later mention could be the one that caused the
+    // at-event. That scan shares the document-mention parser's boundary
+    // heuristic: an `@` glued to a word is an address like `bob@example.com`,
+    // one behind punctuation is a rival mention. The command lookahead must stay
+    // ahead of the whole-remainder scan; swapping them re-runs it at every
+    // backtracked space, quadratic on attacker-controlled content.
+    //
+    // Mention-required conversations only: an ambient group delivers one message
+    // on both the at stream and its group stream under a single dedup key, and
+    // only when a mention is required is the at stream the sole deliverer, so
+    // the normalized text cannot depend on which copy won the race.
     const text =
-      source.kind === 'at'
+      source.kind === 'at' && this.requiresMention(message.conversationId)
         ? message.content
             .replace(
-              /^\s*@[^\s\p{Cf}]+\s+(?=\/[a-zA-Z0-9_:-]+(?:\s|$))(?![\s\S]*\s@)/u,
+              /^\s*@[^\s\p{Cf}]+\s+(?=\/[a-zA-Z0-9_:-]+(?:\s|$))(?![\s\S]*(?<![A-Za-z0-9_])@)/u,
               '',
             )
             .trim()
