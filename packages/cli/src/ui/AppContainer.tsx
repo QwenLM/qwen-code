@@ -239,6 +239,10 @@ import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAge
 import { t } from '../i18n/index.js';
 import { TUI_CHAT_RECORDING_FAILURE_MESSAGE } from '../nonInteractive/chat-recording-failure.js';
 import { buildPermissionSuggestions } from '../nonInteractive/permission-suggestions.js';
+import type {
+  HerdrAgentState,
+  HerdrReporter,
+} from '../utils/herdr-reporter.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
@@ -754,6 +758,7 @@ interface AppContainerProps {
    * stays write-free (static remount bump only), matching pre-PR behavior.
    */
   repaintViewport?: () => void;
+  herdrReporter?: HerdrReporter | null;
 }
 
 /**
@@ -775,6 +780,7 @@ export const AppContainer = (props: AppContainerProps) => {
     initializationResult,
     initialUseVirtualViewport,
     repaintViewport,
+    herdrReporter,
   } = props;
   const extensionRefreshState = useMemo(
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
@@ -3735,6 +3741,33 @@ export const AppContainer = (props: AppContainerProps) => {
     history: historyManager.history,
     sessionStats,
   });
+  const herdrBlocked =
+    streamingState === StreamingState.WaitingForConfirmation ||
+    !!isFolderTrustDialogOpen ||
+    isMcpApprovalDialogOpen ||
+    !!shellConfirmationRequest ||
+    !!confirmationRequest ||
+    confirmUpdateExtensionRequests.length > 0 ||
+    !!providerUpdateRequest ||
+    settingInputRequests.length > 0 ||
+    pluginChoiceRequests.length > 0 ||
+    !!loopDetectionConfirmationRequest ||
+    isAuthDialogOpen ||
+    isAuthenticating ||
+    (isSkillReviewDialogOpen && !!skillReviewPending) ||
+    showWelcomeBackDialog ||
+    shouldShowIdePrompt ||
+    shouldShowCommandMigrationNudge ||
+    showIdeRestartPrompt;
+  const herdrState: HerdrAgentState = herdrBlocked
+    ? 'blocked'
+    : streamingState === StreamingState.Responding || isProcessing
+      ? 'working'
+      : 'idle';
+  useEffect(() => {
+    herdrReporter?.report(sessionStats.sessionId, herdrState);
+  }, [herdrReporter, herdrState, sessionStats.sessionId]);
+
   const dialogsVisible =
     showWelcomeBackDialog ||
     shouldShowIdePrompt ||

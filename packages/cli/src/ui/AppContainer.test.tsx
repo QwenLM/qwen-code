@@ -297,6 +297,7 @@ import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
 import { clearCiEnv } from '../test-utils/ci-env.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
+import type { HerdrReporter } from '../utils/herdr-reporter.js';
 
 describe('AppContainer State Management', () => {
   // One test below runs the real config.initialize(), which warms the tool
@@ -513,7 +514,7 @@ describe('AppContainer State Management', () => {
       vimMode: 'NORMAL',
     });
     mockedUseSessionStats.mockReturnValue({
-      stats: {},
+      stats: { sessionId: 'session-1' },
       seedPromptCount: vi.fn(),
     });
     mockedUseTextBuffer.mockReturnValue({
@@ -648,6 +649,41 @@ describe('AppContainer State Management', () => {
     restoreCiEnv();
     cleanup();
     vi.useRealTimers();
+  });
+
+  it('reports blocked TUI state to Herdr', async () => {
+    const report = vi.fn();
+    const herdrReporter = { report } as unknown as HerdrReporter;
+    mockedUseFolderTrust.mockReturnValue({
+      isFolderTrustDialogOpen: true,
+      handleFolderTrustSelect: vi.fn(),
+      isRestarting: false,
+    });
+    mockedUseGeminiStream.mockReturnValue({
+      streamingState: StreamingState.Idle,
+      submitQuery: vi.fn(),
+      initError: null,
+      pendingHistoryItems: [],
+      thought: null,
+      cancelOngoingRequest: vi.fn(),
+      retryLastPrompt: vi.fn(),
+      streamingResponseLengthRef: { current: 0 },
+      isReceivingContent: false,
+      clearPendingState: mockClearPendingState,
+    });
+
+    render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+        herdrReporter={herdrReporter}
+      />,
+    );
+    await vi.waitFor(() =>
+      expect(report).toHaveBeenLastCalledWith('session-1', 'blocked'),
+    );
   });
 
   const rewindUserItem = (
@@ -6037,7 +6073,8 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Keyboard Input Handling', () => {
-    it('should block quit command during authentication', () => {
+    it('should block quit command during authentication', async () => {
+      const report = vi.fn();
       mockedUseAuthCommand.mockReturnValue({
         authState: 'unauthenticated',
         setAuthState: vi.fn(),
@@ -6094,10 +6131,14 @@ describe('AppContainer State Management', () => {
           settings={mockSettings}
           version="1.0.0"
           initializationResult={mockInitResult}
+          herdrReporter={{ report } as unknown as HerdrReporter}
         />,
       );
 
       expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/quit');
+      await vi.waitFor(() =>
+        expect(report).toHaveBeenLastCalledWith('session-1', 'blocked'),
+      );
     });
 
     it('should prevent exit command when text buffer has content', () => {
