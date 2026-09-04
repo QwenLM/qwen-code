@@ -279,6 +279,37 @@ test('scopes full and pinned sessions to the requested workspace', async ({
   ]);
 });
 
+test('rejects pinned session requests without the organized view', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  const baseURL = String(testInfo.project.use.baseURL);
+
+  const result = await page.evaluate(
+    async ({ baseURL, cwd }) => {
+      const response = await fetch(
+        `${baseURL}/workspaces/${encodeURIComponent(cwd)}/sessions?group=pinned`,
+      );
+      return {
+        status: response.status,
+        body: await response.json(),
+      };
+    },
+    { baseURL, cwd: scenario.workspaceCwd },
+  );
+
+  expect(result).toEqual({
+    status: 400,
+    body: {
+      error: '`group` requires `view=organized`',
+      code: 'invalid_session_group_filter',
+    },
+  });
+});
+
 test('ignores malformed workspace session route encodings', async ({
   page,
 }, testInfo) => {

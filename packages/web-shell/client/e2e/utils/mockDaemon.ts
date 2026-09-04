@@ -1168,6 +1168,17 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && workspaceSessionsRoute) {
     const { workspaceCwd } = workspaceSessionsRoute;
+    if (searchParams.has('group') && searchParams.get('view') !== 'organized') {
+      await json(
+        route,
+        {
+          error: '`group` requires `view=organized`',
+          code: 'invalid_session_group_filter',
+        },
+        400,
+      );
+      return;
+    }
     await json(route, {
       sessions: filterScenarioSessions(scenario, searchParams, workspaceCwd),
     });
