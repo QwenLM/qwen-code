@@ -8,7 +8,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import process from 'node:process';
 import type { SessionScope, SessionTarget } from './types.js';
 import type {
@@ -16,6 +16,7 @@ import type {
   ChannelAgentBridgeSessionOptions,
 } from './ChannelAgentBridge.js';
 import { sanitizeLogText } from './sanitize.js';
+import { canonicalizeWorkspacePath } from './paths.js';
 
 interface PersistedEntry {
   sessionId: string;
@@ -43,6 +44,7 @@ interface ResolveOptions {
 }
 
 export type SessionRecoveryMode = 'eager' | 'lazy';
+export type ManagedSessionIsolation = 'shared' | 'worktree';
 
 export interface SessionRouterOptions {
   recoveryMode?: SessionRecoveryMode;
@@ -431,7 +433,8 @@ export class SessionRouter {
 
   async createManagedSession(
     target: SessionTarget,
-    cwd: string,
+    workspaceCwd: string,
+    isolation: ManagedSessionIsolation = 'shared',
   ): Promise<string> {
     const loadWindow = this.beginSessionLoad();
     const lifecycleGeneration = this.lifecycleGeneration;
@@ -441,10 +444,11 @@ export class SessionRouter {
       let lastDeadSessionId: string | undefined;
       for (let attempt = 0; attempt < 2; attempt++) {
         const sessionId = await bridge.newSession(
-          cwd,
+          workspaceCwd,
           {
             ...this.sessionOptions(target.channelName),
             sourceId: target.channelName,
+            ...(isolation === 'worktree' ? { worktree: {} } : {}),
           },
           bindingToken,
         );
@@ -458,13 +462,28 @@ export class SessionRouter {
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw new Error('Invalid session ID from bridge');
         }
+        let sessionCwd: string;
+        try {
+          sessionCwd = this.validateManagedSessionIdentity(
+            bridge,
+            sessionId,
+            workspaceCwd,
+            undefined,
+            isolation,
+          );
+        } catch (error) {
+          await bridge
+            .discardSession?.(sessionId, bindingToken)
+            .catch(() => undefined);
+          throw error;
+        }
         if (loadWindow.delete(sessionId)) {
           lastDeadSessionId = sessionId;
           await bridge.discardSession?.(sessionId, bindingToken);
           continue;
         }
         this.toTarget.set(sessionId, target);
-        this.toCwd.set(sessionId, cwd);
+        this.toCwd.set(sessionId, sessionCwd);
         this.liveSessionIds.add(sessionId);
         return sessionId;
       }
@@ -479,11 +498,20 @@ export class SessionRouter {
   async loadManagedSession(
     sessionId: string,
     target: SessionTarget,
-    cwd: string,
+    workspaceCwd: string,
+    expectedCwd: string = workspaceCwd,
+    isolation: ManagedSessionIsolation = 'shared',
   ): Promise<{ loaded: boolean }> {
     if (this.liveSessionIds.has(sessionId)) {
+      const actualCwd = this.validateManagedSessionIdentity(
+        this.bridge,
+        sessionId,
+        workspaceCwd,
+        expectedCwd,
+        isolation,
+      );
       this.toTarget.set(sessionId, target);
-      this.toCwd.set(sessionId, cwd);
+      this.toCwd.set(sessionId, actualCwd);
       return { loaded: false };
     }
 
@@ -495,7 +523,7 @@ export class SessionRouter {
     try {
       loadedSessionId = await bridge.loadSession(
         sessionId,
-        cwd,
+        workspaceCwd,
         this.sessionOptions(target.channelName),
         bindingToken,
       );
@@ -520,8 +548,15 @@ export class SessionRouter {
           `Managed session ${sessionId} died before loading completed`,
         );
       }
+      const actualCwd = this.validateManagedSessionIdentity(
+        bridge,
+        sessionId,
+        workspaceCwd,
+        expectedCwd,
+        isolation,
+      );
       this.toTarget.set(sessionId, target);
-      this.toCwd.set(sessionId, cwd);
+      this.toCwd.set(sessionId, actualCwd);
       this.liveSessionIds.add(sessionId);
       return { loaded: true };
     } catch (error) {
@@ -534,6 +569,41 @@ export class SessionRouter {
     } finally {
       this.endSessionLoad(loadWindow);
     }
+  }
+
+  private validateManagedSessionIdentity(
+    bridge: ChannelAgentBridge,
+    sessionId: string,
+    workspaceCwd: string,
+    expectedCwd: string | undefined,
+    isolation: ManagedSessionIsolation,
+  ): string {
+    if (isolation === 'shared') {
+      return workspaceCwd;
+    }
+    const info = bridge
+      .listSessions?.()
+      .find((candidate) => candidate.sessionId === sessionId);
+    const canonicalWorkspace = canonicalizeWorkspacePath(workspaceCwd);
+    const canonicalWorktree = info?.worktree
+      ? canonicalizeWorkspacePath(info.worktree.path)
+      : undefined;
+    if (
+      !info ||
+      canonicalizeWorkspacePath(info.workspaceCwd) !== canonicalWorkspace ||
+      info.worktreeState !== 'persisted-v1' ||
+      !info.worktree ||
+      !isAbsolute(info.worktree.path) ||
+      !canonicalWorktree ||
+      canonicalWorktree === canonicalWorkspace ||
+      (expectedCwd !== undefined &&
+        canonicalWorktree !== canonicalizeWorkspacePath(expectedCwd))
+    ) {
+      throw new Error(
+        `Daemon did not attest the expected worktree for session ${sessionId}`,
+      );
+    }
+    return canonicalWorktree;
   }
 
   activateManagedSession(
