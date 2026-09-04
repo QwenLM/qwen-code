@@ -272,49 +272,57 @@ async function drainNonInteractiveQueue(): Promise<void> {
     const abortController = new AbortController();
     activeNonInteractiveAbortController = abortController;
 
-    await sessionIdContext.exit(async () => {
-      try {
-        const result = await runOpenAILogCleanup(
-          job.target,
-          job.markerPath,
-          abortController.signal,
-        );
-        if (nonInteractiveStopping) return;
+    // No sessionIdContext.exit here: every path into this drain — the
+    // start-side kick, the .finally re-kick, and the retry timers — already
+    // runs context-free because startNonInteractiveOpenAILogHousekeeping
+    // exits the context around enqueue and the worker start, and timers
+    // registered inside that scope inherit it. A second wrapper here was
+    // unreachable defensive code no test could pin (recorded in #9930's
+    // round-4 review); the single tested choke point is the start-side
+    // sessionIdContext.exit in startNonInteractiveOpenAILogHousekeeping. Any
+    // NEW way into this drain must enter through that exited scope, or it
+    // will start propagating a session id into process-scoped housekeeping.
+    try {
+      const result = await runOpenAILogCleanup(
+        job.target,
+        job.markerPath,
+        abortController.signal,
+      );
+      if (nonInteractiveStopping) continue;
 
-        switch (result.status) {
-          case 'completed':
-            scheduleNonInteractiveJob(job, RECURRING_INTERVAL_MS);
-            break;
-          case 'fresh':
-            scheduleNonInteractiveJob(
-              job,
-              Math.min(
-                RECURRING_INTERVAL_MS,
-                Math.max(NON_INTERACTIVE_LOCK_RETRY_MS, result.retryAfterMs),
-              ),
-            );
-            break;
-          case 'locked':
-            scheduleNonInteractiveJob(job, NON_INTERACTIVE_LOCK_RETRY_MS);
-            break;
-          case 'incomplete':
-            break;
-          default:
-            break;
-        }
-      } catch (err) {
-        debugLogger.error(
-          `non-interactive OpenAI log cleanup failed for ${job.target.logDir}`,
-          err,
-        );
-        if (!nonInteractiveStopping) {
-          scheduleNonInteractiveJob(job, NON_INTERACTIVE_FAILURE_RETRY_MS);
-        }
-      } finally {
-        activeNonInteractiveJob = undefined;
-        activeNonInteractiveAbortController = undefined;
+      switch (result.status) {
+        case 'completed':
+          scheduleNonInteractiveJob(job, RECURRING_INTERVAL_MS);
+          break;
+        case 'fresh':
+          scheduleNonInteractiveJob(
+            job,
+            Math.min(
+              RECURRING_INTERVAL_MS,
+              Math.max(NON_INTERACTIVE_LOCK_RETRY_MS, result.retryAfterMs),
+            ),
+          );
+          break;
+        case 'locked':
+          scheduleNonInteractiveJob(job, NON_INTERACTIVE_LOCK_RETRY_MS);
+          break;
+        case 'incomplete':
+          break;
+        default:
+          break;
       }
-    });
+    } catch (err) {
+      debugLogger.error(
+        `non-interactive OpenAI log cleanup failed for ${job.target.logDir}`,
+        err,
+      );
+      if (!nonInteractiveStopping) {
+        scheduleNonInteractiveJob(job, NON_INTERACTIVE_FAILURE_RETRY_MS);
+      }
+    } finally {
+      activeNonInteractiveJob = undefined;
+      activeNonInteractiveAbortController = undefined;
+    }
   }
 }
 

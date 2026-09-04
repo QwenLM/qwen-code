@@ -102,6 +102,87 @@ describe('NamedSessionManager', () => {
     expect(bridge.loadSession).not.toHaveBeenCalled();
   });
 
+  it('indexes open and closed tasks and returns copied targets', async () => {
+    const named = manager();
+    const review = await named.create(alice, 'review');
+    const feature = await named.create(alice, 'feature');
+    await named.close(alice, 'review');
+
+    const closed = named.presentation(review.sessionId);
+    expect(closed).toEqual({
+      taskName: 'review',
+      status: 'closed',
+      target: expect.objectContaining(alice),
+    });
+    expect(named.presentation(feature.sessionId)).toEqual({
+      taskName: 'feature',
+      status: 'open',
+      target: expect.objectContaining(alice),
+    });
+
+    closed!.target.chatId = 'mutated';
+    expect(named.presentation(review.sessionId)?.target.chatId).toBe(
+      alice.chatId,
+    );
+
+    const restarted = manager();
+    expect(restarted.presentation(review.sessionId)?.status).toBe('closed');
+    expect(restarted.presentation(feature.sessionId)?.status).toBe('open');
+  });
+
+  it('bootstraps presentation only from the exact selected legacy route', async () => {
+    const legacyId = await router.resolve(
+      'channel-a',
+      alice.senderId,
+      alice.chatId,
+      alice.threadId,
+      '/workspace',
+      true,
+    );
+    const named = manager();
+
+    await expect(named.resolvePresentation(legacyId)).resolves.toEqual({
+      taskName: 'default',
+      status: 'open',
+      target: expect.objectContaining(alice),
+    });
+    expect(named.presentation(legacyId)).toEqual(
+      expect.objectContaining({ taskName: 'default' }),
+    );
+    expect(bridge.newSession).toHaveBeenCalledTimes(1);
+    expect(bridge.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('does not bootstrap unknown, stale-workspace, or cataloged-owner routes', async () => {
+    const named = manager();
+    await expect(named.resolvePresentation('missing')).resolves.toBeUndefined();
+
+    const staleId = await router.createManagedSession(
+      { channelName: 'channel-a', ...alice },
+      '/other-workspace',
+    );
+    router.activateManagedSession(
+      staleId,
+      { channelName: 'channel-a', ...alice },
+      '/other-workspace',
+    );
+    await expect(named.resolvePresentation(staleId)).resolves.toBeUndefined();
+
+    const review = await named.create(alice, 'review');
+    const extraId = await router.createManagedSession(
+      { channelName: 'channel-a', ...alice },
+      '/workspace',
+    );
+    router.activateManagedSession(
+      extraId,
+      { channelName: 'channel-a', ...alice },
+      '/workspace',
+    );
+    await expect(named.resolvePresentation(extraId)).resolves.toBeUndefined();
+    expect(named.presentation(review.sessionId)?.taskName).toBe('review');
+    await expect(named.list(alice, true)).resolves.toHaveLength(1);
+  });
+
   it('forgets a legacy route outside the channel workspace', async () => {
     const legacyId = await router.createManagedSession(
       {
@@ -264,21 +345,39 @@ describe('NamedSessionManager', () => {
     ]);
   });
 
-  it('does not resolve a collected turn after the selected task changes', async () => {
+  it('reloads a reserved task without changing the current selection', async () => {
     const named = manager();
     const review = await named.create(alice, 'review');
     const feature = await named.create(alice, 'feature');
+    await named.use(alice, 'review');
     vi.mocked(bridge.loadSession).mockClear();
 
-    await expect(named.resolve(alice, review.sessionId)).resolves.toBe(
-      undefined,
+    await expect(named.resumeReserved(alice, feature.sessionId)).resolves.toBe(
+      true,
     );
 
     await expect(named.current(alice)).resolves.toEqual(
       expect.objectContaining({
-        name: 'feature',
-        sessionId: feature.sessionId,
+        name: 'review',
+        sessionId: review.sessionId,
       }),
+    );
+    expect(router.getSession('channel-a', 'alice', 'group-1')).toBe(
+      review.sessionId,
+    );
+    expect(bridge.loadSession).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when a reserved task is foreign or unavailable', async () => {
+    const named = manager();
+    const review = await named.create(alice, 'review');
+
+    await expect(
+      named.resumeReserved({ ...alice, senderId: 'bob' }, review.sessionId),
+    ).resolves.toBe(false);
+    await expect(named.close(alice, 'review')).resolves.toBeDefined();
+    await expect(named.resumeReserved(alice, review.sessionId)).resolves.toBe(
+      false,
     );
     expect(bridge.loadSession).not.toHaveBeenCalled();
   });
@@ -294,22 +393,43 @@ describe('NamedSessionManager', () => {
     );
   });
 
-  it('rejects switching while the selected Channel turn is winding down', async () => {
+  it('allows creating and switching while named tasks are busy', async () => {
     const busy = vi.fn().mockReturnValue(false);
     const named = manager(busy);
     const first = await named.create(alice, 'first');
-    await named.create(alice, 'second');
+    const second = await named.create(alice, 'second');
     await named.use(alice, 'first');
-    busy.mockImplementation(
-      (sessionId: string) => sessionId === first.sessionId,
-    );
+    busy.mockReturnValue(true);
 
-    await expect(named.use(alice, 'second')).rejects.toThrow(
-      'still running or waiting for permission',
+    await expect(named.use(alice, 'second')).resolves.toEqual(
+      expect.objectContaining({ name: 'second', sessionId: second.sessionId }),
+    );
+    await expect(named.create(alice, 'third')).resolves.toEqual(
+      expect.objectContaining({ name: 'third', active: true }),
+    );
+    expect(first.sessionId).not.toBe(second.sessionId);
+  });
+
+  it('looks up owned tasks without loading or changing selection', async () => {
+    const named = manager();
+    const review = await named.create(alice, 'Review');
+    await named.create(alice, 'feature');
+    vi.mocked(bridge.loadSession).mockClear();
+
+    await expect(named.lookup(alice, 'review')).resolves.toEqual(
+      expect.objectContaining({
+        name: 'Review',
+        sessionId: review.sessionId,
+        active: false,
+      }),
     );
     await expect(named.current(alice)).resolves.toEqual(
-      expect.objectContaining({ name: 'first', active: true }),
+      expect.objectContaining({ name: 'feature', active: true }),
     );
+    await expect(
+      named.lookup({ ...alice, senderId: 'bob' }, 'review'),
+    ).resolves.toBeUndefined();
+    expect(bridge.loadSession).not.toHaveBeenCalled();
   });
 
   it('rebinds an already live task without loading and replacing its client', async () => {
@@ -494,6 +614,28 @@ describe('NamedSessionManager', () => {
     expect(router.getSession('channel-a', 'alice', 'group-1')).toBeUndefined();
   });
 
+  it('publishes neither registry nor presentation index after a write failure', async () => {
+    const registryDir = join(dir, 'registry');
+    const named = new NamedSessionManager({
+      channelName: 'channel-a',
+      cwd: '/workspace',
+      filePath: join(registryDir, 'named-sessions.json'),
+      router,
+      isBusy: () => false,
+    });
+    const review = await named.create(alice, 'review');
+    rmSync(registryDir, { recursive: true, force: true });
+    writeFileSync(registryDir, 'block');
+
+    await expect(named.create(alice, 'feature')).rejects.toThrow(
+      'Failed to persist',
+    );
+    expect(named.presentation(review.sessionId)?.taskName).toBe('review');
+    await expect(named.list(alice, true)).resolves.toEqual([
+      expect.objectContaining({ name: 'review' }),
+    ]);
+  });
+
   it('does not expose daemon session identifiers in creation errors', async () => {
     vi.mocked(bridge.newSession).mockRejectedValueOnce(
       new Error('session secret-session-id failed'),
@@ -537,6 +679,34 @@ describe('NamedSessionManager', () => {
     expect(persisted.version).toBe(1);
   });
 
+  it('restores the open presentation when close detachment rolls back', async () => {
+    const named = manager();
+    const review = await named.create(alice, 'review');
+    vi.mocked(bridge.discardSession).mockRejectedValueOnce(
+      new Error('detach failed'),
+    );
+
+    await expect(named.close(alice, 'review')).rejects.toThrow(
+      'Failed to close',
+    );
+    expect(named.presentation(review.sessionId)).toEqual(
+      expect.objectContaining({ taskName: 'review', status: 'open' }),
+    );
+  });
+
+  it('replaces the indexed session ID when resetting a task', async () => {
+    const named = manager();
+    const review = await named.create(alice, 'review');
+
+    const reset = await named.reset(alice);
+
+    expect(reset?.previousSessionId).toBe(review.sessionId);
+    expect(named.presentation(review.sessionId)).toBeUndefined();
+    expect(named.presentation(reset!.sessionId)).toEqual(
+      expect.objectContaining({ taskName: 'review', status: 'open' }),
+    );
+  });
+
   it('falls back to the most recently selected task when timestamps would tie', async () => {
     const named = manager();
     await named.create(alice, 'first');
@@ -552,6 +722,36 @@ describe('NamedSessionManager', () => {
     });
     await expect(named.current(alice)).resolves.toEqual(
       expect.objectContaining({ name: 'third', active: true }),
+    );
+  });
+
+  it('allows a busy task to become the fallback when closing an idle task', async () => {
+    const busySessions = new Set<string>();
+    const named = manager((sessionId) => busySessions.has(sessionId));
+    const fallback = await named.create(alice, 'fallback');
+    const selected = await named.create(alice, 'selected');
+    busySessions.add(fallback.sessionId);
+
+    await expect(named.close(alice, selected.name)).resolves.toEqual({
+      closed: expect.objectContaining({ name: 'selected' }),
+      active: expect.objectContaining({ name: 'fallback', active: true }),
+    });
+    await expect(named.current(alice)).resolves.toEqual(
+      expect.objectContaining({
+        name: 'fallback',
+        sessionId: fallback.sessionId,
+      }),
+    );
+  });
+
+  it('still rejects closing the busy task itself', async () => {
+    const busySessions = new Set<string>();
+    const named = manager((sessionId) => busySessions.has(sessionId));
+    const task = await named.create(alice, 'review');
+    busySessions.add(task.sessionId);
+
+    await expect(named.close(alice, task.name)).rejects.toThrow(
+      'still running or waiting for permission',
     );
   });
 

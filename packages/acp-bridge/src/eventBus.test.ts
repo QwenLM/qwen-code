@@ -845,9 +845,9 @@ describe('EventBus', () => {
     abort.abort();
   });
 
-  it('default ring size is 8000 (#3803 §02 target)', async () => {
+  it('default ring size is 8000', async () => {
     const bus = new EventBus();
-    for (let i = 1; i <= 8001; i++) bus.publish({ type: 'foo', data: i });
+    for (let i = 1; i <= 8_001; i++) bus.publish({ type: 'foo', data: i });
     // After publishing 8001 frames into the default ring, the replay
     // backlog should hold the most recent 8000 (oldest dropped).
     // A `lastEventId: 0` resume with a queue cap larger than the ring
@@ -858,23 +858,23 @@ describe('EventBus', () => {
     // crosses the eviction-detection threshold (earliest > last + 1),
     // so an extra synthetic `state_resync_required` frame is emitted
     // FIRST. The filter below restricts to live ids, which excludes
-    // the synthetic (no id), so the original "8000 live frames"
+    // the synthetic (no id), so the original "N live frames"
     // invariant is preserved.
     const abort = new AbortController();
     const iter = bus.subscribe({
       lastEventId: 0,
-      maxQueued: 9000,
+      maxQueued: 9_000,
       signal: abort.signal,
     });
     // Collect 8001 frames now: 1 synthetic resync + 8000 live.
-    const events = await collect(iter, 8001);
+    const events = await collect(iter, 8_001);
     abort.abort();
     const liveIds = events
       .filter((e) => e.id !== undefined)
       .map((e) => e.id as number);
-    expect(liveIds).toHaveLength(8000);
+    expect(liveIds).toHaveLength(8_000);
     expect(liveIds[0]).toBe(2);
-    expect(liveIds[liveIds.length - 1]).toBe(8001);
+    expect(liveIds[liveIds.length - 1]).toBe(8_001);
     // The synthetic resync frame is the first one.
     expect(events[0]?.type).toBe('state_resync_required');
   });

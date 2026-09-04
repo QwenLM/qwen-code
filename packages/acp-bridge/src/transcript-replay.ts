@@ -141,6 +141,7 @@ export interface TranscriptTodoItem {
 
 export interface TranscriptTodoPlan {
   readonly planId?: string;
+  readonly sessionWorkflow?: boolean;
   readonly todos: TranscriptTodoItem[];
 }
 
@@ -903,6 +904,14 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
             ...meta,
             planToolCallId: callId,
             todoPlanId: plan.planId,
+            ...(plan.sessionWorkflow
+              ? {
+                  extra: {
+                    ...meta.extra,
+                    qwenSessionWorkflow: true,
+                  },
+                }
+              : {}),
           }),
         );
       }
@@ -1536,6 +1545,9 @@ function extractTodoPlanFromDisplay(value: unknown): TranscriptTodoPlan | null {
           ...(typeof value['planId'] === 'string'
             ? { planId: value['planId'] }
             : {}),
+          ...(value['sessionWorkflow'] === true
+            ? { sessionWorkflow: true }
+            : {}),
           todos: normalizeTodos(value['todos']),
         }
       : null;
@@ -1549,6 +1561,9 @@ function extractTodoPlanFromDisplay(value: unknown): TranscriptTodoPlan | null {
       ? {
           ...(typeof parsed['planId'] === 'string'
             ? { planId: parsed['planId'] }
+            : {}),
+          ...(parsed['sessionWorkflow'] === true
+            ? { sessionWorkflow: true }
             : {}),
           todos: normalizeTodos(parsed['todos']),
         }

@@ -32,7 +32,7 @@
  * Each branch listed below is now regression-guarded by an assertion.
  */
 
-import { EventEmitter } from 'node:events';
+import { EventEmitter, getEventListeners } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { ClientSideConnection } from '@agentclientprotocol/sdk';
@@ -463,15 +463,42 @@ describe('createSpawnChannelFactory env policy', () => {
     ).not.toThrow();
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(third),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
 
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
+      budget: 'prepared_response',
     });
     await vi.waitFor(() =>
       expect(child.kill).toHaveBeenCalledWith(expectedTreeFallbackSignal()),
     );
     writer.releaseLock();
+  });
+
+  it('attributes outbound operation budget failures', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const channel = await createSpawnChannelFactory({
+      pipeLimits: {
+        maxFrameBytes: 4096,
+        maxQueuedMessages: 1,
+        maxQueuedBytes: 4096,
+      },
+    })('/tmp/project');
+
+    const release = channel.transportGuard?.reserveOutboundOperation([
+      'first',
+      {},
+    ]);
+    expect(() =>
+      channel.transportGuard?.reserveOutboundOperation(['second', {}]),
+    ).toThrow('NDJSON outbound_operation queue limit exceeded');
+    await expect(channel.transportFailed).resolves.toMatchObject({
+      code: 'ndjson_queue_limit_exceeded',
+      budget: 'outbound_operation',
+      maxQueuedMessages: 1,
+    });
+    release?.();
   });
 
   it('stops estimating a large response once its byte budget is exceeded', async () => {
@@ -505,7 +532,7 @@ describe('createSpawnChannelFactory env policy', () => {
 
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(response),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
     expect(elementReads).toBeLessThan(1_000);
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
@@ -528,7 +555,7 @@ describe('createSpawnChannelFactory env policy', () => {
 
     expect(() =>
       channel.transportGuard?.reservePreparedResponse(response),
-    ).toThrow('NDJSON decoded queue is full');
+    ).toThrow('NDJSON prepared_response queue limit exceeded');
     await expect(channel.transportFailed).resolves.toMatchObject({
       code: 'ndjson_queue_limit_exceeded',
     });
@@ -583,6 +610,38 @@ describe('createSpawnChannelFactory env policy', () => {
       exitCode: 1,
       signalCode: null,
     });
+  });
+
+  it('force-kills the child when the startup signal aborts after spawn', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const controller = new AbortController();
+
+    const channel = await createSpawnChannelFactory()(
+      '/tmp/project',
+      undefined,
+      controller.signal,
+    );
+
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(1);
+    controller.abort();
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+
+    await expect(channel.exited).resolves.toEqual({
+      exitCode: null,
+      signalCode: 'SIGKILL',
+    });
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it('rejects without spawning when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort(new Error('startup cancelled'));
+
+    await expect(
+      createSpawnChannelFactory()('/tmp/project', undefined, controller.signal),
+    ).rejects.toThrow('startup cancelled');
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 });
 

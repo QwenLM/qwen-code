@@ -1,7 +1,10 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
-import { DaemonWorkspaceProvider } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  DaemonWorkspaceProvider,
+  type DaemonProductSessionContext,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
@@ -90,16 +93,32 @@ function getWorkspaceIdFromUrl(): string | undefined {
   );
 }
 
+function getSessionContextFromUrl(): DaemonProductSessionContext | undefined {
+  const context = new URLSearchParams(window.location.search).get('context');
+  return context === 'standalone' || context === 'live'
+    ? { kind: context }
+    : undefined;
+}
+
 function replaceStandaloneSessionUrl(
   sessionId: string | undefined,
   workspaceId?: string,
+  sessionContext?: DaemonProductSessionContext,
 ): void {
   const url = new URL(window.location.href);
   url.pathname = buildSessionPathname(url.pathname, sessionId);
-  if (sessionId && workspaceId) {
+  if (
+    sessionContext?.kind === 'standalone' ||
+    sessionContext?.kind === 'live'
+  ) {
+    url.searchParams.set('context', sessionContext.kind);
+    url.searchParams.delete('workspace');
+  } else if (sessionId && workspaceId) {
     url.searchParams.set('workspace', workspaceId);
+    url.searchParams.delete('context');
   } else {
     url.searchParams.delete('workspace');
+    url.searchParams.delete('context');
   }
   // Strip one-shot query params so bookmarked / shared URLs do not
   // permanently override stored preferences on every page load.
@@ -124,6 +143,9 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [workspaceId, setWorkspaceId] = useState<string | undefined>(() =>
     getWorkspaceIdFromUrl(),
   );
+  const [sessionContext, setSessionContext] = useState<
+    DaemonProductSessionContext | undefined
+  >(() => getSessionContextFromUrl());
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
   // Keep the <html> theme class and <meta name="theme-color"> in sync with
   // the React theme so mobile status bars / overscroll backgrounds stay
@@ -147,10 +169,25 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
     storeLanguage(nextLanguage);
   }, []);
   const handleSessionIdChange = useCallback(
-    (nextSessionId?: string, nextWorkspaceId?: string) => {
+    (
+      nextSessionId?: string,
+      nextWorkspaceId?: string,
+      _nextWorkspaceCwd?: string,
+      nextSessionContext?: DaemonProductSessionContext,
+    ) => {
       setSessionId(nextSessionId);
-      setWorkspaceId(nextWorkspaceId);
-      replaceStandaloneSessionUrl(nextSessionId, nextWorkspaceId);
+      const nonWorkspaceContext =
+        nextSessionContext?.kind === 'standalone' ||
+        nextSessionContext?.kind === 'live'
+          ? nextSessionContext
+          : undefined;
+      setSessionContext(nonWorkspaceContext);
+      setWorkspaceId(nonWorkspaceContext ? undefined : nextWorkspaceId);
+      replaceStandaloneSessionUrl(
+        nextSessionId,
+        nextWorkspaceId,
+        nonWorkspaceContext,
+      );
     },
     [],
   );
@@ -166,6 +203,7 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         <WorkspaceSessionProvider
           sessionId={sessionId}
           workspaceId={workspaceId}
+          sessionContext={sessionContext}
           webShellProps={{
             theme,
             onThemeChange: handleThemeChange,

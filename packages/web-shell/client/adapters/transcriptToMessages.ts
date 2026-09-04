@@ -23,7 +23,10 @@ import type {
   DaemonMessageTodoItem,
   DaemonUserMessage,
 } from './messageTypes.js';
-import { isSubAgentToolCall } from './toolClassification.js';
+import {
+  isSubAgentToolCall,
+  projectTerminalBackgroundAgentTool,
+} from './toolClassification.js';
 import { parseTodoItemsFromEntries } from '../utils/todos.js';
 
 interface PermissionToolInfo {
@@ -82,32 +85,6 @@ function collectBackgroundAgentTaskUpdates(
     });
   }
   return updates;
-}
-
-function applyBackgroundAgentTaskUpdate(
-  tool: DaemonMessageToolCall,
-  update: BackgroundAgentTaskUpdate | undefined,
-): void {
-  if (!update) return;
-  switch (update.status) {
-    case 'completed':
-      tool.status = 'completed';
-      tool.endTime = update.endTime;
-      break;
-    case 'failed':
-      tool.status = 'failed';
-      tool.endTime = update.endTime;
-      break;
-    case 'cancelled':
-    case 'canceled':
-      tool.status = 'completed';
-      tool.endTime = update.endTime;
-      tool.rawOutput = {
-        ...(getRecord(tool.rawOutput) ?? {}),
-        status: 'cancelled',
-      };
-      break;
-  }
 }
 
 function isIgnoredWebShellStatus(text: string): boolean {
@@ -680,10 +657,14 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'tool': {
         const toolBlock = block as DaemonToolTranscriptBlock;
-        const toolCall = daemonToolBlockToToolCall(toolBlock);
-        applyBackgroundAgentTaskUpdate(
-          toolCall,
-          backgroundAgentTaskUpdates.get(toolCall.callId),
+        const projectedToolCall = daemonToolBlockToToolCall(toolBlock);
+        const backgroundAgentUpdate = backgroundAgentTaskUpdates.get(
+          projectedToolCall.callId,
+        );
+        const toolCall = projectTerminalBackgroundAgentTool(
+          projectedToolCall,
+          backgroundAgentUpdate?.status,
+          backgroundAgentUpdate?.endTime,
         );
         const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
         if (permissionInfo?.title) {

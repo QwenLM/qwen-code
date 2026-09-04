@@ -32,6 +32,7 @@ import type {
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
 } from '@qwen-code/channel-base';
+import type { ServeFeature } from '../../serve/capabilities.js';
 import type { ServeChannelSelection } from '../../serve/types.js';
 import { normalizeServeChannelSelection } from '../../serve/channel-selection.js';
 import {
@@ -64,10 +65,7 @@ import {
   MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
   type ChannelStartupReportMessage,
 } from '../../serve/channel-worker-startup-ipc.js';
-import {
-  isHostGateLoopback,
-  isLoopbackBind,
-} from '../../serve/loopback-binds.js';
+import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { isOwnInterfaceAddress } from '../../serve/local-bind-addresses.js';
 import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -98,8 +96,12 @@ import {
   isChannelCronEnabled,
 } from './loop-runtime.js';
 
-const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
-const SESSION_ATTACHMENTS_FEATURE = 'session_attachments';
+// Typed against the registry so renaming a capability key fails the build here
+// instead of silently degrading the worker to the pre-capability behavior.
+const SESSION_SHELL_COMMAND_FEATURE: ServeFeature = 'session_shell_command';
+const SESSION_ATTACHMENTS_FEATURE: ServeFeature = 'session_attachments';
+const SESSION_BTW_FEATURE: ServeFeature = 'session_btw';
+const SESSION_PERMISSION_VOTE_FEATURE: ServeFeature = 'session_permission_vote';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
@@ -239,7 +241,7 @@ export function createDaemonSessionFactory({
 
 export function createDaemonChannelBridgeFacade(
   bridge: ChannelAgentBridge,
-  opts: { exposeShellCommand: boolean },
+  opts: { exposeBtw: boolean; exposeShellCommand: boolean },
 ): ChannelAgentBridge {
   const facade: ChannelAgentBridge = {
     get availableCommands() {
@@ -252,6 +254,10 @@ export function createDaemonChannelBridgeFacade(
     prompt: bridge.prompt.bind(bridge),
     cancelSession: bridge.cancelSession.bind(bridge),
   };
+
+  if (opts.exposeBtw && bridge.btw) {
+    facade.btw = bridge.btw.bind(bridge);
+  }
 
   if (bridge.respondToPermission) {
     facade.respondToPermission = bridge.respondToPermission.bind(bridge);
@@ -340,17 +346,7 @@ function validateDaemonWorkerUrl(daemonUrl: string): void {
         `literal address of one of this machine's interfaces.`,
     );
   }
-  if (isHostGateLoopback(parsed.hostname)) return;
-  if (isLoopbackBind(parsed.hostname)) {
-    // Order matters: this refusal must run BEFORE the own-interface escape
-    // below — a wide 127/8 address can be assigned to a local interface
-    // (`ip addr add 127.0.0.2/8 dev lo`), and the gate 403s it either way.
-    throw new Error(
-      `${QWEN_DAEMON_URL_ENV} points at a loopback address the daemon's ` +
-        `Host header gate refuses (it answers only 127.0.0.1, localhost, ` +
-        `and [::1]); use one of those spellings instead.`,
-    );
-  }
+  if (isLoopbackBind(parsed.hostname)) return;
   if (!isOwnInterfaceAddress(parsed.hostname)) {
     throw new Error(
       `${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL or a ` +
@@ -540,6 +536,9 @@ export async function runChannelDaemonWorker(
     sessionAttachments: capabilities.features.includes(
       SESSION_ATTACHMENTS_FEATURE,
     ),
+    sessionPermissionVote: capabilities.features.includes(
+      SESSION_PERMISSION_VOTE_FEATURE,
+    ),
     ...(opts.promptAuthorization
       ? { promptAuthorization: opts.promptAuthorization }
       : {}),
@@ -587,6 +586,7 @@ export async function runChannelDaemonWorker(
   try {
     await abortableStartup(bridge.start(), startupSignal);
     const bridgeFacade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: capabilities.features.includes(SESSION_BTW_FEATURE),
       exposeShellCommand: capabilities.features.includes(
         SESSION_SHELL_COMMAND_FEATURE,
       ),

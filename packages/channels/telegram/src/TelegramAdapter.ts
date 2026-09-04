@@ -29,6 +29,7 @@ const TELEGRAM_BOT_COMMANDS = [
   { command: 'cancel', description: 'Cancel the running request' },
   { command: 'status', description: 'Show session info' },
 ] as const;
+const TELEGRAM_MESSAGE_LIMIT = 4096;
 
 const TELEGRAM_START_MESSAGE = [
   'Qwen Code Telegram bot',
@@ -87,6 +88,26 @@ export class TelegramChannel extends ChannelBase {
     return `https://api.telegram.org/file/bot${this.bot.token}/${filePath}`;
   }
 
+  private reportInboundError(
+    envelope: Envelope,
+    error: unknown,
+    reply: () => Promise<unknown>,
+  ): void {
+    process.stderr.write(
+      `[Telegram:${this.name}] Error handling message: ${error}\n`,
+    );
+    const sourceLabel = this.getInboundErrorSourceLabel(envelope);
+    const delivery = sourceLabel
+      ? this.sendThreadMessage(
+          envelope.chatId,
+          envelope.threadId,
+          'Sorry, something went wrong processing your message.',
+          sourceLabel,
+        )
+      : reply();
+    delivery.catch(() => {});
+  }
+
   async connect(): Promise<void> {
     if (this.hasConnectedOnce) {
       this.bot = this.createBot();
@@ -106,12 +127,9 @@ export class TelegramChannel extends ChannelBase {
 
       // Don't await — long prompts would block the update loop
       this.handleInbound(envelope).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -143,12 +161,9 @@ export class TelegramChannel extends ChannelBase {
           );
         }
       }).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -199,12 +214,9 @@ export class TelegramChannel extends ChannelBase {
             `\n\n(User sent a file "${fileName}" but download failed)`;
         }
       }).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -252,12 +264,9 @@ export class TelegramChannel extends ChannelBase {
             `\n\n(User sent a voice message but download failed)`;
         }
       }).catch((err) => {
-        process.stderr.write(
-          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        this.reportInboundError(envelope, err, () =>
+          ctx.reply('Sorry, something went wrong processing your message.'),
         );
-        ctx
-          .reply('Sorry, something went wrong processing your message.')
-          .catch(() => {});
       });
     });
 
@@ -373,10 +382,20 @@ export class TelegramChannel extends ChannelBase {
     );
   }
 
+  protected override async sendThreadMessage(
+    chatId: string,
+    threadId: string | undefined,
+    text: string,
+    sourceLabel?: string,
+  ): Promise<void> {
+    await this.sendTelegramMessage(chatId, text, threadId, sourceLabel);
+  }
+
   protected override async sendResponseMessage(
     chatId: string,
     text: string,
     sessionId: string,
+    sourceLabel?: string,
   ): Promise<void> {
     const inboundRoute = this.inboundRoute.getStore();
     const target = this.router.getTarget(sessionId);
@@ -386,35 +405,66 @@ export class TelegramChannel extends ChannelBase {
         : target?.channelName === this.name && target.chatId === chatId
           ? target.threadId
           : undefined;
-    await this.sendTelegramMessage(chatId, text, threadId);
+    await this.sendTelegramMessage(
+      chatId,
+      text,
+      threadId,
+      sourceLabel ?? this.getResponseSourceLabel(sessionId),
+    );
   }
 
   protected override async pushProactive(
     target: SessionTarget,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
-    await this.sendTelegramMessage(target.chatId, text, target.threadId);
+    await this.sendTelegramMessage(
+      target.chatId,
+      text,
+      target.threadId,
+      sourceLabel,
+    );
   }
 
   private async sendTelegramMessage(
     chatId: string,
     text: string,
     threadId?: string,
+    sourceLabel?: string,
   ): Promise<void> {
     const html = telegramFormat(text);
-    const chunks = splitHtmlForTelegram(html);
-    const options =
-      threadId === undefined
-        ? { parse_mode: 'HTML' as const }
-        : { parse_mode: 'HTML' as const, message_thread_id: Number(threadId) };
+    const prefix =
+      sourceLabel && text.trim().length > 0
+        ? `${escapeTelegramHtml(sourceLabel)} `
+        : undefined;
+    const chunks = splitAttributedTelegramHtml(html, prefix, sourceLabel);
     for (const chunk of chunks) {
+      const options = chunk.isHtml
+        ? threadId === undefined
+          ? { parse_mode: 'HTML' as const }
+          : {
+              parse_mode: 'HTML' as const,
+              message_thread_id: Number(threadId),
+            }
+        : threadId === undefined
+          ? undefined
+          : { message_thread_id: Number(threadId) };
+      if (!chunk.isHtml) {
+        await this.bot.api.sendMessage(chatId, chunk.text, options);
+        continue;
+      }
       try {
-        await this.bot.api.sendMessage(chatId, chunk, options);
+        await this.bot.api.sendMessage(chatId, chunk.text, options);
       } catch {
         // Fallback to plain text for the failed chunk only
+        const withoutTags = chunk.text.replace(/<[^>]*>/g, '');
+        const plainText =
+          prefix && sourceLabel && withoutTags.startsWith(prefix)
+            ? `${sourceLabel} ${withoutTags.slice(prefix.length)}`
+            : withoutTags;
         await this.bot.api.sendMessage(
           chatId,
-          chunk.replace(/<[^>]*>/g, ''),
+          plainText,
           threadId === undefined
             ? undefined
             : { message_thread_id: Number(threadId) },
@@ -492,4 +542,135 @@ export class TelegramChannel extends ChannelBase {
       referencedText,
     };
   }
+}
+
+function splitAttributedTelegramHtml(
+  html: string,
+  prefix: string | undefined,
+  sourceLabel: string | undefined,
+): Array<{ text: string; isHtml: boolean }> {
+  const chunks = splitHtmlForTelegram(html);
+  const contentLimit = TELEGRAM_MESSAGE_LIMIT - (prefix?.length ?? 0);
+  if (contentLimit <= 0) {
+    throw new Error('Telegram source label exceeds the message limit.');
+  }
+
+  const attributed: Array<{ text: string; isHtml: boolean }> = [];
+  for (const chunk of chunks) {
+    const split = splitTelegramHtmlAtLimit(chunk, contentLimit);
+    if (split) {
+      attributed.push(
+        ...split.map((part) => ({
+          text: `${prefix ?? ''}${part}`,
+          isHtml: true,
+        })),
+      );
+      continue;
+    }
+    attributed.push(
+      ...splitAttributedTelegramText(
+        chunk.replace(/<[^>]*>/g, ''),
+        sourceLabel,
+      ).map((text) => ({ text, isHtml: false })),
+    );
+  }
+  return attributed;
+}
+
+function splitTelegramHtmlAtLimit(
+  html: string,
+  limit: number,
+): string[] | undefined {
+  const tokens = html.match(
+    /<[^>]+>|&(?:#\d+|#x[\da-f]+|[a-z][\da-z]+);|[\s\S]/giu,
+  );
+  if (!tokens) return [];
+
+  const chunks: string[] = [];
+  const openTags: Array<{ name: string; html: string }> = [];
+  let current = '';
+  let hasContent = false;
+  const closingTags = () =>
+    [...openTags]
+      .reverse()
+      .map(({ name }) => `</${name}>`)
+      .join('');
+  const reopenedTags = () => openTags.map(({ html }) => html).join('');
+  const flush = () => {
+    if (!hasContent) return false;
+    chunks.push(`${current}${closingTags()}`);
+    current = reopenedTags();
+    hasContent = false;
+    return true;
+  };
+
+  for (const token of tokens) {
+    const closingMatch = token.match(/^<\/([a-z\d]+)/iu);
+    if (closingMatch) {
+      current += token;
+      const index = openTags.findLastIndex(
+        ({ name }) => name === closingMatch[1]?.toLowerCase(),
+      );
+      if (index !== -1) openTags.splice(index, 1);
+      continue;
+    }
+
+    const openingMatch = token.match(/^<([a-z\d]+)/iu);
+    const isSelfClosing = /^<br\b|\/>$/iu.test(token);
+    if (openingMatch && !isSelfClosing) {
+      const tag = { name: openingMatch[1].toLowerCase(), html: token };
+      const required = `${current}${token}</${tag.name}>${closingTags()}`;
+      if (required.length > limit && !flush()) return undefined;
+      if (`${current}${token}</${tag.name}>${closingTags()}`.length > limit) {
+        return undefined;
+      }
+      current += token;
+      openTags.push(tag);
+      continue;
+    }
+
+    if (`${current}${token}${closingTags()}`.length > limit && !flush()) {
+      return undefined;
+    }
+    if (`${current}${token}${closingTags()}`.length > limit) return undefined;
+    current += token;
+    hasContent = true;
+  }
+
+  if (hasContent) chunks.push(`${current}${closingTags()}`);
+  return chunks;
+}
+
+function splitAttributedTelegramText(
+  text: string,
+  sourceLabel: string | undefined,
+): string[] {
+  if (text.length === 0) return [];
+  const prefix = sourceLabel ? `${sourceLabel} ` : '';
+  const contentLimit = TELEGRAM_MESSAGE_LIMIT - prefix.length;
+  if (contentLimit <= 0) {
+    throw new Error('Telegram source label exceeds the message limit.');
+  }
+
+  const chunks: string[] = [];
+  for (let offset = 0; offset < text.length; ) {
+    let end = Math.min(offset + contentLimit, text.length);
+    if (
+      end < text.length &&
+      /[\uD800-\uDBFF]/u.test(text[end - 1] ?? '') &&
+      /[\uDC00-\uDFFF]/u.test(text[end] ?? '')
+    ) {
+      end--;
+    }
+    chunks.push(`${prefix}${text.slice(offset, end)}`);
+    offset = end;
+  }
+  return chunks;
+}
+
+function escapeTelegramHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
 }

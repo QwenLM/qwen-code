@@ -4,6 +4,10 @@ const apiMocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
   sendTyping: vi.fn(),
 }));
+const sendMocks = vi.hoisted(() => ({
+  sendText: vi.fn().mockResolvedValue(undefined),
+  sendImage: vi.fn().mockResolvedValue(undefined),
+}));
 
 vi.mock('./api.js', async () => {
   const actual = await vi.importActual<typeof import('./api.js')>('./api.js');
@@ -11,6 +15,15 @@ vi.mock('./api.js', async () => {
     ...actual,
     getConfig: apiMocks.getConfig,
     sendTyping: apiMocks.sendTyping,
+  };
+});
+
+vi.mock('./send.js', async () => {
+  const actual = await vi.importActual<typeof import('./send.js')>('./send.js');
+  return {
+    ...actual,
+    sendText: sendMocks.sendText,
+    sendImage: sendMocks.sendImage,
   };
 });
 
@@ -30,6 +43,10 @@ type LifecycleBase = Omit<
 class TestWeixinChannel extends WeixinChannel {
   emitLifecycle(event: ChannelTaskLifecycleEvent): void {
     this.onTaskLifecycle(event);
+  }
+
+  sendAttributed(chatId: string, text: string, sourceLabel: string) {
+    return this.sendThreadMessage(chatId, undefined, text, sourceLabel);
   }
 }
 
@@ -77,7 +94,62 @@ describe('WeixinChannel', () => {
   beforeEach(() => {
     apiMocks.getConfig.mockReset();
     apiMocks.sendTyping.mockReset();
+    sendMocks.sendText.mockClear();
+    sendMocks.sendImage.mockClear();
     vi.useFakeTimers();
+  });
+
+  it('applies attribution only after raw image-marker projection', async () => {
+    const channel = createChannel();
+
+    await channel.sendAttributed(
+      'user-1',
+      '`[IMAGE: example.png]` remains text',
+      '[review_*]',
+    );
+
+    expect(sendMocks.sendImage).not.toHaveBeenCalled();
+    expect(sendMocks.sendText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'user-1',
+        text: '[review_*] [IMAGE: example.png] remains text',
+      }),
+    );
+  });
+
+  it('attributes images when markdown projection leaves no visible text', async () => {
+    const channel = createChannel();
+
+    await channel.sendAttributed(
+      'user-1',
+      '```\n```\n[IMAGE: example.png]',
+      '[review]',
+    );
+
+    expect(sendMocks.sendText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'user-1',
+        text: '[review]',
+      }),
+    );
+    expect(sendMocks.sendImage).toHaveBeenCalled();
+  });
+
+  it('preserves underscores in attributed task names', async () => {
+    const channel = createChannel();
+
+    await channel.sendAttributed(
+      'user-1',
+      '**Here** is the result.',
+      '[fix_bug_2]',
+    );
+
+    expect(sendMocks.sendText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'user-1',
+        text: '[fix_bug_2] Here is the result.',
+      }),
+    );
   });
 
   afterEach(() => {

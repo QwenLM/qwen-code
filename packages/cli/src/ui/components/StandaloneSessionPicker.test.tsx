@@ -460,6 +460,33 @@ describe('SessionPicker', () => {
   });
 
   describe('Display', () => {
+    it('falls back to the Goal objective when the session has no title or prompt', async () => {
+      const sessions = [
+        createMockSession({
+          customTitle: undefined,
+          prompt: '',
+          goalObjective: 'Ship the requested change',
+        }),
+      ];
+      const mockService = createMockSessionService(sessions);
+
+      const { lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={mockService as never}
+            onSelect={vi.fn()}
+            onCancel={vi.fn()}
+          />
+        </KeypressProvider>,
+      );
+
+      await flush();
+
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Ship the requested change');
+      expect(output).not.toContain('(empty prompt)');
+    });
+
     it('should show session metadata', async () => {
       const sessions = [
         createMockSession({
@@ -758,6 +785,33 @@ describe('SessionPicker', () => {
         lastCompletedUuid: 'u2',
       };
     }
+
+    it('uses the Goal objective as the preview title', async () => {
+      const sessions = [
+        createMockSession({
+          sessionId: 's1',
+          prompt: '',
+          goalObjective: 'Ship the requested change',
+        }),
+      ];
+      const service = createMockSessionService(sessions);
+      service.loadSession.mockResolvedValue(fakeResumedData('s1'));
+
+      const { stdin, lastFrame } = renderPicker(
+        <SessionPicker
+          sessionService={service as never}
+          onSelect={vi.fn()}
+          onCancel={vi.fn()}
+          enablePreview
+        />,
+      );
+
+      await flush();
+      stdin.write(' ');
+      await flush();
+
+      expect(lastFrame() ?? '').toContain('Ship the requested change');
+    });
 
     it('renders tool_group items without crashing (stub Providers mounted)', async () => {
       // The previewed session contains a function call + tool_result, which
