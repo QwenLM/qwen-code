@@ -1617,6 +1617,28 @@ describe('resolve-health: decisions', () => {
       ['comment'],
       'one comment cannot be both the recovery and the retry it served',
     );
+    // Comment timestamps are second-granular, so a request and a result can
+    // tie. A result posted in the same second cannot be that request's — a
+    // run takes minutes — so the match must skip it, or a tie would certify.
+    const tied = assess(
+      [
+        {
+          number: 31,
+          state: 'open',
+          comments: [
+            request('2026-08-27T05:00:00Z', 31),
+            result('2026-08-27T05:00:00Z', PUSHED, 31),
+          ],
+        },
+      ],
+      { now },
+    );
+    assert.equal(tied.unserved, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(tied, existing).map((a) => a.type),
+      ['comment'],
+      'a same-second result cannot be the answer to that request',
+    );
     // And it must not be read off the ROSTER, which needs `staleHours`: on the
     // first tick the request is minutes old, the roster is empty and the alarm
     // is quiet, yet the trailing comment still clears its timestamp. This is
