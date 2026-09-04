@@ -69,6 +69,7 @@ const setModel = vi.fn(async () => ({}) as any);
 const setReasoningEffort = vi.fn(async () => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
+const getWorkflowTasks = vi.fn();
 const getGoal = vi.fn();
 const controlGoal = vi.fn();
 const readAttachment = vi.fn();
@@ -82,6 +83,7 @@ const daemonActions = {
   setReasoningEffort,
   loadArtifacts,
   getTasks,
+  getWorkflowTasks,
   getGoal,
   controlGoal,
   readAttachment,
@@ -433,6 +435,7 @@ beforeEach(() => {
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
   getTasks.mockReset();
+  getWorkflowTasks.mockReset();
   getGoal.mockReset();
   controlGoal.mockReset();
   readAttachment.mockReset();
@@ -524,6 +527,36 @@ function deferred<T>() {
 }
 
 describe('ChatPane', () => {
+  it('polls workflow tasks from the daemon capability, not the UI setting', async () => {
+    connectionState.supportedCommands = { workflowsEnabled: true };
+    messagesState = [
+      {
+        id: 'workflow-group',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'workflow-call',
+            toolName: 'workflow',
+            status: 'in_progress',
+            args: {},
+          },
+        ],
+      },
+    ];
+    getWorkflowTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'sess-1',
+      now: 1_000,
+      tasks: [],
+    });
+
+    render({ sessionWorkflowEnabled: false });
+    await act(async () => Promise.resolve());
+
+    expect(getWorkflowTasks).toHaveBeenCalledWith({ silent: true });
+    expect(getTasks).not.toHaveBeenCalled();
+  });
+
   it.each([
     [
       'images',
