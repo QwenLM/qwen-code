@@ -8,8 +8,8 @@
  * `@qwen-code/qwen-code-core`, which normally resolves through the package's
  * built `dist` (absent on a fresh clone, and stale whenever core src moves
  * ahead of the last build). To avoid both, this registers an ESM loader hook
- * (same idea as scripts/dev.js) that redirects that specifier to
- * `packages/core/index.ts`, then imports the core-dependent modules
+ * (same idea as scripts/dev.js) that redirects root and subpath specifiers to
+ * `packages/core` source, then imports the core-dependent modules
  * DYNAMICALLY so they resolve through the hook. Type-only imports below are
  * erased at runtime and never trigger core resolution.
  */
@@ -230,10 +230,31 @@ async function main() {
   const coreSrcUrl = pathToFileURL(
     path.join(repoRoot, 'packages', 'core', 'index.ts'),
   ).href;
+  const coreModulesUrl = pathToFileURL(
+    path.join(repoRoot, 'packages', 'core', 'src') + '/',
+  ).href;
   const loader = `
+    import { existsSync } from 'node:fs';
+    const prefix = '@qwen-code/qwen-code-core/';
+    const named = new Map([
+      ['transcriptRecords', 'utils/transcript-records.ts'], ['envVarResolver', 'utils/envVarResolver.ts'],
+      ['goalWire', 'goals/goal-wire.ts'], ['memoryScopes', 'memory/scopes.ts'],
+      ['subSessionConstants', 'tools/sub-session-constants.ts'], ['toolWriteOrigin', 'services/tool-write-origin.ts'],
+      ['userPromptSubmitContext', 'hooks/user-prompt-submit-context.ts'], ['noFollowOpen', 'utils/no-follow-open.ts'],
+    ]);
     export function resolve(specifier, context, nextResolve) {
       if (specifier === '@qwen-code/qwen-code-core') {
         return { shortCircuit: true, url: '${coreSrcUrl}', format: 'module' };
+      }
+      if (specifier.startsWith(prefix)) {
+        const subpath = specifier.slice(prefix.length);
+        const namedPath = named.get(subpath);
+        if (namedPath) return { shortCircuit: true, url: new URL(namedPath, '${coreModulesUrl}').href, format: 'module' };
+        const stem = subpath.replace(/\\.js$/, '');
+        for (const ext of ['.ts', '.tsx']) {
+          const candidate = new URL(stem + ext, '${coreModulesUrl}');
+          if (existsSync(candidate)) return { shortCircuit: true, url: candidate.href, format: 'module' };
+        }
       }
       return nextResolve(specifier, context);
     }
