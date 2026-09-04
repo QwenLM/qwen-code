@@ -909,9 +909,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const preEviction = store.getSnapshot();
           transcriptLedgerRef.current = clipLedgerToRetainedBlocks(
             transcriptLedgerRef.current,
-            preEviction.blocks,
-            detail.blockCount ?? preEviction.blocks.length,
-            detail.evictedOldest !== false,
+            {
+              blocks: preEviction.blocks,
+              retainedBlockCount:
+                detail.blockCount ?? preEviction.blocks.length,
+              evictedOldest: detail.evictedOldest !== false,
+              ...(detail.oldestRetainedRecordId !== undefined
+                ? { oldestRetainedRecordId: detail.oldestRetainedRecordId }
+                : {}),
+            },
           );
           // Trimming evicts oldest-first, so it can remove the very record
           // the exclusive `beforeRecordId` anchor points at; the daemon
@@ -2420,7 +2426,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // The replay is the window's first page and replaced everything,
               // so the ledger restarts from the committed blocks. Whatever the
               // rebuild already trimmed is not part of it, and the entry id
-              // counter restarts with it.
+              // counter restarts with it. Older content stays an explicit gap:
+              // either the daemon's window was truncated or the rebuild trimmed
+              // it, and in both cases the first retained block is not the
+              // session's first turn.
               ledgerEntrySeqRef.current = 0;
               const loadPageEntry = createLedgerPageEntry(
                 {
@@ -2429,10 +2438,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 },
                 store.getSnapshot().blocks,
               );
+              const olderContentRemains =
+                replayTrimmed ||
+                replayHistoryWasTruncated ||
+                activeSession.historyHasMore === true;
               transcriptLedgerRef.current = loadPageEntry
                 ? recordLedgerLoadPage(
                     createTranscriptPageLedger(activeSession.sessionId),
                     loadPageEntry,
+                    olderContentRemains,
                   )
                 : createTranscriptPageLedger(activeSession.sessionId);
               if (replayTarget && nextCheckpoint) {
@@ -4308,6 +4322,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 preCommit.blocks,
               ),
               prependEntry,
+              page.hasMore,
             );
           }
           const repair = liveJournalRepairRef.current;

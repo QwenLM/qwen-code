@@ -47,6 +47,22 @@ export interface TranscriptPageLedgerEntry {
 }
 
 /**
+ * An unloaded range between two retained pages, or between the oldest page and
+ * the start of the session. A gap is always explicit: two neighbouring pages
+ * are never assumed contiguous just because nothing sits between them.
+ *
+ * A side is absent when the range is known to be missing but carries no
+ * locator to re-fetch it with — a window whose oldest retained block lost its
+ * record identity, for example.
+ */
+export interface TranscriptGap {
+  /** Direction in which the gap can be resolved. */
+  older?: { beforeRecordId: string; snapshot?: string };
+  /** Self-bound continuation; the protocol requires it to be sent alone. */
+  newer?: { cursor: string };
+}
+
+/**
  * Ordered page/gap spans covering the retained window. Spans are ordered
  * oldest → newest and page spans hold blocks that are contiguous in the flat
  * store, so the page blocks are exactly the store's blocks minus the live
@@ -57,10 +73,14 @@ export interface TranscriptPageLedger {
   spans: readonly TranscriptPageSpan[];
 }
 
-export type TranscriptPageSpan = {
-  kind: 'page';
-  entry: TranscriptPageLedgerEntry;
-};
+export type TranscriptPageSpan =
+  | { kind: 'page'; entry: TranscriptPageLedgerEntry }
+  | { kind: 'gap'; gap: TranscriptGap };
+
+/** A gap towards older content, located by the oldest retained record. */
+function olderGap(beforeRecordId?: string): TranscriptGap {
+  return beforeRecordId === undefined ? {} : { older: { beforeRecordId } };
+}
 
 export function createTranscriptPageLedger(
   sessionId?: string,
@@ -203,42 +223,82 @@ export function createLedgerPageEntry(
 
 /**
  * Records the initial replay commit. The replay replaces the whole window, so
- * any previously retained page is gone with it.
+ * any previously retained page is gone with it. `olderContentRemains` says
+ * whether the session has durable content older than the replayed window, in
+ * which case the window starts with an explicit gap rather than implying that
+ * the first retained block is the first turn.
  */
 export function recordLedgerLoadPage(
   ledger: TranscriptPageLedger,
   entry: TranscriptPageLedgerEntry,
+  olderContentRemains: boolean,
 ): TranscriptPageLedger {
-  return { ...ledger, spans: [{ kind: 'page', entry }] };
+  const page: TranscriptPageSpan = { kind: 'page', entry };
+  return {
+    ...ledger,
+    spans: olderContentRemains
+      ? [{ kind: 'gap', gap: olderGap(entry.firstRecordId) }, page]
+      : [page],
+  };
 }
 
 /**
  * Records a prepended page. Prepend admission places the page's blocks before
  * every retained block, so the span goes at the head.
+ *
+ * The page resolves the front of the older gap, so that gap is replaced rather
+ * than kept: what is still missing now sits before this page and is located by
+ * this page's oldest record. When the fetch reached the start of the session
+ * nothing older remains and the gap closes.
  */
 export function recordLedgerPrependPage(
   ledger: TranscriptPageLedger,
   entry: TranscriptPageLedgerEntry,
+  olderContentRemains: boolean,
 ): TranscriptPageLedger {
-  return { ...ledger, spans: [{ kind: 'page', entry }, ...ledger.spans] };
+  const rest =
+    ledger.spans[0]?.kind === 'gap' ? ledger.spans.slice(1) : ledger.spans;
+  const page: TranscriptPageSpan = { kind: 'page', entry };
+  return {
+    ...ledger,
+    spans: olderContentRemains
+      ? [{ kind: 'gap', gap: olderGap(entry.firstRecordId) }, page, ...rest]
+      : [page, ...rest],
+  };
+}
+
+/** What the store reported when it dropped blocks from one end. */
+export interface LedgerEviction {
+  /** Pre-eviction flat block list. */
+  blocks: readonly DaemonTranscriptBlock[];
+  /** How many of them survive. */
+  retainedBlockCount: number;
+  /** True for an oldest-first retention trim, false for a rewind. */
+  evictedOldest: boolean;
+  /** Oldest surviving persisted record id, when a survivor carries one. */
+  oldestRetainedRecordId?: string;
 }
 
 /**
  * Reconciles the ledger after the store dropped blocks from one end.
  *
- * `blocks` is the pre-eviction flat block list and `retainedBlockCount` the
- * post-eviction one, both of which the store's truncation detail already
- * reports. An oldest-first retention trim evicts a prefix; a rewind evicts a
- * suffix. Either way a page span that survives only partially is clipped to
- * its surviving blocks rather than dropped, so the ledger keeps covering
- * exactly the blocks the store holds.
+ * An oldest-first retention trim evicts a prefix; a rewind evicts a suffix.
+ * Either way a page span that survives only partially is clipped to its
+ * surviving blocks rather than dropped, so the ledger keeps covering exactly
+ * the blocks the store holds.
+ *
+ * The two directions treat gaps differently. A trim pushes the window's older
+ * boundary back, so every missing range it exposes folds into one head gap
+ * located by the oldest surviving record — folding gaps is safe because a
+ * union of unloaded ranges is still unloaded, whereas folding pages would
+ * claim contiguity that does not exist. A rewind drops the newest content, so
+ * gaps beyond the cut are dropped with the pages they separated.
  */
 export function clipLedgerToRetainedBlocks(
   ledger: TranscriptPageLedger,
-  blocks: readonly DaemonTranscriptBlock[],
-  retainedBlockCount: number,
-  evictedOldest: boolean,
+  eviction: LedgerEviction,
 ): TranscriptPageLedger {
+  const { blocks, retainedBlockCount, evictedOldest } = eviction;
   if (!ledgerCoversBlockPrefix(ledger, blocks)) {
     return createTranscriptPageLedger(ledger.sessionId);
   }
@@ -246,19 +306,28 @@ export function clipLedgerToRetainedBlocks(
   const low = evictedOldest ? blocks.length - retained : 0;
   const high = evictedOldest ? blocks.length : retained;
   if (low <= 0 && high >= blocks.length) return ledger;
-  const spans: TranscriptPageSpan[] = [];
+  const kept: TranscriptPageSpan[] = [];
   let offset = 0;
+  let lostPageContent = false;
   for (const span of ledger.spans) {
-    if (span.kind !== 'page') continue;
+    if (span.kind === 'gap') {
+      if (!evictedOldest && offset >= high) continue;
+      kept.push(span);
+      continue;
+    }
     const entry = span.entry;
     const start = offset;
     const end = offset + entry.blockCount;
     offset = end;
     const clippedStart = Math.max(start, low);
     const clippedEnd = Math.min(end, high);
-    if (clippedStart >= clippedEnd) continue;
+    if (clippedStart >= clippedEnd) {
+      lostPageContent = true;
+      continue;
+    }
+    if (clippedStart !== start || clippedEnd !== end) lostPageContent = true;
     if (clippedStart === start && clippedEnd === end) {
-      spans.push(span);
+      kept.push(span);
       continue;
     }
     const clipped = entryFromBlocks(
@@ -272,7 +341,21 @@ export function clipLedgerToRetainedBlocks(
       },
       blocks.slice(clippedStart, clippedEnd),
     );
-    if (clipped) spans.push({ kind: 'page', entry: clipped });
+    if (clipped) kept.push({ kind: 'page', entry: clipped });
   }
-  return { ...ledger, spans };
+  if (!evictedOldest) return { ...ledger, spans: kept };
+  const firstPage = kept.findIndex((span) => span.kind === 'page');
+  const leadingGap = kept.some(
+    (span, index) =>
+      span.kind === 'gap' && (firstPage < 0 || index < firstPage),
+  );
+  if (!lostPageContent && !leadingGap) return { ...ledger, spans: kept };
+  const survivors = firstPage < 0 ? [] : kept.slice(firstPage);
+  return {
+    ...ledger,
+    spans: [
+      { kind: 'gap', gap: olderGap(eviction.oldestRetainedRecordId) },
+      ...survivors,
+    ],
+  };
 }
