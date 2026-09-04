@@ -1691,7 +1691,10 @@ jobs:
             # killed mid-verification, nothing posted). Recomputed per attempt
             # so a retry gets a fresh deadline; ignored by CLIs that predate
             # the gate.
-            QWEN_REVIEW_DEADLINE_EPOCH="$(( $("${QWEN_CI_REAL_DATE:-date}" +%s) + attempt_timeout ))"
+            # Bare `date` on purpose: packages/cli's deadline.test.ts pins this
+            # exact line as the cross-package units contract (whole seconds
+            # of epoch), so the clock pin stays out of it.
+            QWEN_REVIEW_DEADLINE_EPOCH="$(( $(date +%s) + attempt_timeout ))"
             export QWEN_REVIEW_DEADLINE_EPOCH
             # The budget itself is chosen outside this file — repository
             # variable, workflow input, or a /review --timeout=N comment — so
