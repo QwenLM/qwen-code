@@ -748,12 +748,15 @@ export class DaemonSessionClient {
     this.reattaching = resume.then(async (session) => {
       if (this.session.worktreeState === 'persisted-v1') {
         if (!session.worktree) {
-          // The daemon resumed the session with no worktree object at all.
-          // Its own restore gate only accepts that when no sidecar exists —
-          // the worktree was legitimately exited (exit_worktree removes the
-          // sidecar without notifying this client), so the cached claim is
-          // stale rather than contradicted. Heal by dropping it; a response
-          // that still carries `worktree` metadata is never proof of exit.
+          // The daemon resumed the session with no worktree object at all —
+          // most often a legitimate exit (exit_worktree removes the sidecar
+          // without notifying this client), but also a cleared in-memory
+          // association or a provenance that skips sidecar restore. The
+          // client cannot distinguish these, so it drops the cached claim
+          // and lets the identity gate re-establish the truth: a task that
+          // still needs worktree attestation fails closed there rather than
+          // running in the wrong directory. A response that still carries
+          // `worktree` metadata is never treated as proof of exit.
           this.session.worktree = undefined;
           this.session.worktreeState = undefined;
         } else {

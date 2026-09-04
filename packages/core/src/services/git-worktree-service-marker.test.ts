@@ -235,4 +235,33 @@ describe('daemon worktree session markers', () => {
       writeSpy.mockRestore();
     }
   });
+
+  it('does not remove a foreign file swapped in during the write window', async () => {
+    const dir = await tempDir();
+    const markerPath = path.join(dir, WORKTREE_SESSION_FILE);
+    const probe = await fs.open(path.join(dir, 'probe'), 'w');
+    const prototype = Object.getPrototypeOf(probe) as typeof probe;
+    await probe.close();
+    // Another writer swaps the marker path while our write is in flight, so
+    // the identity check fires with a foreign inode now occupying the path.
+    const writeSpy = vi
+      .spyOn(prototype, 'writeFile')
+      .mockImplementation(async () => {
+        await fs.unlink(markerPath);
+        await fs.writeFile(markerPath, 'foreign-owner');
+      });
+
+    try {
+      await expect(
+        createWorktreeSessionMarkerExclusive(dir, 'session-123'),
+      ).rejects.toThrow('Worktree session marker identity changed');
+      // The cleanup must not delete the file the identity check proved is
+      // not ours.
+      await expect(fs.readFile(markerPath, 'utf8')).resolves.toBe(
+        'foreign-owner',
+      );
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
 });
