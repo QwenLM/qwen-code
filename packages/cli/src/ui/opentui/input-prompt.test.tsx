@@ -933,6 +933,58 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
     expect(submitted).toEqual(['/help']);
   });
 
+  it('submits an exact command from the live editor when completion is stale', async () => {
+    const submitted: string[] = [];
+    await renderWithCommands(
+      [
+        {
+          name: 'quit',
+          description: 'Exit the CLI',
+          kind: 'built-in',
+          action: () => undefined,
+        },
+      ],
+      (text) => submitted.push(text),
+    );
+    const editor = currentEditor();
+    await typeText('/qui');
+
+    await act(async () => {
+      // OpenTUI can deliver the final character and Enter in one React frame.
+      const handler = lastKeyboardHandler();
+      handler(baseKeyEvent({ name: 't', sequence: 't' }));
+      handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+
+    expect(submitted).toEqual(['/quit']);
+    expect(editor.plainText).toBe('');
+  });
+
+  it('does not submit a partial command from stale perfect-match state', async () => {
+    const submitted: string[] = [];
+    await renderWithCommands(
+      [
+        {
+          name: 'quit',
+          description: 'Exit the CLI',
+          kind: 'built-in',
+          action: () => undefined,
+        },
+      ],
+      (text) => submitted.push(text),
+    );
+    const editor = currentEditor();
+    await typeText('/quit');
+
+    editor.setText('/qui');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+
+    expect(submitted).toEqual([]);
+    expect(editor.plainText).toBe('/quit ');
+  });
+
   it('after navigating, Enter fills the highlighted sub-command', async () => {
     const submitted: string[] = [];
     await renderWithCommands(
