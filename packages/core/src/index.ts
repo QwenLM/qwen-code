@@ -92,6 +92,7 @@ export * from './core/message-display-dispatcher.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/output-styles.js';
+export * from './core/output-style-files.js';
 export * from './core/session-recovery.js';
 export * from './core/ask-user-question-restore.js';
 export * from './core/tokenLimits.js';
@@ -373,9 +374,12 @@ export {
 export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
+  decodeSessionTranscriptSnapshot,
   encodeSessionTranscriptCursor,
+  encodeSessionTranscriptSnapshot,
   findBoundaryAtOrBefore,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   isReplayTurnStartType,
   SESSION_TRANSCRIPT_CURSOR_VERSION,
   SESSION_TRANSCRIPT_DEFAULT_LIMIT,
@@ -383,6 +387,7 @@ export {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+  SESSION_TRANSCRIPT_TURN_INDEX_VERSION,
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptPageTooLargeError,
@@ -397,8 +402,13 @@ export type {
   SessionRestoreReplaySelection,
   SessionRuntimeResumeState,
   SessionTranscriptCursorState,
+  SessionTranscriptNavigationTurn,
+  SessionTranscriptNavigationTurnKind,
   SessionTranscriptReadPageOptions,
+  SessionTranscriptReadTurnIndexOptions,
   SessionTranscriptRecordPage,
+  SessionTranscriptSnapshotState,
+  SessionTranscriptTurnIndexPage,
 } from './services/session-transcript-reader.js';
 export * from './utils/conversation-chain.js';
 export * from './utils/transcript-records.js';
@@ -456,6 +466,10 @@ export {
   type ResolvedSavedWorkflow,
   type WorkflowSaveResult,
 } from './agents/runtime/workflow-saved.js';
+export {
+  extractAndStripMeta,
+  type WorkflowMeta,
+} from './agents/runtime/workflow-sandbox.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
@@ -642,6 +656,7 @@ export * from './utils/github-prs.js';
 export * from './utils/github-pr-issues.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/invocation-context.js';
+export * from './utils/conversations-runtime-marker.js';
 export {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   QwenIgnoreParser,
