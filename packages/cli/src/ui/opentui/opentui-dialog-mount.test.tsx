@@ -3,6 +3,7 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /**
  * Routing tests for OpenTuiDialogMount (Batch 5 slice 2). The mount is the

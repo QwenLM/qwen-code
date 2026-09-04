@@ -34,7 +34,10 @@ import {
 import { useSharedNow } from '../../hooks/useSharedNow';
 import { useSubagentDetails } from '../../subagentDetailsContext';
 import { useMonitorDetails } from '../../monitorDetailsContext';
+import { useWorkflowDetails } from '../../workflowDetailsContext';
+import { findWorkflowTaskForTool } from '../../utils/workflowTasks';
 import { TodoEventSummary, TodoFullList } from './TodoView';
+import { WorkflowExecutionView } from './WorkflowExecutionView';
 import { Markdown } from './Markdown';
 import { ThinkingDoneIcon, ThinkingTranslateButton } from './AssistantMessage';
 import {
@@ -62,6 +65,7 @@ import {
   isShellToolName,
   localizeAgentTypeName,
   toolContainsCallId,
+  isWorkflowToolName,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
@@ -135,7 +139,8 @@ function hasDetailView(tool: ACPToolCall): boolean {
     name === 'read_file' ||
     name === 'readfile' ||
     isSkillToolName(name) ||
-    isAskUserQuestionToolName(tool.toolName)
+    isAskUserQuestionToolName(tool.toolName) ||
+    isWorkflowToolName(name)
   );
 }
 
@@ -408,8 +413,38 @@ interface ToolLineProps {
   workspaceCwd?: string;
   summaryOnly?: boolean;
   forceExpanded?: boolean;
+  detailsVisible?: boolean;
   hideHeader?: boolean;
   hideCollapsedOutput?: boolean;
+}
+
+function WorkflowToolDetail({
+  tool,
+  displayName,
+  detail,
+  result,
+}: {
+  tool: ACPToolCall;
+  displayName: string;
+  detail: string;
+  result: string;
+}) {
+  const { t } = useI18n();
+  const workflowDetails = useWorkflowDetails();
+  const workflowTask = workflowDetails
+    ? findWorkflowTaskForTool(workflowDetails.tasks, tool)
+    : undefined;
+  return workflowTask ? (
+    <WorkflowExecutionView task={workflowTask} />
+  ) : (
+    <ToolExpandedCard title={displayName} detail={detail}>
+      <div className={styles.workflowFallback} role="status">
+        {tool.status === 'pending' || tool.status === 'in_progress'
+          ? t('workflow.inline.loading')
+          : result || t('workflow.inline.unavailable')}
+      </div>
+    </ToolExpandedCard>
+  );
 }
 
 function getAgentDisplayInfo(
@@ -977,6 +1012,7 @@ function areToolLinePropsEqual(
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.summaryOnly !== next.summaryOnly) return false;
   if (prev.forceExpanded !== next.forceExpanded) return false;
+  if (prev.detailsVisible !== next.detailsVisible) return false;
   if (prev.hideHeader !== next.hideHeader) return false;
   if (prev.hideCollapsedOutput !== next.hideCollapsedOutput) return false;
   const a = prev.tool;
@@ -1076,6 +1112,7 @@ export const ToolLine = memo(function ToolLine({
   workspaceCwd,
   summaryOnly = false,
   forceExpanded = false,
+  detailsVisible = true,
   hideHeader = false,
   hideCollapsedOutput = false,
 }: ToolLineProps) {
@@ -1106,6 +1143,7 @@ export const ToolLine = memo(function ToolLine({
   // Set once the user explicitly toggles this row, so auto-collapse-on-
   // completion never silently overrides their choice.
   const userToggledRef = useRef(false);
+  const isWorkflow = isWorkflowToolName(tool.toolName);
 
   useEffect(
     () => {
@@ -1511,39 +1549,52 @@ export const ToolLine = memo(function ToolLine({
             {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
         )}
-      {!mcpApp && !isTodo && expanded && detailView && (
-        <div
-          className={
-            useMarkdownDetail
-              ? `${styles.lineDetail} ${styles.markdownLineDetail}`
-              : styles.lineDetail
-          }
-        >
-          {isRead ? (
-            <ToolExpandedCard title={displayName} status={tool.status}>
-              <ExpandedReadContent tool={tool} />
-            </ToolExpandedCard>
-          ) : (
-            <ToolExpandedCard
-              title={displayName}
-              detail={expandedCardDetail}
-              status={tool.status}
-            >
-              {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
-              {(name === 'write_file' || name === 'writefile') && (
-                <ExpandedEditContent tool={tool} />
-              )}
-              {(name === 'edit' || name === 'write' || name === 'editfile') && (
-                <ExpandedEditContent tool={tool} />
-              )}
-              {isAskUserQuestionToolName(tool.toolName) && (
-                <ExpandedAskUserQuestionOutput tool={tool} />
-              )}
-              {isSkillToolName(name) && <ExpandedSkillOutput tool={tool} />}
-            </ToolExpandedCard>
-          )}
-        </div>
-      )}
+      {!mcpApp &&
+        !isTodo &&
+        expanded &&
+        detailView &&
+        (!isWorkflow || detailsVisible) && (
+          <div
+            className={
+              isWorkflow
+                ? `${styles.lineDetail} ${styles.workflowLineDetail}`
+                : useMarkdownDetail
+                  ? `${styles.lineDetail} ${styles.markdownLineDetail}`
+                  : styles.lineDetail
+            }
+          >
+            {isWorkflow ? (
+              <WorkflowToolDetail
+                tool={tool}
+                displayName={displayName}
+                detail={expandedCardDetail}
+                result={result}
+              />
+            ) : isRead ? (
+              <ToolExpandedCard title={displayName} status={tool.status}>
+                <ExpandedReadContent tool={tool} />
+              </ToolExpandedCard>
+            ) : (
+              <ToolExpandedCard
+                title={displayName}
+                detail={expandedCardDetail}
+                status={tool.status}
+              >
+                {isShellToolName(name) && <ExpandedBashOutput tool={tool} />}
+                {(name === 'write_file' || name === 'writefile') && (
+                  <ExpandedEditContent tool={tool} />
+                )}
+                {(name === 'edit' ||
+                  name === 'write' ||
+                  name === 'editfile') && <ExpandedEditContent tool={tool} />}
+                {isAskUserQuestionToolName(tool.toolName) && (
+                  <ExpandedAskUserQuestionOutput tool={tool} />
+                )}
+                {isSkillToolName(name) && <ExpandedSkillOutput tool={tool} />}
+              </ToolExpandedCard>
+            )}
+          </div>
+        )}
     </div>
   );
 }, areToolLinePropsEqual);
@@ -1687,6 +1738,7 @@ export const ToolGroup = memo(function ToolGroup({
     : undefined;
   const singleMcpAppResourceUri = singleMcpApp?.resourceUri;
   const hasMcpApp = tools.some((tool) => getMcpAppDisplay(tool.rawOutput));
+  const hasWorkflow = tools.some((tool) => isWorkflowToolName(tool.toolName));
   const hasForegroundActiveTool = tools.some(
     (tool) =>
       isActiveToolStatus(tool.status) && !isBackgroundSubAgentToolCall(tool),
@@ -1807,10 +1859,28 @@ export const ToolGroup = memo(function ToolGroup({
             aria-hidden="true"
           />
         </button>
-        {(chatExpanded || hasMcpApp) && (
+        {(chatExpanded || hasMcpApp || hasWorkflow) && (
           <div
-            className={styles.chatSummaryContentClip}
-            style={chatExpanded ? undefined : { display: 'none' }}
+            aria-hidden={!chatExpanded}
+            // Set on the DOM node, not as a JSX prop: react-dom 18 — inside
+            // this package's supported peer range — has no `inert` property
+            // entry and drops a boolean on an unknown attribute, so the
+            // collapsed content (which stays mounted) would keep its
+            // focusable ToolLine rows while aria-hidden hid them from
+            // assistive tech. Same pattern as ParallelAgentsGroup.
+            ref={(element) => {
+              element?.toggleAttribute('inert', !chatExpanded);
+            }}
+            className={
+              chatExpanded
+                ? styles.chatSummaryContentClip
+                : `${styles.chatSummaryContentClip} ${styles.chatSummaryContentCollapsed}`
+            }
+            style={
+              !chatExpanded && hasMcpApp && !hasWorkflow
+                ? { display: 'none' }
+                : undefined
+            }
           >
             <div className={styles.chatSummaryContentInner}>
               <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
@@ -1869,6 +1939,7 @@ export const ToolGroup = memo(function ToolGroup({
                           workspaceCwd={workspaceCwd}
                           summaryOnly={!singleTool || compactToolLines}
                           forceExpanded={!!singleTool && !compactToolLines}
+                          detailsVisible={chatExpanded}
                           hideHeader={!!singleTool && !compactToolLines}
                         />
                       )}

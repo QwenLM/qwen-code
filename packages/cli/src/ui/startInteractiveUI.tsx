@@ -12,6 +12,7 @@ import {
   createDebugLogger,
   getLastPeerInboxFailure,
   type InboundPolicy,
+  parseHeldExpiry,
   type PeerInboxStartFailure,
   isDebugLogFileEnabled,
   registerSession,
@@ -471,6 +472,8 @@ export async function startInteractiveUI(
             settings.merged.agents?.crossSessionInbound as
               | InboundPolicy
               | undefined,
+          getHeldExpiryMs: () =>
+            parseHeldExpiry(settings.merged.agents?.crossSessionHeldExpiry),
           updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
             config.updateSessionRegistryIpcPath(ipcPath, ipcToken),
           getSessionId: () => config.getSessionId(),

@@ -42,6 +42,7 @@ import {
   type PeerConnectionAuth,
   type PeerInbox,
 } from './uds-inbox.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 /**
  * A PID no process can ever hold.
@@ -825,7 +826,7 @@ describe.skipIf(isWindows)('client errors', () => {
           timeoutMs: 500,
         }),
       ).rejects.toMatchObject({ name: 'PeerSendError', code: 'ETIMEDOUT' });
-      expect(Date.now() - startedAt).toBeLessThan(3000);
+      expectWithinLatencyBudget(Date.now() - startedAt, 3000);
     } finally {
       for (const conn of conns) conn.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
