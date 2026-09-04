@@ -105,6 +105,54 @@ describe('peekManagedSession', () => {
     expect(result.lines.join('\n')).toContain('no live process');
   });
 
+  it('names the session the way sessions ps does', async () => {
+    // 'Waiting for approval' is one of the generic phrases deriveTitle
+    // filters, so without the launch record the title would fall through
+    // to the untitled placeholder while `sessions ps` prints the prompt.
+    // Feeding peek the same launch record keeps the two surfaces aligned.
+    const h = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        activity: {
+          schemaVersion: 1,
+          summary: 'Waiting for approval',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        launch: {
+          sessionId: SESSION,
+          initialPrompt: 'find out why the release job is flaky',
+        },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(h));
+    expect(result.lines[0]).toContain('find out why the release job is flaky');
+  });
+
+  it('shows the name a roster rename gave the session', async () => {
+    // The roster entry wins the title over the summary and the launch
+    // prompt; peek must show the renamed session under that name, not
+    // under whatever the worker last reported.
+    const h = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        activity: {
+          schemaVersion: 1,
+          summary: 'Investigating flaky release job',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        rosterEntry: { sessionId: SESSION, displayName: 'release-debugger' },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(h));
+    expect(result.lines[0]).toContain('release-debugger');
+  });
+
   it('neutralizes control sequences in text the session wrote', async () => {
     // waitingFor and summary are a model's own words, relayed from
     // another process - the same untrusted input `sessions ps` sanitizes.

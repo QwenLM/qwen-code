@@ -28,6 +28,8 @@ import {
 import { deriveAgentViewPresentation } from '../../agent-view/presentation.js';
 import type {
   AgentViewActivityFile,
+  AgentViewLaunchFile,
+  AgentViewRosterEntry,
   AgentViewSessionStateFile,
 } from '../../agent-view/protocol.js';
 
@@ -85,6 +87,8 @@ interface PeekResponse {
   sessionId: string;
   state: AgentViewSessionStateFile;
   activity?: AgentViewActivityFile;
+  rosterEntry?: AgentViewRosterEntry;
+  launch?: AgentViewLaunchFile;
   live?: boolean;
 }
 
@@ -102,9 +106,10 @@ export function shortSessionId(sessionId: string): string {
 /**
  * Report what a background session is doing, and what it is waiting for.
  *
- * The state line comes from `deriveAgentViewPresentation`, the same
- * source as the roster and `sessions ps`, so three surfaces cannot
- * describe one session three ways.
+ * The title and the state line come from `deriveAgentViewPresentation`,
+ * fed the same roster entry, launch record and activity the roster and
+ * `sessions ps` use, so three surfaces cannot describe one session
+ * three ways.
  */
 export async function peekManagedSession(
   sessionId: string,
@@ -128,6 +133,8 @@ export async function peekManagedSession(
 
   const presentation = deriveAgentViewPresentation({
     state: response.state,
+    rosterEntry: response.rosterEntry,
+    launch: response.launch,
     activity: response.activity,
   });
   const lines = [
