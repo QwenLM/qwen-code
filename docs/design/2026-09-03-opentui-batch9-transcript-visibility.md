@@ -349,8 +349,13 @@ folds two rows (`expected [ …(2) ] to have a length of 1 but got 2`) while the
     expressible through it — U-29 rests on the unit wiring plus the local smoke
     below. U-27 would need an unsupported image inside a submitted prompt,
     which the fake server's scripted turns do not model.
-  - **When it runs**: the spec is collected only by `e2e.yml`'s
-    `e2e-interactive-opentui` job, and that workflow never triggers on
+  - **When it runs**: three lanes collect it. `e2e-interactive-opentui`
+    (e2e.yml:528) runs it under the opentui renderer, and the ink lanes —
+    `e2e-test-linux`, every shard (e2e.yml:349, :352), and `e2e-test-macos`
+    (e2e.yml:457) — pass `--root ./integration-tests` with exactly two
+    excludes (`**/interactive/cron-interactive.test.ts` and
+    `**/channel-plugin.test.ts`), so they collect this spec under ink too.
+    None of the three is pre-merge evidence: `e2e.yml` never triggers on
     `pull_request` — only pushes to `main`, the nightly schedule, and
     `workflow_dispatch` (its own comment gives the reason: E2E is slow and
     flaky, so it stays out of the merge queue). Pre-merge the evidence is
