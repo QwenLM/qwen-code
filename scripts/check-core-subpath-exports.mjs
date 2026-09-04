@@ -18,7 +18,9 @@
  * Nothing else exercises that entry. Remove it, rename the `dist/src` root, or
  * add a pattern that shadows it, and every suite stays green while `qwen` dies
  * on its first core subpath import. This runs Node's real resolver against the
- * built package so that failure lands in CI instead.
+ * built package so that failure lands in CI instead. It also rejects targets
+ * outside core's published `dist/`, so a specifier the `./src/*` exports entry
+ * routes to an in-repo file that never ships cannot pass the gate either.
  */
 
 import { existsSync, globSync, readFileSync } from 'node:fs';
@@ -61,6 +63,15 @@ if (!existsSync(coreDist)) {
   process.exit(1);
 }
 
+// core's package.json publishes only dist, vendor and scripts/postinstall.js
+// ("files"), but its exports map also carries "./src/*": "./src/*". A
+// specifier routed through that entry resolves to a real in-repo
+// packages/core/src/... file, so a bare existsSync passes while the published
+// artifact ships nothing and the installed CLI dies with ERR_MODULE_NOT_FOUND.
+// Legitimate runtime specifiers all resolve under dist/, so require exactly
+// that instead of trusting the repo tree.
+const publishedDist = path.join(root, 'packages', 'core', 'dist') + path.sep;
+
 let failed = 0;
 for (const specifier of specifiers) {
   const exportName = EXPORT_PROBES.get(specifier);
@@ -75,6 +86,13 @@ for (const specifier of specifiers) {
   if (!existsSync(resolved)) {
     console.error(
       `✗ ${specifier}\n    resolved target does not exist: ${resolved}`,
+    );
+    failed++;
+    continue;
+  }
+  if (!resolved.startsWith(publishedDist)) {
+    console.error(
+      `✗ ${specifier}\n    resolved target is not published: ${resolved} lies outside ${path.relative(root, publishedDist)} (core ships "files": dist, vendor, scripts/postinstall.js)`,
     );
     failed++;
     continue;
