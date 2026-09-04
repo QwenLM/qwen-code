@@ -70,6 +70,10 @@ export default defineConfig({
           __dirname,
           '../core/src/utils/debugLogger.ts',
         ),
+        '@qwen-code/qwen-code-core/conversationsRuntimeMarker': path.resolve(
+          __dirname,
+          '../core/src/utils/conversations-runtime-marker.ts',
+        ),
       }),
       // Mirrors `"@qwen-code/qwen-code-core/*": ["../core/src/*"]` from
       // packages/cli/tsconfig.json. esbuild reads that paths block when it

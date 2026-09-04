@@ -193,6 +193,7 @@ async function flushConfigInitialization() {
 // value swappable without wrapping every render in a provider.
 const peerMessagingHolder = vi.hoisted(() => ({
   current: null as unknown,
+  failure: null as unknown,
 }));
 vi.mock('../peerMessaging/PeerMessagingContext.js', async (importOriginal) => {
   const actual =
@@ -202,6 +203,7 @@ vi.mock('../peerMessaging/PeerMessagingContext.js', async (importOriginal) => {
   return {
     ...actual,
     usePeerMessaging: () => peerMessagingHolder.current,
+    usePeerInboxFailure: () => peerMessagingHolder.failure,
   };
 });
 
@@ -7701,6 +7703,137 @@ describe('AppContainer State Management', () => {
       );
     };
 
+    it('re-runs the gate when the held-expiry lifetime changes', () => {
+      // Both peer settings reload live, and both change what the gate
+      // would decide for messages already parked. Parking under `never`
+      // arms no timer at all, so without this trigger an edit to `1m`
+      // leaves the backlog held until session exit -- no expired receipt
+      // for the sender -- while `/peers` counts down from the new value.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (crossSessionHeldExpiry: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry,
+            },
+          },
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('never')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('1m')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
+    it('re-runs the gate when the inbound policy changes', () => {
+      // The effect keys on the parsed lifetime AND the policy. The policy
+      // half is referenced nowhere in the effect body, so dropping it from
+      // the deps array flags nothing -- and a user live-editing
+      // `crossSessionInbound` from `hold` to `refuse` would never have the
+      // parked backlog settled as `denied`, leaving senders with no
+      // receipt for messages the new policy is supposed to have handled.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (crossSessionInbound: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '5m',
+              crossSessionInbound,
+            },
+          },
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('hold')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('refuse')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).toHaveBeenCalledWith('held-expiry-changed');
+    });
+
+    it('does not re-run the gate when an unrelated setting changes', () => {
+      // `reevaluate` also settles a parked backlog as `denied` under a
+      // refuse policy, so it must key on the parsed lifetime and the
+      // policy -- not on any settings-file edit, which would discard the
+      // user's backlog on an unrelated key.
+      const peer = makePeerMessaging();
+      peerMessagingHolder.current = peer.value;
+      const settingsWith = (version: string) =>
+        ({
+          ...mockSettings,
+          merged: {
+            ...mockSettings.merged,
+            agents: {
+              ...mockSettings.merged.agents,
+              crossSessionHeldExpiry: '1m',
+            },
+            ui: { ...mockSettings.merged.ui, customWittyPhrases: [version] },
+          },
+        }) as unknown as LoadedSettings;
+
+      const { rerender } = render(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('a')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const reevaluate = peer.value.reevaluate as ReturnType<typeof vi.fn>;
+      reevaluate.mockClear();
+
+      rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={settingsWith('b')}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(reevaluate).not.toHaveBeenCalledWith('held-expiry-changed');
+    });
+
     it('queues the envelope on the peer path, never as typed user input', () => {
       // The peer path marks the entry so the drain submits it on the
       // preprocessing-free Teammate send type — queued as user text, an
@@ -7804,6 +7937,48 @@ describe('AppContainer State Management', () => {
       expect(addPeerMessage).not.toHaveBeenCalled();
     });
 
+    it('announces once, with the cause, when the inbox could not bind', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const failure = {
+        cause: 'foreign_owner',
+        socketPath: '/run/user/1000/qwen-socks/1.sock',
+        detail: 'belongs to uid 65534, not 1000',
+        hint: 'Set XDG_RUNTIME_DIR to a directory you own, then restart.',
+        attempts: 3,
+      };
+      peerMessagingHolder.failure = failure;
+      try {
+        const { rerender } = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        peerMessagingHolder.failure = { ...failure };
+        rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        const notices = addItem.mock.calls
+          .map((call) => call[0] as { type?: string; text?: string })
+          .filter((item) =>
+            item.text?.includes('Cross-session messaging is OFF'),
+          );
+        expect(notices).toHaveLength(1);
+        expect(notices[0]?.type).toBe(MessageType.ERROR);
+        expect(notices[0]?.text).toContain('belongs to another user');
+        expect(notices[0]?.text).toContain('XDG_RUNTIME_DIR');
+      } finally {
+        peerMessagingHolder.failure = null;
+      }
+    });
+
     it('announces held and denied receipts, and delivery only after a hold', () => {
       const addItem = mockedUseHistory().addItem as Mock;
       const peer = makePeerMessaging();
@@ -7862,6 +8037,24 @@ describe('AppContainer State Management', () => {
         `Message to app-ab [ab12cd]: ${describeDeliveryStatus('denied')}`,
       );
 
+      // Refused is not declined: nobody looked at this one, the setting
+      // turned it away at admission. This transcript line is the only
+      // place that distinction reaches a person, so it is what makes the
+      // two answers different rather than two words for the same thing.
+      act(() => {
+        peer.emitReceipt({
+          status: 'refused',
+          address: 'app-ab [ab12cd]',
+          origMsgId: 'm3b',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(4);
+      expect(notices()[3]).toBe(
+        `Message to app-ab [ab12cd]: ${describeDeliveryStatus('refused')}`,
+      );
+      expect(notices()[3]).not.toContain('declined');
+
       // A stale address is named as such, never as a human's decision.
       act(() => {
         peer.emitReceipt({
@@ -7871,9 +8064,9 @@ describe('AppContainer State Management', () => {
           previous: 'pending',
         });
       });
-      expect(notices()).toHaveLength(4);
-      expect(notices()[3]).toContain('different session');
-      expect(notices()[3]).not.toContain('declined');
+      expect(notices()).toHaveLength(5);
+      expect(notices()[4]).toContain('different session');
+      expect(notices()[4]).not.toContain('declined');
 
       // An accepted message that expired was never held: the wire text
       // for 'expired' speaks of a held message and must not be reused.
@@ -7885,9 +8078,9 @@ describe('AppContainer State Management', () => {
           previous: 'delivered',
         });
       });
-      expect(notices()).toHaveLength(5);
-      expect(notices()[4]).toContain('exited before it read');
-      expect(notices()[4]).not.toContain('held');
+      expect(notices()).toHaveLength(6);
+      expect(notices()[5]).toContain('exited before it read');
+      expect(notices()[5]).not.toContain('held');
 
       act(() => {
         peer.emitReceipt({
@@ -7897,8 +8090,8 @@ describe('AppContainer State Management', () => {
           previous: 'held',
         });
       });
-      expect(notices()).toHaveLength(6);
-      expect(notices()[5]).toContain(describeDeliveryStatus('expired'));
+      expect(notices()).toHaveLength(7);
+      expect(notices()[6]).toContain(describeDeliveryStatus('expired'));
 
       // Expired with no delivery at all: the gate could not queue it
       // (accept backlog full) — the peer may be alive, so no exit claim.
@@ -7910,9 +8103,9 @@ describe('AppContainer State Management', () => {
           previous: 'pending',
         });
       });
-      expect(notices()).toHaveLength(7);
-      expect(notices()[6]).not.toContain('exited before');
-      expect(notices()[6]).toContain('too busy');
+      expect(notices()).toHaveLength(8);
+      expect(notices()[7]).not.toContain('exited before');
+      expect(notices()[7]).toContain('too busy');
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {
