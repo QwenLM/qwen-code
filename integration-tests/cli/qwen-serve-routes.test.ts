@@ -18,6 +18,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import {
+  appendFileSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -354,6 +355,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_prompt',
       'session_turn_status',
       'session_attachments',
+      'session_attachment_list',
       'session_mid_turn_message_mutation',
       'session_mid_turn_message_query',
       'session_cancel',
@@ -388,6 +390,8 @@ describe('qwen serve — capabilities envelope', () => {
       'session_context_usage',
       'session_supported_commands',
       'session_tasks',
+      'session_agents',
+      'session_agent_trace',
       'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
@@ -403,6 +407,7 @@ describe('qwen serve — capabilities envelope', () => {
       'standalone_session_options_v1',
       'session_transcript',
       'session_transcript_pagination',
+      'session_turn_navigation',
       'mcp_guardrails',
       'workspace_mcp_manage',
       'mcp_guardrail_events',
@@ -468,6 +473,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_archived_session_export',
       'workspace_session_live_state',
       'workspace_session_metadata',
+      'session_worktree_persistence_v1',
       'voice_transcribe',
       'web_terminal',
     ]);
@@ -558,6 +564,57 @@ describe('qwen serve — transcript paging route', () => {
       second.events.every((event) => event.type === 'session_update'),
     ).toBe(true);
     expect(second.events.some((event) => 'id' in event)).toBe(false);
+  });
+
+  it('indexes and opens frozen turns through the real daemon owner path', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-111111111112';
+    const filePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'first prompt'),
+      chatRecord(sessionId, 'a1', 'u1', 'first answer'),
+      chatRecord(sessionId, 'u2', 'a1', 'second prompt'),
+      chatRecord(sessionId, 'a2', 'u2', 'second answer'),
+    ]);
+
+    const initial = await client.getSessionTurnIndexPage(sessionId, {
+      limit: 10,
+    });
+    expect(initial.totalTurns).toBe(2);
+    expect(initial.turns.map((turn) => turn.turnId)).toEqual(['u1', 'u2']);
+
+    const anchored = await client.getSessionTranscriptPage(sessionId, {
+      atRecordId: 'u2',
+      snapshot: initial.snapshot,
+      limit: 2,
+    });
+    expect(anchored.targetRecordId).toBe('u2');
+    expect(anchored.hasOlder).toBe(true);
+
+    appendFileSync(
+      filePath,
+      `${JSON.stringify(chatRecord(sessionId, 'u3', 'a2', 'third prompt'))}\n`,
+      'utf8',
+    );
+    const frozen = await client.getSessionTurnIndexPage(sessionId, {
+      snapshot: initial.snapshot,
+      start: 0,
+      limit: 10,
+    });
+    const fresh = await client.getSessionTurnIndexPage(sessionId, {
+      limit: 10,
+    });
+    expect(frozen.totalTurns).toBe(2);
+    expect(fresh.totalTurns).toBe(3);
+
+    const tampered = `${initial.snapshot[0] === 'A' ? 'B' : 'A'}${initial.snapshot.slice(1)}`;
+    await expect(
+      client.getSessionTurnIndexPage(sessionId, {
+        snapshot: tampered,
+        start: 0,
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { code: 'invalid_transcript_cursor' },
+    } satisfies Partial<DaemonHttpError>);
   });
 
   it('maps transcript request validation errors through the real daemon', async () => {
