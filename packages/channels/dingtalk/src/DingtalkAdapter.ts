@@ -2499,6 +2499,16 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
 
+    if (current.delivery) {
+      // A delivery composed before the turn ended froze `partial` and `status`
+      // at that moment; its card must still report the completed turn.
+      current.delivery.status = current.status;
+      current.delivery.label = current.label ?? current.delivery.label;
+      current.delivery.partial = this.isPartialBackgroundResponseDelivery(
+        current,
+        current.delivery.parts.length,
+      );
+    }
     if (current.timeoutTimer) clearTimeout(current.timeoutTimer);
     current.timeoutTimer = undefined;
     await this.flushBackgroundResponseAggregation(key, current);
@@ -2534,12 +2544,10 @@ export class DingtalkChannel extends ChannelBase {
         status: aggregation.status,
         label: aggregation.label,
         parts,
-        partial:
-          parts.length > 0 &&
-          (aggregation.delivered === true ||
-            aggregation.retiring === true ||
-            aggregation.completionPartial === true ||
-            aggregation.turnComplete !== true),
+        partial: this.isPartialBackgroundResponseDelivery(
+          aggregation,
+          parts.length,
+        ),
         attempts: 0,
       };
       aggregation.delivery = delivery;
@@ -2609,7 +2617,12 @@ export class DingtalkChannel extends ChannelBase {
     process.stderr.write(
       `[DingTalk:${this.name}] background response delivery failed (attempt ${delivery.attempts}): ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
     );
-    if (delivery.attempts >= BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES) {
+    if (
+      delivery.attempts >= BACKGROUND_RESPONSE_AGGREGATION_MAX_RETRIES ||
+      // A permanently rejected send (an invalid appkey, a missing app) cannot
+      // succeed later; retrying it only spends the chat's send quota.
+      (error instanceof ProactiveTextDeliveryError && error.retryable === false)
+    ) {
       aggregation.delivery = undefined;
       aggregation.dropped = true;
       if (aggregation.parts.length === 0) {
@@ -2627,6 +2640,25 @@ export class DingtalkChannel extends ChannelBase {
       void this.flushBackgroundResponseAggregation(key, aggregation);
     }, BACKGROUND_RESPONSE_AGGREGATION_RETRY_MS);
     aggregation.retryTimer.unref?.();
+  }
+
+  /**
+   * A card carries `（部分）` whenever it is not the turn's whole output: the
+   * turn is still open, earlier text already went out (or was given up on),
+   * or the turn itself ended early.
+   */
+  private isPartialBackgroundResponseDelivery(
+    aggregation: BackgroundResponseAggregation,
+    partCount: number,
+  ): boolean {
+    return (
+      partCount > 0 &&
+      (aggregation.delivered === true ||
+        aggregation.dropped === true ||
+        aggregation.retiring === true ||
+        aggregation.completionPartial === true ||
+        aggregation.turnComplete !== true)
+    );
   }
 
   /**

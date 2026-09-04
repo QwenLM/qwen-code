@@ -4776,9 +4776,13 @@ describe('ChannelBase', () => {
           expect.anything(),
         );
 
+        ch.retiringSessions = [];
         await ch.handleInbound(envelope({ text: '/clear' }));
         expect(ch.sent.at(-1)!.text).toContain('Task "review" reset');
         expect(bridge.discardSession).toHaveBeenCalledWith('s-1');
+        // /clear of a named task retires it through the removedIds loop, the
+        // only path that lets an adapter drain what the task had buffered.
+        expect(ch.retiringSessions).toEqual(['s-1']);
 
         await ch.handleInbound(envelope({ text: '/session use feature' }));
         await ch.handleInbound(envelope({ text: '/session use review' }));
@@ -10368,6 +10372,40 @@ describe('ChannelBase', () => {
         ]);
       });
       expect(ch.proactiveTargets).toEqual([target]);
+      expect(ch.sent).toEqual([]);
+    });
+
+    it('drops a background response whose route disappeared during resolution', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi
+          .fn()
+          .mockReturnValueOnce(target)
+          .mockReturnValue(undefined),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+      ch.proactiveSupported = true;
+
+      (bridge as unknown as EventEmitter).emit(
+        'backgroundResponse',
+        's-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() =>
+        expect(router.getTarget.mock.calls.length).toBeGreaterThanOrEqual(2),
+      );
+      expect(ch.proactive).toEqual([]);
       expect(ch.sent).toEqual([]);
     });
 
