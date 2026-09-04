@@ -117,6 +117,25 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
 }
 
 /**
+ * Ownership proof for the identity gate in `computeApiTruncationIndex`:
+ * returns true when `entry` is the API-history entry owned by the UI turn
+ * whose prompt text is `targetText`.
+ *
+ * A `promptId` match alone never proves ownership (twins, cron/duplicate
+ * re-sends and re-minted absorbed marks all wear the same id), but a turn's
+ * own entry carries exactly that turn's prompt text, while any other turn's
+ * entry carries a different prompt. Comparing the entry's user text parts
+ * against the target's text is therefore the minimal per-entry proof that a
+ * matched entry belongs to the rewind target. System-reminder parts and
+ * cleared-media placeholders never equal a genuine prompt, so a plain text
+ * part comparison is sufficient.
+ */
+function isApiEntryOwnedByText(entry: Content, targetText: string): boolean {
+  if (entry.role !== 'user' || !entry.parts) return false;
+  return entry.parts.some((part) => 'text' in part && part.text === targetText);
+}
+
+/**
  * Computes the number of API Content[] entries to keep when rewinding
  * to a specific user turn in the UI history.
  *
@@ -223,51 +242,46 @@ export function computeApiTruncationIndex(
     target.promptId &&
     !target.promptIdFileKeyOnly
   ) {
-    // Identities are minted `sessionId########<n>` by entrances whose
-    // counters restart independently, so OTHER real user turns can carry the
-    // target's promptId (twins). Whenever a twin exists, a unique
-    // post-`startIndex` match is not provably the target's own entry: if the
-    // target's own entry is present but UNMARKED (a retry, continuation,
-    // tool-result or cron re-send strips the mark while the UI item keeps
-    // its promptId) while a twin's entry keeps the mark, the lookup resolves
-    // the target onto the TWIN's boundary and silently truncates there
-    // (R27-1) even though the positional walk maps it correctly. This needs
-    // no compressed prefix and the twin may be earlier OR later, so no
-    // prefix/`slice(targetIndex + 1)` gate catches it - the class fix is a
-    // whitelist at this resolution site. In the ambiguous state prefer the
-    // positional walk (the pre-identity behavior). Only when it cannot land
-    // AND the target is the LAST claimant of its id - a surviving twin whose
-    // own marked entry is the unique post-prefix match while earlier twins
-    // were absorbed - fall back to the lookup (R25-1). A target with a LATER
-    // claimant never falls back: the match would be the later twin's entry,
-    // and refusing loudly (-1) is what the positional walk already does
-    // (R26-1).
-    let hasTwin = false;
-    let hasLaterClaimant = false;
-    for (let i = 0; i < uiHistory.length; i++) {
-      if (i === targetIndex) continue;
-      const item = uiHistory[i]!;
-      if (isRealUserTurn(item) && item.promptId === target.promptId) {
-        hasTwin = true;
-        if (i > targetIndex) hasLaterClaimant = true;
-      }
+    // Ownership gate (round-28 structural close of the twin-trust class that
+    // R24-1 .. R27-1 each patched per-entrance). Identities are minted
+    // `sessionId########<n>` by entrances whose counters restart
+    // independently, so a `promptId` can be worn by API entries that do NOT
+    // belong to the rewind target: an earlier/later twin's entry, a
+    // cron/duplicate re-send with no UI claimant, or an absorbed turn's
+    // re-minted mark. A unique post-`startIndex` match is therefore never
+    // provably the target's own entry on the id alone — the round-27
+    // attempt to whitelist by scanning the UI history for twin claimants
+    // still resolved a target onto a twin's boundary whenever the positional
+    // walk could not land (or landed late) while an impostor wore the id.
+    //
+    // The target's OWN entry is the unique one whose user prompt text equals
+    // the target's text; every impostor carries a different prompt. Accept
+    // the identity match only under that ownership proof, and prefer it over
+    // the positional walk: it lands exactly even when the walk is
+    // desynchronized by an absorbed turn or a placeholder collision. Any
+    // other outcome — no match, an ambiguous (multi) match, or a match owned
+    // by a different turn — falls back to the positional walk, the exact
+    // pre-identity behavior, whose loud -1 is the safe refusal.
+    //
+    // This supersedes the claimant scan. file-key-only restored items and
+    // other same-id UI claimants can no longer demote an ownership-proven
+    // match onto a late positional walk, and an unowned match can no longer
+    // be returned at all — closing the companion shapes where a missing or
+    // desynchronized target resolved onto a twin's boundary. The pinned
+    // surviving-twin resolutions stay correct because the surviving twin IS
+    // the rewind target in those states, so its entry's text matches.
+    const identifiedIndex = findApiHistoryPromptIndex(
+      apiHistory,
+      target.promptId,
+      startIndex,
+    );
+    if (
+      identifiedIndex !== -1 &&
+      isApiEntryOwnedByText(apiHistory[identifiedIndex]!, target.text)
+    ) {
+      return identifiedIndex;
     }
-
-    if (!hasTwin) {
-      // No other turn claims the id, so the lookup is unambiguous.
-      const identifiedIndex = findApiHistoryPromptIndex(
-        apiHistory,
-        target.promptId,
-        startIndex,
-      );
-      if (identifiedIndex !== -1) return identifiedIndex;
-      return positionalTruncationIndex();
-    }
-
-    const positional = positionalTruncationIndex();
-    if (positional !== -1) return positional;
-    if (hasLaterClaimant) return -1;
-    return findApiHistoryPromptIndex(apiHistory, target.promptId, startIndex);
+    return positionalTruncationIndex();
   }
 
   return positionalTruncationIndex();

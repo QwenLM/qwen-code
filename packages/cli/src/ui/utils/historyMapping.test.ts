@@ -1108,6 +1108,174 @@ describe('positional fallback when identity does not resolve', () => {
   });
 });
 
+describe('round-28 ownership gate: companion shapes of the R27-1 whitelist', () => {
+  // The round-27 fix whitelisted the identity lookup by scanning the UI
+  // history for twin claimants and preferring the positional walk. The
+  // round-28 review showed that cascade still resolved a target onto a
+  // boundary that is not its own whenever the positional walk could not land
+  // (or landed late) while an impostor entry wore the target's promptId.
+  // The structural close is an ownership gate: an identity match is trusted
+  // only when the matched entry's user text equals the target's text (the
+  // target's own entry); every impostor carries a different prompt. Each of
+  // these tests is RED against the round-27 whitelist and GREEN under the
+  // ownership gate, while the R27-1 positional pin above stays green.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  it('refuses (-1) when the target entry never landed but an earlier twin keeps the mark', () => {
+    // Entrance 1: the target's own entry never reached model history (a
+    // setup-error rollback or the oversized-prompt rescue throwing before the
+    // push) while an earlier twin's entry keeps the shared mark. The
+    // positional walk cannot land (one prompt short), and the unique marked
+    // match is the TWIN's entry. The whitelist fallback returned the twin's
+    // boundary; the pre-identity code refused loudly (-1). Ownership gate:
+    // the twin's text differs from the target's, so the match is unowned ->
+    // positional -> -1.
+    const twinEntry = userContent('twin prompt');
+    markApiHistoryPrompt(twinEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'twin prompt', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'target prompt', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      twinEntry, // twin's entry, marked, present
+      modelContent('r1'),
+      // target's own entry never landed
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+  });
+
+  it('refuses (-1) when a placeholder collision desyncs the walk and an earlier twin keeps the mark', () => {
+    // Entrance 2: a genuine prompt whose entire text equals a generated
+    // microcompaction placeholder is counted by the UI but excluded from the
+    // API prompt count, so the positional walk falls one short and cannot
+    // land. The earlier twin keeps the mark; the whitelist fallback returned
+    // the twin's boundary. Ownership gate: the twin's text differs -> -1.
+    const twinEntry = userContent('twin prompt');
+    markApiHistoryPrompt(twinEntry, 'session########1');
+    const collidingEntry = userContent(PLACEHOLDER); // excluded from the walk
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, PLACEHOLDER, 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'twin prompt', 'session########1'),
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      collidingEntry, // counted by the UI, excluded by the API walk
+      twinEntry, // twin's entry, marked
+      modelContent('r1'),
+      // target's own entry never landed
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+
+  it('refuses (-1) when an absorbed turn desyncs the walk and the target entry is present-but-unmarked', () => {
+    // Entrance 3: an absorbed turn (its API entry removed without a UI
+    // marker) leaves the positional walk one short, while the target's own
+    // entry is present but UNMARKED and an earlier twin keeps the mark. The
+    // whitelist fallback's "surviving twin" premise is falsified and it
+    // returned the twin's boundary. Ownership gate: the twin's text differs
+    // -> positional -> -1.
+    const twinEntry = userContent('twin prompt');
+    markApiHistoryPrompt(twinEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'absorbed turn', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'twin prompt', 'session########1'),
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+    ];
+    const api: Content[] = [
+      // absorbed turn's entry removed (desyncs the walk)
+      twinEntry, // twin's entry, marked
+      modelContent('r1'),
+      userContent('target prompt'), // target's own entry, present but UNMARKED
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+
+  it('prefers the ownership-proven identity over a positional walk that lands one turn late', () => {
+    // Entrance 4: an absorbed turn desyncs the positional walk so it lands
+    // one turn LATE (keeping the deleted turn's prompt+response in model
+    // context), while the target's own entry is marked and ownership-proven
+    // at the exact boundary. The whitelist preferred positional (late).
+    // Ownership gate: identity is owned -> exact index.
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'absorbed turn', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'twin prompt', 'session########1'), // twin, unmarked entry
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+      userItem(7, 'later turn'),
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      // absorbed turn's entry removed (desyncs the walk)
+      userContent('twin prompt'), // twin's entry, UNMARKED
+      targetEntry, // target's own entry, marked
+      modelContent('r1'),
+      userContent('later turn'),
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(1);
+  });
+
+  it('resolves an ownership-proven identity despite a file-key-only restored item sharing the id', () => {
+    // Entrance 6: a promptIdFileKeyOnly restored item shares the target's
+    // promptId but can never own a marked entry. The whitelist claimant scan
+    // counted it as a twin and demoted the unambiguous identity resolution
+    // onto a positional walk that lands late. The ownership gate ignores UI
+    // claimants: the target's own marked entry is ownership-proven -> exact
+    // index.
+    const targetEntry = userContent('target prompt');
+    markApiHistoryPrompt(targetEntry, 'session########1');
+    const restored = userItemWithPromptId(
+      1,
+      'restored turn',
+      'session########1',
+    ) as HistoryItem & { promptId: string; promptIdFileKeyOnly?: boolean };
+    restored.promptIdFileKeyOnly = true;
+    const ui: HistoryItem[] = [
+      restored,
+      llmItem(2),
+      userItemWithPromptId(3, 'absorbed turn', 'session########0'),
+      llmItem(4),
+      userItemWithPromptId(5, 'target prompt', 'session########1'),
+      llmItem(6),
+      userItem(7, 'later turn'),
+      llmItem(8),
+    ];
+    const api: Content[] = [
+      userContent('restored turn'), // unmarked: restored from JSON
+      // absorbed turn's entry removed (desyncs the walk)
+      targetEntry, // target's own entry, marked
+      modelContent('r1'),
+      userContent('later turn'),
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(1);
+  });
+});
+
 describe('isRealUserTurn', () => {
   it('returns true for normal user prompts', () => {
     expect(isRealUserTurn(userItem(1, 'hello world'))).toBe(true);
