@@ -97,6 +97,11 @@ function getCommandParameterDescription(shellTool: ShellTool): string {
     .properties.command.description;
 }
 
+// Sentinel digest returned by the mocked crypto.createHash. Must be 64
+// lowercase hex chars — the shape the loop guards' line-anchored digest
+// scanner admits (services/loopDetectionService.ts).
+const FAKE_BLOCK_DIGEST = 'a'.repeat(64);
+
 describe('ShellTool', () => {
   let shellTool: ShellTool;
   let mockConfig: Config;
@@ -113,6 +118,10 @@ describe('ShellTool', () => {
     check: ReturnType<typeof vi.fn>;
     recordWrite: ReturnType<typeof vi.fn>;
   };
+  // Captures the input of the most recent mocked crypto.createHash chain
+  // (the failure-block digest, issue #10887) so tests can pin exactly
+  // which fields are hashed.
+  let lastCreateHashInput = '';
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -226,6 +235,19 @@ describe('ShellTool', () => {
     vi.mocked(os.tmpdir).mockReturnValue('/tmp');
     (vi.mocked(crypto.randomBytes) as Mock).mockReturnValue(
       Buffer.from('abcdef', 'hex'),
+    );
+    // The failure-block digest (issue #10887) runs through the auto-mocked
+    // createHash: return a fixed 64-hex sentinel digest and capture the
+    // hashed input so tests can pin the digested fields.
+    lastCreateHashInput = '';
+    vi.mocked(crypto.createHash).mockImplementation(
+      () =>
+        ({
+          update: (data: string) => {
+            lastCreateHashInput = data;
+            return { digest: () => FAKE_BLOCK_DIGEST };
+          },
+        }) as unknown as ReturnType<typeof crypto.createHash>,
     );
 
     shellTool = new ShellTool(mockConfig);
@@ -3718,6 +3740,60 @@ describe('ShellTool', () => {
       const result = await promise;
 
       expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+    });
+
+    it('embeds the stable failure-core digest in error blocks for the loop guards', async () => {
+      // The error-repetition guard keys on the producer-embedded sha256 of
+      // the stable failure core (Output/Error/Exit Code/Signal) so varied
+      // retries of the same failure fingerprint identically (issue #10887).
+      const invocation = shellTool.build({
+        command: 'find missing-directory',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'find: missing-directory: No such file or directory',
+        exitCode: 1,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
+      expect(result.llmContent).toContain(
+        `Full output sha256: ${FAKE_BLOCK_DIGEST}`,
+      );
+      expect(result.error?.message).toContain(
+        `Full output sha256: ${FAKE_BLOCK_DIGEST}`,
+      );
+      // The digest must cover exactly the stable failure core — not the
+      // per-call volatile Command/Directory/PGID lines.
+      expect(lastCreateHashInput).toBe(
+        [
+          'Output: find: missing-directory: No such file or directory',
+          'Error: (none)',
+          'Exit Code: 1',
+          'Signal: (none)',
+        ].join('\n'),
+      );
+    });
+
+    it('keeps successful shell blocks digest-free', async () => {
+      const invocation = shellTool.build({
+        command: 'echo ok',
+        is_background: false,
+      });
+      const promise = invocation.execute(mockAbortSignal);
+      resolveShellExecution({
+        output: 'ok',
+        exitCode: 0,
+        error: null,
+      });
+
+      const result = await promise;
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).not.toContain('Full output sha256:');
     });
 
     it('does not exempt exit 1 from a mixed compound command', async () => {

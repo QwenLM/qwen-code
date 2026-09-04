@@ -30,7 +30,7 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { truncateToolOutput } from './truncation.js';
+import { FULL_OUTPUT_DIGEST_LABEL, truncateToolOutput } from './truncation.js';
 import {
   CommitAttributionService,
   type StagedFileInfo,
@@ -2822,15 +2822,52 @@ export class ShellToolInvocation extends BaseToolInvocation<
         ? result.error.message.replace(commandToExecute, this.params.command)
         : '(none)';
 
-      llmContent = [
-        `Command: ${this.params.command}`,
-        `Directory: ${this.params.directory || '(root)'}`,
+      // The repeatable evidence of a failure: identical for every retry
+      // of the same dead end, unlike the command/directory/PGID lines.
+      const stableFailureCoreLines = [
         `Output: ${result.output || '(empty)'}`,
         `Error: ${finalError}`, // Use the cleaned error string.
         `Exit Code: ${result.exitCode ?? '(none)'}`,
         `Signal: ${result.signal ?? '(none)'}`,
+      ];
+      const blockLines = [
+        `Command: ${this.params.command}`,
+        `Directory: ${this.params.directory || '(root)'}`,
+        ...stableFailureCoreLines,
         `Process Group PGID: ${result.pid ?? '(none)'}`,
-      ].join('\n');
+      ];
+      // Failures embed a producer-owned stable identity for the loop
+      // guards (issue #10887): a sha256 of the stable failure core
+      // (Output/Error/Exit Code/Signal) anchored as a
+      // FULL_OUTPUT_DIGEST_LABEL line. The block's remaining lines are
+      // per-call volatile — the command itself (a dead-end loop varies it
+      // by definition; multi-line commands put continuation lines the
+      // consumer's line filter cannot enumerate), the directory, a fresh
+      // process-group id — and metadata appended after the block (the
+      // long-run advisory's per-run elapsed seconds) varies too, so
+      // hashing the rendered block fingerprints every retry uniquely and
+      // the error-repetition streak never accumulates. The digest covers
+      // exactly the failure evidence, so identical failures fingerprint
+      // identically no matter how the retry is varied. Only failures
+      // become model-facing `response.error` payloads (see the error
+      // object built below) and only they feed the error-repetition
+      // guard, so successes keep their block shape unchanged. The same
+      // digest line shape is consumed by the stateful-read guard's stub
+      // reduction (extractAnchoredStubDigest), and truncateToolOutput's
+      // keep='both' tail retention preserves it through truncation.
+      if (
+        isSignalTermination(result.signal) ||
+        isShellExitError(this.params.command, result.exitCode)
+      ) {
+        blockLines.push(
+          FULL_OUTPUT_DIGEST_LABEL +
+            crypto
+              .createHash('sha256')
+              .update(stableFailureCoreLines.join('\n'))
+              .digest('hex'),
+        );
+      }
+      llmContent = blockLines.join('\n');
 
       // (Long-run advisory append happens AFTER `truncateToolOutput`
       // below — see the explanation there for why post-truncation.)

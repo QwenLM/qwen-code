@@ -24,6 +24,7 @@ import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/llm-chat.js';
 import {
   FULL_OUTPUT_DIGEST_LABEL,
   persistAndTruncateToolResult,
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
 } from '../tools/truncation.js';
 import {
   finalizeToolResponses,
@@ -3614,6 +3615,275 @@ huge error content
         fired = service.recordToolErrorBatch(parts);
       }
       expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    // shell.ts embeds an anchored sha256 of the stable failure core
+    // (Output/Error/Exit Code/Signal) into every failure block; the tests
+    // below rebuild that producer shape and drive it through the guard.
+    const SHELL_FAILURE_CORE = [
+      'Output: fatal: unable to access',
+      'Error: (none)',
+      'Exit Code: 128',
+      'Signal: (none)',
+    ].join('\n');
+    const shellFailureCoreDigest = createHash('sha256')
+      .update(SHELL_FAILURE_CORE)
+      .digest('hex');
+    const shellFailureBlock = (
+      attempt: number,
+      options: { digest?: boolean; multiLineCommand?: boolean } = {},
+    ): string => {
+      const { digest = true, multiLineCommand = false } = options;
+      return [
+        multiLineCommand
+          ? `Command: git remote show origin &&\n  echo attempt-${attempt}`
+          : `Command: git remote show origin attempt-${attempt}`,
+        `Directory: /work/dir-${attempt}`,
+        ...SHELL_FAILURE_CORE.split('\n'),
+        `Process Group PGID: ${10000 + attempt}`,
+        ...(digest
+          ? [`${FULL_OUTPUT_DIGEST_LABEL}${shellFailureCoreDigest}`]
+          : []),
+      ].join('\n');
+    };
+
+    it('fires on repeated failures with varied multi-line commands via the producer digest', () => {
+      // A varied multi-line command puts continuation lines into the block
+      // that the line-anchored volatile filter cannot strip; the guard must
+      // prefer the producer-embedded stable-core digest instead of hashing
+      // the rendered block, or every retry fingerprints uniquely.
+      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD - 1; i++) {
+        expect(
+          service.recordToolErrorBatch(
+            errorResult(
+              shellFailureBlock(i, { multiLineCommand: true }),
+              `ml-${i}`,
+            ),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.recordToolErrorBatch(
+          errorResult(
+            shellFailureBlock(REPEATED_TOOL_ERROR_THRESHOLD, {
+              multiLineCommand: true,
+            }),
+            'ml-final',
+          ),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('fires despite a varied long-run advisory appended after the shell block', () => {
+      // shell.ts appends `Note: this foreground command ran for Ns.` with
+      // per-run elapsed seconds after the block; the digest covers the
+      // stable core only, so long builds failing identically accumulate.
+      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD - 1; i++) {
+        expect(
+          service.recordToolErrorBatch(
+            errorResult(
+              `${shellFailureBlock(i)}\n\nNote: this foreground command ran for ${
+                61 + i
+              }s. Consider running it with is_background: true.`,
+              `lr-${i}`,
+            ),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.recordToolErrorBatch(
+          errorResult(
+            `${shellFailureBlock(REPEATED_TOOL_ERROR_THRESHOLD)}\n\nNote: this foreground command ran for 67s. Consider running it with is_background: true.`,
+            'lr-final',
+          ),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('fires on a pre-stubbed oversized error re-truncated by the batch-budget finalizer', async () => {
+      // The scheduler gate persists oversized errors into a buildStub
+      // envelope BEFORE the finalizer (per-call unique path + stable
+      // full-content digest); batch-budget pressure then re-truncates that
+      // envelope. fitText must reuse the inner producer digest —
+      // recomputing it over the envelope would hash the per-call unique
+      // path and fingerprint identical repeated errors uniquely per call.
+      vi.mocked(persistAndTruncateToolResult).mockResolvedValue({
+        content: '',
+        bytesWritten: 0,
+      });
+      const hugeError = 'src/module.ts(1,5): error TS2345: boom. '.repeat(1200);
+      const innerDigest = createHash('sha256').update(hugeError).digest('hex');
+      // The buildStub envelope shape (truncation.ts), embedding the
+      // per-call unique path and the stable digest of the full content.
+      const preStubbedError = (callId: string): string => `<persisted-output>
+Output too large (42 KB). Full output saved to: /tool-results/${callId}.txt
+${FULL_OUTPUT_DIGEST_LABEL}${innerDigest}
+Note: this file may be cleaned up after 24 hours.
+To read the complete output, use the read_file tool with the absolute file path above.
+
+Preview (up to 2000 chars):
+${hugeError.slice(0, 2000)}
+</persisted-output>`;
+      const finalizerConfig = {
+        getToolOutputBatchBudget: () => 4000,
+      } as unknown as Config;
+      const runRound = async (round: number): Promise<Part[]> => {
+        const entries: ToolResponseBudgetEntry[] = Array.from(
+          { length: 4 },
+          (_, k) => ({
+            callId: `call-s${round}-k${k}`,
+            toolName: 'run_shell_command',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: `call-s${round}-k${k}`,
+                  name: 'run_shell_command',
+                  response: { error: preStubbedError(`call-s${round}-k${k}`) },
+                },
+              },
+            ],
+          }),
+        );
+        const finalized = await finalizeToolResponses(
+          finalizerConfig,
+          entries,
+          undefined,
+          false,
+        );
+        return finalized.flatMap((entry) => entry.responseParts);
+      };
+      let fired = false;
+      for (
+        let round = 0;
+        round < REPEATED_TOOL_ERROR_THRESHOLD && !fired;
+        round++
+      ) {
+        const parts = await runRound(round);
+        const error = parts[0]?.functionResponse?.response?.['error'];
+        expect(typeof error).toBe('string');
+        // Batch-budget pressure re-truncated the pre-stubbed envelope.
+        expect(error as string).toContain('Tool output truncated.');
+        fired = service.recordToolErrorBatch(parts);
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('fires on keep-both truncated shell envelopes with varied commands', () => {
+      // truncateAndSaveToFile keep='both' preserves the head (the Command
+      // line) and the tail. With the producer digest in the tail the guard
+      // keys on it; legacy blocks without a digest rely on the payload
+      // reduction keeping the payload's first line line-anchored so the
+      // volatile filter strips the varied Command line.
+      const envelopeFor = (attempt: number, withDigest: boolean): string => {
+        const tail = [
+          ...SHELL_FAILURE_CORE.split('\n'),
+          `Process Group PGID: ${10000 + attempt}`,
+          ...(withDigest
+            ? [`${FULL_OUTPUT_DIGEST_LABEL}${shellFailureCoreDigest}`]
+            : []),
+        ].join('\n');
+        return `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
+The full output has been saved to: /tmp/shell-${attempt}/find.output
+To read the complete output, use the read_file tool with the absolute file path above.
+The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
+
+Truncated part of the output:
+Command: find /nonexistent-${attempt} -name core
+Directory: /work
+
+---
+... [CONTENT TRUNCATED] ...
+---
+
+${tail}`;
+      };
+      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD - 1; i++) {
+        expect(
+          service.recordToolErrorBatch(
+            errorResult(envelopeFor(i, true), `kb-${i}`),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        service.recordToolErrorBatch(
+          errorResult(
+            envelopeFor(REPEATED_TOOL_ERROR_THRESHOLD, true),
+            'kb-final',
+          ),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+
+      // Legacy block, no producer digest: the single-line varied command
+      // must be stripped by the volatile filter once the payload starts on
+      // its own line.
+      const legacyService = new LoopDetectionService(makeConfig());
+      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD - 1; i++) {
+        expect(
+          legacyService.recordToolErrorBatch(
+            errorResult(envelopeFor(i, false), `kbl-${i}`),
+          ),
+        ).toBe(false);
+      }
+      expect(
+        legacyService.recordToolErrorBatch(
+          errorResult(
+            envelopeFor(REPEATED_TOOL_ERROR_THRESHOLD, false),
+            'kbl-final',
+          ),
+        ),
+      ).toBe(true);
+      expect(legacyService.getLastLoopType()).toBe(
+        LoopType.REPEATED_TOOL_ERROR,
+      );
+    });
+
+    it('fires on repeated MCP errors with varied function-call JSON but identical server payloads', () => {
+      // buildMcpToolError (mcp-tool.ts) embeds the full function-call JSON
+      // — including the args a dead-end loop varies on every retry —
+      // before the stable server payload. Hashing the message verbatim
+      // would fingerprint every retry uniquely (identical-args MCP errors
+      // are already caught by the consecutive-identical-call guard), so
+      // the fingerprint must key on the server payload.
+      const serverPayload =
+        '{"errorCode":"TABLE_NOT_FOUND","message":"table orders missing"}';
+      const mcpError = (attempt: number) =>
+        `MCP tool 'dw_query' reported tool error for function call: ${JSON.stringify(
+          {
+            name: 'dw_query',
+            args: { sql: `SELECT * FROM t${attempt}`, timeout: attempt * 1000 },
+          },
+        )} with response: ${serverPayload}`;
+      for (let i = 0; i < REPEATED_TOOL_ERROR_THRESHOLD - 1; i++) {
+        expect(
+          service.recordToolErrorBatch(errorResult(mcpError(i), `mcp-${i}`)),
+        ).toBe(false);
+      }
+      expect(
+        service.recordToolErrorBatch(
+          errorResult(mcpError(REPEATED_TOOL_ERROR_THRESHOLD + 6), 'mcp-final'),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('keeps the streak alive across a fully successful round', () => {
+      // Successful results neither advance nor reset the streak — and that
+      // must hold across rounds too, not only within a batch: a session
+      // alternating a fully successful round and a failing round (the
+      // #10887 interleaved-reads shape stretched across rounds) still
+      // reaches the threshold on the third failing round.
+      const err = 'fatal: not a git repository';
+      expect(service.recordToolErrorBatch(errorResult(err))).toBe(false);
+      expect(service.recordToolErrorBatch(successResult('all good'))).toBe(
+        false,
+      );
+      expect(service.recordToolErrorBatch(errorResult(err))).toBe(false);
+      expect(service.recordToolErrorBatch(errorResult(err))).toBe(true);
       expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
     });
   });

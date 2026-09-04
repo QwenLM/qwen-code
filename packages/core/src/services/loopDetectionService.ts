@@ -61,6 +61,16 @@ const REPEATED_TOOL_ERROR_THRESHOLD = 3;
 // (coreToolScheduler.ts createCancelledResponse / the scheduler's
 // auxiliary-cancel path): `[Operation Cancelled] Reason: <reason>`.
 const CANCELLED_TOOL_ERROR_PREFIX = '[Operation Cancelled] Reason:';
+
+// Producer shape of MCP tool errors (mcp-tool.ts buildMcpToolError):
+// `MCP tool '<name>' reported tool error for function call:
+// <safeJsonStringify(functionCall)> with response: <server payload>`.
+// The function-call JSON embeds the args a dead-end loop varies on every
+// retry; only the server payload after the last ` with response: `
+// separator is the stable failure evidence.
+const MCP_TOOL_ERROR_PREFIX = "MCP tool '";
+const MCP_TOOL_ERROR_CALL_MARKER = "' reported tool error for function call: ";
+const MCP_TOOL_ERROR_RESPONSE_MARKER = ' with response: ';
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
 // Cap for the debug-log excerpt of a fired chanting region (~one period,
@@ -286,7 +296,15 @@ function stripPersistenceEnvelope(value: string): string {
     if (payloadStart !== -1) {
       const payload = value.slice(payloadStart + marker.length);
       const closeTag = payload.indexOf('</persisted-output>');
-      return `<persisted-stub>payload:${closeTag === -1 ? payload : payload.slice(0, closeTag)}`;
+      // The newline puts the payload on its own line: the marker can
+      // consume the producer's line break (STUB_TRUNCATED_PART_MARKER
+      // carries it), and gluing the payload onto the marker line would
+      // shield the payload's first line — a shell block's `Command: `
+      // line after keep='both' truncation — from the line-anchored
+      // volatile-line filter below (issue #10887).
+      return `<persisted-stub>payload:\n${
+        closeTag === -1 ? payload : payload.slice(0, closeTag)
+      }`;
     }
   }
   return `<persisted-stub>raw:${value}`;
@@ -662,16 +680,68 @@ export class LoopDetectionService {
   }
 
   /**
+   * Reduces one error payload to its stable fingerprint text. Shell
+   * failure blocks carry a producer-embedded sha256 of the stable failure
+   * core (shell.ts anchors it as a FULL_OUTPUT_DIGEST_LABEL line): prefer
+   * it over hashing the rendered block, whose per-call volatile text
+   * (multi-line command continuation lines, the long-run advisory's
+   * elapsed seconds) the line-anchored volatile filter cannot fully
+   * enumerate — the producer knows the stable fields, so the producer
+   * owns the identity (issue #10887). Stub envelopes reduce through
+   * stripPersistenceEnvelope (their digest or path-free payload); other
+   * text falls back to the volatile-line filter.
+   */
+  private static normalizeToolErrorText(error: string): string {
+    const mcpNormalized = LoopDetectionService.normalizeMcpToolError(error);
+    if (mcpNormalized !== null) return mcpNormalized;
+    const enveloped = stripPersistenceEnvelope(error);
+    if (enveloped.includes('Process Group PGID:')) {
+      const digest = extractAnchoredStubDigest(enveloped);
+      if (digest !== null) {
+        return `<shell-failure-core>sha256:${digest}`;
+      }
+    }
+    return LoopDetectionService.stripShellBlockVolatiles(enveloped);
+  }
+
+  /**
+   * Reduces an MCP tool error to its stable fingerprint text: the tool
+   * name plus the server payload after the last ` with response: `
+   * separator. buildMcpToolError (mcp-tool.ts) embeds the full
+   * function-call JSON — including the args a dead-end loop varies on
+   * every retry — before that separator, so hashing the message verbatim
+   * fingerprints every retry uniquely and the streak never accumulates;
+   * identical-args MCP errors are already caught by the
+   * consecutive-identical-call guard, so this is the only shape where the
+   * error-repetition guard adds anything for MCP. Only the fingerprint
+   * derivation changes — the model-facing message is untouched. Returns
+   * null for non-MCP payloads.
+   */
+  private static normalizeMcpToolError(error: string): string | null {
+    if (!error.startsWith(MCP_TOOL_ERROR_PREFIX)) return null;
+    const callMarker = error.indexOf(MCP_TOOL_ERROR_CALL_MARKER);
+    if (callMarker === -1) return null;
+    const responseMarker = error.lastIndexOf(MCP_TOOL_ERROR_RESPONSE_MARKER);
+    if (responseMarker <= callMarker) return null;
+    const serverToolName = error.slice(
+      MCP_TOOL_ERROR_PREFIX.length,
+      callMarker,
+    );
+    const serverPayload = error.slice(
+      responseMarker + MCP_TOOL_ERROR_RESPONSE_MARKER.length,
+    );
+    return `MCP tool '${serverToolName}' error response: ${serverPayload}`;
+  }
+
+  /**
    * Extracts the per-result error payloads of failed tool results (empty
    * when the parts carry none). Failed calls surface their failure as a
    * `functionResponse.response.error` string across every runtime
    * (scheduler error responses, timeouts). Synthetic non-failure payloads
-   * (orphan repairs, user cancellations) are skipped; oversized errors
-   * arrive as persistence envelopes whose per-call unique paths are reduced
-   * to a stable payload first (stripPersistenceEnvelope); shell failure
-   * blocks drop their per-call volatile lines — identical underlying errors
-   * fingerprint identically no matter how they were produced (issue
-   * #10887).
+   * (orphan repairs, user cancellations) are skipped; each remaining error
+   * is reduced to its stable fingerprint text (normalizeToolErrorText) —
+   * identical underlying errors fingerprint identically no matter how they
+   * were produced (issue #10887).
    */
   private static extractToolErrorTexts(
     responseParts: readonly Part[],
@@ -683,11 +753,7 @@ export class LoopDetectionService {
       const error = response['error'];
       if (typeof error !== 'string' || error.trim().length === 0) continue;
       if (LoopDetectionService.isSyntheticToolError(error)) continue;
-      errors.push(
-        LoopDetectionService.stripShellBlockVolatiles(
-          stripPersistenceEnvelope(error),
-        ),
-      );
+      errors.push(LoopDetectionService.normalizeToolErrorText(error));
     }
     return errors;
   }
