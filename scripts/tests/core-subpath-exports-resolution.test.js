@@ -51,12 +51,12 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
 // Every core subpath specifier statically imported from packages/cli/src
 // (storage, atomicFileWrite, debugLogger, noFollowOpen, envVarResolver,
-// toolWriteOrigin, memoryScopes), plus the subpaths `npm start` reaches
-// through @qwen-code/acp-bridge (subSessionConstants, goalWire,
-// transcriptRecords). Values are the dist targets pinned by the exports map
-// in packages/core/package.json. Probes run from packages/cli; acp-bridge is
-// a `file:` dependency there, so acp-bridge-routed specifiers resolve
-// identically from that cwd.
+// toolWriteOrigin, memoryScopes, conversationsRuntimeMarker), plus the
+// subpaths `npm start` reaches through @qwen-code/acp-bridge
+// (subSessionConstants, goalWire, transcriptRecords). Values are the dist
+// targets pinned by the exports map in packages/core/package.json. Probes
+// run from packages/cli; acp-bridge is a `file:` dependency there, so
+// acp-bridge-routed specifiers resolve identically from that cwd.
 const expectedDistTargets = {
   '@qwen-code/qwen-code-core/storage':
     'packages/core/dist/src/config/storage.js',
@@ -72,6 +72,8 @@ const expectedDistTargets = {
     'packages/core/dist/src/services/tool-write-origin.js',
   '@qwen-code/qwen-code-core/memoryScopes':
     'packages/core/dist/src/memory/scopes.js',
+  '@qwen-code/qwen-code-core/conversationsRuntimeMarker':
+    'packages/core/dist/src/utils/conversations-runtime-marker.js',
   '@qwen-code/qwen-code-core/subSessionConstants':
     'packages/core/dist/src/tools/sub-session-constants.js',
   '@qwen-code/qwen-code-core/goalWire':
@@ -126,6 +128,8 @@ const expectedSrcTargets = {
     'packages/core/src/services/tool-write-origin.ts',
   '@qwen-code/qwen-code-core/memoryScopes':
     'packages/core/src/memory/scopes.ts',
+  '@qwen-code/qwen-code-core/conversationsRuntimeMarker':
+    'packages/core/src/utils/conversations-runtime-marker.ts',
   '@qwen-code/qwen-code-core/goalWire': 'packages/core/src/goals/goal-wire.ts',
 };
 

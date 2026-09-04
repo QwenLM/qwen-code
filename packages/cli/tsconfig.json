@@ -34,6 +34,9 @@
       "@qwen-code/qwen-code-core/memoryScopes": [
         "../core/src/memory/scopes.ts"
       ],
+      "@qwen-code/qwen-code-core/conversationsRuntimeMarker": [
+        "../core/src/utils/conversations-runtime-marker.ts"
+      ],
       "@qwen-code/qwen-code-core/*": ["../core/src/*"],
       "@qwen-code/acp-bridge": ["../acp-bridge/src/index.ts"],
       "@qwen-code/acp-bridge/transcriptReplay": [
