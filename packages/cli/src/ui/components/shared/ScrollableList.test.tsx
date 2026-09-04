@@ -174,6 +174,75 @@ describe('<ScrollableList /> mouse scrolling', () => {
     expect(listRef.current?.getScrollState().scrollTop).toBe(3);
   });
 
+  it('preserves wheel intent clipped at the top boundary', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(0);
+
+    await act(async () => {
+      stdin.write(wheelUp(5, 5));
+      stdin.write(wheelDown(5, 5));
+      stdin.write(wheelDown(5, 5));
+    });
+    await flushScrollFrame();
+
+    expect(listRef.current?.getScrollState().scrollTop).toBe(3);
+  });
+
+  it('preserves bottom stickiness after opposing boundary-clipped input', async () => {
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = ({ count }: { count: number }) => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(count)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        initialScrollOffsetInIndex={SCROLL_TO_ITEM_END}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper count={200} />));
+    rerender(withKeypress(<Wrapper count={200} />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(195);
+
+    await act(async () => {
+      stdin.write(wheelDown(5, 5));
+      stdin.write(wheelUp(5, 5));
+    });
+    await flushScrollFrame();
+    expect(listRef.current?.getScrollState().scrollTop).toBe(195);
+
+    rerender(withKeypress(<Wrapper count={201} />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(196);
+  });
+
   it('does not crash when hasFocus is false (mouse pipeline inactive)', () => {
     const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
     const Wrapper = () => (

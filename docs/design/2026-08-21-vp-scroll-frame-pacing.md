@@ -22,10 +22,11 @@ semantics:
   path-dependent scroll distance through the dynamically measured list.
   **Superseded:** `docs/design/virtualized-history-scroll-scheduling.md`
   re-introduces a leading-and-trailing coalescer after showing the accumulated
-  row delta is preserved regardless of flush timing (burst-preservation test
-  plus real-PTY row-delta capture). That doc is now authoritative for VP
-  scroll input coalescing; the trailing-only decision recorded here no longer
-  applies.
+  row delta is preserved for uniform-height fixtures and clipped wheel intent
+  is retained at hard boundaries. Its real-PTY dynamic-height measurement is
+  directional and does not establish equivalence with trailing-only flushing.
+  That doc is now authoritative for VP scroll input coalescing; the
+  trailing-only decision recorded here no longer applies.
 
 No rendering-library fork or virtual-list rewrite is part of the first pass.
 Broader work is justified only if the measured result remains below the

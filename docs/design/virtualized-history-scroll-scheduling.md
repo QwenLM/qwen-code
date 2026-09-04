@@ -22,16 +22,17 @@ Keep the existing accumulated wheel/drag intent and the once-per-frame cap, but 
 3. If the event loop was blocked past the deadline, the next update flushes immediately instead of starting another full 16 ms wait.
 4. Cancellation still discards a pending trailing flush.
 
-This removes avoidable scheduling latency without increasing scroll work above one application flush per frame window or dropping input delta.
+This removes avoidable scheduling latency without increasing scroll work above one application flush per frame window. When a leading flush reaches the top or bottom boundary, any clipped wheel delta remains pending for the trailing flush instead of being discarded.
 
 ## Relationship to the frame pacing doc
 
-`docs/design/2026-08-21-vp-scroll-frame-pacing.md` kept the trailing-only coalescer and records that a leading-and-trailing variant was rejected because high-frequency direct-PTY testing showed path-dependent scroll distance through the dynamically measured list. This doc supersedes that bullet. The rejection no longer applies because the current scheduler does not change how far a burst scrolls — only when the first application happens. Wheel and drag intent accumulates in refs exactly as before, and every flush (leading or trailing) applies the same accumulated delta through a single `scrollBy`, then resets the accumulator. Total row delta is therefore independent of flush timing:
+`docs/design/2026-08-21-vp-scroll-frame-pacing.md` kept the trailing-only coalescer and records that a leading-and-trailing variant was rejected because high-frequency direct-PTY testing showed path-dependent scroll distance through the dynamically measured list. This doc supersedes that implementation decision, but not the dynamic-height caveat. Wheel and drag intent still accumulates in refs. A flush applies that intent through one `scrollBy`; if a hard boundary clips the requested movement, the unapplied remainder stays pending for the trailing flush.
 
-- The burst-preservation unit test (`preserves the full delta of a coalesced wheel burst`) asserts an exact 90-row delta across a coalesced 30-tick burst.
-- The real PTY capture above preserves 239 of the expected 240 rows across an 80-event burst, and one SGR tick still moves exactly `WHEEL_LINES_PER_TICK` rows.
+- The burst-preservation unit test (`preserves the full delta of a coalesced wheel burst`) asserts an exact 90-row delta across a coalesced 30-tick burst with uniform-height fixtures.
+- Boundary tests assert that leading and trailing flushes preserve net wheel intent at the top and bottom, including bottom stickiness when new content is appended.
+- The real PTY capture above preserves 239 of the expected 240 rows across an 80-event burst, and one SGR tick still moves exactly `WHEEL_LINES_PER_TICK` rows. That result is directional: the harness has no trailing-only dynamic-height baseline, so it does not establish flush-scheduling equivalence.
 
-The residual path dependence the pacing doc observed is the height estimator discovering actual row heights for newly measured items (see Evidence); it is orthogonal to flush scheduling and remains a non-goal here. After this change, this doc is the authoritative statement on VP scroll input coalescing.
+Exact accumulated row-delta preservation is therefore claimed only for uniform-height test data. Dynamic-height lists remain path-dependent because intermediate renders discover actual item heights and can change the final content anchor. After this change, this doc is the authoritative statement on VP scroll input coalescing, subject to that limitation.
 
 ## Non-goals
 

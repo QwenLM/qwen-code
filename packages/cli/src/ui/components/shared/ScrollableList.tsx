@@ -130,7 +130,11 @@ function ScrollableList<T>(
       return;
     }
     if (wheelDelta !== 0) {
+      const beforeScrollTop = list.getScrollState().scrollTop;
       list.scrollBy(wheelDelta);
+      const afterScrollTop = list.getScrollState().scrollTop;
+      pendingWheelDelta.current =
+        wheelDelta - (afterScrollTop - beforeScrollTop);
     }
   }, []);
 
