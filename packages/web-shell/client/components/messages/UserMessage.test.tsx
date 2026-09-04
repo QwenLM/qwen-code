@@ -388,6 +388,31 @@ describe('UserMessage', () => {
     expect(onImagePreview).toHaveBeenCalledWith(
       'data:image/png;base64,abc',
       expect.any(String),
+      undefined,
+    );
+  });
+
+  it('keeps uploaded images attachment-backed when opening the preview', () => {
+    const onImagePreview = vi.fn();
+    const container = render(
+      <UserMessage
+        content=""
+        images={[
+          {
+            data: 'abc',
+            mimeType: 'image/png',
+            attachmentId: 'photo.png',
+          },
+        ]}
+        onImagePreview={onImagePreview}
+      />,
+    );
+
+    act(() => container.querySelector('img')?.click());
+    expect(onImagePreview).toHaveBeenCalledWith(
+      'data:image/png;base64,abc',
+      expect.any(String),
+      { kind: 'attachment', attachmentId: 'photo.png' },
     );
   });
 
