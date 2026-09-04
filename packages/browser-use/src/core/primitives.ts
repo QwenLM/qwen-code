@@ -40,6 +40,14 @@ export interface Box {
 
 export interface ScreenshotEnvelope {
   base64: string;
+  width: number;
+  height: number;
+  viewport: {
+    width: number;
+    height: number;
+  };
+  devicePixelRatio: number;
+  coordinateSpace: 'css-pixels';
 }
 
 export interface LogEntry {

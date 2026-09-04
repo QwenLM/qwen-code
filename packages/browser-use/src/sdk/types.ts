@@ -299,6 +299,21 @@ export interface TabScreenshotOptions {
   fullPage?: boolean;
 }
 
+export interface BrowserScreenshot {
+  readonly bytes: Uint8Array;
+  readonly mimeType: 'image/png';
+  readonly metadata: {
+    readonly width: number;
+    readonly height: number;
+    readonly viewport: {
+      readonly width: number;
+      readonly height: number;
+    };
+    readonly devicePixelRatio: number;
+    readonly coordinateSpace: 'css-pixels';
+  };
+}
+
 export interface BrowserTab {
   readonly id: string;
   readonly playwright: BrowserPlaywright;
@@ -312,7 +327,7 @@ export interface BrowserTab {
   forward(): Promise<void>;
   reload(): Promise<void>;
   close(): Promise<void>;
-  screenshot(options?: TabScreenshotOptions): Promise<Uint8Array>;
+  screenshot(options?: TabScreenshotOptions): Promise<BrowserScreenshot>;
   getJsDialog(): Promise<BrowserDialog | undefined>;
 }
 

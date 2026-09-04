@@ -27,6 +27,7 @@ import type {
   BrowserFrameLocator,
   BrowserLocator,
   BrowserPlaywright,
+  BrowserScreenshot,
   BrowserTab,
   LoadStateOptions,
   LocatorRoleOptions,
@@ -422,7 +423,7 @@ export class TabProxy implements BrowserTab {
   close(): Promise<void> {
     return this.context.call<void>('tab.close', { tabId: this.id });
   }
-  screenshot(options: TabScreenshotOptions = {}): Promise<Uint8Array> {
+  screenshot(options: TabScreenshotOptions = {}): Promise<BrowserScreenshot> {
     return this.context.screenshotCall('tab.screenshot', {
       tabId: this.id,
       ...options,

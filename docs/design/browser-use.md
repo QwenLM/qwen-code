@@ -105,10 +105,13 @@ Snapshot truncation, screenshot encoding and budgets, stale-session detection,
 and the JSON transport envelope remain runtime implementation details rather
 than model-facing options.
 
-Viewport screenshots preserve the page's 1:1 CSS-pixel coordinate space and
-are limited by their encoded byte size rather than rejected from viewport
-dimensions alone. Explicit clips and full-page captures retain a pixel budget
-because their dimensions are caller-controlled or potentially unbounded.
+Viewport screenshots return an image object accepted by `nodeRepl.emitImage()`.
+Its metadata carries the original PNG dimensions, viewport, device pixel ratio,
+and CSS-pixel coordinate space so visual coordinates remain usable when a model
+client resizes the preview. Viewport screenshots are limited by their encoded
+byte size rather than rejected from viewport dimensions alone. Explicit clips
+and full-page captures retain a pixel budget because their dimensions are
+caller-controlled or potentially unbounded.
 
 Locator `downloadMedia()` triggers a media or file-link download, while
 `waitForEvent("download")` provides synchronization for downloads triggered

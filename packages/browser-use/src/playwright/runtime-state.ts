@@ -28,6 +28,7 @@ export interface ScreenshotMetrics {
   height: number;
   contentWidth: number;
   contentHeight: number;
+  devicePixelRatio: number;
 }
 
 export interface TabState {

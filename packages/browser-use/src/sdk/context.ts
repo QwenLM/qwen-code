@@ -10,6 +10,7 @@ import { staleSessionError } from '../core/errors.js';
 import type { ScreenshotEnvelope } from '../core/primitives.js';
 import type { SupportedCommand } from '../core/schemas.js';
 import { createBrowserBackend, type BrowserBackend } from '../runtime.js';
+import type { BrowserScreenshot } from './types.js';
 
 function jsonBoundary(value: unknown, label: string): unknown {
   if (value === undefined) return undefined;
@@ -49,9 +50,19 @@ export class BrowserSdkContext {
   async screenshotCall(
     method: SupportedCommand,
     args: unknown,
-  ): Promise<Uint8Array> {
+  ): Promise<BrowserScreenshot> {
     const image = await this.call<ScreenshotEnvelope>(method, args);
-    return Uint8Array.from(Buffer.from(image.base64, 'base64'));
+    return {
+      bytes: Uint8Array.from(Buffer.from(image.base64, 'base64')),
+      mimeType: 'image/png',
+      metadata: {
+        width: image.width,
+        height: image.height,
+        viewport: image.viewport,
+        devicePixelRatio: image.devicePixelRatio,
+        coordinateSpace: image.coordinateSpace,
+      },
+    };
   }
 
   close(): Promise<void> {

@@ -40,12 +40,13 @@ export async function captureTabScreenshot(
     ...(args.fullPage === true ? { fullPage: true } : {}),
     ...(clip === undefined ? {} : { clip }),
   });
-  return screenshotEnvelope(buffer, constrained);
+  return screenshotEnvelope(buffer, constrained, metrics);
 }
 
 function screenshotEnvelope(
   buffer: Buffer,
   constrained: boolean,
+  metrics: ScreenshotMetrics,
 ): ScreenshotEnvelope {
   const dimensions = pngDimensions(buffer);
   if (constrained)
@@ -59,6 +60,11 @@ function screenshotEnvelope(
     );
   return {
     base64: buffer.toString('base64'),
+    width: dimensions.width,
+    height: dimensions.height,
+    viewport: { width: metrics.width, height: metrics.height },
+    devicePixelRatio: metrics.devicePixelRatio,
+    coordinateSpace: 'css-pixels',
   };
 }
 
@@ -81,6 +87,7 @@ async function screenshotMetrics(page: Page): Promise<ScreenshotMetrics> {
         body?.scrollHeight ?? 0,
         body?.offsetHeight ?? 0,
       ),
+      devicePixelRatio,
     };
   });
 }

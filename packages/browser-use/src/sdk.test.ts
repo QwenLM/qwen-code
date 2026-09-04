@@ -35,6 +35,11 @@ const backend = vi.hoisted(() => ({
     if (method === 'tab.screenshot') {
       return {
         base64: 'iVBORw0KGgo=',
+        width: 1280,
+        height: 720,
+        viewport: { width: 1280, height: 720 },
+        devicePixelRatio: 2,
+        coordinateSpace: 'css-pixels',
       };
     }
     throw new Error(`unexpected call: ${method}`);
@@ -197,14 +202,27 @@ describe('Browser SDK in the existing Node REPL', () => {
     });
   });
 
-  it('returns screenshot bytes ready for nodeRepl.emitImage', async () => {
+  it('returns a screenshot with bytes and original image metadata', async () => {
     const agent = await setupBrowserRuntime();
     const browser = await agent.browsers.get('chrome');
     const tab = await browser.tabs.new();
     const screenshot = await tab.screenshot();
 
-    expect(screenshot).toBeInstanceOf(Uint8Array);
-    expect(Buffer.from(screenshot).toString('base64')).toBe('iVBORw0KGgo=');
+    expect(screenshot.bytes).toBeInstanceOf(Uint8Array);
+    expect(Buffer.from(screenshot.bytes).toString('base64')).toBe(
+      'iVBORw0KGgo=',
+    );
+    expect(screenshot).toEqual({
+      bytes: screenshot.bytes,
+      mimeType: 'image/png',
+      metadata: {
+        width: 1280,
+        height: 720,
+        viewport: { width: 1280, height: 720 },
+        devicePixelRatio: 2,
+        coordinateSpace: 'css-pixels',
+      },
+    });
   });
 
   it('rejects invalid locator composition and never coerces model values', async () => {

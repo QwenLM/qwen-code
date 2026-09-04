@@ -493,6 +493,13 @@ describe('PlaywrightRuntime command contracts', () => {
       scale: 'css',
     });
     expect(Buffer.from(screenshot.base64, 'base64')).toEqual(png(2, 3));
+    expect(screenshot).toMatchObject({
+      width: 2,
+      height: 3,
+      viewport: { width: 800, height: 600 },
+      devicePixelRatio: 2,
+      coordinateSpace: 'css-pixels',
+    });
   });
 
   it('keeps screenshot clips in viewport coordinates after scrolling', async () => {
@@ -503,6 +510,7 @@ describe('PlaywrightRuntime command contracts', () => {
       height: 600,
       contentWidth: 1_600,
       contentHeight: 2_400,
+      devicePixelRatio: 2,
       scrollX: 120,
       scrollY: 700,
     });
@@ -528,6 +536,7 @@ describe('PlaywrightRuntime command contracts', () => {
       height: 1_440,
       contentWidth: 2_560,
       contentHeight: 1_440,
+      devicePixelRatio: 2,
     });
     fixture.page.screenshot.mockResolvedValueOnce(png(2_560, 1_440));
 
@@ -906,6 +915,7 @@ function fakePage(
       height: 600,
       contentWidth: 800,
       contentHeight: 600,
+      devicePixelRatio: 2,
     })),
     screenshot: vi.fn(async () => png(2, 3)),
     ariaSnapshot: vi.fn(async () => '- button "Save" [ref=e1]'),
