@@ -16,7 +16,10 @@ import {
 } from 'vitest';
 import { act } from 'react';
 import { renderHook } from '@testing-library/react';
-import { resolveBranchName, watchRepoBranch } from '@qwen-code/qwen-code-core';
+import {
+  resolveBranchName,
+  watchRepoBranch,
+} from '@qwen-code/qwen-code-core/utils/gitDirect.js';
 import {
   useGitBranchName,
   BRANCH_POLL_INTERVAL_MS,

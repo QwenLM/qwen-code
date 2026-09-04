@@ -67,11 +67,22 @@ const loaderPath = join(tmpDir, 'loader.mjs');
 
 const coreSourcePath = join(root, 'packages', 'core', 'index.ts');
 const coreSourceUrl = pathToFileURL(coreSourcePath).href;
+// Subpath imports (`@qwen-code/qwen-code-core/utils/debugLogger.js`) resolve
+// through the package's `./*` export to compiled `dist/src/*`. In dev that is
+// whatever `npm run build` last produced, so without this the running CLI
+// mixes live source for the package root with stale output for every module
+// imported by path. Point them at the source tree instead.
+const coreSrcUrl = pathToFileURL(
+  join(root, 'packages', 'core', 'src') + '/',
+).href;
 
 const loaderCode = `
-import { pathToFileURL } from 'node:url';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const coreSourceUrl = '${coreSourceUrl}';
+const coreSrcUrl = '${coreSrcUrl}';
+const corePrefix = '@qwen-code/qwen-code-core/';
 
 export function resolve(specifier, context, nextResolve) {
   if (specifier === '@qwen-code/qwen-code-core') {
@@ -80,6 +91,18 @@ export function resolve(specifier, context, nextResolve) {
       url: coreSourceUrl,
       format: 'module',
     };
+  }
+  if (specifier.startsWith(corePrefix)) {
+    // Only redirect when the source file is actually there. The named subpath
+    // exports (goalWire, memoryScopes, …) do not mirror their file names, so
+    // they fall through to the package's own mapping.
+    const sub = specifier.slice(corePrefix.length).replace(/\\.js$/, '');
+    for (const ext of ['.ts', '.tsx']) {
+      const candidate = new URL(sub + ext, coreSrcUrl);
+      if (existsSync(fileURLToPath(candidate))) {
+        return { shortCircuit: true, url: candidate.href, format: 'module' };
+      }
+    }
   }
   return nextResolve(specifier, context);
 }
