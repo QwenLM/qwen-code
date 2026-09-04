@@ -59,6 +59,7 @@ import {
   SquarePenIcon,
   SunIcon,
   TargetIcon,
+  WorkflowIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useI18n } from '../../i18n';
@@ -238,6 +239,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'plugins'
   | 'channels'
   | 'scheduledTasks'
+  | 'workflows'
   | 'goals';
 
 export interface WebShellSidebarPrimaryNavOptions {
@@ -269,6 +271,7 @@ const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'plugins',
   'channels',
   'scheduledTasks',
+  'workflows',
   'goals',
 ];
 
@@ -375,6 +378,7 @@ interface WebShellSidebarProps {
   onOpenChannels: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  onOpenWorkflows: () => void;
   onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
@@ -877,6 +881,7 @@ export function WebShellSidebar({
   onOpenChannels,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenWorkflows,
   onOpenGoals,
   onOpenSessions,
   canOpenSessionsOverview,
@@ -936,6 +941,7 @@ export function WebShellSidebar({
       (primaryNavItems.has('plugins') ||
         primaryNavItems.has('channels') ||
         primaryNavItems.has('scheduledTasks') ||
+        primaryNavItems.has('workflows') ||
         primaryNavItems.has('goals'))) ||
     Boolean(primaryNavOptions?.render);
   const sessionActionItems = useMemo(
@@ -1018,6 +1024,16 @@ export function WebShellSidebar({
   const primaryWorkspaceExpansionId = `primary:${
     primaryWorkspaceCwd ?? 'default'
   }`;
+  const workflowWorkspaceCwd = connection.sessionId
+    ? connection.workspaceCwd
+    : (lockedWorkspaceCwd ?? selectedWorkspaceCwd ?? primaryWorkspaceCwd);
+  const workspaceWorkflowsEnabled =
+    workspaces.find((entry) => entry.cwd === workflowWorkspaceCwd)
+      ?.workflowsEnabled ?? false;
+  const workflowsEnabled = connection.sessionId
+    ? (connection.supportedCommands?.workflowsEnabled ??
+      workspaceWorkflowsEnabled)
+    : workspaceWorkflowsEnabled;
   const lockedWorkspace = lockedWorkspaceCwd
     ? workspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
     : undefined;
@@ -5314,6 +5330,22 @@ export function WebShellSidebar({
                       <CalendarClockIcon size={16} strokeWidth={1.2} />
                     </span>
                     {!collapsed && <span>{t('sidebar.scheduledTasks')}</span>}
+                  </button>
+                )}
+              {projectFeaturesEnabled &&
+                primaryNavItems.has('workflows') &&
+                workflowsEnabled && (
+                  <button
+                    className={styles.pluginButton}
+                    type="button"
+                    title={t('sidebar.workflows')}
+                    aria-label={t('sidebar.workflows')}
+                    onClick={onOpenWorkflows}
+                  >
+                    <span className={styles.navIcon}>
+                      <WorkflowIcon size={16} strokeWidth={1.2} />
+                    </span>
+                    {!collapsed && <span>{t('sidebar.workflows')}</span>}
                   </button>
                 )}
               {projectFeaturesEnabled && primaryNavItems.has('goals') && (

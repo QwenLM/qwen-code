@@ -285,6 +285,170 @@ describe('fetchGitBranches upstream tracking', () => {
   });
 });
 
+describe('fetchGitBranches push-side tracking', () => {
+  it('reports the push target and its counts in a triangular workflow', async () => {
+    const dir = makeRepo();
+    const upstreamRemote = makeBareRemote();
+    const originRemote = makeBareRemote();
+    git(dir, 'remote', 'add', 'upstream', upstreamRemote);
+    git(dir, 'remote', 'add', 'origin', originRemote);
+    git(dir, 'push', '-q', '-u', 'upstream', 'master');
+    git(dir, 'config', 'branch.master.pushRemote', 'origin');
+    git(dir, 'push', '-q', 'origin', 'master');
+    // Local gains one commit (ahead of origin), upstream gains one via a
+    // second clone (local behind upstream) — the fork-workflow shape.
+    fs.writeFileSync(path.join(dir, 'local.txt'), 'x\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local');
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitother-'));
+    tmpRoots.push(other);
+    git(other, 'clone', '-q', upstreamRemote, 'c');
+    const clone = path.join(other, 'c');
+    git(clone, 'config', 'user.email', 'test@example.com');
+    git(clone, 'config', 'user.name', 'Test');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(clone, 'up.txt'), 'y\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'up');
+    git(clone, 'push', '-q', 'origin', 'master');
+    git(dir, 'fetch', '-q', 'upstream');
+
+    const env = hermeticEnv();
+    // Under the default `push.default=simple`, git refuses to resolve
+    // `@{push}` in a triangular repo even though a plain `git push`
+    // succeeds — the listing names no push destination.
+    const simpleHead = (await fetchGitBranches(dir, env)).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(simpleHead?.upstream).toBe('upstream/master');
+    expect(simpleHead?.behind).toBe(1);
+    expect(simpleHead?.pushTarget).toBeUndefined();
+
+    // With a resolvable push.default the push-side counts come through.
+    git(dir, 'config', 'push.default', 'current');
+    const head = (await fetchGitBranches(dir, env)).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(head?.pushTarget).toBe('origin/master');
+    expect(head?.pushAhead).toBe(1);
+    expect(head?.pushBehind).toBe(0);
+    expect(head?.pushGone).toBeUndefined();
+  });
+
+  it('marks a resolvable push destination whose ref is missing as pushGone', async () => {
+    const dir = makeRepo();
+    const upstreamRemote = makeBareRemote();
+    const originRemote = makeBareRemote();
+    git(dir, 'remote', 'add', 'upstream', upstreamRemote);
+    git(dir, 'remote', 'add', 'origin', originRemote);
+    git(dir, 'push', '-q', '-u', 'upstream', 'master');
+    git(dir, 'config', 'branch.master.pushRemote', 'origin');
+    git(dir, 'config', 'push.default', 'current');
+    // Never pushed to origin: the push destination resolves by config but
+    // its ref does not exist — `git push` would create it.
+    const head = (await fetchGitBranches(dir, hermeticEnv())).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(head?.pushTarget).toBe('origin/master');
+    expect(head?.pushGone).toBe(true);
+    expect(head?.pushAhead).toBeUndefined();
+    expect(head?.pushBehind).toBeUndefined();
+  });
+
+  it('reports the upstream itself as push target in the plain clone shape', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'master');
+    const head = (await fetchGitBranches(dir, hermeticEnv())).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(head?.pushTarget).toBe('origin/master');
+    expect(head?.pushAhead).toBe(0);
+    expect(head?.pushBehind).toBe(0);
+  });
+
+  it('reports a nonzero pushBehind when the push remote has advanced', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'master');
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitother-'));
+    tmpRoots.push(other);
+    git(other, 'clone', '-q', remote, 'c');
+    const clone = path.join(other, 'c');
+    git(clone, 'config', 'user.email', 'test@example.com');
+    git(clone, 'config', 'user.name', 'Test');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(clone, 'r.txt'), 'r\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote moves');
+    git(clone, 'push', '-q', 'origin', 'master');
+    git(dir, 'fetch', '-q', 'origin');
+
+    const head = (await fetchGitBranches(dir, hermeticEnv())).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(head?.pushTarget).toBe('origin/master');
+    expect(head?.pushBehind).toBe(1);
+    expect(head?.pushAhead).toBe(0);
+  });
+
+  it('reports no push destination when git declines to name one', async () => {
+    // A live upstream git cannot turn into an `@{push}` answer. The push row
+    // stays silent on these: the bare `git push` is either refused outright
+    // or routed somewhere the listing cannot name, so the upstream counts
+    // are never a stand-in for push-side ones.
+    const env = hermeticEnv();
+
+    // The tracking upstream's name does not match the branch and
+    // `push.default` is the default `simple`.
+    const mismatch = makeRepo();
+    const remoteM = makeBareRemote();
+    git(mismatch, 'remote', 'add', 'origin', remoteM);
+    git(mismatch, 'push', '-q', 'origin', 'master:bar');
+    git(mismatch, 'fetch', '-q', 'origin');
+    git(mismatch, 'branch', '--set-upstream-to=origin/bar', 'master');
+    commitFile(mismatch, 'b.txt', 'two\n');
+    const headM = (await fetchGitBranches(mismatch, env)).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(headM?.upstream).toBe('origin/bar');
+    expect(headM?.ahead).toBe(1);
+    expect(headM?.pushTarget).toBeUndefined();
+    expect(headM?.pushAhead).toBeUndefined();
+    expect(headM?.pushBehind).toBeUndefined();
+
+    // `push.default=nothing`: the upstream matches, git still names nothing.
+    const nothing = makeRepo();
+    const remoteN = makeBareRemote();
+    git(nothing, 'remote', 'add', 'origin', remoteN);
+    git(nothing, 'push', '-q', '-u', 'origin', 'master');
+    commitFile(nothing, 'c.txt', 'three\n');
+    git(nothing, 'config', 'push.default', 'nothing');
+    const headN = (await fetchGitBranches(nothing, env)).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(headN?.upstream).toBe('origin/master');
+    expect(headN?.ahead).toBe(1);
+    expect(headN?.pushTarget).toBeUndefined();
+    expect(headN?.pushAhead).toBeUndefined();
+
+    // A `remote.<name>.push` refspec (Gerrit): `%(push)` cannot express
+    // `refs/for/*` as a branch at all.
+    const gerrit = makeRepo();
+    const remoteG = makeBareRemote();
+    git(gerrit, 'remote', 'add', 'origin', remoteG);
+    git(gerrit, 'push', '-q', '-u', 'origin', 'master');
+    git(gerrit, 'config', 'remote.origin.push', 'refs/heads/*:refs/for/*');
+    const headG = (await fetchGitBranches(gerrit, env)).local.find(
+      (b) => b.name === 'master',
+    );
+    expect(headG?.upstream).toBe('origin/master');
+    expect(headG?.pushTarget).toBeUndefined();
+  });
+});
+
 describe('fetchGitBranches recent branches', () => {
   it('lists recently checked-out branches from the reflog', async () => {
     const dir = makeRepo();
