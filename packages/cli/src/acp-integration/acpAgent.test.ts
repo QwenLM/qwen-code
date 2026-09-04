@@ -16,6 +16,7 @@ import {
 } from 'vitest';
 import { readFileSync } from 'node:fs';
 import type { Stats } from 'node:fs';
+import * as ts from 'typescript';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -30087,31 +30088,47 @@ describe('QwenAgent runtime-root pinning choke point', () => {
     // go through `runWithPinnedRuntimeBaseDirForRequest`, which resolves the
     // settings from the request cwd itself, and everything else through the
     // shared helper. A handler naming `runWithAcpRuntimeOutputDir` directly —
-    // as a call or via an alias — is exactly the shape that regressed, and
-    // no behavioral test can see the difference (both spellings reach the
-    // same function), so pin the source: outside the canonical import line
-    // and comments, the only mention left is the shared helper's own
-    // delegation (an aliased import would be a second mention). The per-request
-    // handlers themselves are pinned behaviorally (settings/cwd reaching the
-    // mock) by the routing tests above.
-    const source = readFileSync('src/acp-integration/acpAgent.ts', 'utf8');
-    const directCalls = source
-      .split('\n')
-      .map((line, index) => ({ line: index + 1, text: line.trim() }))
-      .filter(
-        ({ text }) =>
-          /\brunWithAcpRuntimeOutputDir\b/.test(text) &&
-          !text.startsWith(
-            "import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';",
-          ) &&
-          !text.startsWith('//') &&
-          !text.startsWith('*') &&
-          !text.startsWith('/*'),
-      );
-    const located = directCalls.map(({ line, text }) => `${line}: ${text}`);
+    // as a call, via an alias, or via an aliased import — is exactly the
+    // shape that regressed, and no behavioral test can see the difference
+    // (both spellings reach the same function), so pin the source. Walk the
+    // AST rather than lines: comments, string literals and import formatting
+    // cannot false-positive, the canonical un-aliased import specifier is the
+    // one exempt mention, and the only other mention must be the shared
+    // helper's own delegation. The per-request handlers themselves are pinned
+    // behaviorally (settings/cwd reaching the mock) by the routing tests above.
+    const sourcePath = 'src/acp-integration/acpAgent.ts';
+    const source = readFileSync(sourcePath, 'utf8');
+    const lines = source.split('\n');
+    const sourceFile = ts.createSourceFile(
+      sourcePath,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const mentions: string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (ts.isIdentifier(node) && node.text === 'runWithAcpRuntimeOutputDir') {
+        // `import { runWithAcpRuntimeOutputDir } from …` binds the name
+        // without an alias (`propertyName` is unset). An aliased specifier
+        // (`runWithAcpRuntimeOutputDir as pin`) keeps this identifier under
+        // `propertyName` and is reported like any other mention.
+        const isCanonicalImport =
+          ts.isImportSpecifier(node.parent) &&
+          node.parent.propertyName === undefined;
+        if (!isCanonicalImport) {
+          const { line } = sourceFile.getLineAndCharacterOfPosition(
+            node.getStart(sourceFile),
+          );
+          mentions.push(`${line + 1}: ${lines[line]!.trim()}`);
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
     expect(
-      located,
-      `acpAgent.ts must not name runWithAcpRuntimeOutputDir directly. Handlers serving a caller-supplied cwd route through this.runWithPinnedRuntimeBaseDirForRequest; only callers holding deliberately scoped settings may use this.runWithPinnedRuntimeBaseDir (see #10095). Direct mentions at:\n${located.join('\n')}`,
+      mentions,
+      `acpAgent.ts must not name runWithAcpRuntimeOutputDir directly. Handlers serving a caller-supplied cwd route through this.runWithPinnedRuntimeBaseDirForRequest; only callers holding deliberately scoped settings may use this.runWithPinnedRuntimeBaseDir (see #10095). Direct mentions at:\n${mentions.join('\n')}`,
     ).toEqual([
       expect.stringMatching(
         /^\d+: return runWithAcpRuntimeOutputDir\(settings, cwd, operation\);$/,
