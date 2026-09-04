@@ -390,6 +390,7 @@ function materializeTranscriptHistory(
   current: DaemonTranscriptState,
   events: DaemonUiEvent[],
   maxBlocks: number,
+  options: { boundaryEchoDedup?: boolean } = {},
 ): TranscriptHistoryAdmission {
   // Drop fetched events whose source records are already displayed.
   // `beforeRecordId` pagination is exclusive of the anchor but the anchor
@@ -433,10 +434,16 @@ function materializeTranscriptHistory(
     return `${text} img:${images} file:${files}`;
   };
   const oldestRetainedBlock = current.blocks[0];
+  // The echo comparison is a boundary rule: it only holds when the page is
+  // about to be prepended, because it matches the window's oldest block against
+  // the page's newest user block. An anchored page lands mid-window, where those
+  // two blocks are unrelated, so a coincidental text match would silently excise
+  // a real turn head — callers that do not prepend must opt out.
   const boundaryEchoKey =
-    (oldestRetainedBlock?.sourceRecordIds?.length ?? 0) === 0
-      ? userBlockBoundaryKey(oldestRetainedBlock)
-      : undefined;
+    options.boundaryEchoDedup === false ||
+    (oldestRetainedBlock?.sourceRecordIds?.length ?? 0) !== 0
+      ? undefined
+      : userBlockBoundaryKey(oldestRetainedBlock);
   const freshEvents =
     displayedRecordIds.size === 0
       ? events
@@ -4697,6 +4704,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           preCommit,
           uiEvents,
           maxBlocks,
+          // This page is spliced in at its ledger position, not prepended, so
+          // the window's oldest block is not adjacent to it.
+          { boundaryEchoDedup: false },
         );
         if (!admission.admitted) {
           return {
@@ -4751,6 +4761,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // Landing at the head moves the window's older boundary, so the
           // sequential load-older affordance has to follow the page rather than
           // keep pointing at a record that is no longer the oldest retained one.
+          // Capacity gates it exactly as the sequential path does: an anchor
+          // with no room left would only produce an immediate rejection.
           const history = transcriptHistoryRef.current;
           if (
             insertAt === 0 &&
@@ -4759,7 +4771,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           ) {
             history.beforeRecordId = entry.firstRecordId;
             history.cursor = undefined;
-            history.hasMore = page.hasOlder === true;
+            history.hasMore =
+              page.hasOlder === true &&
+              store.getSnapshot().blocks.length < maxBlocks;
+            // Consumers read the mirrored state, not the ref, so the affordance
+            // has to be told the anchor moved.
+            setTranscriptHistoryState((current) => ({
+              ...current,
+              hasMore: history.hasMore,
+            }));
           }
         }
         return { ok: true, targetRecordId: focusRecordId };
