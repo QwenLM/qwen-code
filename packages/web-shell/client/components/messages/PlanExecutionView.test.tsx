@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionAgentTaskStatus } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
+import styles from './PlanExecutionView.module.css';
 import {
   getActiveAgents,
   getAttentionAgentTool,
@@ -621,6 +622,16 @@ describe('PlanExecutionView', () => {
       details?.querySelector('[data-plan-dependency="ghost-step"]'),
     ).toBeNull();
     expect(details?.textContent).not.toContain('ghost-step');
+    // The ellipsis lives on `.dependencyTitle`; pin the class wiring so a
+    // dropped className cannot re-clip titles while these text assertions
+    // stay green.
+    expect(
+      Array.from(
+        details
+          ?.querySelector('[data-plan-dependency="research"]')
+          ?.querySelectorAll('span') ?? [],
+      ).some((span) => span.classList.contains(styles.dependencyTitle)),
+    ).toBe(true);
 
     act(() => root.unmount());
     container.remove();
@@ -1394,6 +1405,12 @@ describe('PlanExecutionView', () => {
               ),
             }),
       }),
+    ).map((todo) =>
+      // blockedBy is model-authored and can repeat an id; the chip row must
+      // dedup it like the topology builder does.
+      todo.id === 'dense-1'
+        ? { ...todo, blockedBy: ['dense-0', 'dense-0'] }
+        : todo,
     );
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -1422,6 +1439,16 @@ describe('PlanExecutionView', () => {
       ?.closest('article');
     expect(denseNode?.textContent).toContain('Depends on');
     expect(denseNode?.textContent).toContain('Dense 0');
+    // The repeated id renders one chip, not two.
+    expect((denseNode?.textContent ?? '').split('Dense 0').length - 1).toBe(1);
+    // The truncation rule targets `.dependencyTitle`; pin the class wiring
+    // so a dropped className cannot re-clip titles while text assertions
+    // stay green.
+    expect(
+      Array.from(denseNode?.querySelectorAll('span') ?? []).some((span) =>
+        span.classList.contains(styles.dependencyTitle),
+      ),
+    ).toBe(true);
 
     act(() => root.unmount());
     container.remove();

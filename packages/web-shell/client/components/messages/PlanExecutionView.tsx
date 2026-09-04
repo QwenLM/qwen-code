@@ -1366,7 +1366,11 @@ export function PlanExecutionView({
                         (todo.blockedBy?.length ?? 0) > 0 && (
                           <div className={styles.dependencies}>
                             <span>{t('planExecution.dependsOn')}</span>
-                            {todo.blockedBy!.map((id) => (
+                            {/* blockedBy is model-authored and can repeat an
+                                id; dedup like the topology builder so a
+                                repeated reference cannot emit a duplicate
+                                key or a second chip. */}
+                            {[...new Set(todo.blockedBy ?? [])].map((id) => (
                               <span className={styles.dependencyChip} key={id}>
                                 <span>
                                   {(stepNumberByTodo.get(id) ?? 0) || '?'}

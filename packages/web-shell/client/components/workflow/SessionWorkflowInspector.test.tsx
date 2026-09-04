@@ -225,6 +225,47 @@ describe('SessionWorkflowInspector', () => {
     container.remove();
   });
 
+  it('dedups a repeated dependency id in the upstream list', () => {
+    // blockedBy is model-authored and can repeat an id; without the dedup
+    // the list rendered two links sharing one key.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const todos: TodoItem[] = [
+      { id: 'prepare', content: 'Prepare inputs', status: 'completed' },
+      {
+        id: 'ship',
+        content: 'Ship result',
+        status: 'in_progress',
+        blockedBy: ['prepare', 'prepare'],
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={[]}
+            tasks={[]}
+            artifacts={[]}
+            selectedTodoId="ship"
+            onSelectedTodoIdChange={vi.fn()}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelectorAll('[data-testid="workflow-dependency-prepare"]'),
+    ).toHaveLength(1);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it('keeps every activity row reachable past the preview cap', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
