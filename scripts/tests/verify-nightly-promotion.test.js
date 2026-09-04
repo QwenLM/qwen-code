@@ -33,10 +33,12 @@ function runner({
   extraArtifacts = [],
   npm = 'published',
   totalRuns = 1,
+  fullWindowRuns = 0,
   workflowShaByRef = { [runHeadSha]: 'wf1', [currentSha]: 'wf1' },
 } = {}) {
   let lastTagLookup = '';
-  return (command, args) => {
+  const fullWindowPages = [];
+  const run = (command, args) => {
     const joined = `${command} ${args.join(' ')}`;
     if (joined.includes('git/ref/tags/')) {
       lastTagLookup = joined;
@@ -76,6 +78,20 @@ function runner({
       // The candidate search must be bounded to the publication window
       // rather than scanning the head of the run list.
       expect(joined).toContain('created=2026-08-31..2026-09-04');
+      if (fullWindowRuns > 0) {
+        // A window holding more runs than a short page can cover: every
+        // response is a full page (RUNS_PER_PAGE = 100 runs), so the search
+        // loop can only end at its page cap — the paging-cap test below
+        // pins both the cap and the page=N advancement that reaches it.
+        const page = Number(/[?&]page=(\d+)/.exec(joined)?.[1]);
+        fullWindowPages.push(page);
+        return JSON.stringify({
+          total_count: fullWindowRuns,
+          workflow_runs: Array.from({ length: 100 }, (_, index) => ({
+            id: page * 1000 + index,
+          })),
+        });
+      }
       return JSON.stringify({
         total_count: totalRuns,
         workflow_runs: [
@@ -118,6 +134,8 @@ function runner({
     }
     throw new Error(`Unexpected command: ${joined}`);
   };
+  run.fullWindowPages = fullWindowPages;
+  return run;
 }
 
 function verify(options, sha = currentSha) {
@@ -174,6 +192,19 @@ describe('verifyNightlyPromotion', () => {
     ).toThrow('required jobs not successful: Quality Checks=skipped');
   });
 
+  it('rejects a run whose jobs list omits a required job entirely', () => {
+    // A nightly validated by an older release.yml revision has the newer
+    // REQUIRED_JOBS entry absent from its /jobs response — not 'skipped',
+    // absent. The check filters REQUIRED_JOBS against the conclusions it
+    // saw, so absence reads as missing evidence and refuses fail-closed;
+    // reading membership over the returned jobs would accept the run and
+    // promote validation that never ran the missing job.
+    expect(() => verify({ jobs: { 'Quality Checks': 'success' } })).toThrow(
+      'required jobs not successful: Integration Tests (No Sandbox)=absent, ' +
+        'Integration Tests (Docker)=absent, Publish Release=absent',
+    );
+  });
+
   it('reports missing source evidence instead of a bare no-match', () => {
     expect(() => verify({ artifactExpired: true })).toThrow(
       'no unexpired release-source-<sha> artifact',
@@ -211,6 +242,20 @@ describe('verifyNightlyPromotion', () => {
     );
   });
 
+  it('refuses to promote when the run window outgrows the paged search', () => {
+    // The test above exits through the short-page break on page one, so the
+    // MAX_RUN_PAGES bound itself needs its own witness: a window holding 501
+    // runs where every page comes back full (100 runs) can only stop at the
+    // five-page cap, still short of the total. Raising or removing the cap
+    // lets the loop page past the bound until runs.length >= total and the
+    // refusal disappears.
+    const run = runner({ fullWindowRuns: 501 });
+    expect(() =>
+      verifyNightlyPromotion(nightlyTag, 'QwenLM/qwen-code', run, currentSha),
+    ).toThrow('the evidence search would be incomplete');
+    expect(run.fullWindowPages).toEqual([1, 2, 3, 4, 5]);
+  });
+
   it('warns when the release workflow changed since the validation run', () => {
     const result = verify({
       workflowShaByRef: { [runHeadSha]: 'wf1', [currentSha]: 'wf2' },
@@ -220,12 +265,28 @@ describe('verifyNightlyPromotion', () => {
   });
 
   it('skips the workflow drift check when the current revision is unknown', () => {
-    expect(verify({}, undefined).warnings).toEqual([]);
+    // Call the gate directly with an explicit falsy revision: the helper's
+    // `sha = currentSha` default applies to undefined too and would forward
+    // the known SHA, and null (unlike undefined) also bypasses the gate's
+    // own `currentSha = process.env.GITHUB_SHA` default, which CI sets.
+    // The fixture resolves a lookup for the falsy ref to 'wf2', so this
+    // stays green only while the `currentSha ?` guard skips that lookup.
+    const result = verifyNightlyPromotion(
+      nightlyTag,
+      'QwenLM/qwen-code',
+      runner({ workflowShaByRef: { [runHeadSha]: 'wf1', null: 'wf2' } }),
+      null,
+    );
+    expect(result.warnings).toEqual([]);
   });
 });
 
 // test-setup mocks appendFileSync, so assert on the calls, not the files.
 describe('reportPromotion', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   const written = (name) =>
     vi
       .mocked(appendFileSync)
@@ -246,6 +307,7 @@ describe('reportPromotion', () => {
 
   it('renders the evidence, and any soft finding, into the summary', () => {
     vi.mocked(appendFileSync).mockClear();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     reportPromotion(
       verify({
         workflowShaByRef: { [runHeadSha]: 'wf1', [currentSha]: 'wf2' },
@@ -258,6 +320,12 @@ describe('reportPromotion', () => {
     expect(rendered).toContain(sourceSha);
     expect(rendered).toContain('/actions/runs/42');
     expect(rendered).toContain(':warning: ');
+    // The soft finding must also reach the run-level log annotation the
+    // Actions UI shows at the top of the run, not only the step summary
+    // someone has to open.
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0][0]).toContain('::warning::');
+    expect(errorSpy.mock.calls[0][0]).toContain('changed since run 42');
   });
 
   it('writes nothing outside a workflow run', () => {
