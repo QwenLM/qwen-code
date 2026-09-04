@@ -217,4 +217,43 @@ describe('no-core-utils-upward-import', () => {
       ),
     ).toHaveLength(0);
   });
+  it('resolves self-reference subpaths through the exports wildcard', () => {
+    // `packages/core/package.json` carries a `./*` catch-all, so a deep
+    // specifier resolves at runtime without matching any named export key.
+    // Without pattern matching in the rule these read as unresolvable and go
+    // unreported, which would let the utils layer regain upward runtime
+    // dependencies with lint, typecheck and CI all green.
+    expect(
+      runRule(
+        "import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(1);
+    expect(
+      runRule(
+        "import { X } from '@qwen-code/qwen-code-core/tools/tools.js';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('keeps exact export keys ahead of the wildcard', () => {
+    // `goalWire` maps to goals/goal-wire.ts, which the wildcard would resolve
+    // to a file that does not exist. Exact keys must win.
+    expect(
+      runRule(
+        "import { X } from '@qwen-code/qwen-code-core/goalWire';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('allows a sibling utils module reached through the wildcard', () => {
+    expect(
+      runRule(
+        "import { X } from '@qwen-code/qwen-code-core/utils/paths.js';",
+        'packages/core/src/utils/foo.ts',
+      ),
+    ).toHaveLength(0);
+  });
 });

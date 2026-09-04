@@ -66,6 +66,44 @@ function stripExtension(rel) {
   return rel.replace(/\.(js|ts|tsx|mjs|cjs)$/, '');
 }
 
+function exportTargetOf(entry) {
+  return typeof entry === 'string' ? entry : entry?.import;
+}
+
+// Node resolves a subpath against `exports` by exact key first, then by
+// pattern: among keys containing a single `*`, the one with the longest
+// literal prefix wins, and what `*` captured is substituted into the target.
+// The rule has to follow the same order, because `packages/core/package.json`
+// carries a `./*` catch-all — without pattern matching every deep specifier
+// misses the exact lookup, resolves fine at runtime, and is reported by
+// nothing.
+function resolveExportTarget(exportKey) {
+  const exact = exportTargetOf(CORE_PACKAGE_EXPORTS[exportKey]);
+  if (typeof exact === 'string') return exact;
+
+  let best = null;
+  for (const [pattern, entry] of Object.entries(CORE_PACKAGE_EXPORTS)) {
+    const star = pattern.indexOf('*');
+    if (star < 0 || pattern.indexOf('*', star + 1) >= 0) continue;
+    const prefix = pattern.slice(0, star);
+    const suffix = pattern.slice(star + 1);
+    if (!exportKey.startsWith(prefix)) continue;
+    if (!exportKey.endsWith(suffix)) continue;
+    if (exportKey.length < prefix.length + suffix.length) continue;
+    if (best && best.prefix.length >= prefix.length) continue;
+    best = { prefix, suffix, entry };
+  }
+  if (!best) return null;
+
+  const target = exportTargetOf(best.entry);
+  if (typeof target !== 'string' || !target.includes('*')) return null;
+  const captured = exportKey.slice(
+    best.prefix.length,
+    exportKey.length - best.suffix.length,
+  );
+  return target.replace('*', captured);
+}
+
 function corePackageSourcePath(importedPath) {
   if (importedPath.startsWith(CORE_PACKAGE_SRC_PREFIX)) {
     return importedPath.slice(CORE_PACKAGE_SRC_PREFIX.length);
@@ -83,9 +121,7 @@ function corePackageSourcePath(importedPath) {
   }
 
   const exportKey = `./${importedPath.slice(CORE_PACKAGE_SUBPATH_PREFIX.length)}`;
-  const exportEntry = CORE_PACKAGE_EXPORTS[exportKey];
-  const exportTarget =
-    typeof exportEntry === 'string' ? exportEntry : exportEntry?.import;
+  const exportTarget = resolveExportTarget(exportKey);
   if (typeof exportTarget !== 'string') {
     return null;
   }
