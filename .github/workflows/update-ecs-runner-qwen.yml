@@ -141,8 +141,10 @@ jobs:
           # feeding a bare assignment aborts the step right here — before
           # the mismatch diagnostics below can print, for exactly the
           # failure class they exist for. The version test at the end
-          # still fails the step either way.
-          actual="$("${qwen_path}" --version 2>&1)" || actual="(qwen --version failed, exit $?)"
+          # still fails the step either way. The capture stays stdout-only:
+          # a stderr byte would fold into the strict-matched version and
+          # fail a healthy install on one runtime warning.
+          actual="$("${qwen_path}" --version)" || actual="(qwen --version failed, exit $?)"
           echo "qwen path: ${qwen_path}"
           echo "qwen version: ${actual}"
           if [[ "${actual}" != "${VERSION}" ]]; then

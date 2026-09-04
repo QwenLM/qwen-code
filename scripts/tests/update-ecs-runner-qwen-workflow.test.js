@@ -135,9 +135,11 @@ describe('ECS runner qwen update workflow', () => {
   it('captures the installed version tolerantly', () => {
     // Under `set -e`, a failing `--version` feeding a bare assignment
     // aborts the step before the mismatch branch — and the diagnostics
-    // this step exists to print — ever runs.
+    // this step exists to print — ever runs. The capture stays stdout-only:
+    // any stderr byte would fold into the strict-matched version and fail a
+    // healthy install on one runtime warning.
     expect(stepBody('Verify version')).toContain(
-      'actual="$("${qwen_path}" --version 2>&1)" || actual=',
+      'actual="$("${qwen_path}" --version)" || actual=',
     );
   });
 
@@ -339,12 +341,21 @@ function runResolve({ failures = 0, version = '0.22.3', env = {} } = {}) {
 }
 
 // Runs the 'Verify version' step body against a stubbed `qwen` whose
-// `--version` prints `output` and exits with `exitCode`.
-function runVerify({ output = '', exitCode = 0, target = '0.22.3' } = {}) {
+// `--version` prints `output` (stdout), optionally `stderrOutput` (stderr),
+// and exits with `exitCode`.
+function runVerify({
+  output = '',
+  stderrOutput = '',
+  exitCode = 0,
+  target = '0.22.3',
+} = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ecs-verify-'));
   try {
     const qwenStub = join(dir, 'qwen');
     const stubLines = ['#!/usr/bin/env bash'];
+    if (stderrOutput) {
+      stubLines.push(`echo '${stderrOutput}' >&2`);
+    }
     if (output) {
       stubLines.push(`echo '${output}'`);
     }
@@ -503,6 +514,21 @@ describe.skipIf(!replayable)('ECS runner qwen update replay', () => {
 
   it('verifies a healthy install without diagnostics', () => {
     const verified = runVerify({ output: '0.22.3', target: '0.22.3' });
+    expect(verified.status).toBe(0);
+    expect(verified.stdout).toContain('qwen version: 0.22.3');
+    expect(verified.stdout).not.toContain('--- diagnostics ---');
+  });
+
+  it('ignores stderr noise on a successful --version', () => {
+    // The capture is stdout-only: one stderr line during `--version` (a Node
+    // runtime warning, a future startup notice) must not fail a healthy
+    // install on every pool and file a stale-fleet issue against a correctly
+    // updated fleet.
+    const verified = runVerify({
+      output: '0.22.3',
+      stderrOutput: '(node:1234) ExperimentalWarning: some future warning',
+      target: '0.22.3',
+    });
     expect(verified.status).toBe(0);
     expect(verified.stdout).toContain('qwen version: 0.22.3');
     expect(verified.stdout).not.toContain('--- diagnostics ---');
