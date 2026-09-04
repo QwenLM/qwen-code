@@ -303,8 +303,8 @@ describe('qwen sessions ps', () => {
   });
 
   it('lists a managed Agent View session the registry cannot see', async () => {
-    // The whole point of the merge: a supervisor-owned session writes no
-    // registry record, so before this it was invisible to every listing.
+    // A managed session can have no live registry record; before this,
+    // such a session was invisible to every listing.
     listLiveSessions.mockResolvedValue([]);
     listAgentViewSessionSnapshots.mockResolvedValue([managedSnapshot()]);
     await run({ json: false });
@@ -374,13 +374,19 @@ describe('qwen sessions ps', () => {
   it('prints a dash, not a zero, for a managed session with no process', async () => {
     listLiveSessions.mockResolvedValue([]);
     listAgentViewSessionSnapshots.mockResolvedValue([
-      managedSnapshot({ worker: undefined }),
+      managedSnapshot({
+        worker: undefined,
+        state: { createdAt: 'not-a-date' },
+      }),
     ]);
     await run({ json: false });
 
     expect(stdout[1].slice(NAME_COL, NAME_COL + PID_COL)).toBe(
       '-'.padEnd(PID_COL),
     );
+    expect(
+      stdout[1].slice(NAME_COL + PID_COL, NAME_COL + PID_COL + AGE_COL),
+    ).toBe('-'.padEnd(AGE_COL));
   });
 
   it('does not render a managed pid that no process owns any more', async () => {
@@ -411,6 +417,20 @@ describe('qwen sessions ps', () => {
     expect(stdout[1]).toContain('app-ab');
     expect(stderr.join('\n')).toContain('Managed sessions could not be listed');
     expect(stderr.join('\n')).toContain('EACCES');
+  });
+
+  it('does not claim the listing is empty when managed sessions could not be read', async () => {
+    listLiveSessions.mockResolvedValue([]);
+    listAgentViewSessionSnapshots.mockRejectedValue(
+      new Error('EACCES: permission denied'),
+    );
+
+    await run({ json: false });
+
+    expect(stdout).toEqual([
+      'No interactive Qwen Code sessions are running; managed sessions could not be listed.',
+    ]);
+    expect(stdout).not.toContain('No other Qwen Code sessions are running.');
   });
 
   it('keeps --json stdout parseable when the store fails', async () => {

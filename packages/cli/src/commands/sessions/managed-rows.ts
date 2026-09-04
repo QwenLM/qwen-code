@@ -10,8 +10,8 @@
  * `qwen sessions ps` has always walked the live-process registry, which
  * only a top-level interactive UI writes. A managed Agent View session is
  * just as live and considerably more interesting — it may be sitting on a
- * question nobody has answered — but it registers under a supervisor
- * rather than in that registry, so the command could not see it.
+ * question nobody has answered — but the registry alone cannot describe
+ * its supervisor-owned state, so the command could not report it accurately.
  *
  * This module turns both sources into one row shape. It is deliberately
  * pure: the readers stay in the command, so the merge and the labelling

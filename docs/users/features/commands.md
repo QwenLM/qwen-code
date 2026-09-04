@@ -760,9 +760,10 @@ Two kinds of session are listed. An **interactive** session is one you
 started in a terminal; it registers in the live-process registry, and
 records left behind by a killed session are swept as they are found. A
 **managed** session is an Agent View session owned by a supervisor: it
-writes no registry record, so it used to be invisible here. Managed
-sessions are listed first, because one of them may be waiting for an
-answer.
+stores richer lifecycle state in the supervisor store, which the registry
+alone cannot provide. A session present in both sources is listed once, as
+managed. Managed sessions are listed first, because one of them may be
+waiting for an answer.
 
 Headless sessions (`qwen -p`) register nowhere and are not shown.
 
@@ -780,8 +781,8 @@ STATE is `interactive` for a session you started yourself. For a managed
 session it is what that session is actually doing — `needs input`,
 `working`, `ready`, `stopped` or `failed`. Those are display labels; the
 `--json` output carries stable tokens instead (see below). PID and AGE print `-` for a
-managed session with no process behind it (one that has exited, or has
-not started its worker yet).
+managed session only when their own source value is unavailable: PID when
+there is no live worker process, and AGE when the creation stamp is unusable.
 
 **JSON output (`--json`):**
 
@@ -796,7 +797,8 @@ schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
 qwenVersion, managed
 ```
 
-A managed session has no such record and is emitted as the row itself:
+A managed session is emitted in the managed row shape, even when the same
+session also has a registry record:
 
 ```
 name, pid, startedAt, cwd, taskState, sessionId, managed
