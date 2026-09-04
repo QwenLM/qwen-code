@@ -6,7 +6,9 @@
 
 module.exports = async ({ github, context }) => {
   const marker = '<!-- qwen-dependency-cve-audit-failure -->';
-  const failed = process.env.AUDIT_RESULT === 'failure';
+  const result = process.env.AUDIT_RESULT;
+  if (result !== 'success' && result !== 'failure') return;
+  const failed = result === 'failure';
   const repository = context.repo;
   const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
   const issues = await github.paginate(github.rest.issues.listForRepo, {

@@ -108,5 +108,15 @@ describe('update dependency audit issue', () => {
         direction: 'desc',
       }),
     );
+
+    github.paginate.mockClear();
+    vi.stubEnv('AUDIT_RESULT', 'cancelled');
+    await updateDependencyAuditIssue({ github, context });
+    vi.unstubAllEnvs();
+    await updateDependencyAuditIssue({ github, context });
+    expect(github.paginate).not.toHaveBeenCalled();
+    expect(api.create).not.toHaveBeenCalled();
+    expect(api.createComment).not.toHaveBeenCalled();
+    expect(api.update).not.toHaveBeenCalled();
   });
 });
