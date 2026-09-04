@@ -117,6 +117,12 @@ const { mockResolveSavedWorkflowScript } = vi.hoisted(() => ({
 const { mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockAddDaemonRequestAttribute: vi.fn(),
 }));
+const { mockRestoreWorktreeContext } = vi.hoisted(() => ({
+  mockRestoreWorktreeContext: vi.fn().mockResolvedValue({
+    contextMessage: null,
+    session: null,
+  }),
+}));
 
 const {
   mockExtractDaemonTraceContext,
@@ -299,6 +305,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ),
   initializeTelemetry: vi.fn().mockResolvedValue(undefined),
   addDaemonRequestAttribute: mockAddDaemonRequestAttribute,
+  restoreWorktreeContext: mockRestoreWorktreeContext,
   observeToolResultBoundary: vi.fn(() => false),
   toolResultArtifactState: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
@@ -1064,6 +1071,7 @@ import {
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import { DAEMON_OWNED_STANDALONE_CREATION_KEY } from '@qwen-code/acp-bridge/sessionSource';
@@ -22804,6 +22812,35 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         expect(
           innerConfig.suppressRestorableAskUserQuestionPreservation,
         ).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s leaves worktree sidecar validation to the daemon when requested',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          _meta: {
+            [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+          },
+        };
+        if (action === 'load') {
+          await agent.loadSession(params);
+        } else {
+          await agent.unstable_resumeSession(params);
+        }
+
+        expect(mockRestoreWorktreeContext).not.toHaveBeenCalled();
       } finally {
         mockConnectionState.resolve();
         await agentPromise;

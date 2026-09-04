@@ -100,6 +100,7 @@ import {
   gradeActiveWorkCoverage,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
@@ -4865,6 +4866,7 @@ describe('createAcpSessionBridge', () => {
     const loaded = await bridge.loadSession({
       sessionId: 'persisted-1',
       workspaceCwd: WS_A,
+      suppressWorktreeContextRestore: true,
     });
 
     expect(loaded).toEqual({
@@ -4882,7 +4884,9 @@ describe('createAcpSessionBridge', () => {
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
       {
-        _meta: {},
+        _meta: {
+          [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+        },
         sessionId: 'persisted-1',
         cwd: WS_A,
         mcpServers: [],
@@ -9166,6 +9170,7 @@ describe('createAcpSessionBridge', () => {
     const resumed = await bridge.resumeSession({
       sessionId: 'persisted-2',
       workspaceCwd: WS_A,
+      suppressWorktreeContextRestore: true,
     });
 
     expect(resumed).toEqual({
@@ -9181,7 +9186,14 @@ describe('createAcpSessionBridge', () => {
     });
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toEqual([
-      { _meta: {}, sessionId: 'persisted-2', cwd: WS_A, mcpServers: [] },
+      {
+        _meta: {
+          [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+        },
+        sessionId: 'persisted-2',
+        cwd: WS_A,
+        mcpServers: [],
+      },
     ]);
 
     await bridge.shutdown();
@@ -14247,6 +14259,148 @@ describe('createAcpSessionBridge', () => {
           'qwen.daemon.restoreAskUserQuestion'
         ],
       ).toBe(true);
+      await bridge.shutdown();
+    });
+
+    it('defers a tracked restore prompt until the daemon integrity gate admits it', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.loadSession({
+        sessionId: 'persisted-auq-deferred',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      expect(restored.hasActivePrompt).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(true);
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(false);
+      await bridge.shutdown();
+    });
+
+    it('discards a deferred restore prompt rejected by the daemon integrity gate', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.loadSession({
+        sessionId: 'persisted-auq-discarded',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      bridge.discardDeferredRestoreAskUserQuestionPrompt?.(
+        restored.sessionId,
+        restored.clientId,
+      );
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
+    it('defers a tracked resume prompt until the daemon integrity gate admits it', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        resumeSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: 'persisted-auq-resume-deferred',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      expect(restored.hasActivePrompt).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(true);
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      await bridge.shutdown();
+    });
+
+    it('discards a deferred resume prompt rejected by the daemon integrity gate', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        resumeSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: 'persisted-auq-resume-discarded',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      bridge.discardDeferredRestoreAskUserQuestionPrompt?.(
+        restored.sessionId,
+        restored.clientId,
+      );
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
       await bridge.shutdown();
     });
 
