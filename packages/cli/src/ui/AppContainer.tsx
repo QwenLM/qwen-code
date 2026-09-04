@@ -1661,6 +1661,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const {
     isOutputStyleDialogOpen,
+    outputStyleChoices,
     openOutputStyleDialog,
     handleOutputStyleSelect,
   } = useOutputStyleCommand(settings, config, historyManager.addItem);
@@ -4855,6 +4856,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
       isOutputStyleDialogOpen,
+      outputStyleChoices,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -5002,6 +5004,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
       isOutputStyleDialogOpen,
+      outputStyleChoices,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
