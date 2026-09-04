@@ -2083,6 +2083,57 @@ describe('multi-workspace session dispatch', () => {
     );
   });
 
+  it.each(['load', 'resume'] as const)(
+    'runs a cold %s inside the selected workspace runtime root',
+    async (action) => {
+      await withRuntimeDir(async () => {
+        const sessionId =
+          action === 'load'
+            ? '550e8400-e29b-41d4-a716-446655440124'
+            : '550e8400-e29b-41d4-a716-446655440125';
+        const runtimeRoot = Storage.getRuntimeBaseDir();
+        const secondaryRuntimeBaseDir = path.join(
+          runtimeRoot,
+          'secondary-runtime',
+        );
+        await Storage.runWithResolvedRuntimeBaseDir(
+          secondaryRuntimeBaseDir,
+          () =>
+            writeStoredSession({
+              sessionId,
+              cwd: SECONDARY_CWD,
+              timestamp: '2026-07-08T00:16:00.000Z',
+              prompt: `secondary ${action} target`,
+              mtime: new Date('2026-07-08T00:16:00.000Z'),
+            }),
+        );
+        const { app, secondaryBridge } = makeHarness({
+          secondaryRuntimeBaseDir,
+          secondarySummaries: [],
+        });
+        const restoreMethod =
+          action === 'load' ? 'loadSession' : 'resumeSession';
+        const originalRestore =
+          secondaryBridge[restoreMethod].bind(secondaryBridge);
+        let observedRuntimeBaseDir: string | undefined;
+        vi.spyOn(secondaryBridge, restoreMethod).mockImplementation(
+          async (request) => {
+            observedRuntimeBaseDir = Storage.getRuntimeBaseDir();
+            return originalRestore(request);
+          },
+        );
+
+        const response = await request(app)
+          .post(`/session/${sessionId}/${action}`)
+          .set('Host', host())
+          .send({ cwd: SECONDARY_CWD });
+
+        expect(response.status).toBe(200);
+        expect(observedRuntimeBaseDir).toBe(secondaryRuntimeBaseDir);
+      });
+    },
+  );
+
   it('loads a projectless task created from Live in the Conversations runtime', async () => {
     await withStoredProjectlessLiveTasks(
       [LIVE_PROJECTLESS_TASK_ID],

@@ -131,6 +131,7 @@ import {
   type StandaloneSessionService,
 } from '../conversations/standalone-session-service.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
+import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 import {
   createDaemonSubagentManager,
   toSummary as agentToSummary,
@@ -1993,9 +1994,8 @@ export class AcpDispatcher {
             // of a caller id contends on one key), so the request spelling
             // alone covers the raw-spelled batch delete/archive/unarchive
             // locks (parity with the REST restore handler).
-            restored ??= await this.archiveCoordinator.runSharedMany(
-              [sessionId],
-              async () => {
+            const restoreInRuntime = () =>
+              this.archiveCoordinator.runSharedMany([sessionId], async () => {
                 assertGenerationOpen?.();
                 const sessionService = new SessionService(cwd, {
                   runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
@@ -2131,7 +2131,10 @@ export class AcpDispatcher {
                   throw error;
                 }
                 return session;
-              },
+              });
+            restored ??= await runWithWorkspaceRuntimeStorage(
+              sessionRuntime,
+              restoreInRuntime,
             );
             const initialReplayOnDelivery =
               method === 'session/load' && !conn.ownsSession(sessionId);
