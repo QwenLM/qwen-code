@@ -75,6 +75,23 @@ describe('readBackgroundPrompt', () => {
     );
   });
 
+  it('reads the prompt from the attached --bg=<prompt> form', () => {
+    // The CLI's other prompt flags are used as `--prompt=<value>`, so the
+    // attached form must reach the same reader instead of dying in the
+    // strict parser on an unregistered `bg`.
+    expect(
+      readBackgroundPrompt([`${BACKGROUND_FLAG}=audit the release`]),
+    ).toEqual({ prompt: 'audit the release' });
+    // The attached value is data even when it starts with a dash.
+    expect(readBackgroundPrompt([`${BACKGROUND_FLAG}=-repro`])).toEqual({
+      prompt: '-repro',
+    });
+    // Trailing positionals still join behind the attached prompt.
+    expect(
+      readBackgroundPrompt([`${BACKGROUND_FLAG}=audit`, 'the', 'release']),
+    ).toEqual({ prompt: 'audit the release' });
+  });
+
   it('declines any other flag and names it, because --bg forwards nothing', () => {
     // The worker argv carries only the session id and the prompt, so any
     // other flag would be silently dropped — worse, a hand-rolled scan of

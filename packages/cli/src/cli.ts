@@ -60,12 +60,24 @@ export const TOP_LEVEL_COMMANDS = [
   ['update', 'Check for Qwen Code updates and install if available'],
 ] as const;
 
-// The command names of TOP_LEVEL_COMMANDS without their yargs argument
-// suffixes. A first positional matching one of these is a subcommand
-// launch the `--bg` intercept must not shadow.
-const TOP_LEVEL_COMMAND_NAMES = new Set(
-  TOP_LEVEL_COMMANDS.map(([command]) => command.split(' ')[0]),
-);
+// yargs' builtin help command: the parser registers it itself, and it
+// matches `help` on the LAST positional (yargs pops argv._'s tail when it
+// ends in the help word), so the `--bg` gate must not read it only in the
+// first slot.
+const HELP_COMMAND = 'help';
+
+// The entrances the parser honors for a positional-led launch: the command
+// names of TOP_LEVEL_COMMANDS without their yargs argument suffixes, the
+// aliases their command modules register with them in config.ts (hooks.tsx
+// registers `aliases: ['hook']`), and yargs' `help` builtin. A positional
+// the parser reads as one of these is a subcommand launch the `--bg`
+// intercept must not shadow. cli.test.ts pins this mirror to the command
+// modules so a new alias cannot slip past the gate.
+export const TOP_LEVEL_COMMAND_NAMES = new Set([
+  ...TOP_LEVEL_COMMANDS.map(([command]) => command.split(' ')[0]),
+  'hook',
+  HELP_COMMAND,
+]);
 
 export const MCP_COMMANDS = [
   ['add <name> <commandOrUrl> [args...]', 'Add a server'],
@@ -303,11 +315,11 @@ async function buildTopLevelHelpParser() {
   return parser;
 }
 
-function firstPositionalArg(argv: readonly string[]): string | undefined {
+function firstPositionalArgIndex(argv: readonly string[]): number {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
-      return undefined;
+      return -1;
     }
     // Base parity: same unconditional BASE value-slot skip as hasFlag, so
     // a sentinel sitting in one of those slots never ends the scan early.
@@ -317,10 +329,52 @@ function firstPositionalArg(argv: readonly string[]): string | undefined {
     }
     i = skipOptionValues(argv, i);
     if (!arg.startsWith('-')) {
-      return arg;
+      return i;
     }
   }
-  return undefined;
+  return -1;
+}
+
+function firstPositionalArg(argv: readonly string[]): string | undefined {
+  const index = firstPositionalArgIndex(argv);
+  return index === -1 ? undefined : argv[index];
+}
+
+function lastPositionalArg(argv: readonly string[]): string | undefined {
+  let lastPositional: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg === '--') {
+      return lastPositional;
+    }
+    // Same value-slot skip as firstPositionalArgIndex, so a flag's value
+    // is never read as positional data.
+    if (BASE_VALUE_FLAGS.has(arg)) {
+      i++;
+      continue;
+    }
+    i = skipOptionValues(argv, i);
+    if (!arg.startsWith('-')) {
+      lastPositional = arg;
+    }
+  }
+  return lastPositional;
+}
+
+// The index of the background flag before any `--`, in its bare
+// (`--bg`) or attached (`--bg=<prompt>`) spelling, or -1. Tokens after
+// `--` are the user's own data and never count.
+function backgroundFlagIndex(argv: readonly string[]): number {
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i]!;
+    if (token === '--') {
+      return -1;
+    }
+    if (token === BACKGROUND_FLAG || token.startsWith(`${BACKGROUND_FLAG}=`)) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 function normalizeMcpFastPathArgv(argv: readonly string[]): readonly string[] {
@@ -577,33 +631,43 @@ export async function runCliEntry(
     }
 
     // `--bg` needs a prompt and a directory, nothing else the interactive
-    // startup path would load. A first positional that is a top-level
-    // command means the subcommand launch is the intent: let it fall
-    // through to the parser (which declines the unsupported `--bg`)
-    // instead of collecting the subcommand tokens as a prompt.
-    const firstPositional = firstPositionalArg(argv);
-    if (
-      routableArgv.includes(BACKGROUND_FLAG) &&
-      (firstPositional === undefined ||
-        !TOP_LEVEL_COMMAND_NAMES.has(firstPositional))
-    ) {
-      const { readBackgroundPrompt, runBackgroundDispatch } = await import(
-        './agent-view/background-entry.js'
-      );
-      // Read from the normalized argv, the same array the gate above
-      // trusts: a launch carrying the bundled entrypoint as its first
-      // token must not dispatch that path as the first prompt word.
-      const read = readBackgroundPrompt(argv);
-      if (read !== undefined) {
-        if ('prompt' in read) {
-          process.exitCode = await runBackgroundDispatch(read.prompt);
-        } else {
-          writeStderrLine(
-            `qwen --bg runs only the prompt and does not honor ${read.unsupportedFlag}. Re-run without it.`,
-          );
-          process.exitCode = 1;
+    // startup path would load. The intercept fires only on flag-led
+    // launches: every positional after the flag is a prompt word, so
+    // `qwen --bg sessions cleanup` dispatches the prompt `sessions
+    // cleanup`. A positional BEFORE the flag that the parser honors as a
+    // command entrance means the subcommand launch is the intent: let it
+    // fall through to the parser instead of collecting the subcommand
+    // tokens as a prompt. Those entrances are wider than the canonical
+    // first words — the command modules' aliases (`hook`) and yargs'
+    // builtin `help`, which yargs matches on the LAST positional — so the
+    // bounce reads both positions.
+    const backgroundFlag = backgroundFlagIndex(argv);
+    if (backgroundFlag !== -1) {
+      const firstPositionalIndex = firstPositionalArgIndex(argv);
+      const parserOwnsLaunch =
+        lastPositionalArg(argv) === HELP_COMMAND ||
+        (firstPositionalIndex !== -1 &&
+          firstPositionalIndex < backgroundFlag &&
+          TOP_LEVEL_COMMAND_NAMES.has(argv[firstPositionalIndex]!));
+      if (!parserOwnsLaunch) {
+        const { readBackgroundPrompt, runBackgroundDispatch } = await import(
+          './agent-view/background-entry.js'
+        );
+        // Read from the normalized argv, the same array the gate above
+        // trusts: a launch carrying the bundled entrypoint as its first
+        // token must not dispatch that path as the first prompt word.
+        const read = readBackgroundPrompt(argv);
+        if (read !== undefined) {
+          if ('prompt' in read) {
+            process.exitCode = await runBackgroundDispatch(read.prompt);
+          } else {
+            writeStderrLine(
+              `qwen --bg runs only the prompt and does not honor ${read.unsupportedFlag}. Re-run without it.`,
+            );
+            process.exitCode = 1;
+          }
+          return;
         }
-        return;
       }
     }
   }

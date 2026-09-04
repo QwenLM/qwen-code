@@ -33,6 +33,7 @@ import {
 import {
   MCP_COMMANDS,
   TOP_LEVEL_COMMANDS,
+  TOP_LEVEL_COMMAND_NAMES,
   handleCriticalError,
   isExpectedPtyRaceError,
   resolveBootstrapRoute,
@@ -1142,6 +1143,51 @@ describe('runCliEntry', () => {
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
+    it('leaves an aliased subcommand launch to the parser instead of dispatching it', async () => {
+      // hooks.tsx registers `aliases: ['hook']`, so the parser honors
+      // `hook` exactly like `hooks`; a gate that only knew the canonical
+      // names silently dispatched the alias as a prompt.
+      await runCliEntry(['hook', BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves the yargs help builtin to the parser instead of dispatching it', async () => {
+      // yargs matches `help` as a command entrance, so `qwen help --bg`
+      // is how a user reads about the flag — it must print help through
+      // the parser, not dispatch a session with the prompt `help`.
+      await runCliEntry(['help', BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('dispatches a flag-led prompt whose words name commands', async () => {
+      // The bounce is positional-order aware: a launch LED by `--bg`
+      // passes its words to the session even when they name top-level
+      // commands, because the prompt is exactly the positional query.
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry([BACKGROUND_FLAG, 'sessions', 'cleanup']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith(
+        'sessions cleanup',
+      );
+      expect(process.exitCode).toBe(0);
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('reads the attached --bg=<prompt> form through the same intercept', async () => {
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry(['--bg=audit']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith('audit');
+      expect(process.exitCode).toBe(0);
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
     it('lets the version intercept win over --bg', async () => {
       await runCliEntry(['--version', BACKGROUND_FLAG]);
 
@@ -1164,6 +1210,47 @@ describe('runCliEntry', () => {
       expect(process.exitCode).toBe(1);
       expect(stderr.join('')).toContain('--yolo');
     });
+  });
+
+  it('pins the --bg gate’s command surface to the registered command modules', async () => {
+    // The gate bounces a positional-led launch only when the parser
+    // honors the positional as a command entrance. config.ts registers
+    // these modules with their aliases, so every name and alias they
+    // declare must sit in the gate set — a new alias that misses it
+    // silently dispatches the subcommand launch as a prompt.
+    const { authCommand } = await import('./commands/auth.js');
+    const { channelCommand } = await import('./commands/channel.js');
+    const { extensionsCommand } = await import('./commands/extensions.js');
+    const { hooksCommand } = await import('./commands/hooks.js');
+    const { mcpCommand } = await import('./commands/mcp.js');
+    const { reviewCommand } = await import('./commands/review.js');
+    const { serveCommand } = await import('./commands/serve.js');
+    const { sessionsCommand } = await import('./commands/sessions.js');
+    const { updateCommand } = await import('./commands/update.js');
+
+    const commandModules = [
+      authCommand,
+      channelCommand,
+      extensionsCommand,
+      hooksCommand,
+      mcpCommand,
+      reviewCommand,
+      serveCommand,
+      sessionsCommand,
+      updateCommand,
+    ];
+    expect(commandModules.length).toBe(TOP_LEVEL_COMMANDS.length);
+
+    for (const commandModule of commandModules) {
+      const names = [String(commandModule.command).split(' ')[0]!];
+      const aliases = commandModule.aliases ?? [];
+      names.push(...(typeof aliases === 'string' ? [aliases] : aliases));
+      for (const name of names) {
+        expect(TOP_LEVEL_COMMAND_NAMES.has(name)).toBe(true);
+      }
+    }
+    // yargs' builtin help command is an entrance too.
+    expect(TOP_LEVEL_COMMAND_NAMES.has('help')).toBe(true);
   });
 
   it('loads gemini on the default path', async () => {

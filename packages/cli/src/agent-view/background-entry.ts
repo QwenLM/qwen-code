@@ -74,17 +74,32 @@ export type BackgroundPromptRead =
  * the behavior it asks for — and a hand-rolled scan of which flags take
  * values misreads the value slots of the ones it cannot model as prompt
  * words. A flag added later cannot silently start leaking into prompts.
+ *
+ * The attached `--bg=<prompt>` spelling reads like the CLI's other prompt
+ * flags (`--prompt=<value>`); its value travels inside the token and is
+ * prompt data even when it starts with a dash.
  */
 export function readBackgroundPrompt(
   rawArgv: readonly string[],
 ): BackgroundPromptRead | undefined {
   const separator = rawArgv.indexOf('--');
   const argv = separator === -1 ? rawArgv : rawArgv.slice(0, separator);
-  if (!argv.includes(BACKGROUND_FLAG)) return undefined;
+  if (
+    !argv.some(
+      (token) =>
+        token === BACKGROUND_FLAG || token.startsWith(`${BACKGROUND_FLAG}=`),
+    )
+  ) {
+    return undefined;
+  }
 
   const words: string[] = [];
   for (const token of argv) {
     if (token === BACKGROUND_FLAG) continue;
+    if (token.startsWith(`${BACKGROUND_FLAG}=`)) {
+      words.push(token.slice(BACKGROUND_FLAG.length + 1));
+      continue;
+    }
     if (token.startsWith('-')) {
       const eq = token.indexOf('=');
       return { unsupportedFlag: eq === -1 ? token : token.slice(0, eq) };
