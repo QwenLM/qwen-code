@@ -2972,6 +2972,96 @@ describe('DwsChannel', () => {
     );
   });
 
+  it('keeps a slash command carrying a glued mention suffix as prose', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'command-with-glued-mention',
+        '@Colleague /approve@QwenBot(QwenBot)',
+      ),
+    );
+
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('@Colleague /approve@QwenBot(QwenBot)'),
+      expect.any(Object),
+    );
+  });
+
+  it.each([
+    ['zero-width space', '\u200b'],
+    ['byte-order mark', '\ufeff'],
+  ])(
+    'keeps a slash command before a %s mention as prose',
+    async (_label, separator) => {
+      const client = new FakeDwsClient();
+      const { bridge } = await readyPolicyChannel(client);
+
+      await client.emit(
+        0,
+        message(
+          'user_im_message_receive_at',
+          'command-before-hidden-mention',
+          `@QwenBot(QwenBot) /approve @${separator}Alice`,
+        ),
+      );
+
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        'session-1',
+        expect.stringContaining('@QwenBot(QwenBot) /approve'),
+        expect.any(Object),
+      );
+    },
+  );
+
+  it('keeps a slash command with a later mention on another line as prose', async () => {
+    const client = new FakeDwsClient();
+    const { bridge } = await readyPolicyChannel(client);
+    bridge.btw = vi.fn();
+
+    await client.emit(
+      0,
+      message(
+        'user_im_message_receive_at',
+        'command-with-mention-on-later-line',
+        '@QwenBot(QwenBot) /btw what day is it?\nsee the deploy log\n@Alice',
+      ),
+    );
+
+    expect(bridge.btw).not.toHaveBeenCalled();
+    expect(bridge.prompt).toHaveBeenCalledWith(
+      'session-1',
+      expect.stringContaining('@QwenBot(QwenBot) /btw what day is it?'),
+      expect.any(Object),
+    );
+  });
+
+  it('normalizes a padded mention in linear time', async () => {
+    // Group message content is attacker-controlled and reaches the mention
+    // strip uncapped. A whitespace run that backtracks into the whole-remainder
+    // mention scan pays that scan once per space, which blocks the event loop
+    // for seconds. The bound is generous to slow runners; one linear scan of
+    // this payload costs microseconds.
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const content = `@QwenBot(QwenBot) ${' '.repeat(100_000)}not a command`;
+    const started = performance.now();
+
+    await client.emit(
+      0,
+      message('user_im_message_receive_at', 'padded-mention', content),
+    );
+
+    expect(performance.now() - started).toBeLessThan(250);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({ text: content }),
+    ]);
+  }, 60_000);
+
   it('deduplicates a mention delivered by history and the live stream', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);

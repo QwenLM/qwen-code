@@ -1769,13 +1769,16 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     this.rememberImTarget(message.conversationId, target);
 
     // DWS identifies only that the bot was mentioned somewhere, not which text
-    // token is the bot. Remove a leading mention only when no later mention
-    // could be the one that caused the at-event.
+    // token is the bot, so a leading mention is removed only when what follows
+    // is unambiguously a slash command and no later mention could be the one
+    // that caused the at-event. The command lookahead must stay ahead of the
+    // whole-remainder mention scan: swapping them re-runs the scan at every
+    // backtracked space, which is quadratic on attacker-controlled content.
     const text =
       source.kind === 'at'
         ? message.content
             .replace(
-              /^\s*@[^\s\p{Cf}]+\s+(?![\s\S]*\s@[^\s\p{Cf}]+)(?=\/[a-zA-Z0-9_:-]+(?:@\S+)?(?:\s|$))/u,
+              /^\s*@[^\s\p{Cf}]+\s+(?=\/[a-zA-Z0-9_:-]+(?:\s|$))(?![\s\S]*\s@)/u,
               '',
             )
             .trim()
