@@ -12,6 +12,7 @@ import type {
   DaemonClient,
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   createLocalFilesRewarm,
   resolveLocalFilesWorkspaceSelector,
@@ -89,7 +90,9 @@ describe('createLocalFilesRewarm', () => {
   });
 
   it('falls back to the legacy preheat without a selector or on route failure', async () => {
-    const ensureRuntime = vi.fn().mockRejectedValue(new Error('no route'));
+    const ensureRuntime = vi
+      .fn()
+      .mockRejectedValue(new DaemonHttpError(404, {}, 'no such route'));
     const client = {
       workspaceById: vi.fn(() => ({ ensureRuntime })),
     } as unknown as DaemonClient;
@@ -104,5 +107,26 @@ describe('createLocalFilesRewarm', () => {
 
     await createLocalFilesRewarm({ client, selector: undefined, preheat })();
     expect(preheat).toHaveBeenCalledTimes(2);
+  });
+
+  it('propagates non-404 ensureRuntime failures instead of preheating primary', async () => {
+    // Silently warming the primary runtime for a secondary session is the
+    // exact failure the qualified rewarm exists to prevent.
+    const ensureRuntime = vi
+      .fn()
+      .mockRejectedValue(new DaemonHttpError(500, {}, 'runtime spawn failed'));
+    const client = {
+      workspaceById: vi.fn(() => ({ ensureRuntime })),
+    } as unknown as DaemonClient;
+    const preheat = vi.fn();
+
+    await expect(
+      createLocalFilesRewarm({
+        client,
+        selector: { kind: 'id', value: 'ws-2' },
+        preheat,
+      })(),
+    ).rejects.toThrow(/runtime spawn failed/);
+    expect(preheat).not.toHaveBeenCalled();
   });
 });

@@ -254,7 +254,28 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   useEffect(() => {
     const handle = handleRef.current;
     if (handle === undefined) return;
-    startBridge(handle);
+    // Re-query before re-registering: a grant revoked after the original
+    // connect would otherwise re-register a bridge whose every tool call the
+    // browser rejects. An effect cannot supply activation, so never request.
+    let cancelled = false;
+    const generation = generationRef.current;
+    void ensureReadwritePermission(handle).then((permission) => {
+      // A disconnect that landed while the query was in flight must win:
+      // without this the continuation would resurrect the bridge behind it.
+      if (cancelled || generationRef.current !== generation) return;
+      if (permission.state !== 'granted') {
+        setStatus({
+          phase: 'needs-gesture',
+          blocker: null,
+          rootName: handle.name,
+        });
+        return;
+      }
+      startBridge(handle);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [sessionId, selectorKey, startBridge]);
 
   useEffect(

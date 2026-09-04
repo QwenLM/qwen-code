@@ -105,7 +105,13 @@ class FakeDatabase {
   }
 }
 
-function fakeIdb(options: { failOpen?: boolean; failRequests?: boolean } = {}) {
+function fakeIdb(
+  options: {
+    failOpen?: boolean;
+    failRequests?: boolean;
+    blockedThenSuccess?: boolean;
+  } = {},
+) {
   const stores = new Map<string, Map<string, unknown>>();
   const db = new FakeDatabase(stores, options.failRequests === true);
   const open = vi.fn(() => {
@@ -121,6 +127,12 @@ function fakeIdb(options: { failOpen?: boolean; failRequests?: boolean } = {}) {
       if (options.failOpen) {
         request.error = new Error('open failed');
         request.onerror?.();
+        return;
+      }
+      if (options.blockedThenSuccess) {
+        // `blocked` is not terminal: the open can still succeed afterwards.
+        request.onblocked?.();
+        queueMicrotask(() => request.onsuccess?.());
         return;
       }
       // The real IndexedDB only fires this on first creation; the store created
@@ -192,6 +204,15 @@ describe('createDirectoryHandleStore', () => {
     expect(await store.save(directoryHandle)).toBe(false);
     expect(await store.load()).toBeUndefined();
     expect(await store.clear()).toBe(false);
+  });
+
+  it('closes a connection whose open succeeded after being blocked', async () => {
+    const { factory, db } = fakeIdb({ blockedThenSuccess: true });
+    const store = createDirectoryHandleStore(factory);
+    // The blocked event rejects the open (fail-soft); the success that can
+    // still follow must close the fresh connection instead of leaking it.
+    expect(await store.load()).toBeUndefined();
+    expect(db.closed).toBe(true);
   });
 
   it('fails soft when a request fails', async () => {

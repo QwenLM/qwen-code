@@ -701,6 +701,49 @@ describe('LocalFilesBridge reconnection', () => {
     await h.running;
   });
 
+  it('survives a rate_limited shed frame while connected', async () => {
+    const h = harness();
+    const socket = await connect(h);
+    // The daemon sheds one frame to keep service up; the connection and the
+    // registration stay live, so the bridge must not terminate.
+    socket.emit({
+      type: 'mcp_error',
+      code: 'rate_limited',
+      message: 'Rate limit exceeded',
+    });
+    await flush();
+    expect(lastPhase(h)).toBe('connected');
+    expect(socket.closeCount).toBe(0);
+    h.bridge.stop();
+    await h.running;
+  });
+
+  it('joins the retry budget when rate_limited arrives while registering', async () => {
+    const h = harness();
+    await flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    await flush();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await flush();
+    expect(socket.framesOfType('mcp_register')).toHaveLength(1);
+    socket.emit({
+      type: 'mcp_error',
+      code: 'rate_limited',
+      message: 'Rate limit exceeded',
+    });
+    await flush();
+    expect(h.rewarmCalls).toBe(1);
+    expect(socket.framesOfType('mcp_register')).toHaveLength(2);
+    expect(lastPhase(h)).toBe('registering');
+    h.bridge.stop();
+    await h.running;
+  });
+
   it('treats already_registered as benign and waits out the in-flight add', async () => {
     const h = harness();
     await flush();

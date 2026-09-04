@@ -499,6 +499,11 @@ export class LocalDirectory {
             break;
           }
           const entryPath = joinPath(prefix, entry.name);
+          // filesExamined bounds the work (every getFile() costs a round
+          // trip), so the attempt counts, not the success — otherwise a
+          // mid-scan revocation pays a failing round trip per file beyond
+          // the cap. Includes files we then skip.
+          filesExamined += 1;
           let file: LocalFileLike;
           try {
             file = await entry.getFile();
@@ -506,10 +511,6 @@ export class LocalDirectory {
             filesSkipped += 1;
             continue;
           }
-          // filesExamined bounds the work (every getFile() costs a round trip),
-          // including for files we then skip — otherwise a binary-heavy tree
-          // would only be stopped by the byte budget.
-          filesExamined += 1;
           // Skipped files are counted, not silently invisible: without this a
           // "no match" could mean "the only copy was a 4 MB bundle we never
           // opened", which would send the agent to the wrong conclusion.
@@ -527,7 +528,12 @@ export class LocalDirectory {
           bytesScanned += file.size;
           let content: string;
           try {
-            content = await file.text();
+            // Strict decode like read(): undecodable bytes would scan as
+            // mojibake and report a false "No match" over a file read()
+            // correctly refuses.
+            content = new TextDecoder('utf-8', { fatal: true }).decode(
+              await file.arrayBuffer(),
+            );
           } catch {
             filesSkipped += 1;
             continue;

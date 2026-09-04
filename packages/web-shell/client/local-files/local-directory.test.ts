@@ -449,6 +449,41 @@ describe('LocalDirectory.search', () => {
     ).rejects.toMatchObject({ code: 'invalid_path' });
   });
 
+  it('counts a failed getFile against the file budget', async () => {
+    const root = new FakeDir('root');
+    for (const name of ['a', 'b', 'c']) {
+      root.files.set(name, {
+        kind: 'file',
+        name,
+        getFile: async () => {
+          throw domError('NotAllowedError', 'grant revoked mid-scan');
+        },
+        createWritable: async () => new FakeWriter(new FakeFile('')),
+      } as unknown as FakeFileHandle);
+    }
+    // The attempt counts, not the success: a mid-scan revocation must stop at
+    // the cap instead of paying a failing round trip per file.
+    const result = await new LocalDirectory(root).search('x', { maxFiles: 2 });
+    expect(result.filesSkipped).toBe(2);
+    expect(result.truncatedBy).toBe('files');
+    expect(result.hits).toEqual([]);
+  });
+
+  it('skips undecodable files in search instead of scanning mojibake', async () => {
+    const root = new FakeDir('root');
+    root.files.set(
+      'latin1.txt',
+      new FakeFileHandle(
+        'latin1.txt',
+        new FakeFile('', new Uint8Array([0x63, 0x61, 0x66, 0xe9])),
+      ),
+    );
+    const result = await new LocalDirectory(root).search('café');
+    expect(result.filesScanned).toBe(0);
+    expect(result.filesSkipped).toBe(1);
+    expect(result.hits).toEqual([]);
+  });
+
   it('searches a subtree only', async () => {
     const result = await new LocalDirectory(tree()).search('export', {
       path: 'src/util',

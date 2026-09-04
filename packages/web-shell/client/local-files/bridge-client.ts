@@ -535,6 +535,18 @@ export class LocalFilesBridge {
           }, this.options.registerTimeoutMs ?? DEFAULTS.registerTimeoutMs);
           return;
         }
+        if (frame.code === 'rate_limited') {
+          // The daemon shed this one frame to keep service up; the connection
+          // and the registration stay live. While registering, join the
+          // retry budget; while connected, the agent-side request fails
+          // through the registrar's own timeout. Terminating the bridge here
+          // would turn a single shed frame into a session-level outage of
+          // every tool until a manual reconnect.
+          if (this.state.phase === 'registering') {
+            void this.retryRegister(message);
+          }
+          return;
+        }
         this.fail(String(frame.code ?? 'mcp_error'), message);
         return;
       }

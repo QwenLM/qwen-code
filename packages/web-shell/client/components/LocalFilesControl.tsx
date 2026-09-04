@@ -11,6 +11,7 @@ import type {
   DaemonClient,
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   useConnection,
   useWorkspace,
@@ -220,9 +221,17 @@ export function createLocalFilesRewarm(options: {
           ? options.client.workspaceById(selector.value)
           : options.client.workspaceByCwd(selector.value);
       await workspace.ensureRuntime();
-    } catch {
-      // A daemon without the qualified route still needs the child warm.
-      await options.preheat();
+    } catch (err) {
+      // Only a daemon without the qualified route justifies the legacy
+      // preheat; any other failure (spawn, timeout, unknown workspace) must
+      // surface — retryRegister tolerates a failed re-warm, and silently
+      // preheating the primary runtime for a secondary session is the exact
+      // failure this function exists to prevent.
+      if (err instanceof DaemonHttpError && err.status === 404) {
+        await options.preheat();
+        return;
+      }
+      throw err;
     }
   };
 }

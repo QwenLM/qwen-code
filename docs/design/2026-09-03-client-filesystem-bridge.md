@@ -137,7 +137,7 @@ server 名要短（会进每个工具名，事实 5）：`local-files` → `mcp_
 
 **片3 — daemon 侧最小改动（已完成，随本 PR 提交）**
 
-改动落在两个文件，`ClientMcpSenderRegistry` 本身**一行未动**（`setSession`/`ownsSession`/`deleteSession`/`lookup` 全部是既有能力）：
+改动落在两个文件。`ClientMcpSenderRegistry` 的既有能力（`ownsSession`/`lookup`）保持原样，但回滚安全性要求两处签名扩展：会话 sender 条目携带**按次注册的令牌**（`setSession` 新增可选 `registration` 参数并存储），`deleteSession` 新增同名可选参数——传入时只回滚存入该令牌的那次注册，使一个迟到失败的注册不会拆掉同一连接上更新的活跃重注册；不传令牌时保持既有的 owner-only 语义（unregister/dispose 拆除路径）。
 
 - `acp-http/client-mcp-ws.ts`：`McpRegisterFrame` 增加可选 `sessionId`；新增 `ClientMcpServerScope`；`ClientMcpServerProvider` 的两个方法带上可选 scope；`ClientMcpWsConnection` 用 `serverScopes` map 记住每个 server 的注册 scope，使 `mcp_unregister` 与 WS close 的 `dispose()` 都按**原 scope** 拆除（少了 sessionId 就会漏拆会话侧那份、留下死 transport）。非法 `sessionId` 返回结构化 `invalid_session_id`。
 - `acp-http/client-mcp-sender-registry.ts`：`ClientMcpBridge` 增加 `addSessionRuntimeMcpServer`/`removeSessionRuntimeMcpServer`；新增 `registerSessionScopedClientMcpServer`，在 `scope.sessionId` 存在时接管，镜像 `channel-worker-group.ts:258-330` 的生产序列。workspace 路径逐字未改。

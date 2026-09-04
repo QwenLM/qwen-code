@@ -453,7 +453,61 @@ describe('useLocalFilesBridge restore', () => {
     });
     await h.flush();
     expect(h.sockets).toHaveLength(2);
+    // The replaced socket must be closed: close is the daemon's
+    // server-removal signal, so a leaked one keeps a stale registration.
+    expect(h.sockets[0]!.closeCount).toBe(1);
     expect(h.sockets[1]!.url).toBe('wss://daemon.example/workspaces/ws-2/acp');
+    h.unmount();
+  });
+
+  it('re-queries permission before rebinding onto a new session', async () => {
+    const perms: { query?: PermissionState; request?: PermissionState } = {
+      query: 'granted',
+    };
+    const handle = fakeHandle('ai_coding', perms);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store: fakeStore(handle),
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+
+    // The grant lapses after the original connect (revoked in site settings):
+    // the rebind must not re-register a bridge whose calls all reject.
+    perms.query = 'prompt';
+    h.rerender({ sessionId: 'session-2' });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    expect(h.get().status.phase).toBe('needs-gesture');
+    h.unmount();
+  });
+
+  it('does not resurrect the bridge when disconnect lands during the rebind query', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store: fakeStore(handle),
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+
+    // The rebind query is in flight when the user disconnects: the
+    // continuation must not start a bridge behind the disconnect.
+    h.rerender({ sessionId: 'session-2' });
+    await act(async () => {
+      h.get().disconnect();
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    expect(h.get().status.phase).toBe('idle');
     h.unmount();
   });
 

@@ -22,17 +22,30 @@ export interface DirectoryHandleStore {
 function openDatabase(idb: IDBFactory): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = idb.open(DB_NAME, DB_VERSION);
+    let discarded = false;
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         db.createObjectStore(STORE_NAME);
       }
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      // `blocked` is not terminal for an open request: a success can still
+      // follow it. Resolving then would be a no-op on the already-rejected
+      // promise while the fresh connection leaks — and a leaked connection
+      // blocks every future version upgrade.
+      if (discarded) {
+        request.result.close();
+        return;
+      }
+      resolve(request.result);
+    };
     request.onerror = () =>
       reject(request.error ?? new Error('IndexedDB open failed'));
-    request.onblocked = () =>
+    request.onblocked = () => {
+      discarded = true;
       reject(new Error('IndexedDB open blocked by another connection'));
+    };
   });
 }
 
