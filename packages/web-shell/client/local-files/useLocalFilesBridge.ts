@@ -218,7 +218,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     const permission = await ensureReadwritePermission(stored);
     if (generationRef.current !== generation) return;
     if (permission.state !== 'granted') {
-      handleRef.current = stored;
+      // Deliberately NOT stored in `handleRef`: the session-rebind effect
+      // starts a bridge from whatever it holds, and an ungranted handle would
+      // register tools whose every call the browser then rejects, while the
+      // UI reports a connected bridge. `connect()` re-reads the store instead.
       // Needs a real click; an effect cannot supply the activation.
       setStatus({
         phase: 'needs-gesture',

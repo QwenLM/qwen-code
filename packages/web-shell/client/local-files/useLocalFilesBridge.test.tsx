@@ -396,6 +396,47 @@ describe('useLocalFilesBridge restore', () => {
     h.unmount();
   });
 
+  it('does not start a bridge from an ungranted handle on session switch', async () => {
+    const handle = fakeHandle('ai_coding', {
+      query: 'prompt',
+      request: 'granted',
+    });
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store: fakeStore(handle),
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    // Rebinding must not promote a handle the browser has not granted: the
+    // registration would succeed and every tool call would then fail.
+    h.rerender({ sessionId: 'session-2' });
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+    expect(h.sockets).toHaveLength(0);
+
+    // The gesture path still binds to the session active at click time.
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    h.sockets[0]!.emitOpen();
+    h.sockets[0]!.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    expect(h.sockets[0]!.framesOfType('mcp_register')).toEqual([
+      { type: 'mcp_register', server: 'local-files', sessionId: 'session-2' },
+    ]);
+    h.unmount();
+  });
+
   it('leaves a denied grant alone and asks for a fresh pick', async () => {
     const stored = fakeHandle('old', { query: 'denied' });
     const fresh = fakeHandle('new', { query: 'granted' });
