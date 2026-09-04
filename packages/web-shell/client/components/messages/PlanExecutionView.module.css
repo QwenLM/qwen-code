@@ -244,10 +244,12 @@
 }
 
 /* 168px lanes still put a three-layer plan at ~588px, which scrolls on a
-   390px phone and grows by a lane with every extra layer. This step gets a
-   three-layer plan under a phone viewport; deeper plans still scroll
-   horizontally, which is the honest limit of narrowing alone — reusing the
-   flat layout is tracked in #10866. */
+   390px phone and grows by a lane with every extra layer. This step brings
+   a three-layer plan to ~396px (3×116px lanes, 2×18px gaps, 2×6px canvas
+   padding): it fits phones wider than ~396px, and a 390px phone still
+   scrolls the last ~6px. Deeper plans scroll horizontally at any phone
+   width, which is the honest limit of narrowing alone — reusing the flat
+   layout is tracked in #10866. */
 @media (max-width: 480px) {
   .dagCanvas {
     --plan-layer-width: 116px;
