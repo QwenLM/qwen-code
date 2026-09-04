@@ -57,10 +57,12 @@ describe('security workflows', () => {
     );
 
     expect(workflow).toContain('pull_request:');
-    expect(workflow).toContain('push:');
+    expect(workflow).not.toContain('\n  push:');
     expect(workflow).toContain("- cron: '30 2 * * *'");
     expect(dependencyJob).toContain('if: "github.event_name == \'schedule\'"');
-    expect(secretScanJob).toContain('if: "github.event_name != \'schedule\'"');
+    expect(secretScanJob).toContain(
+      'if: "github.event_name == \'pull_request\'"',
+    );
     expect(dependencyJob).not.toContain('continue-on-error');
     expect(secretScanJob).not.toContain('continue-on-error');
     expect(trackingJob).toContain("needs: 'dependency-cve'");
@@ -121,9 +123,7 @@ describe('security workflows', () => {
     );
     expect(trufflehogPin).not.toBeNull();
     expect(trufflehogStep).toContain(`version: '${trufflehogPin?.[1]}'`);
-    expect(trufflehogStep).toContain(
-      "if: \"github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'\"",
-    );
+    expect(trufflehogStep).not.toContain('github.event.before');
     expect(trufflehogStep).toContain("extra_args: '--only-verified'");
     expect(trufflehogStep).toContain(
       'trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11',
