@@ -40,6 +40,7 @@ import { dispatchAgentViewSession } from './supervisor-dispatch.js';
 import {
   clearAgentViewWorkerPids,
   digestAgentViewWorkerToken,
+  findAgentViewRosterEntry,
   getAgentViewSessionPaths,
   getAgentViewStorePaths,
   inputKindValue,
@@ -1123,9 +1124,7 @@ class AgentViewSupervisorProcessHandler
       sessionId,
       state,
       activity: redactAgentViewActivity(activity),
-      rosterEntry: roster.sessions.find(
-        (entry) => sanitizeSessionId(entry.sessionId) === sessionId,
-      ),
+      rosterEntry: findAgentViewRosterEntry(roster, sessionId),
       launch: redactAgentViewLaunch(
         await readAgentViewLaunch(sessionId, store),
       ),
