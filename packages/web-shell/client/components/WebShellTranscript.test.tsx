@@ -11,6 +11,7 @@ interface Observation {
   theme: string;
   language: string;
   renderMode: string;
+  documentExpanded: boolean;
   compactMode: boolean;
   customization: Record<string, unknown>;
 }
@@ -52,6 +53,9 @@ vi.mock('./MessageList', async () => {
   const { useI18n } = await import('../i18n');
   const { useTheme } = await import('../themeContext');
   const { useTranscriptRenderMode } = await import('../transcriptRenderMode');
+  const { useTranscriptDocumentExpanded } = await import(
+    '../transcriptRenderMode'
+  );
   return {
     MessageList: (props: Record<string, unknown> & { messages: Message[] }) => {
       if (observed.shouldThrow) throw new Error('message-list boom');
@@ -61,6 +65,7 @@ vi.mock('./MessageList', async () => {
         theme: useTheme(),
         language: useI18n().language,
         renderMode: useTranscriptRenderMode(),
+        documentExpanded: useTranscriptDocumentExpanded(),
         compactMode: React.useContext(CompactModeContext),
         customization: customization as Record<string, unknown>,
       });
@@ -202,6 +207,103 @@ describe('WebShellTranscript contract', () => {
     expect(root?.classList.contains('dark')).toBe(false);
     expect(root?.lang).toBe('zh-CN');
     expect(root?.style.getPropertyValue('--chat-content-width')).toBe('720px');
+  });
+
+  it('uses the non-virtualized, expanded document boundary', () => {
+    mount(
+      <WebShellTranscript
+        blocks={[]}
+        renderMode="document"
+        collapseCompletedTurns
+        markdownTableMode="advanced"
+        virtualScrollThreshold={1}
+      />,
+    );
+
+    const observation = latestObservation();
+    expect(observation.renderMode).toBe('document');
+    expect(observation.documentExpanded).toBe(true);
+    expect(observation.props.virtualScrollThreshold).toBe(
+      Number.MAX_SAFE_INTEGER,
+    );
+    expect(observation.props.hideSessionTimeline).toBe(true);
+    expect(observation.customization.collapseCompletedTurns).toBe(false);
+    expect(observation.customization.markdownTableMode).toBe('basic');
+    expect(
+      document
+        .querySelector('[data-web-shell-root]')
+        ?.getAttribute('data-transcript-render-mode'),
+    ).toBe('document');
+  });
+
+  it('projects the document-wide expansion state without changing render mode', () => {
+    mount(
+      <WebShellTranscript
+        blocks={[]}
+        renderMode="document"
+        documentExpanded={false}
+      />,
+    );
+
+    const observation = latestObservation();
+    expect(observation.renderMode).toBe('document');
+    expect(observation.documentExpanded).toBe(false);
+    expect(
+      document
+        .querySelector('[data-web-shell-root]')
+        ?.getAttribute('data-document-expanded'),
+    ).toBe('false');
+  });
+
+  it('uses safe tool projections only in document mode', () => {
+    const blocks: DaemonTranscriptBlock[] = [
+      {
+        id: 'write-block',
+        kind: 'tool',
+        toolCallId: 'write-call',
+        toolName: 'write_file',
+        title: 'Write file',
+        status: 'completed',
+        rawInput: {
+          file_path: 'src/generated.ts',
+          content: 'RAW_CONTENT\n',
+        },
+        rawOutput: { audit: 'RAW_RESULT' },
+        preview: {
+          kind: 'file_diff',
+          path: 'src/generated.ts',
+          newText: 'SAFE_CONTENT\n',
+        },
+        resultPreview: { kind: 'text', text: 'SAFE_RESULT' },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ];
+    const view = mount(<WebShellTranscript blocks={blocks} />);
+
+    const readonlyMessage = latestObservation().props.messages[0];
+    const readonlyTool =
+      readonlyMessage?.role === 'tool_group'
+        ? readonlyMessage.tools[0]
+        : undefined;
+    expect(readonlyTool?.args).toEqual({
+      file_path: 'src/generated.ts',
+      content: 'RAW_CONTENT\n',
+    });
+    expect(readonlyTool?.rawOutput).toEqual({ audit: 'RAW_RESULT' });
+
+    view.render(<WebShellTranscript blocks={blocks} renderMode="document" />);
+    const documentMessage = latestObservation().props.messages[0];
+    const documentTool =
+      documentMessage?.role === 'tool_group'
+        ? documentMessage.tools[0]
+        : undefined;
+    expect(documentTool?.args).toEqual({
+      path: 'src/generated.ts',
+      newText: 'SAFE_CONTENT\n',
+    });
+    expect(documentTool?.rawOutput).toBe('SAFE_RESULT');
   });
 
   it('reconverts on language or block changes and supports an empty list', () => {
