@@ -506,7 +506,7 @@ const SETTINGS_SCHEMA = {
             requiresRestart: false,
             default: '',
             description:
-              'Path to a custom keyterms file (one term per line, "#" for comments) that biases voice transcription toward domain-specific terms. Relative paths resolve from the workspace root; defaults to ".qwen/voice-keyterms.txt" when present. The file contents are sent to the ASR provider and it is read only in trusted workspaces. Only applies to Qwen ASR models (qwen3-asr-*).',
+              'Path to a custom keyterms file (one term per line, "#" for comments) that biases voice transcription toward domain-specific terms. Relative paths resolve from the workspace root; defaults to ".qwen/voice-keyterms.txt" when present. The file contents are sent to the ASR provider and it is read only in trusted workspaces. Only applies to Qwen ASR models (qwen3-asr-* and the qwen-audio-* ASR family).',
             showInDialog: false,
           },
           refineTranscript: {
