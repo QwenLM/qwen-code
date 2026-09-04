@@ -323,17 +323,20 @@ function isCompressionPending(pendingHistoryItems: HistoryItemWithoutId[]) {
 }
 
 export function isInputActiveForState({
+  isConfigInitialized,
   initError,
   isProcessing,
   hasPendingCompression,
   streamingState,
 }: {
+  isConfigInitialized: boolean;
   initError: unknown;
   isProcessing: boolean;
   hasPendingCompression: boolean;
   streamingState: StreamingState;
 }) {
   return (
+    isConfigInitialized &&
     !initError &&
     (!isProcessing || hasPendingCompression) &&
     (streamingState === StreamingState.Idle ||
@@ -3442,12 +3445,14 @@ export const AppContainer = (props: AppContainerProps) => {
   /**
    * Determines if the input prompt should be active and accept user input.
    * Input is disabled during:
+   * - Configuration and chat initialization
    * - Initialization errors
    * - Slash command processing, except pending compression where input can queue
    * - Tool confirmations (WaitingForConfirmation state)
    * - Any future streaming states not explicitly allowed
    */
   const isInputActive = isInputActiveForState({
+    isConfigInitialized,
     initError,
     isProcessing,
     hasPendingCompression,

@@ -1778,6 +1778,7 @@ describe('AppContainer State Management', () => {
     it('keeps input active while compression is processing', () => {
       expect(
         isInputActiveForState({
+          isConfigInitialized: true,
           initError: null,
           isProcessing: true,
           hasPendingCompression: true,
@@ -1787,8 +1788,21 @@ describe('AppContainer State Management', () => {
 
       expect(
         isInputActiveForState({
+          isConfigInitialized: true,
           initError: null,
           isProcessing: true,
+          hasPendingCompression: false,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(false);
+    });
+
+    it('keeps input inactive until chat initialization completes', () => {
+      expect(
+        isInputActiveForState({
+          isConfigInitialized: false,
+          initError: null,
+          isProcessing: false,
           hasPendingCompression: false,
           streamingState: StreamingState.Idle,
         }),
