@@ -129,7 +129,17 @@ describe('ECS runner qwen update workflow', () => {
     expect(verify).toMatch(
       /^\s*cat \/usr\/local\/lib\/node_modules\/@qwen-code\/qwen-code\/package\.json/m,
     );
-    expect(verify).not.toMatch(/sudo (cat|ls|env)/);
+    // Assert the class documented above — every sudo probe must be
+    // non-interactive — instead of enumerating the verbs used today: a bare
+    // `sudo` with any other verb passes an enumeration and blocks on a
+    // password prompt until the job timeout on exactly the pools these
+    // diagnostics exist for. The probe comment mentions `sudo` in prose, so
+    // the comment lines stay out of the check.
+    const verifyCode = verify
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(verifyCode).not.toMatch(/sudo\s+(?!-n\b)/);
   });
 
   it('captures the installed version tolerantly', () => {
