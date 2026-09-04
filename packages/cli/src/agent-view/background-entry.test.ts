@@ -22,12 +22,30 @@ vi.mock('./supervisor-dispatch.js', () => ({
 
 const stdout: string[] = [];
 let stderr: string[] = [];
+// Overridable per test: the EPIPE case makes the stdout write throw
+// after the dispatch RPC resolves.
+let writeStdoutLineImpl = (line: string): void => {
+  stdout.push(line);
+};
+let ignoreBrokenPipeCalls = 0;
 vi.mock('../utils/stdioHelpers.js', () => ({
-  writeStdoutLine: (line: string) => stdout.push(line),
+  writeStdoutLine: (line: string) => writeStdoutLineImpl(line),
+  // Mirror the real helper: swallows whatever the write throws, because
+  // the write is incidental once the work is done.
+  writeStdoutLineSafe: (line: string) => {
+    try {
+      writeStdoutLineImpl(line);
+    } catch {
+      // stdout is gone. Whatever this line had to say, its reader left.
+    }
+  },
   // Mirror the real helpers' newline contract so the assertions pin
   // the exact bytes the user sees.
   writeStderrLine: (line: string) => {
     stderr.push(line.endsWith('\n') ? line : `${line}\n`);
+  },
+  ignoreBrokenPipe: () => {
+    ignoreBrokenPipeCalls += 1;
   },
 }));
 
@@ -39,6 +57,10 @@ const { BACKGROUND_FLAG } = await import('./entry-flags.js');
 beforeEach(() => {
   stdout.length = 0;
   stderr = [];
+  writeStdoutLineImpl = (line: string): void => {
+    stdout.push(line);
+  };
+  ignoreBrokenPipeCalls = 0;
   supervisorDispatch
     .mockReset()
     .mockResolvedValue({ sessionId: 'sess-abc', state: 'created' });
@@ -198,6 +220,40 @@ describe('runBackgroundDispatch', () => {
     expect(supervisorDispatch).toHaveBeenCalledWith('audit', '/w/app');
     expect(stdout[0]).toContain('sess-rpc');
     expect(stdout.join('\n')).toContain('qwen sessions ps');
+  });
+
+  it('installs broken-pipe protection before dispatching', async () => {
+    // The dispatch RPC can block for seconds while the worker starts; a
+    // reader that leaves during that window (`qwen --bg "..." | true`,
+    // a CI step closing the pipe) sends EPIPE back once the success
+    // writes arrive — after the work is done.
+    await runBackgroundDispatch('audit', '/w/app');
+
+    expect(ignoreBrokenPipeCalls).toBe(1);
+  });
+
+  it('keeps exit 0 when the success write hits a broken pipe', async () => {
+    // The dispatch succeeded — the session is recorded and the worker
+    // spawned — then the stdout write throws EPIPE because the reader
+    // is gone. The outcome must not flip: no launch-failure line, exit
+    // code 0. A wrapper script keying on the exit code would otherwise
+    // conclude the launch failed and start a second agent on the same
+    // prompt.
+    supervisorDispatch.mockImplementation(async () => {
+      writeStdoutLineImpl = (): void => {
+        const error = new Error('write EPIPE') as Error & { code: string };
+        error.code = 'EPIPE';
+        throw error;
+      };
+      return { sessionId: 'sess-abc', state: 'created' };
+    });
+
+    const code = await runBackgroundDispatch('audit', '/w/app');
+
+    expect(code).toBe(0);
+    expect(stderr.join('')).not.toContain(
+      'Could not start a background session',
+    );
   });
 
   it('refuses an empty prompt with the usage, and dispatches nothing', async () => {

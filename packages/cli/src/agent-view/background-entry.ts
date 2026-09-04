@@ -29,7 +29,11 @@
  */
 
 import { getErrorMessage } from '../utils/errors.js';
-import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import {
+  ignoreBrokenPipe,
+  writeStderrLine,
+  writeStdoutLineSafe,
+} from '../utils/stdioHelpers.js';
 import { BACKGROUND_FLAG } from './entry-flags.js';
 
 /**
@@ -132,8 +136,19 @@ export async function runBackgroundDispatch(
     return 1;
   }
 
+  // The dispatch RPC can block for seconds while the worker starts; a
+  // reader that leaves during that window (`qwen --bg "..." | true`, a
+  // CI step closing the pipe) sends EPIPE back once the success writes
+  // below arrive — after the session is already running. The async
+  // 'error' event would crash the process and the sync throw would land
+  // in the launch-failure catch; both would flip a successful launch
+  // into exit 1 and have a wrapping script start a second agent on the
+  // same prompt.
+  ignoreBrokenPipe();
+
   const { ensureAgentViewSupervisor } = await import('./supervisor-runner.js');
 
+  let sessionId: string;
   try {
     // Route through the supervisor's dispatch RPC: it is the one path that
     // records the session AND spawns its worker — it writes the store with
@@ -143,15 +158,20 @@ export async function runBackgroundDispatch(
     // nothing ever starts. The ready-wait means this can block while the
     // worker starts; the returned session id is the output contract.
     const supervisor = await ensureAgentViewSupervisor();
-    const { sessionId } = (await supervisor.dispatch(prompt, cwd)) as {
+    ({ sessionId } = (await supervisor.dispatch(prompt, cwd)) as {
       sessionId: string;
-    };
-    writeStdoutLine(`Started background session ${sessionId}`);
-    writeStdoutLine('See it with: qwen sessions ps');
-    return 0;
+    });
   } catch (error) {
     const reason = getErrorMessage(error);
     writeStderrLine(`Could not start a background session: ${reason}`);
     return 1;
   }
+
+  // Success writes live OUTSIDE the launch try, and cannot throw: once
+  // the session is recorded and spawned, a gone reader is not a launch
+  // failure, and reporting one would certify the opposite of what
+  // happened.
+  writeStdoutLineSafe(`Started background session ${sessionId}`);
+  writeStdoutLineSafe('See it with: qwen sessions ps');
+  return 0;
 }
