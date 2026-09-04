@@ -1433,6 +1433,43 @@ describe('AppContainer State Management', () => {
       expect(capturedUIState.useTerminalBuffer).toBe(true);
     });
 
+    it('keeps input inactive until config initialization completes', async () => {
+      // Pins the wiring hop itself: AppContainer feeding its own
+      // isConfigInitialized into isInputActive. The predicate has unit tests
+      // and Composer covers isInputActive:false, but nothing asserted that this
+      // call site passes that particular boolean — any other in-scope boolean
+      // type-checks and reopens the `Chat not initialized` race with the suite
+      // still green.
+      const defaultSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={defaultSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // First synchronous render: initialization has not flipped yet.
+      expect(capturedUIState.isConfigInitialized).toBe(false);
+      expect(capturedUIState.isInputActive).toBe(false);
+
+      await flushConfigInitialization();
+
+      expect(capturedUIState.isInputActive).toBe(true);
+    });
+
     it('keeps non-TTY output on the Static path', () => {
       Object.defineProperty(process.stdout, 'isTTY', {
         value: false,
@@ -1780,6 +1817,7 @@ describe('AppContainer State Management', () => {
     it('keeps input active while compression is processing', () => {
       expect(
         isInputActiveForState({
+          isConfigInitialized: true,
           initError: null,
           isProcessing: true,
           hasPendingCompression: true,
@@ -1789,8 +1827,21 @@ describe('AppContainer State Management', () => {
 
       expect(
         isInputActiveForState({
+          isConfigInitialized: true,
           initError: null,
           isProcessing: true,
+          hasPendingCompression: false,
+          streamingState: StreamingState.Idle,
+        }),
+      ).toBe(false);
+    });
+
+    it('keeps input inactive until chat initialization completes', () => {
+      expect(
+        isInputActiveForState({
+          isConfigInitialized: false,
+          initError: null,
+          isProcessing: false,
           hasPendingCompression: false,
           streamingState: StreamingState.Idle,
         }),

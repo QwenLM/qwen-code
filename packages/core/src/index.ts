@@ -92,6 +92,7 @@ export * from './core/message-display-dispatcher.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
 export * from './core/output-styles.js';
+export * from './core/output-style-files.js';
 export * from './core/session-recovery.js';
 export * from './core/ask-user-question-restore.js';
 export * from './core/tokenLimits.js';
@@ -303,6 +304,12 @@ export {
   type ResolvedSlimmingConfig,
 } from './services/compactionInputSlimming.js';
 export { isClearedMediaPlaceholder } from './services/microcompaction/microcompact.js';
+export {
+  isApiUserPrompt,
+  findApiRewindCutPoint,
+  countApiUserPrompts,
+  type ApiUserPromptOptions,
+} from './services/api-user-prompt.js';
 export * from './services/chatRecordingService.js';
 export * from './services/branch-points.js';
 export * from './services/cronScheduler.js';
@@ -651,6 +658,7 @@ export * from './utils/github-prs.js';
 export * from './utils/github-pr-issues.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/invocation-context.js';
+export * from './utils/conversations-runtime-marker.js';
 export {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   QwenIgnoreParser,
