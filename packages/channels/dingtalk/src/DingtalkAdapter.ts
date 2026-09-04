@@ -808,6 +808,32 @@ type DingTalkClientInternals = DWClient & {
   onCallback(message: DWClientDownStream): void;
 };
 
+/* eslint-disable no-console -- swapping console.log out is the whole job here */
+let connectLogDepth = 0;
+let unsuppressedConsoleLog: typeof console.log | undefined;
+
+// Connects can overlap — a manager replacement starts while another is still
+// in flight, and either may settle first — so only the depth 1→0 transition
+// restores, to what the 0→1 transition saved. An inner scope restoring its own
+// capture would put the no-op back and leave logging off process-wide.
+async function withConnectLoggingSuppressed<T>(
+  connect: () => Promise<T>,
+): Promise<T> {
+  if (connectLogDepth++ === 0) {
+    unsuppressedConsoleLog = console.log;
+    console.log = () => {};
+  }
+  try {
+    return await connect();
+  } finally {
+    if (--connectLogDepth === 0 && unsuppressedConsoleLog) {
+      console.log = unsuppressedConsoleLog;
+      unsuppressedConsoleLog = undefined;
+    }
+  }
+}
+/* eslint-enable no-console */
+
 type DingtalkChannelConfig = ChannelConfig & {
   useConnectionManager?: unknown;
   interactiveCards?: unknown;
@@ -1015,6 +1041,11 @@ export class DingtalkChannel extends ChannelBase {
     client.onDownStream = (raw: unknown) => {
       this.onDownStream(raw, client);
     };
+    // The SDK's getEndpoint() console.log()s the resolved config (clientSecret)
+    // and the gateway response (stream ticket), ungated by its own `debug` flag.
+    // Silence rather than redact: a key allowlist stays open to future SDK logs.
+    const sdkConnect = client.connect.bind(client);
+    client.connect = () => withConnectLoggingSuppressed(sdkConnect);
   }
 
   private registerMessageHandler(client: DWClient): void {
