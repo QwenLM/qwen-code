@@ -337,18 +337,21 @@
   --node-ring: var(--status-attention-fg);
 }
 
-/* Attention folds into the same rule instead of adding a fourth status
-   token to the node face: one status, one place. It outranks the status
-   tone because it is the state the reader is being asked to act on. */
-.node[data-attention='true'] {
-  --node-rule: var(--status-attention-fg);
-  --node-ring: var(--status-attention-fg);
-}
-
 .node[data-status='blocked'],
 .node[data-status='ready'] {
   --node-accent: var(--border);
   --node-ring: var(--muted-foreground);
+}
+
+/* Attention folds into the same rule instead of adding a fourth status
+   token to the node face: one status, one place. It outranks the status
+   tone because it is the state the reader is being asked to act on — so
+   it is declared after every status tone: at equal specificity the cascade
+   lets the later rule win, and a blocked/ready node that also needs
+   attention would otherwise wear the muted ring. */
+.node[data-attention='true'] {
+  --node-rule: var(--status-attention-fg);
+  --node-ring: var(--status-attention-fg);
 }
 
 /* Selection reads as "the same edge, turned up": the border goes to full
@@ -495,10 +498,14 @@
   white-space: nowrap;
 }
 
+/* The `> span` rules below mute every direct-child span — the title
+   included — and a direct declaration beats the chip's inherited colour,
+   so the title states its own full-weight colour here. */
 .dependencyChip .dependencyTitle,
 .dependencyLink .dependencyTitle {
   overflow: hidden;
   min-width: 0;
+  color: var(--foreground);
   text-overflow: ellipsis;
   white-space: nowrap;
 }

@@ -72,6 +72,22 @@ describe('PlanExecutionView stylesheet', () => {
     )?.[0];
     expect(title).toMatch(/text-overflow:\s*ellipsis/);
     expect(title).toMatch(/min-width:\s*0/);
+    // The `> span` rules mute every direct-child span, the title included;
+    // without its own colour the title would render muted while the chip's
+    // `color: var(--foreground)` applies to no rendered text.
+    expect(title).toMatch(/color:\s*var\(--foreground\)/);
+  });
+
+  it('declares the attention tone after the blocked/ready tone', () => {
+    // Both selectors carry the same specificity, so the cascade lets the
+    // later rule win: attention must stay declared after the status tones,
+    // or a blocked node that also needs attention would wear the muted
+    // ring instead of the attention tone its comment promises.
+    const attentionAt = planCss.indexOf(".node[data-attention='true']");
+    const neutralAt = planCss.indexOf(".node[data-status='blocked']");
+    expect(attentionAt).toBeGreaterThan(-1);
+    expect(neutralAt).toBeGreaterThan(-1);
+    expect(attentionAt).toBeGreaterThan(neutralAt);
   });
 
   it('narrows the DAG lane at two viewport steps', () => {
