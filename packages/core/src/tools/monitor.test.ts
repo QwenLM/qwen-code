@@ -8,7 +8,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { Readable } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -144,6 +144,10 @@ vi.mock('../utils/shellAstParser.js', () => ({
 import { MonitorTool, sanitizeMonitorLine } from './monitor.js';
 import type { Config } from '../config/config.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
+import {
+  MAX_TASK_OUTPUT_TAIL_BYTES,
+  readTaskOutputTail,
+} from '../services/backgroundShellRegistry.js';
 import type { ToolCallConfirmationDetails } from './tools.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
@@ -717,6 +721,39 @@ describe('MonitorTool', () => {
       });
     });
 
+    it('bounds the task output file while preserving the latest output', async () => {
+      const invocation = createInvocation({ command: 'tail -f app.log' });
+
+      await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
+      const stdoutPrefix = 'old marker\n';
+      const stdoutBody = 'x'.repeat(MAX_TASK_OUTPUT_TAIL_BYTES);
+      const stderr = 'latest marker\n';
+      const output = stdoutPrefix + stdoutBody + stderr;
+      mockChild.stdout.emit('data', Buffer.from(stdoutPrefix));
+      mockChild.stdout.emit('data', Buffer.from(stdoutBody));
+      mockChild.stderr.emit('data', Buffer.from(stderr));
+      expect(task.status).toBe('running');
+      expect(task.eventCount).toBeGreaterThan(0);
+      mockChild._emitClose(0);
+
+      const captureLimit = MAX_TASK_OUTPUT_TAIL_BYTES + 1;
+      const expected = Buffer.from(output).subarray(-captureLimit);
+      await vi.waitFor(() => {
+        expect(statSync(task.outputFile).size).toBe(captureLimit);
+        expect(readFileSync(task.outputFile)).toEqual(expected);
+        expect(
+          readTaskOutputTail(task.outputFile, MAX_TASK_OUTPUT_TAIL_BYTES),
+        ).toEqual({
+          text: Buffer.from(output)
+            .subarray(-MAX_TASK_OUTPUT_TAIL_BYTES)
+            .toString('utf8')
+            .trimEnd(),
+          truncated: true,
+        });
+      });
+    });
+
     it('uses default pager env for spawned processes when pager is unset', async () => {
       const invocation = createInvocation({
         command: 'tail -f /var/log/app.log',
@@ -1162,11 +1199,15 @@ describe('MonitorTool', () => {
       });
 
       await invocation.execute(new AbortController().signal);
+      const task = monitorRegistry.getRunning()[0]!;
       mockChild._emitExit(0);
       mockChild.stdout.emit('data', Buffer.from('final line\n'));
       mockChild._emitClose(0);
 
-      expect(callback).toHaveBeenCalledTimes(2);
+      await vi.waitFor(() => {
+        expect(callback).toHaveBeenCalledTimes(2);
+        expect(readFileSync(task.outputFile, 'utf8')).toBe('final line\n');
+      });
       const [, eventModelText] = callback.mock.calls[0] as [string, string];
       const [, terminalModelText] = callback.mock.calls[1] as [string, string];
       expect(eventModelText).toContain('final line');

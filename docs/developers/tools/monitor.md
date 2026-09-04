@@ -135,13 +135,15 @@ commands without backgrounding instead.
   the same cap as monitors started by the main agent. Stop an existing monitor
   before starting another if the limit is reached.
 - **Output handling:** Stdout and stderr are merged without stream prefixes and
-  captured in the task output file. The Web Shell shows the latest 64 KiB of
-  that file. For notifications, empty lines are ignored, ANSI color and control
-  characters are stripped, and individual lines longer than 2000 characters are
-  truncated. High-volume notification output is rate-limited with a burst of 5
-  events and about 1 event per second after that; lines beyond the rate limit
-  are dropped from notifications but remain in the output file. Monitor
-  notifications flow into the agent context as
+  captured as a bounded rolling tail in the task output file. The capture keeps
+  64 KiB plus one byte used to preserve the truncation signal. The Web Shell
+  shows the latest 64 KiB; older output is discarded as new output arrives. For
+  notifications, empty lines are ignored, ANSI color and control characters are
+  stripped, and individual lines longer than 2000 characters are truncated.
+  High-volume notification output is rate-limited with a burst of 5 events and
+  about 1 event per second after that; lines beyond the rate limit are dropped
+  from notifications but remain available in the rolling tail until newer
+  output replaces them. Monitor notifications flow into the agent context as
   `<task-notification>` content. Structural notification tags are defanged, but
   the model still reads each line's text, so avoid monitoring streams that
   external parties can write to unless you trust the model to ignore embedded

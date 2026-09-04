@@ -7,8 +7,10 @@ panels without relying on Monitor task notifications reaching the Web Shell.
 
 ## Design
 
-- Capture Monitor stdout and stderr in its existing reserved `outputFile`.
-  Shell already writes both streams to its task output file.
+- Capture a rolling tail of Monitor stdout and stderr in its existing reserved
+  `outputFile`, bounded to 64 KiB plus one byte that preserves the task output
+  API's truncation signal. Shell already writes both streams to its task output
+  file.
 - Add a live-session-owner-scoped read route:
   `GET /session/:id/tasks/:taskId/output?kind=shell|monitor`.
 - Resolve the request through the selected session runtime and look up the task
@@ -36,7 +38,8 @@ panels without relying on Monitor task notifications reaching the Web Shell.
 
 ## Verification
 
-- Core tests cover Monitor file creation and stdout/stderr capture.
+- Core tests cover Monitor file creation, stdout/stderr capture, and bounded
+  rolling-tail behavior.
 - Core, ACP, and bridge tests collectively cover task ownership, kind
   validation, missing tasks, truncation, symlink refusal, and the new status
   method.
