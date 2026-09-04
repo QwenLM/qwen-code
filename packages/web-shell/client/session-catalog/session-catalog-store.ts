@@ -630,6 +630,17 @@ export class SessionCatalogStore {
     return this.liveSessionsByWorkspace.has(workspaceCwd);
   }
 
+  /**
+   * Drop the retained live-state snapshot after its channel has failed for
+   * long enough that the snapshot can no longer be called current. Readers
+   * then report the answer as unknown rather than serving a last-known value
+   * indefinitely — a daemon that dies mid-turn must not leave a pane believing
+   * the turn is still running for the life of the tab (#9487).
+   */
+  markWorkspaceLiveStateUnavailable(workspaceCwd: string): void {
+    this.clearLiveSessions(workspaceCwd);
+  }
+
   subscribeLiveSessions(
     workspaceCwd: string,
     listener: () => void,

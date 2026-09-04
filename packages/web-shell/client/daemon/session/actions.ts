@@ -878,11 +878,16 @@ export function createDaemonSessionActions({
     setDaemonActivePrompt(active) {
       const previous = daemonActivePromptRef.current;
       daemonActivePromptRef.current = active;
-      // Only a true -> false transition is a settle signal. Going true (or
-      // going unknown) must never revive a finished turn: the live-state poll
+      // Losing `true` is the settle signal — whether the daemon reported the
+      // turn finished, or the authority itself went unknown because its
+      // channel stopped answering. Either way nothing vouches for the turn any
+      // more, and an uncovered pane's pre-existing behaviour is to settle.
+      // Gaining `true` never revives a finished turn: the live-state poll
       // trails the event stream, so reviving would flash the indicator back on
-      // for one poll interval after every turn_complete.
-      if (previous !== true || active !== false) return;
+      // for one poll interval after every turn_complete. A turn that really is
+      // still running is revived by its next event, as it was before this
+      // signal existed.
+      if (previous !== true || active === true) return;
       // Terminal events normally settle the turn well before this. This is the
       // backstop for the ones that never arrive (dropped stream, daemon
       // restart mid-turn), so a pane held alive through silent tool gaps

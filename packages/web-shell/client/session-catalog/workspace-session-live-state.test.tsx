@@ -21,6 +21,7 @@ import {
   SESSION_LIVE_STATE_ERROR_RETRY_MS,
   SESSION_LIVE_STATE_POLL_MS,
   SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS,
+  SESSION_LIVE_STATE_STALE_AFTER_FAILURES,
   useWorkspaceSessionLiveState,
 } from './workspace-session-live-state';
 
@@ -552,6 +553,42 @@ describe('useWorkspaceSessionLiveState', () => {
     });
     expect(getLiveState.mock.calls.length).toBeGreaterThan(1);
     expect(container.textContent).toBe('false:false:no-group');
+  });
+
+  it('drops the retained snapshot once the channel stops answering', async () => {
+    // A blip keeps the last-known state — one failed request must not disturb a
+    // running turn. Sustained failure is different: retaining the snapshot lets
+    // a reader vouch for a turn nobody can confirm, so a pane can show a dead
+    // daemon's turn as running for the life of the tab (#9487).
+    await renderProbe();
+    const store = getSessionCatalogStore(client);
+    expect(store.hasLiveSessions('/work')).toBe(true);
+
+    getLiveState.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS,
+      );
+    });
+    expect(store.hasLiveSessions('/work')).toBe(true);
+
+    getLiveState.mockRejectedValue(new Error('offline'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_STALE_AFTER_FAILURES *
+          (SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS),
+      );
+    });
+    expect(store.hasLiveSessions('/work')).toBe(false);
+
+    // A poll that answers again restores the authority.
+    getLiveState.mockResolvedValue(liveState(1));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS,
+      );
+    });
+    expect(store.hasLiveSessions('/work')).toBe(true);
   });
 
   it('lets an explicit refresh bypass live-state error backoff', async () => {

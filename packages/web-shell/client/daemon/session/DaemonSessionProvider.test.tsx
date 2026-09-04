@@ -10434,6 +10434,16 @@ describe('DaemonSessionProvider', () => {
           await flushPromises();
         });
         expect(promptStatus).not.toBe('idle');
+
+        // The authority's own channel then stops answering too — a dead daemon,
+        // not a long tool call. Once the live-state poll gives up on its
+        // snapshot the bridge publishes `undefined`, and the pane must be
+        // released rather than showing a running turn for the tab's lifetime.
+        await act(async () => {
+          actions?.setDaemonActivePrompt(undefined);
+          await flushPromises();
+        });
+        expect(promptStatus).toBe('idle');
       } finally {
         vi.useRealTimers();
       }

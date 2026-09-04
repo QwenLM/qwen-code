@@ -315,15 +315,33 @@ describe('createDaemonSessionActions', () => {
       expect(setPromptStatus).toHaveBeenCalledWith('idle');
     });
 
+    it('settles when the authority itself goes unknown', () => {
+      // A dead daemon: the live-state channel stops answering, its retained
+      // snapshot is dropped, and the bridge publishes `undefined`. Nothing
+      // vouches for the turn any more, so the pane must be released instead of
+      // holding a running turn for the life of the tab.
+      const { actions, setPromptStatus } = createActionsHarness();
+
+      actions.setDaemonActivePrompt(true);
+      actions.setDaemonActivePrompt(undefined);
+      expect(setPromptStatus).toHaveBeenCalledWith('idle');
+    });
+
     it('never revives a settled turn', () => {
       // The live-state poll trails the event stream, so a stale `true`
       // arriving after turn_complete must not flash the indicator back on.
+      // Only losing `true` is a signal; gaining it, or never having had it,
+      // is not.
       const { actions, setPromptStatus } = createActionsHarness();
 
       actions.setDaemonActivePrompt(false);
       actions.setDaemonActivePrompt(true);
-      actions.setDaemonActivePrompt(undefined);
       expect(setPromptStatus).not.toHaveBeenCalled();
+
+      actions.setDaemonActivePrompt(undefined);
+      actions.setDaemonActivePrompt(undefined);
+      actions.setDaemonActivePrompt(false);
+      expect(setPromptStatus).toHaveBeenCalledTimes(1);
     });
 
     it('leaves a locally submitted prompt alone', () => {
