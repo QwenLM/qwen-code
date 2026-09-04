@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
   buildSessionAwareFetch,
@@ -20,6 +20,10 @@ function config(sessionId = 'session-1'): Config {
 }
 
 describe('outbound session ID', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it.each([
     'routify.alibaba-inc.com',
     'routify-online.alibaba-inc.com',
@@ -145,6 +149,22 @@ describe('outbound session ID', () => {
     );
 
     const headers = new Headers(runtimeFetch.mock.calls[0][1]?.headers);
+    expect(headers.get(SESSION_ID_HEADER)).toBe('session-1');
+  });
+
+  it('falls back to globalThis.fetch when no runtime fetch exists', async () => {
+    const fetchStub = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(),
+    );
+    vi.stubGlobal('fetch', fetchStub);
+    const sessionAwareFetch = buildSessionAwareFetch(undefined, config());
+
+    await sessionAwareFetch(
+      'https://routify-pub.alibaba-inc.com/protocol/openai/v1',
+    );
+
+    const headers = new Headers(fetchStub.mock.calls[0][1]?.headers);
     expect(headers.get(SESSION_ID_HEADER)).toBe('session-1');
   });
 });

@@ -105,10 +105,7 @@ export class LlmContentGenerator implements ContentGenerator {
   }
 
   private buildHttpOptions(httpOptions?: HttpOptions): HttpOptions | undefined {
-    const destination =
-      httpOptions?.baseUrl ??
-      this.clientBaseUrl ??
-      this.contentGeneratorConfig?.baseUrl;
+    const destination = httpOptions?.baseUrl ?? this.clientBaseUrl;
     if (!this.cliConfig || !destination) return httpOptions;
 
     const sessionHeaders = buildSessionIdHeaders(this.cliConfig, destination);

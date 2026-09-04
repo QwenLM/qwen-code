@@ -397,7 +397,7 @@ Verify both flags when wiring an ARMS+DashScope correlation setup:
 
 Qwen Code's LLM requests through the OpenAI-compatible, DashScope, Anthropic,
 Gemini, and Vertex provider paths include the current Qwen Code session ID in
-the `session_id` header when addressed directly to `routify.alibaba-inc.com`,
+the `session_id` header when addressed over HTTPS directly to `routify.alibaba-inc.com`,
 `routify-online.alibaba-inc.com`, or `routify-pub.alibaba-inc.com`. Routify's
 ModelRouter uses this value for session affinity and traffic marking. This
 behavior is not controlled by `telemetry.enabled` or
