@@ -3253,6 +3253,99 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('keeps legacy aborted semantics without a usage-limited canonical state', async () => {
+    const session = createMockSession({
+      events: async function* goalStatusEvents() {
+        yield {
+          id: 14,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-blocked',
+                    revision: 2,
+                    objective: 'wait for approval',
+                    status: 'blocked',
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 4,
+                    activeTimeMs: 5000,
+                    createdAt: 1234,
+                    updatedAt: 2345,
+                    lastReason: 'approval required',
+                  },
+                },
+                goalStatus: {
+                  kind: 'aborted',
+                  condition: 'wait for approval',
+                  lastReason: 'approval required',
+                },
+              },
+            },
+          },
+        };
+        yield {
+          id: 15,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalStatus: {
+                  kind: 'aborted',
+                  condition: 'stop the legacy run',
+                },
+              },
+            },
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: {
+          kind: 'aborted',
+          condition: 'wait for approval',
+          lastReason: 'approval required',
+        },
+      }),
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: {
+          kind: 'aborted',
+          condition: 'stop the legacy run',
+        },
+      }),
+    ]);
+  });
+
   it('does not overwrite a streamed goal update with the session-load snapshot', async () => {
     const pendingGoal = createDeferred<GoalStateResponse>();
     const streamedGoal: GoalStateResponse['snapshot'] = {
