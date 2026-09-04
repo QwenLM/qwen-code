@@ -2667,7 +2667,7 @@ export const AppContainer = (props: AppContainerProps) => {
               newest.selfSent
                 ? 'a process this session started'
                 : 'another session'
-            } (${describeHoldCause(newest.cause)}). ` +
+            } (${describeHoldCause(newest.cause, newest.policyScope)}). ` +
             `${held.length} waiting — /peers to review.`,
         },
         Date.now(),

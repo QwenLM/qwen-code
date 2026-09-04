@@ -22,6 +22,7 @@ import {
   getSettingDefinition,
   validateSettingValue,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
+  isLoosestTightenOnlyValue,
 } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
@@ -126,14 +127,27 @@ function rejectWorkspaceRestrictedWrite(
   res: Response,
   scope: string,
   key: string,
+  value: unknown,
 ): boolean {
-  if (scope !== 'workspace' || !WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key))
-    return false;
-  res.status(400).json({
-    error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
-    code: 'workspace_restricted_setting',
-  });
-  return true;
+  if (scope !== 'workspace') return false;
+  if (WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key)) {
+    res.status(400).json({
+      error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
+      code: 'workspace_restricted_setting',
+    });
+    return true;
+  }
+  // A tighten-only key takes stricter values from a workspace; its loosest
+  // value is the one a workspace can never be honored for, so refuse it
+  // here rather than persist an entry the merge will always drop.
+  if (isLoosestTightenOnlyValue(key, value)) {
+    res.status(400).json({
+      error: `Setting "${key}" can only be made stricter from workspace scope; set "${String(value)}" at user scope instead`,
+      code: 'workspace_restricted_setting',
+    });
+    return true;
+  }
+  return false;
 }
 
 function getAllowedKeys(includeLiveVoice = false): Set<string> {
@@ -527,7 +541,7 @@ export function registerWorkspaceSettingsRoutes(
         return;
       }
 
-      if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
+      if (rejectWorkspaceRestrictedWrite(res, scope, key, value)) return;
 
       if (LIVE_MANAGED_SETTINGS.has(key)) {
         res.status(400).json({
@@ -792,7 +806,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         return;
       }
 
-      if (rejectWorkspaceRestrictedWrite(res, scope, key)) return;
+      if (rejectWorkspaceRestrictedWrite(res, scope, key, value)) return;
       if (LIVE_MANAGED_SETTINGS.has(key)) {
         res.status(400).json({
           error: `Setting "${key}" must be changed through the Live setup API`,

@@ -268,13 +268,88 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'tools', key: 'workflowsEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },
   { section: 'security', key: 'allowedInsecureVoiceBaseUrls' },
-  { section: 'agents', key: 'crossSessionMessaging' },
-  { section: 'agents', key: 'crossSessionInbound' },
   { section: 'goals', key: 'modelProposed' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;
 }>;
+
+/**
+ * Settings a Workspace may only make stricter.
+ *
+ * A cloned repository must not open the user's session to peers or force
+ * incoming messages through, so the loosening direction is dropped like a
+ * restricted setting. The tightening direction is the one a repository has
+ * a legitimate reason to set — automation agents in a monorepo that must
+ * not be able to reach a person's session, say — so a workspace value
+ * that is stricter than what the operator scopes set is honored. System
+ * scope stays the admin override: when it sets the key the workspace
+ * value is dropped regardless.
+ *
+ * `strictness` ranks a value; higher is stricter. An unrecognized value
+ * ranks strictest of all so it is kept rather than stripped: the readers
+ * of both keys fail closed on a value they do not understand, and
+ * stripping it would let a looser user value through in its place.
+ * `undefined` is ranked too, so a workspace value is compared against the
+ * feature's own default when no operator scope sets the key.
+ *
+ * Like the list above, this is the one place that drives the merge-time
+ * strip, the warning that reports it, and the write guard on the serve
+ * routes.
+ */
+export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
+  {
+    section: 'agents',
+    key: 'crossSessionMessaging',
+    strictness: (value: unknown): number =>
+      value === true
+        ? 0
+        : value === false || value === undefined
+          ? 1
+          : Infinity,
+  },
+  {
+    section: 'agents',
+    key: 'crossSessionInbound',
+    // Unset means approval-mode parity, which delivers some messages and
+    // holds others: looser than `hold`, stricter than `accept`.
+    strictness: (value: unknown): number =>
+      value === 'accept'
+        ? 0
+        : value === undefined
+          ? 1
+          : value === 'hold'
+            ? 2
+            : value === 'refuse'
+              ? 3
+              : Infinity,
+  },
+] as const satisfies ReadonlyArray<{
+  readonly section: keyof Settings;
+  readonly key: string;
+  readonly strictness: (value: unknown) => number;
+}>;
+
+/** The tighten-only settings as flattened dotted keys. */
+export const WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS: readonly string[] =
+  WORKSPACE_TIGHTEN_ONLY_SETTINGS.map(
+    ({ section, key }) => `${section}.${key}`,
+  );
+
+/**
+ * True when `value` is the loosest a tighten-only key can be, i.e. a
+ * value a workspace can never be honored for. Used to refuse the write
+ * up front instead of persisting a dead entry.
+ */
+export function isLoosestTightenOnlyValue(
+  dottedKey: string,
+  value: unknown,
+): boolean {
+  const entry = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+    ({ section, key }) => `${section}.${key}` === dottedKey,
+  );
+  return entry !== undefined && entry.strictness(value) === 0;
+}
 
 /** The restricted settings as flattened dotted keys, e.g. `tools.workflowsEnabled`. */
 export const WORKSPACE_RESTRICTED_SETTING_KEYS: readonly string[] =
