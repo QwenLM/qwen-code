@@ -157,6 +157,47 @@ describe('peekManagedSession', () => {
     expect(result.lines.some((line) => line.startsWith('Doing:'))).toBe(false);
   });
 
+  it('still dedupes a padded or over-long summary against the title', async () => {
+    // The title path trims the summary and cuts it at 200 cells, so a
+    // summary differing only by padding — or by length past that cutoff —
+    // is still the same phrase. Comparing the untrimmed, 300-cell output
+    // would let both slip past the dedupe and print twice.
+    const peekWithSummary = (summary: string) =>
+      handle({
+        peek: vi.fn().mockResolvedValue({
+          sessionId: SESSION,
+          state: state({ sessionState: 'working' }),
+          activity: {
+            schemaVersion: 1,
+            summary,
+            lastActivityAt: '2026-09-04T11:59:00Z',
+            capabilities: [],
+          },
+          live: true,
+        }),
+      });
+
+    const padded = await peekManagedSession(
+      SESSION,
+      connectTo(peekWithSummary('  Backgrounded from native session  ')),
+    );
+    expect(padded.exitCode).toBe(0);
+    expect(padded.lines[0]).toContain('Backgrounded from native session');
+    expect(padded.lines.some((line) => line.startsWith('Doing:'))).toBe(false);
+
+    const longSummary = 'investigating the flaky release job '.repeat(8);
+    expect(longSummary.length).toBeGreaterThan(200);
+    const overlong = await peekManagedSession(
+      SESSION,
+      connectTo(peekWithSummary(longSummary)),
+    );
+    expect(overlong.exitCode).toBe(0);
+    expect(overlong.lines[0]).toContain('investigating the flaky release job');
+    expect(overlong.lines.some((line) => line.startsWith('Doing:'))).toBe(
+      false,
+    );
+  });
+
   it('shows the name a roster rename gave the session', async () => {
     // The roster entry wins the title over the summary and the launch
     // prompt; peek must show the renamed session under that name, not

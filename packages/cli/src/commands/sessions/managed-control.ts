@@ -154,8 +154,11 @@ export async function peekManagedSession(
   const summary = clean(response.activity?.summary, 300);
   // deriveTitle falls back to this same summary when neither a roster
   // name nor a launch prompt is available, so printing it again as
-  // `Doing:` would repeat one phrase twice in five lines.
-  if (summary && summary !== title) {
+  // `Doing:` would repeat one phrase twice in five lines. Compare the
+  // summary the way the title was derived from it — trimmed, then cleaned
+  // and cut to the title's own 200 cells — or a padded or over-long
+  // summary would slip past the comparison and print twice.
+  if (summary && clean(response.activity?.summary?.trim(), 200) !== title) {
     lines.push(`Doing:     ${summary}`);
   }
   const lastResult = clean(response.activity?.lastResult, 300);
