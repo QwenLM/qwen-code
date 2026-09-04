@@ -45,6 +45,28 @@ describe('model configuration manifest', () => {
     expect(
       isReasoningSelectionSupported('deepseek-v4-pro', 'low', false, reasoning),
     ).toBe(false);
+
+    expect(
+      buildModelReasoningConfigOption(
+        'deepseek-v4-pro',
+        {},
+        {
+          ...reasoning,
+          canDisable: false,
+        },
+      )?.options,
+    ).toMatchObject([{ value: 'high' }, { value: 'max' }]);
+  });
+
+  it('ignores an incomplete user-provided reasoning capability', () => {
+    const config = {
+      getModel: () => 'custom-model',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => ({
+        capabilities: { reasoning: { thinking: true } },
+      }),
+    } as unknown as Config;
+    expect(getConfiguredModelReasoning(config)).toBeUndefined();
   });
 
   it('registers the exact stable qwen3.8-max reasoning controls', () => {
@@ -53,7 +75,6 @@ describe('model configuration manifest', () => {
         thinking: true,
         efforts: ['low', 'medium', 'xhigh'],
         defaultEffort: 'xhigh',
-        disableField: 'reasoning_effort',
       },
     });
   });
@@ -179,7 +200,6 @@ describe('model configuration manifest', () => {
       reasoning: {
         thinking: true,
         toggleOnly: true,
-        disableField: 'enable_thinking',
       },
     });
   });

@@ -86,7 +86,13 @@ function applyConfiguredReasoningEffort(
   request: OpenAI.Chat.ChatCompletionCreateParams,
   capabilities: ModelReasoningCapabilities | undefined,
 ): OpenAI.Chat.ChatCompletionCreateParams {
-  if (!capabilities || capabilities.toggleOnly) return request;
+  if (
+    !capabilities ||
+    capabilities.toggleOnly ||
+    !Array.isArray(capabilities.efforts)
+  ) {
+    return request;
+  }
   const loose = request as unknown as Record<string, unknown>;
   const reasoning = asObject(loose['reasoning']);
   if (!reasoning || !('effort' in reasoning)) return request;
@@ -884,6 +890,16 @@ export class ContentGenerationPipeline {
           this.contentGeneratorConfig.baseUrl,
         )?.capabilities.reasoning
       : undefined;
+    if (
+      reasoningCapabilities &&
+      !('reasoning' in baseRequest) &&
+      this.contentGeneratorConfig.reasoning
+    ) {
+      baseRequest = {
+        ...baseRequest,
+        reasoning: this.contentGeneratorConfig.reasoning,
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+    }
     baseRequest = applyConfiguredReasoningEffort(
       baseRequest,
       reasoningCapabilities,
@@ -1237,15 +1253,12 @@ export class ContentGenerationPipeline {
       // provider-specific output-budget key in the result is clamped to the
       // window too — a config carrying both max_tokens and e.g.
       // max_completion_tokens must not leak the provider key unclamped.
-      const params = clampProviderOutputBudgetKeys(
+      return clampProviderOutputBudgetKeys(
         maxTokens !== undefined
           ? { ...configSamplingParams, max_tokens: maxTokens }
           : { ...configSamplingParams },
         requestMaxTokens,
       );
-      return configSamplingParams['reasoning'] === undefined
-        ? { ...params, ...this.buildReasoningConfig(request) }
-        : params;
     }
 
     const params: Record<string, unknown> = {

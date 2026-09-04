@@ -55,7 +55,17 @@ describe('effortCommand', () => {
 
   it('does not open an empty picker for a toggle-only model', async () => {
     Object.assign(context.services.config!, {
-      getModel: () => 'qwen3.7-plus',
+      getModel: () => 'toggle-model',
+      getAuthType: () => 'openai',
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            toggleOnly: true,
+            disableField: 'enable_thinking',
+          },
+        },
+      }),
     });
     const res = await effortCommand.action!(context, '');
     expect(res).toMatchObject({ type: 'message', messageType: 'info' });
@@ -189,6 +199,7 @@ describe('effortCommand', () => {
             thinking: true,
             efforts: ['high', 'max'],
             defaultEffort: 'high',
+            disableField: 'thinking',
           },
         },
       }),
