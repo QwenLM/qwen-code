@@ -31,6 +31,38 @@ describe('deriveCapabilityStatus', () => {
     });
   });
 
+  it('recognizes direct WebBridge without the legacy MCP adapter', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'webbridge'],
+        undefined,
+        undefined,
+        true,
+      ),
+    ).toEqual({
+      state: 'automation-connected',
+      shellReady: true,
+      warning: null,
+    });
+  });
+
+  it('warns when direct WebBridge has no connected extension', () => {
+    expect(
+      deriveCapabilityStatus(
+        true,
+        ['allow_origin', 'webbridge'],
+        undefined,
+        undefined,
+        false,
+      ),
+    ).toEqual({
+      state: 'automation-pending',
+      shellReady: true,
+      warning: 'WebBridge extension is not connected.',
+    });
+  });
+
   it('warns when chat is ready without the CDP tunnel', () => {
     expect(deriveCapabilityStatus(true, ['allow_origin'])).toEqual({
       state: 'chat-only',

@@ -92,6 +92,11 @@ import {
   resolveCdpMcpCommand,
 } from '../cdp-mcp-command.js';
 import { safeWsSend } from './safe-ws-send.js';
+import {
+  isWebBridgeInboundFrameType,
+  type WebBridgeCallFrame,
+  type WebBridgeRegistry,
+} from '../web-bridge/web-bridge-registry.js';
 
 export const ACP_CONNECTION_HEADER = 'acp-connection-id';
 export const ACP_SESSION_HEADER = 'acp-session-id';
@@ -200,6 +205,7 @@ function pluralWorkspaceRawSelector(
  * packages can't share a module).
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
+const WEB_BRIDGE_CAPABILITY = 'webbridge-v1';
 const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
 const RUNTIME_MCP_RETRY_DELAY_MS = 250;
 const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
@@ -489,6 +495,8 @@ export interface MountAcpHttpOptions {
    * ignored otherwise.
    */
   cdpTunnelRegistry?: CdpTunnelRegistry;
+  /** Process-scoped reverse command channel for the Qwen WebBridge extension. */
+  webBridgeRegistry?: WebBridgeRegistry;
   /**
    * Phase 4 (issue #6378): the daemon's workspace registry. When present and it
    * has non-primary runtimes, `/workspaces/:workspace/acp` mounts a per-runtime
@@ -1931,6 +1939,7 @@ export function mountAcpHttp(
         // Per-connection CDP-tunnel bridge unregister (Plan C, issue #5626),
         // called on WS close.
         let cdpBridgeUnregister: (() => void) | undefined;
+        let webBridgeUnregister: (() => void) | undefined;
         // The registered CDP bridge endpoint. Its `routeInbound` starts as a
         // no-op and is reassigned by the `/cdp` glue when a puppeteer client binds.
         let cdpEndpoint: CdpBridgeEndpoint | undefined;
@@ -1960,6 +1969,10 @@ export function mountAcpHttp(
             activeMount.removeChromeDevToolsMcpIfUnused(
               connRef?.connectionId ?? 'cdp-bridge',
             );
+          }
+          if (webBridgeUnregister) {
+            webBridgeUnregister();
+            webBridgeUnregister = undefined;
           }
         });
 
@@ -2012,6 +2025,20 @@ export function mountAcpHttp(
             parsed !== null && typeof parsed === 'object'
               ? (parsed as { type?: unknown }).type
               : undefined;
+          if (
+            initialized &&
+            connRef !== undefined &&
+            opts.webBridgeRegistry !== undefined &&
+            parsed !== null &&
+            typeof parsed === 'object' &&
+            isWebBridgeInboundFrameType(frameType)
+          ) {
+            opts.webBridgeRegistry.routeInbound(
+              connRef.connectionId,
+              parsed as Record<string, unknown>,
+            );
+            return;
+          }
           if (
             activeMount.draining &&
             frameType === 'mcp_message' &&
@@ -2333,16 +2360,46 @@ export function mountAcpHttp(
             // Gate on `clientInfo.name`: web UI / Zed agents share this `/acp`
             // endpoint, and an un-gated last-writer-wins would let an agent steal
             // the bridge with `cdp_*` frames it can't answer.
-            const clientName =
+            const clientInfo =
               message.params &&
               typeof message.params === 'object' &&
               !Array.isArray(message.params)
-                ? (
-                    (message.params as Record<string, unknown>)[
-                      'clientInfo'
-                    ] as { name?: string } | undefined
-                  )?.name
+                ? ((message.params as Record<string, unknown>)['clientInfo'] as
+                    | {
+                        name?: string;
+                        version?: string;
+                        extensionId?: string;
+                        capabilities?: unknown;
+                      }
+                    | undefined)
                 : undefined;
+            const clientName = clientInfo?.name;
+            const supportsWebBridge =
+              Array.isArray(clientInfo?.capabilities) &&
+              clientInfo.capabilities.includes(WEB_BRIDGE_CAPABILITY);
+            const webBridgeOrigin =
+              typeof origin === 'string' &&
+              typeof clientInfo?.extensionId === 'string' &&
+              origin.toLowerCase() ===
+                `chrome-extension://${clientInfo.extensionId.toLowerCase()}`;
+            if (
+              activeMount.primary &&
+              opts.webBridgeRegistry !== undefined &&
+              clientName === CDP_BRIDGE_CLIENT_NAME &&
+              supportsWebBridge &&
+              webBridgeOrigin
+            ) {
+              webBridgeUnregister = opts.webBridgeRegistry.register({
+                connectionId: conn.connectionId,
+                extensionId: clientInfo?.extensionId,
+                version: clientInfo?.version,
+                send: (frame: WebBridgeCallFrame) =>
+                  safeWsSend(ws, JSON.stringify(frame), 'WebBridge'),
+              });
+              writeStderrLine(
+                `qwen serve: ${activeMount.routeLabel} connection ${conn.connectionId.slice(0, 8)} registered as WebBridge`,
+              );
+            }
             if (
               activeMount.primary &&
               opts.cdpTunnelOverWs === true &&

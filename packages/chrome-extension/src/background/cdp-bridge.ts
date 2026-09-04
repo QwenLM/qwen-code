@@ -14,7 +14,8 @@
  *   - debugger events  → `cdp_event`
  *   - debugger detach  → `cdp_detach`
  *
- * Single tab, single debugger.
+ * The raw tunnel exposes one tab; direct WebBridge calls can keep multiple tabs
+ * attached so network capture continues while the agent switches tabs.
  *
  * See `packages/chrome-extension/docs/06-plan-c-cdp-tunnel.md`.
  */
@@ -69,15 +70,29 @@ type CdpOutbound =
 
 /** Sink that pushes one outbound frame down the daemon `/acp` socket. */
 type CdpSend = (frame: CdpOutbound) => void;
+type CdpEventListener = (
+  method: string,
+  params: Record<string, unknown>,
+  tabId: number,
+) => void;
+type CdpDetachListener = (tabId: number) => void;
+export type CdpCommand = (
+  method: string,
+  params?: Record<string, unknown>,
+) => Promise<unknown>;
 
-/** The tab id this bridge currently has the debugger attached to (or null). */
-let attachedTabId: number | null = null;
+/** Tabs this extension currently owns through chrome.debugger. */
+const attachedTabIds = new Set<number>();
+const directTabIds = new Set<number>();
+/** The tab currently exposed to the legacy raw `/cdp` tunnel. */
+let rawTabId: number | null = null;
 /** The active outbound sink while a `/cdp` puppeteer client is connected. */
 let activeSend: CdpSend | null = null;
 /** While set, keeps the MV3 worker awake during an attachment (see startAttachKeepalive). */
 let keepaliveTimer: ReturnType<typeof setInterval> | null = null;
 /** True while a `handleAttach` is mid-flight (guards against overlapping attaches). */
 let attaching = false;
+let attachingTabId: number | null = null;
 /**
  * Set when a `cdp_release` (or socket close) arrives while `handleAttach` is
  * mid-flight. A teardown that fires before the attach lands can't detach a tab
@@ -86,6 +101,24 @@ let attaching = false;
  * would leave a debugger attachment with no live `/cdp` client behind it.
  */
 let releaseRequestedDuringAttach = false;
+let attachGeneration = 0;
+const directEventListeners = new Set<CdpEventListener>();
+const directDetachListeners = new Set<CdpDetachListener>();
+const detachingTabIds = new Set<number>();
+const pendingDirectCommands = new Set<{
+  expire(): void;
+  cancel(error: Error): void;
+}>();
+let directOperationActive = false;
+/**
+ * Tabs the in-flight direct operation has touched (via `withCdpTab`). A
+ * per-operation timeout detaches exactly these tabs instead of the whole
+ * bridge, so a hung action in one session can't destroy other sessions'
+ * attachments and network captures.
+ */
+let activeDirectOperationTabIds: Set<number> | null = null;
+let detachInProgress: Promise<void> | undefined;
+const DIRECT_OPERATION_TIMEOUT_MS = 55_000;
 
 /**
  * Keep the MV3 worker alive while the debugger is attached: it idles out after
@@ -119,20 +152,27 @@ export function isCdpBridgeFrame(type: unknown): boolean {
 }
 
 /**
- * Forward a CDP event from the real tab to the daemon. Only events for the
- * currently-attached tab are forwarded.
+ * Fan a CDP event out from the real tab. Every attached tab delivers to the
+ * direct subscribers (`subscribeCdpEvents`) — with no raw `/cdp` client
+ * connected (the dominant WebBridge mode) this is the only delivery path for
+ * network-capture and navigate-lifecycle events. Only the raw client's own
+ * attached tab is additionally forwarded to the daemon socket.
  */
 function onDebuggerEvent(
   source: chrome.debugger.Debuggee,
   method: string,
   params?: object,
 ): void {
-  if (attachedTabId === null || source.tabId !== attachedTabId) return;
-  if (!activeSend) return;
+  if (source.tabId === undefined || !attachedTabIds.has(source.tabId)) return;
+  const eventParams = (params ?? {}) as Record<string, unknown>;
+  for (const listener of directEventListeners) {
+    listener(method, eventParams, source.tabId);
+  }
+  if (!activeSend || source.tabId !== rawTabId) return;
   activeSend({
     type: 'cdp_event',
     method,
-    params: (params ?? {}) as Record<string, unknown>,
+    params: eventParams,
   });
 }
 
@@ -145,17 +185,24 @@ function onDebuggerDetach(
   source: chrome.debugger.Debuggee,
   reason: string,
 ): void {
-  if (attachedTabId === null || source.tabId !== attachedTabId) return;
-  console.log(LOG_PREFIX, 'debugger detached:', reason);
-  if (activeSend) {
-    activeSend({ type: 'cdp_detach', reason: reason || 'target_closed' });
+  if (source.tabId === undefined || !attachedTabIds.has(source.tabId)) return;
+  if (attaching && source.tabId === attachingTabId) {
+    releaseRequestedDuringAttach = true;
   }
-  teardownAttachment();
+  console.log(LOG_PREFIX, 'debugger detached:', reason);
+  attachedTabIds.delete(source.tabId);
+  directTabIds.delete(source.tabId);
+  for (const listener of directDetachListeners) listener(source.tabId);
+  if (activeSend && source.tabId === rawTabId) {
+    activeSend({ type: 'cdp_detach', reason: reason || 'target_closed' });
+    activeSend = null;
+    rawTabId = null;
+  }
+  if (attachedTabIds.size === 0) teardownAttachments();
 }
 
-/** Remove our debugger listeners and forget the attached tab. */
-function teardownAttachment(): void {
-  if (attachedTabId === null) return;
+/** Remove debugger listeners and forget all attached tabs. */
+function teardownAttachments(): void {
   stopAttachKeepalive();
   try {
     chrome.debugger.onEvent.removeListener(onDebuggerEvent);
@@ -163,7 +210,9 @@ function teardownAttachment(): void {
   } catch {
     /* listeners already gone */
   }
-  attachedTabId = null;
+  attachedTabIds.clear();
+  directTabIds.clear();
+  rawTabId = null;
 }
 
 /** Resolve the active tab's id (rejects if none / no id). */
@@ -181,22 +230,167 @@ function sendDebuggerCommand(
   tabId: number,
   method: string,
   params: Record<string, unknown> | undefined,
+  direct = false,
 ): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    chrome.debugger.sendCommand(
-      { tabId },
-      method,
-      params ?? {},
-      (result?: object) => {
-        const err = chrome.runtime.lastError;
-        if (err) {
-          reject(new Error(err.message ?? 'CDP command failed'));
-          return;
-        }
-        resolve(result ?? {});
+    let settled = false;
+    let expired = false;
+    const finish = (complete: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (direct) pendingDirectCommands.delete(pending);
+      complete();
+    };
+    const pending = {
+      expire: () => {
+        expired = true;
       },
-    );
+      cancel: (error: Error) => finish(() => reject(error)),
+    };
+    if (direct) pendingDirectCommands.add(pending);
+    try {
+      chrome.debugger.sendCommand(
+        { tabId },
+        method,
+        params ?? {},
+        (result?: object) => {
+          if (expired) return;
+          const err = chrome.runtime.lastError;
+          finish(() =>
+            err
+              ? reject(new Error(err.message ?? 'CDP command failed'))
+              : resolve(result ?? {}),
+          );
+        },
+      );
+    } catch (error) {
+      finish(() =>
+        reject(error instanceof Error ? error : new Error(String(error))),
+      );
+    }
   });
+}
+
+async function attachTab(tabId: number): Promise<void> {
+  if (attachedTabIds.has(tabId)) return;
+  const generation = attachGeneration;
+
+  await new Promise<void>((resolve, reject) => {
+    chrome.debugger.attach({ tabId }, CDP_PROTOCOL_VERSION, () => {
+      const error = chrome.runtime.lastError;
+      const ownAlreadyAttached =
+        /already attached/i.test(error?.message ?? '') &&
+        attachedTabIds.has(tabId);
+      if (error && !ownAlreadyAttached) {
+        reject(new Error(error.message ?? 'debugger attach failed'));
+        return;
+      }
+      resolve();
+    });
+  });
+
+  if (generation !== attachGeneration) {
+    await new Promise<void>((resolve) => {
+      chrome.debugger.detach({ tabId }, () => resolve());
+    });
+    throw new Error('released during attach');
+  }
+
+  if (attachedTabIds.size === 0) {
+    chrome.debugger.onEvent.addListener(onDebuggerEvent);
+    chrome.debugger.onDetach.addListener(onDebuggerDetach);
+  }
+  attachedTabIds.add(tabId);
+  startAttachKeepalive();
+}
+
+async function runDirectBrowserOperation<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (directOperationActive) {
+    throw new Error('WebBridge action is already in progress');
+  }
+  if (detachingTabIds.size > 0) {
+    throw new Error('CDP tunnel is releasing the browser');
+  }
+  if (activeSend || attaching) {
+    throw new Error('CDP tunnel is currently controlling the browser');
+  }
+  directOperationActive = true;
+  activeDirectOperationTabIds = new Set<number>();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      const error = new Error('WebBridge action timed out after 55s');
+      error.name = 'WebBridgeTimeoutError';
+      timeout = setTimeout(() => {
+        void detachDirectOperationTabs(error);
+        reject(error);
+      }, DIRECT_OPERATION_TIMEOUT_MS);
+    });
+    const operationPromise = operation();
+    // The timeout teardown cancels pending CDP commands, which rejects the
+    // operation promise AFTER the race has settled on the timeout error;
+    // without a handler that late rejection becomes unhandled. The guard
+    // catch only marks it handled — the race still observes a rejection
+    // that lands before the timeout.
+    operationPromise.catch(() => {});
+    return await Promise.race([operationPromise, timedOut]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    directOperationActive = false;
+    activeDirectOperationTabIds = null;
+  }
+}
+
+export function withDirectBrowserAction<T>(
+  operation: () => Promise<T>,
+): Promise<T> {
+  return runDirectBrowserOperation(operation);
+}
+
+export function withCdpTab<T>(
+  tabId: number,
+  operation: (send: CdpCommand) => Promise<T>,
+): Promise<T> {
+  const run = async () => {
+    activeDirectOperationTabIds?.add(tabId);
+    await attachTab(tabId);
+    directTabIds.add(tabId);
+    return operation((method, params) =>
+      sendDebuggerCommand(tabId, method, params, true),
+    );
+  };
+  // Whole WebBridge actions already hold this reservation.
+  return directOperationActive ? run() : runDirectBrowserOperation(run);
+}
+
+export function subscribeCdpEvents(listener: CdpEventListener): () => void {
+  directEventListeners.add(listener);
+  return () => directEventListeners.delete(listener);
+}
+
+export function subscribeCdpDetaches(listener: CdpDetachListener): () => void {
+  directDetachListeners.add(listener);
+  return () => directDetachListeners.delete(listener);
+}
+
+export async function releaseCdpTab(tabId: number): Promise<void> {
+  directTabIds.delete(tabId);
+  if (rawTabId === tabId || !attachedTabIds.has(tabId)) return;
+  detachingTabIds.add(tabId);
+  try {
+    await new Promise<void>((resolve) => {
+      chrome.debugger.detach({ tabId }, () => {
+        void chrome.runtime.lastError;
+        resolve();
+      });
+    });
+    attachedTabIds.delete(tabId);
+    if (attachedTabIds.size === 0) teardownAttachments();
+  } finally {
+    detachingTabIds.delete(tabId);
+  }
 }
 
 /** Handle a `cdp_attach` frame: attach the active tab and ack. */
@@ -204,10 +398,25 @@ async function handleAttach(
   frame: CdpAttachFrame,
   send: CdpSend,
 ): Promise<void> {
+  if (detachingTabIds.size > 0) {
+    send({
+      type: 'cdp_attached',
+      id: frame.id,
+      error: { message: 'CDP tunnel is releasing the browser' },
+    });
+    return;
+  }
+  if (directOperationActive || directTabIds.size > 0) {
+    send({
+      type: 'cdp_attached',
+      id: frame.id,
+      error: { message: 'WebBridge is currently controlling the browser' },
+    });
+    return;
+  }
   // Reentrancy guard: handleAttach awaits twice (attach + tabs.get) and is
-  // dispatched fire-and-forget. A second cdp_attach mid-flight would interleave
-  // teardownAttachment() with the first attach and corrupt attachedTabId. Only
-  // one puppeteer client binds today, but the guard keeps the next caller safe.
+  // dispatched fire-and-forget. Only one puppeteer client binds today, but the
+  // guard keeps the next caller safe.
   if (attaching) {
     send({
       type: 'cdp_attached',
@@ -219,49 +428,18 @@ async function handleAttach(
   attaching = true;
   try {
     const tabId = await getActiveTabId();
+    attachingTabId = tabId;
 
-    // Switching to a different tab: detach the previous one first so it doesn't
-    // keep Chrome's debugging banner + keepalive after we move on.
-    if (attachedTabId !== null && attachedTabId !== tabId) {
-      const prev = attachedTabId;
-      await new Promise<void>((resolve) => {
-        chrome.debugger.detach({ tabId: prev }, () => {
-          void chrome.runtime.lastError; // best-effort; tab may already be gone
-          resolve();
-        });
-      });
-      teardownAttachment();
+    if (rawTabId !== null && rawTabId !== tabId) {
+      const previousTabId = rawTabId;
+      rawTabId = null;
+      activeSend = null;
+      if (!directTabIds.has(previousTabId)) {
+        await releaseCdpTab(previousTabId);
+      }
     }
 
-    await new Promise<void>((resolve, reject) => {
-      chrome.debugger.attach({ tabId }, CDP_PROTOCOL_VERSION, () => {
-        const err = chrome.runtime.lastError;
-        // "Already attached" is only benign when WE already own this exact tab.
-        // Chrome reports the same error when DevTools / another debugger owns
-        // it — acking success there would let us claim a tab we can't drive.
-        const ownAlreadyAttached =
-          /already attached/i.test(err?.message ?? '') &&
-          attachedTabId === tabId;
-        if (err && !ownAlreadyAttached) {
-          reject(new Error(err.message ?? 'debugger attach failed'));
-          return;
-        }
-        resolve();
-      });
-    });
-
-    // Idempotent re-attach: a prior attachment may still hold live listeners +
-    // keepalive. Drop them before re-registering so a second `cdp_attach` can't
-    // double-register onDebuggerEvent/onDebuggerDetach — otherwise every CDP
-    // event would fire twice and corrupt the puppeteer stream. teardown is a
-    // no-op on a fresh attach (attachedTabId is null) and clears attachedTabId,
-    // so it must run before we record the new tab below.
-    teardownAttachment();
-
-    attachedTabId = tabId;
-    chrome.debugger.onEvent.addListener(onDebuggerEvent);
-    chrome.debugger.onDetach.addListener(onDebuggerDetach);
-    startAttachKeepalive();
+    await attachTab(tabId);
 
     // Best-effort tab metadata for the daemon's synthetic targetInfo.
     let url: string | undefined;
@@ -295,6 +473,8 @@ async function handleAttach(
       return;
     }
 
+    activeSend = send;
+    rawTabId = tabId;
     console.log(LOG_PREFIX, 'attached tab', tabId);
     send({ type: 'cdp_attached', id: frame.id, url, title });
   } catch (e) {
@@ -303,6 +483,7 @@ async function handleAttach(
     send({ type: 'cdp_attached', id: frame.id, error: { message } });
   } finally {
     attaching = false;
+    attachingTabId = null;
     releaseRequestedDuringAttach = false;
   }
 }
@@ -321,7 +502,7 @@ async function handleCommand(
   frame: CdpCommandFrame,
   send: CdpSend,
 ): Promise<void> {
-  if (attachedTabId === null) {
+  if (rawTabId === null) {
     send({
       type: 'cdp_result',
       id: frame.id,
@@ -331,7 +512,7 @@ async function handleCommand(
   }
   try {
     const result = await sendDebuggerCommand(
-      attachedTabId,
+      rawTabId,
       frame.method,
       frame.params,
     );
@@ -348,12 +529,16 @@ async function handleCommand(
 
 /**
  * Handle a `cdp_release` frame: the daemon's `/cdp` puppeteer client
- * disconnected, so tear the bridge down (detach the debugger + stop forwarding)
- * even though the `/acp` socket is still up.
+ * disconnected, so release its debugger ownership and stop forwarding while
+ * preserving tabs still used by direct WebBridge actions.
  */
 function handleRelease(_frame: CdpReleaseFrame): void {
-  console.log(LOG_PREFIX, 'cdp_release received; detaching debugger');
-  shutdownCdpBridge();
+  console.log(LOG_PREFIX, 'cdp_release received; releasing raw tunnel');
+  if (attaching) releaseRequestedDuringAttach = true;
+  const tabId = rawTabId;
+  rawTabId = null;
+  activeSend = null;
+  if (tabId !== null && !directTabIds.has(tabId)) void releaseCdpTab(tabId);
 }
 
 /**
@@ -362,7 +547,6 @@ function handleRelease(_frame: CdpReleaseFrame): void {
  * socket; it is recorded as the active sink so events/detach reach the daemon.
  */
 export function handleCdpFrame(frame: { type?: unknown }, send: CdpSend): void {
-  activeSend = send;
   if (frame.type === 'cdp_attach') {
     void handleAttach(frame as CdpAttachFrame, send);
   } else if (frame.type === 'cdp_command') {
@@ -376,22 +560,92 @@ export function handleCdpFrame(frame: { type?: unknown }, send: CdpSend): void {
  * Tear down the bridge: detach the debugger and stop forwarding. Called when
  * the daemon socket closes so a stale attachment doesn't linger. Idempotent.
  */
-export function shutdownCdpBridge(): void {
+async function detachDirectOperationTabs(error: Error): Promise<void> {
+  const tabIds = [...(activeDirectOperationTabIds ?? [])].filter((tabId) =>
+    attachedTabIds.has(tabId),
+  );
+  for (const pending of pendingDirectCommands) pending.expire();
+  if (tabIds.length === 0) {
+    // Nothing left to detach (the tab may already be gone), but pending
+    // commands must still be cancelled so their promises settle instead
+    // of hanging forever.
+    for (const pending of [...pendingDirectCommands]) pending.cancel(error);
+    return;
+  }
+  for (const tabId of tabIds) {
+    for (const listener of directDetachListeners) listener(tabId);
+  }
+  const pendingDetaches: Array<Promise<void>> = [];
+  for (const tabId of tabIds) {
+    attachedTabIds.delete(tabId);
+    directTabIds.delete(tabId);
+    if (detachingTabIds.has(tabId)) continue;
+    detachingTabIds.add(tabId);
+    pendingDetaches.push(
+      new Promise<void>((resolve) => {
+        const done = () => {
+          void chrome.runtime.lastError;
+          detachingTabIds.delete(tabId);
+          resolve();
+        };
+        try {
+          chrome.debugger.detach({ tabId }, done);
+        } catch {
+          done();
+        }
+      }),
+    );
+  }
+  await Promise.all(pendingDetaches);
+  if (attachedTabIds.size === 0) teardownAttachments();
+  for (const pending of [...pendingDirectCommands]) pending.cancel(error);
+}
+
+function detachCdpBridge(error: Error): Promise<void> {
+  for (const pending of pendingDirectCommands) pending.expire();
+  detachInProgress ??= performCdpDetach(error).finally(() => {
+    detachInProgress = undefined;
+  });
+  return detachInProgress;
+}
+
+async function performCdpDetach(error: Error): Promise<void> {
+  attachGeneration++;
   // A release that races an in-flight handleAttach can't detach a tab the
-  // debugger hasn't attached to yet (attachedTabId is still null, listeners
-  // aren't registered). Record it so handleAttach tears down the moment it
-  // finishes wiring up, instead of leaving a debugger attachment behind.
+  // debugger hasn't attached to yet. Record it so handleAttach tears down the
+  // moment it finishes wiring up instead of leaving an attachment behind.
   if (attaching) {
     releaseRequestedDuringAttach = true;
   }
-  const tabId = attachedTabId;
-  teardownAttachment();
-  activeSend = null;
-  if (tabId !== null) {
-    try {
-      chrome.debugger.detach({ tabId });
-    } catch {
-      /* might already be detached */
-    }
+  const tabIds = [...attachedTabIds];
+  for (const tabId of tabIds) {
+    for (const listener of directDetachListeners) listener(tabId);
   }
+  teardownAttachments();
+  activeSend = null;
+  const pendingDetaches: Array<Promise<void>> = [];
+  for (const tabId of tabIds) {
+    if (detachingTabIds.has(tabId)) continue;
+    detachingTabIds.add(tabId);
+    pendingDetaches.push(
+      new Promise<void>((resolve) => {
+        const done = () => {
+          void chrome.runtime.lastError;
+          detachingTabIds.delete(tabId);
+          resolve();
+        };
+        try {
+          chrome.debugger.detach({ tabId }, done);
+        } catch {
+          done();
+        }
+      }),
+    );
+  }
+  await Promise.all(pendingDetaches);
+  for (const pending of [...pendingDirectCommands]) pending.cancel(error);
+}
+
+export function shutdownCdpBridge(): void {
+  void detachCdpBridge(new Error('CDP bridge shut down'));
 }

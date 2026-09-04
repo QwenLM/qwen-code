@@ -690,6 +690,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
+  'webbridge',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -762,7 +763,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_live_state' &&
       f !== 'workspace_session_metadata' &&
       f !== 'voice_transcribe' &&
-      f !== 'realtime_voice',
+      f !== 'realtime_voice' &&
+      f !== 'webbridge',
   ),
   'workspace_settings',
   'workspace_permissions',
@@ -832,6 +834,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'browser_automation_mcp',
   'voice_transcribe',
   'realtime_voice',
+  'webbridge',
   'web_terminal',
 ] as const;
 
@@ -30009,6 +30012,90 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret');
       expect(res.status).toBe(200);
+    });
+
+    it('accepts the route-scoped token only on WebBridge routes', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'daemon-secret' },
+        undefined,
+        { webBridgeToken: 'webbridge-secret' },
+      );
+
+      const webBridge = await request(app)
+        .get('/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer webbridge-secret');
+      expect(webBridge.status).toBe(200);
+
+      const daemon = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer webbridge-secret');
+      expect(daemon.status).toBe(401);
+    });
+
+    it('does not accept the daemon bearer on WebBridge routes', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'daemon-secret' },
+        undefined,
+        { webBridgeToken: 'webbridge-secret' },
+      );
+
+      const res = await request(app)
+        .get('/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer daemon-secret');
+      expect(res.status).toBe(401);
+    });
+
+    it('exposes read-only WebBridge status to daemon-authenticated clients', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'daemon-secret' },
+        undefined,
+        { webBridgeToken: 'webbridge-secret' },
+      );
+
+      const daemon = await request(app)
+        .get('/webbridge/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer daemon-secret');
+      expect(daemon.status).toBe(200);
+      expect(daemon.body).toMatchObject({ extension_connected: false });
+
+      const routeScoped = await request(app)
+        .get('/webbridge/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer webbridge-secret');
+      expect(routeScoped.status).toBe(401);
+    });
+
+    it('keeps trailing-slash WebBridge routes behind the route-scoped token', async () => {
+      const app = createServeApp({ ...baseOpts, token: undefined }, undefined, {
+        webBridgeToken: 'webbridge-secret',
+      });
+
+      const denied = await request(app)
+        .post('/COMMAND/')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ action: 'snapshot', args: {}, session: 'test' });
+      expect(denied.status).toBe(401);
+
+      const allowed = await request(app)
+        .get('/status/')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer webbridge-secret');
+      expect(allowed.status).toBe(200);
+    });
+
+    it('does not disable WebBridge auth for an empty route token', async () => {
+      const app = createServeApp({ ...baseOpts, token: undefined }, undefined, {
+        webBridgeToken: '',
+      });
+
+      const res = await request(app)
+        .get('/status')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(401);
     });
 
     it('exempts /health from bearer auth so liveness probes work without credentials', async () => {

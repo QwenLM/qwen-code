@@ -135,6 +135,8 @@ Prompt control: **`prompt_absolute_deadline`** (conditional), **`writer_idle_tim
 
 Auth: `auth_provider_install`, `auth_device_flow`, **`require_auth`** (conditional), **`allow_origin`** (conditional).
 
+Browser automation: `webbridge` advertises the process-global direct `/command` surface; `/status` reports whether a compatible extension is connected. `cdp_tunnel_over_ws` and `browser_automation_mcp` describe the optional legacy adapter path separately.
+
 Voice: **`workspace_voice`** (conditional), **`workspace_voice_transcription`** (conditional, `modes: ['batch']`), **`voice_transcribe`** (conditional, `modes: ['streaming', 'batch']`).
 
 Rate limiting: **`rate_limit`** (conditional).

@@ -8,9 +8,9 @@ It does two things:
 
 - **Side panel** — frames the daemon's Web Shell (chat + tools), the same UI the
   daemon serves to the browser. The panel has no UI of its own.
-- **Service worker** — a CDP-tunnel pipe. It connects to the daemon's `/acp`
-  WebSocket and bridges `cdp_*` frames into `chrome.debugger`, so the agent can
-  drive the real browser when an external CDP MCP adapter is configured.
+- **Service worker** — connects to the daemon's `/acp` WebSocket and executes
+  Qwen WebBridge actions in the real browser through `chrome.debugger`. The
+  existing raw `/cdp` tunnel remains available for external MCP adapters.
 - **Readiness warning** — the framed Web Shell stays usable for chat while a
   small status message distinguishes a disabled CDP tunnel from a missing
   browser automation adapter.
@@ -45,11 +45,31 @@ Do not replace this command with `--open-with-auth`. That mode delivers its gene
 Once the daemon is reachable and permits framing, the side panel swaps the
 welcome screen for the chat UI automatically.
 
-## Browser Automation Tools
+## Qwen WebBridge
 
-The command above only makes the side panel and Web Shell available. Browser
-automation tools such as console/network inspection, screenshots, and page
-clicking require an explicit external MCP adapter command:
+Once the extension is connected, Qwen can control the real browser directly
+through the daemon's `POST /command` endpoint and bundled `qwen-webbridge`
+skill. This path does not require MCP or `QWEN_CDP_MCP_COMMAND`.
+
+```bash
+# Terminal 1
+export QWEN_WEBBRIDGE_TOKEN='choose-a-local-secret'
+qwen serve
+
+# Terminal 2
+export QWEN_WEBBRIDGE_TOKEN='choose-a-local-secret'
+curl http://127.0.0.1:4170/status \
+  -H "Authorization: Bearer $QWEN_WEBBRIDGE_TOKEN"
+curl -X POST http://127.0.0.1:4170/command \
+  -H "Authorization: Bearer $QWEN_WEBBRIDGE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"navigate","args":{"url":"https://example.com","newTab":true},"session":"demo"}'
+```
+
+## External CDP adapter (optional)
+
+The legacy `/cdp` tunnel can still feed an external MCP adapter for its own
+tool surface:
 
 ```bash
 QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
@@ -99,6 +119,17 @@ The side panel probes `GET /health` and `GET /capabilities` and shows one of:
 | `automation-connected`   | extension-backed MCP connected            | the Web Shell                    |
 
 ## Automated real-Chrome acceptance
+
+The direct WebBridge runner launches an isolated real Chrome profile, loads the
+built extension, and verifies all 17 actions end to end:
+
+```bash
+CHROME_PATH='/path/to/Chromium-compatible-browser' \
+  npm -w packages/chrome-extension run test:e2e:webbridge
+```
+
+Chrome 137 and newer ignore `--load-extension` in branded Google Chrome, so
+this automated runner requires Chrome for Testing, Chromium, or Edge.
 
 With Chrome running and the unpacked extension loaded, the acceptance runner
 starts an isolated daemon and fixture page, exercises DOM snapshots, console

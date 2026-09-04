@@ -4,7 +4,7 @@ Stage 1 of the [qwen-code daemon design](https://github.com/QwenLM/qwen-code/iss
 
 ## Authentication
 
-When the daemon was started with `--token` or `QWEN_SERVER_TOKEN`, **every normal API route except `/health` on ordinary loopback binds** must carry:
+When the daemon was started with `--token` or `QWEN_SERVER_TOKEN`, **every normal API route except `/health` on ordinary loopback binds and the WebBridge extension routes** must carry:
 
 ```
 Authorization: Bearer <token>
@@ -13,6 +13,8 @@ Authorization: Bearer <token>
 Without a configured token on the loopback default, the header is optional and requests arriving through the primary listener have full operator API authority. Workspace trust, session ownership, `X-Qwen-Client-Id`, permission, feature, validation, and resource checks still apply. Token comparison is constant-time. 401 responses are uniform across `missing header` / `wrong scheme` / `wrong token`.
 
 **`--open-with-auth`.** This default-off CLI mode requires a loopback bind and an available Web Shell. It reuses the normal `--token`-over-`QWEN_SERVER_TOKEN` selection, or generates 32 random bytes encoded as base64url before daemon startup when that selection is empty. The browser receives the selected bearer through `#token=` and stores it per tab; the protocol and middleware see an ordinary configured token. Bare `--open`, direct embedded callers, non-loopback binds, and other clients do not receive automatic credentials. Browser-ineligible environments print the secret-bearing fragment URL for manual opening. Loopback `/health` and static Web Shell assets retain the exemptions described below; `--require-auth` still gates `/health`.
+
+WebBridge's Kimi-compatible `/status` and `/command` routes use the route-scoped `QWEN_WEBBRIDGE_TOKEN` instead of the daemon bearer, even on loopback. Daemon-bearer clients should read extension readiness from the read-only `/webbridge/status` route.
 
 Channel webhook ingress (`POST /channels/:channelName/webhooks/:source`) is separate from this bearer contract in every mode. When mounted, it is registered before `bearerAuth` and authenticates with its configured `x-qwen-webhook-secret`; rotating the daemon bearer does not rotate webhook source secrets.
 
@@ -574,6 +576,8 @@ operator diagnostic snapshot documented below.
 | `web_terminal`                      | ACP HTTP is enabled, so the authenticated Web Terminal endpoint is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 <!-- conditional-serve-features:end -->
+
+`webbridge` is **not** in this conditional table — it is an always-on baseline tag: presence means the `/status` and `/command` endpoints exist, while `/status` reports dynamic extension readiness (`extension_connected`) and `/command` returns `503` while no extension is connected. Both routes require the route-scoped `QWEN_WEBBRIDGE_TOKEN`; daemon-bearer clients use `/webbridge/status` for read-only extension readiness.
 
 `mcp_guardrails` is **not** in this conditional table — it's an always-on tag, advertised whenever the binary supports the new `/workspace/mcp` budget fields, regardless of whether the operator configured a budget. Operators who haven't set `--mcp-client-budget` still get the new fields (with `budgetMode: 'off'`, `budgets: []`).
 

@@ -70,6 +70,7 @@ import {
 } from '../workspace-service/types.js';
 import { type AcpHttpHandle, mountAcpHttp } from './index.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
+import { WebBridgeRegistry } from '../web-bridge/web-bridge-registry.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
@@ -11323,12 +11324,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
 // ── WebSocket transport security tests ────────────────────────────────
 describe('ACP WebSocket transport security', () => {
+  const extensionId = 'test-extension';
+  const extensionOrigin = `chrome-extension://${extensionId}`;
   let server: Server;
   let lanServer: Server | undefined;
   let acpHandle: AcpHttpHandle | undefined;
   let port: number;
   let lanPort: number;
   let bridge: FakeBridge;
+  let webBridgeRegistry: WebBridgeRegistry;
   let previousCdpMcpCommand: string | undefined;
 
   beforeEach(() => {
@@ -11353,6 +11357,7 @@ describe('ACP WebSocket transport security', () => {
   ) {
     return new Promise<void>((resolve) => {
       bridge = new FakeBridge();
+      webBridgeRegistry = new WebBridgeRegistry(1_000);
       const app = express();
       app.use(express.json());
       const archiveCoordinator = new SessionArchiveCoordinator();
@@ -11387,6 +11392,7 @@ describe('ACP WebSocket transport security', () => {
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
+        webBridgeRegistry,
         ...(opts.cdpTunnelOverWs
           ? {
               cdpTunnelOverWs: true,
@@ -11511,16 +11517,108 @@ describe('ACP WebSocket transport security', () => {
     });
   }
 
-  function initializeCdpBridge(ws: WebSocket, id = 1): Promise<unknown> {
+  function initializeCdpBridge(
+    ws: WebSocket,
+    id = 1,
+    capabilities: string[] = ['webbridge-v1'],
+  ): Promise<unknown> {
     return sendRpc(ws, {
       jsonrpc: '2.0',
       id,
       method: 'initialize',
       params: {
-        clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' },
+        clientInfo: {
+          name: 'qwen-cdp-bridge',
+          version: '1.0.0',
+          extensionId,
+          capabilities,
+        },
       },
     });
   }
+
+  it('does not register an older CDP-only extension as WebBridge', async () => {
+    await startServer({
+      allowedOrigins: { allowAny: false, origins: new Set([extensionOrigin]) },
+    });
+    const ws = await wsConnect({ headers: { Origin: extensionOrigin } });
+    await initializeCdpBridge(ws, 1, []);
+    await yieldImmediate();
+
+    expect(webBridgeRegistry.status().extensionConnected).toBe(false);
+    ws.close();
+  });
+
+  it('round-trips a WebBridge command over the initialized extension socket', async () => {
+    await startServer({
+      allowedOrigins: { allowAny: false, origins: new Set([extensionOrigin]) },
+    });
+    const ws = await wsConnect({ headers: { Origin: extensionOrigin } });
+    await initializeCdpBridge(ws);
+    await yieldImmediate();
+
+    const outbound = new Promise<Record<string, unknown>>((resolve) => {
+      ws.once('message', (data) => resolve(JSON.parse(data.toString())));
+    });
+    const result = webBridgeRegistry.call('snapshot', {
+      _session: 'test',
+    });
+    const call = await outbound;
+    expect(call).toMatchObject({
+      type: 'webbridge_call',
+      payload: { name: 'snapshot', args: { _session: 'test' } },
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: 'webbridge_result',
+        responseToRequestId: call['requestId'],
+        payload: { data: { title: 'Example' } },
+      }),
+    );
+    await expect(result).resolves.toEqual({ title: 'Example' });
+    ws.close();
+  });
+
+  it('rejects pending WebBridge commands when the extension disconnects', async () => {
+    await startServer({
+      allowedOrigins: { allowAny: false, origins: new Set([extensionOrigin]) },
+    });
+    const ws = await wsConnect({ headers: { Origin: extensionOrigin } });
+    await initializeCdpBridge(ws);
+    await yieldImmediate();
+
+    const pending = webBridgeRegistry.call('snapshot', {});
+    ws.close();
+
+    await expect(pending).rejects.toThrow('disconnected');
+  });
+
+  it('does not trust WebBridge identity without a matching extension origin', async () => {
+    await startServer();
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+    await yieldImmediate();
+
+    expect(webBridgeRegistry.status().extensionConnected).toBe(false);
+    ws.close();
+  });
+
+  it('does not trust WebBridge identity from another allowed extension', async () => {
+    const otherOrigin = 'chrome-extension://other-extension';
+    await startServer({
+      allowedOrigins: {
+        allowAny: false,
+        origins: new Set([extensionOrigin, otherOrigin]),
+      },
+    });
+    const ws = await wsConnect({ headers: { Origin: otherOrigin } });
+    await initializeCdpBridge(ws);
+    await yieldImmediate();
+
+    expect(webBridgeRegistry.status().extensionConnected).toBe(false);
+    ws.close();
+  });
 
   // ── Host allowlist ──────────────────────────────────────────────────
   it('accepts WS upgrade with loopback Host header', async () => {

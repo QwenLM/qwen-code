@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
+import {
+  X509Certificate,
+  createHash,
+  randomUUID,
+  timingSafeEqual,
+} from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
 import * as fs from 'node:fs';
@@ -4220,6 +4225,23 @@ async function runQwenServeImpl(
     daemonLog.raw(line, level);
 
   let actualPort = opts.port;
+  // Same trailing-newline gotcha as the daemon token above:
+  // `export QWEN_WEBBRIDGE_TOKEN=$(cat token.txt)` keeps the file's final
+  // `\n` in the value, and a newline-bearing token can never match an HTTP
+  // Authorization header — every WebBridge request would 401 with no
+  // breadcrumb. Trim once at boot; fall back to a fresh token when empty.
+  const webBridgeToken =
+    daemonRuntimeBaseEnv['QWEN_WEBBRIDGE_TOKEN']?.trim() || randomUUID();
+  let webBridgeUrl: string | undefined;
+  const webBridgeChildEnvs = new Set<NodeJS.ProcessEnv>();
+  const applyWebBridgeEnv = (env: NodeJS.ProcessEnv): void => {
+    env['QWEN_WEBBRIDGE_TOKEN'] = webBridgeToken;
+    if (webBridgeUrl) env['QWEN_WEBBRIDGE_URL'] = webBridgeUrl;
+    else {
+      delete env['QWEN_WEBBRIDGE_URL'];
+      webBridgeChildEnvs.add(env);
+    }
+  };
 
   // Resolve the built Web Shell SPA so createServeApp can mount the UI at the
   // daemon root. --no-web (serveWebShell=false) skips it. Absent assets (e.g.
@@ -4825,6 +4847,7 @@ async function runQwenServeImpl(
       ...runtimeEnvSnapshot.effectiveEnv,
       QWEN_RUNTIME_DIR: primarySessionRuntimeBaseDir,
     };
+    applyWebBridgeEnv(runtimeEffectiveEnv);
     const replaceRuntimeEffectiveEnv = (
       nextEnv: Readonly<NodeJS.ProcessEnv>,
     ): void => {
@@ -4833,6 +4856,7 @@ async function runQwenServeImpl(
       }
       Object.assign(runtimeEffectiveEnv, nextEnv);
       runtimeEffectiveEnv['QWEN_RUNTIME_DIR'] = primarySessionRuntimeBaseDir;
+      applyWebBridgeEnv(runtimeEffectiveEnv);
     };
     const primaryRuntimeEnv: {
       mode: 'runtime-overlay';
@@ -5829,6 +5853,7 @@ async function runQwenServeImpl(
           }
           Object.assign(effectiveEnv, nextEnv);
           effectiveEnv['QWEN_RUNTIME_DIR'] = sessionRuntimeBaseDir;
+          applyWebBridgeEnv(effectiveEnv);
         },
       };
     };
@@ -5996,6 +6021,7 @@ async function runQwenServeImpl(
         secondarySettings,
         secondaryTrusted,
       );
+      applyWebBridgeEnv(secondaryEnv.effectiveEnv);
       const secondaryCustomIgnoreFiles =
         secondarySettings?.merged.context?.fileFiltering?.customIgnoreFiles;
       const secondaryContextFilename =
@@ -6645,6 +6671,7 @@ async function runQwenServeImpl(
         );
       }
       const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings, trusted);
+      applyWebBridgeEnv(wsEnv.effectiveEnv);
       const wsCustomIgnoreFiles =
         wsSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
       const wsContextFilename =
@@ -7513,6 +7540,7 @@ async function runQwenServeImpl(
       workspaceTrustHotReloadAvailable,
       voiceCoordinator: workspaceVoiceCoordinator,
       bridge,
+      webBridgeToken,
       webShellDir,
       boundWorkspace,
       qwenCodeVersion: resolvedCliVersion,
@@ -7910,13 +7938,18 @@ async function runQwenServeImpl(
         daemonLog,
       )
     : undefined;
+  const deferredDaemonAuth = bearerAuth(opts.token);
+  const deferredWebBridgeAuth = bearerAuth(webBridgeToken);
   const app =
     runtimeApp ??
     createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
       waitForDeferredRuntimeRoutes: deferRuntimeUntilFirstHealth,
       startRuntime: () => startRuntimeForRequest?.() ?? false,
       runtimeReady,
-      authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
+      authenticateDeferredRuntimeRequest: (req, res, next) =>
+        /^\/(?:status|command)\/?$/i.test(req.path)
+          ? deferredWebBridgeAuth(req, res, next)
+          : deferredDaemonAuth(req, res, next),
       authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
       // The runtime app serves these before bearerAuth; a browser navigation
       // cannot attach the bearer header, so the cold gate must let them
@@ -8159,6 +8192,13 @@ async function runQwenServeImpl(
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const scheme = tlsOptions ? 'https' : 'http';
       const url = `${scheme}://${formatHostForUrl(optsIn.hostname)}:${actualPort}`;
+      webBridgeUrl = formatChannelWorkerDaemonUrl(
+        opts.hostname,
+        actualPort,
+        tlsOptions !== undefined,
+      );
+      for (const env of webBridgeChildEnvs) applyWebBridgeEnv(env);
+      webBridgeChildEnvs.clear();
       const liveRuntimeBaseDir = path.dirname(daemonLogBaseDir);
       const liveDiscoveryOwners: Array<{
         runtimeBaseDir: string;

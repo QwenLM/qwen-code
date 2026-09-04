@@ -900,6 +900,23 @@ describe('scrubChildEnv (defaultSpawnChannelFactory env policy)', () => {
     expect(result).toEqual(source);
   });
 
+  it('passes the route-scoped WebBridge credential to daemon agents', () => {
+    const result = scrubChildEnv(
+      {
+        QWEN_SERVER_TOKEN: 'daemon-secret',
+        QWEN_WEBBRIDGE_TOKEN: 'webbridge-secret',
+        QWEN_WEBBRIDGE_URL: 'http://127.0.0.1:4170',
+      },
+      SCRUBBED,
+    );
+
+    expect(result).toMatchObject({
+      QWEN_WEBBRIDGE_TOKEN: 'webbridge-secret',
+      QWEN_WEBBRIDGE_URL: 'http://127.0.0.1:4170',
+    });
+    expect(result).not.toHaveProperty('QWEN_SERVER_TOKEN');
+  });
+
   it('overrides with a string value ADD the key', () => {
     const source = { PATH: '/usr/bin' };
     const result = scrubChildEnv(source, SCRUBBED, { NEW_KEY: 'new-value' });

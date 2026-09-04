@@ -9249,12 +9249,20 @@ describe('runQwenServe runtime startup failures', () => {
       );
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(() => {
       const app = express();
+      app.get('/status', (_req, res) => {
+        res.status(200).json({ status: 'ready' });
+      });
       app.post('/session', (_req, res) => {
         res.status(201).json({ sessionId: 'session-1' });
       });
       return app;
     });
 
+    const previousWebBridgeToken = process.env['QWEN_WEBBRIDGE_TOKEN'];
+    // Trailing newline on purpose: `export TOKEN=$(cat token.txt)` keeps the
+    // file's final newline, and boot must trim it — the Authorization header
+    // below carries the trimmed value and must be accepted.
+    process.env['QWEN_WEBBRIDGE_TOKEN'] = 'webbridge-secret\n';
     const handle = await runQwenServe(
       {
         port: 0,
@@ -9278,6 +9286,19 @@ describe('runQwenServe runtime startup failures', () => {
       expect(await res.json()).toEqual({ error: 'Unauthorized' });
       expect(createBridge).not.toHaveBeenCalled();
 
+      const wrongStatus = await fetch(`${handle.url}/status`, {
+        headers: { authorization: 'Bearer secret-token' },
+      });
+      expect(wrongStatus.status).toBe(401);
+      expect(createBridge).not.toHaveBeenCalled();
+
+      const status = await fetch(`${handle.url}/status`, {
+        headers: { authorization: 'Bearer webbridge-secret' },
+      });
+      expect(status.status).toBe(200);
+      expect(await status.json()).toEqual({ status: 'ready' });
+      expect(createBridge).toHaveBeenCalledTimes(1);
+
       const authorizedRes = await fetch(`${handle.url}/session`, {
         method: 'POST',
         headers: { authorization: 'Bearer secret-token' },
@@ -9288,6 +9309,11 @@ describe('runQwenServe runtime startup failures', () => {
       await expect(handle.runtimeReady).resolves.toBeUndefined();
     } finally {
       await handle.close();
+      if (previousWebBridgeToken === undefined) {
+        delete process.env['QWEN_WEBBRIDGE_TOKEN'];
+      } else {
+        process.env['QWEN_WEBBRIDGE_TOKEN'] = previousWebBridgeToken;
+      }
     }
   });
 
