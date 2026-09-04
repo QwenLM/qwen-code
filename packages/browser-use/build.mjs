@@ -39,6 +39,9 @@ await build({
   entryPoints: {
     'native-host': 'src/bridge/native-host/index.ts',
     'scripts/native-host-setup': 'scripts/native-host-setup.ts',
+    'scripts/managed-chrome': 'scripts/managed-chrome.ts',
+    'scripts/managed-chrome-preflight': 'scripts/managed-chrome-preflight.ts',
+    'scripts/smoke-qwen-saucedemo': 'scripts/smoke-qwen-saucedemo.ts',
   },
   outdir: dist,
   bundle: true,

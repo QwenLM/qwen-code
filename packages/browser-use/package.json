@@ -37,6 +37,8 @@
     "native-host:install": "node dist/scripts/native-host-setup.js install",
     "native-host:status": "node dist/scripts/native-host-setup.js status",
     "native-host:uninstall": "node dist/scripts/native-host-setup.js uninstall",
+    "smoke:managed-chrome-preflight": "npm run build --workspace=@qwen-code/chrome-bridge && npm run build && node dist/scripts/managed-chrome-preflight.js",
+    "smoke:qwen-saucedemo": "npm run build --workspace=@qwen-code/node-repl-mcp && npm run build --workspace=@qwen-code/chrome-bridge && npm run build && node dist/scripts/smoke-qwen-saucedemo.js",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
