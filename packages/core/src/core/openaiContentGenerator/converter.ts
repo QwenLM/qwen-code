@@ -1204,6 +1204,31 @@ function classifyContentOnlyThinkingTagPrefix(
   return streamFinished ? 'leaked' : 'suspicious';
 }
 
+/**
+ * Whether the text starts with an opening thinking tag whose block is fully
+ * balanced by a closing tag (counting nesting), i.e. the leading
+ * `<think>/<thinking> ... </think>/</thinking>` shape production captures
+ * showed as leaked chain-of-thought (issues #6666, #10791). False for a
+ * leading closing tag, no leading tag, or a block that has not balanced yet.
+ * Shares the depth-counting semantics of classifyContentOnlyThinkingTagPrefix.
+ */
+function hasLeadingBalancedThinkingBlock(text: string): boolean {
+  const candidate = text.trimStart();
+  const opening = LEADING_THINKING_TAG_PATTERN.exec(candidate)?.[0];
+  if (!opening || opening.trimStart().startsWith('</')) return false;
+
+  let rest = candidate.slice(opening.length);
+  let depth = 1;
+  for (;;) {
+    const nextTag = THINKING_TAG_PATTERN.exec(rest);
+    if (!nextTag) return false;
+
+    depth += nextTag[0].startsWith('</') ? -1 : 1;
+    if (depth === 0) return true;
+    rest = rest.slice(nextTag.index + nextTag[0].length);
+  }
+}
+
 function throwProtocolTagLeak(requestContext: RequestContext): never {
   requestContext.pendingThinkingTagCandidate = undefined;
   requestContext.pendingUntrustedResponseParts = undefined;
@@ -1227,9 +1252,21 @@ export function convertOpenAIResponseToLlm(
 
   if (choice) {
     const parts: Part[] = [];
-    const textParts = choice.message.content
-      ? convertOpenAITextToParts(choice.message.content, requestContext)
-      : [];
+    let textParts: Part[] = [];
+    if (choice.message.content) {
+      // Balanced leading thinking blocks leak to user-visible output on
+      // content-only turns of non-streaming completions too (issue #10791):
+      // with no structured reasoning channel, demote the block through the
+      // same tagged-thinking parser the streaming path uses instead of
+      // passing the raw tags through verbatim.
+      textParts =
+        requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks ===
+          true &&
+        !reasoningText &&
+        hasLeadingBalancedThinkingBlock(choice.message.content)
+          ? parseTaggedThinkingText(choice.message.content)
+          : convertOpenAITextToParts(choice.message.content, requestContext);
+    }
 
     // Handle reasoning content (thoughts).
     // Tagged thinking providers may put thoughts in content, while other
@@ -1404,12 +1441,27 @@ export function convertOpenAIChunkToLlm(
       const taggedThinkingCandidate =
         (requestContext.pendingThinkingTagCandidate?.text ?? '') +
         normalizedContent;
+      // A content-only turn (no structured reasoning yet, nothing visible
+      // emitted) whose leading <think>/<thinking> block is fully balanced is
+      // demoted exactly like the structured-reasoning inline blocks above:
+      // production captures (issues #6666, #10791) show this shape is leaked
+      // chain-of-thought the model wrote into content, not legitimate literal
+      // text. Unclosed blocks keep flowing through the hold/reject classifier
+      // below so their fail-closed behavior is unchanged.
+      const contentOnlyBalancedThinkingBlock =
+        requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks ===
+          true &&
+        !requestContext.hasStructuredReasoningContent &&
+        !reasoningText &&
+        requestContext.hasVisibleContent !== true &&
+        hasLeadingBalancedThinkingBlock(taggedThinkingCandidate);
       if (
-        requestContext.responseParsingOptions
+        (requestContext.responseParsingOptions
           ?.taggedThinkingTagsAfterReasoning &&
-        (requestContext.hasStructuredReasoningContent || reasoningText) &&
-        LEADING_THINKING_TAG_PATTERN.test(taggedThinkingCandidate) &&
-        !taggedThinkingCandidate.trimStart().startsWith('</')
+          (requestContext.hasStructuredReasoningContent || reasoningText) &&
+          LEADING_THINKING_TAG_PATTERN.test(taggedThinkingCandidate) &&
+          !taggedThinkingCandidate.trimStart().startsWith('</')) ||
+        contentOnlyBalancedThinkingBlock
       ) {
         requestContext.taggedThinkingParser ??= new TaggedThinkingParser();
         requestContext.pendingThinkingTagCandidate = undefined;
@@ -1433,7 +1485,9 @@ export function convertOpenAIChunkToLlm(
 
     if (
       choice.finish_reason &&
-      requestContext.responseParsingOptions?.taggedThinkingTagsAfterReasoning &&
+      (requestContext.responseParsingOptions
+        ?.taggedThinkingTagsAfterReasoning ||
+        requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks) &&
       requestContext.taggedThinkingParser?.hasUnclosedThought()
     ) {
       throwProtocolTagLeak(requestContext);
