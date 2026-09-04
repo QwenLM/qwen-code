@@ -69,7 +69,7 @@ describe('GET /background-agents', () => {
       {
         sessionId: SESSION,
         name: 'release audit',
-        state: 'needs input',
+        taskState: 'waiting',
         cwd: '/w/app',
         pid: 777,
         startedAt: '2026-09-04T11:58:00.000Z',
@@ -87,7 +87,7 @@ describe('GET /background-agents', () => {
       ]),
     ).get('/background-agents');
 
-    expect(response.body.agents[0].state).toBe('failed');
+    expect(response.body.agents[0].taskState).toBe('failed');
   });
 
   it('omits pid and startedAt rather than inventing them', async () => {
