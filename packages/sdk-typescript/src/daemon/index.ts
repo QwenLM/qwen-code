@@ -596,6 +596,7 @@ export type {
   DaemonSessionContextStatus,
   DaemonLspServerStatus,
   DaemonSessionLspStatus,
+  DaemonSessionResourcesStatus,
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionWorkflowTaskStatus,

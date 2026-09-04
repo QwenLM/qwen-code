@@ -142,6 +142,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionTasks: 'qwen/status/session/tasks',
   sessionStats: 'qwen/status/session/stats',
   sessionLspStatus: 'qwen/status/session/lsp',
+  sessionResources: 'qwen/status/session/resources',
   /**
    * Read one saved workflow definition (script + parsed `meta`). Params:
    * `{ sessionId, name }`; result: `ServeSessionSavedWorkflowStatus`, whose
@@ -545,6 +546,27 @@ export interface ServeWorkspaceSkillsStatus {
   initialized: boolean;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
+}
+
+/**
+ * Sanitized Skill and MCP snapshots built from one live session's Config.
+ * The nested workspace status envelopes are reused intentionally so their
+ * loading, error, discovery, and compatibility fields remain identical.
+ */
+export interface ServeSessionResourcesStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  skills: ServeWorkspaceSkillsStatus;
+  /**
+   * Session-scoped MCP snapshot. Status, discovery, and accounting come from
+   * the selected session's manager; workspace-owned pool, budget, and
+   * discovery-error enrichments are absent. The name-keyed `hasOAuthTokens`,
+   * `requiresAuth`, `authenticationState`, and `authenticationError` fields
+   * are always absent; consumers must not treat their absence as a negative
+   * authentication state.
+   */
+  mcp: ServeWorkspaceMcpStatus;
 }
 
 export interface ServeWorkspaceProviderCurrent {

@@ -40,6 +40,7 @@ import type {
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
   DaemonSessionLspStatus,
+  DaemonSessionResourcesStatus,
   DaemonSessionRecapResult,
   DaemonSessionSummary,
   DaemonShellCommandResult,
@@ -1021,6 +1022,10 @@ export class DaemonSessionClient {
 
   lspStatus(): Promise<DaemonSessionLspStatus> {
     return this.client.sessionLspStatus(this.sessionId, this.clientId);
+  }
+
+  resources(): Promise<DaemonSessionResourcesStatus> {
+    return this.client.sessionResources(this.sessionId, this.clientId);
   }
 
   cancelTask(
