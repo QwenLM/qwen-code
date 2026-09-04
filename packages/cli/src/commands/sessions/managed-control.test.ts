@@ -129,6 +129,32 @@ describe('peekManagedSession', () => {
     });
     const result = await peekManagedSession(SESSION, connectTo(h));
     expect(result.lines[0]).toContain('find out why the release job is flaky');
+    // Title and summary carry distinct information here, so the summary
+    // still earns its own line.
+    expect(result.lines).toContain('Doing:     Waiting for approval');
+  });
+
+  it('does not print the summary twice when it is the title', async () => {
+    // With no roster name and no launch record, deriveTitle falls back
+    // to the summary itself; repeating it as `Doing:` two lines later
+    // would show the identical phrase twice in a five-line output.
+    const h = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        activity: {
+          schemaVersion: 1,
+          summary: 'Backgrounded from native session',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(h));
+    const text = result.lines.join('\n');
+    expect(text.split('Backgrounded from native session')).toHaveLength(2);
+    expect(result.lines.some((line) => line.startsWith('Doing:'))).toBe(false);
   });
 
   it('shows the name a roster rename gave the session', async () => {

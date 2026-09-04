@@ -137,8 +137,9 @@ export async function peekManagedSession(
     launch: response.launch,
     activity: response.activity,
   });
+  const title = clean(presentation.title, 200);
   const lines = [
-    `${clean(presentation.title, 200)}  [${shortSessionId(response.state.sessionId)}]`,
+    `${title}  [${shortSessionId(response.state.sessionId)}]`,
     `State:     ${presentation.taskState}${response.live === false ? ' (no live process)' : ''}`,
     `Directory: ${clean(response.state.activeCwd, 200)}`,
   ];
@@ -148,7 +149,10 @@ export async function peekManagedSession(
     lines.push(`Waiting:   ${waitingFor}`);
   }
   const summary = clean(response.activity?.summary, 300);
-  if (summary) {
+  // deriveTitle falls back to this same summary when neither a roster
+  // name nor a launch prompt is available, so printing it again as
+  // `Doing:` would repeat one phrase twice in five lines.
+  if (summary && summary !== title) {
     lines.push(`Doing:     ${summary}`);
   }
   const lastResult = clean(response.activity?.lastResult, 300);
