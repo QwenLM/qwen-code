@@ -168,7 +168,7 @@ describe('e2e workflow', () => {
       // shard and exclude coverage lives only in this argument list. The
       // excludes are shared verbatim with the docker leg above.
       expect(runStep.run).toContain(
-        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'",
+        "npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --exclude '**/chat-transcript-document.test.ts' --shard='${{ matrix.shard }}'",
       );
     });
 
