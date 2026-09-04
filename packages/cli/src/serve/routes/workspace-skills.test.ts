@@ -430,6 +430,48 @@ describe('workspace Skill management routes', () => {
     );
   });
 
+  it('invalidates global config status when mutations fail', async () => {
+    const install = createHarness();
+    install.workspaceRegistry.add({
+      ...install.runtime,
+      workspaceId: 'workspace-2',
+      workspaceCwd: '/workspace-2',
+      primary: false,
+    });
+    install.installWorkspaceSkill.mockRejectedValueOnce(new Error('failed'));
+
+    const installResponse = await request(install.app)
+      .post('/workspace/config/skills/install')
+      .send({
+        name: 'demo-skill',
+        scope: 'global',
+        source: { type: 'folder', path: '/tmp/demo-skill' },
+      });
+
+    expect(installResponse.status).toBe(500);
+    expect(install.invalidateSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace-2',
+    );
+
+    const remove = createHarness();
+    remove.workspaceRegistry.add({
+      ...remove.runtime,
+      workspaceId: 'workspace-2',
+      workspaceCwd: '/workspace-2',
+      primary: false,
+    });
+    remove.deleteWorkspaceSkill.mockRejectedValueOnce(new Error('failed'));
+
+    const deleteResponse = await request(remove.app).delete(
+      '/workspace/config/skills/configured?scope=global',
+    );
+
+    expect(deleteResponse.status).toBe(500);
+    expect(remove.invalidateSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace-2',
+    );
+  });
+
   it('maps a vanished configured Skill to not found', async () => {
     const harness = createHarness();
     harness.deleteWorkspaceSkill.mockRejectedValueOnce(

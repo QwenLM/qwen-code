@@ -423,6 +423,7 @@ export function registerWorkspaceSkillsRoutes(
           activation: reconcileSkills(runtimes),
         });
       } catch (error) {
+        invalidateGlobalConfigStatus(owner.workspaceCwd);
         if (!sendSkillManagementError(res, error)) {
           deps.sendBridgeError(res, error, { route: configRoute });
         }
@@ -466,6 +467,7 @@ export function registerWorkspaceSkillsRoutes(
           activation: reconcileSkills(runtimes),
         });
       } catch (error) {
+        invalidateGlobalConfigStatus(owner.workspaceCwd);
         if (!sendSkillManagementError(res, error)) {
           deps.sendBridgeError(res, error, { route: configRoute });
         }
