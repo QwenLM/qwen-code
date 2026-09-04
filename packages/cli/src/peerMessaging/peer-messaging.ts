@@ -26,6 +26,7 @@ import {
 } from './env.js';
 import {
   type ApprovalMode,
+  canonicalizeMsgId,
   createDebugLogger,
   formatPeerDisplay,
   formatPeerEnvelope,
@@ -95,6 +96,11 @@ export interface PeerReceipt {
 export interface PeerMessagingOptions {
   getApprovalMode: () => ApprovalMode | null;
   getPolicySetting: () => InboundPolicy | undefined;
+  /**
+   * How long a held message waits, in milliseconds, or null for "until
+   * the session ends". Omitted in tests, which take the default.
+   */
+  getHeldExpiryMs?: () => number | null;
   updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
     ipcToken?: string,
@@ -128,6 +134,14 @@ export interface PeerMessagingOptions {
    * and the generated token is not observable until after.
    */
   ipcToken?: string;
+  /** Overrides the generated child token. Same seam, same reason. */
+  childToken?: string;
+}
+
+/** An accepted message waiting for the TUI's submit function. */
+interface BufferedDelivery {
+  frame: PeerUserFrame;
+  selfSent: boolean;
 }
 
 export class PeerMessaging {
@@ -145,7 +159,7 @@ export class PeerMessaging {
   private reassertSessionRecord: (() => Promise<void>) | null = null;
   private readonly receiptListeners = new Set<(receipt: PeerReceipt) => void>();
   private submitFn: PeerSubmitFn | null = null;
-  private readonly buffered: PeerUserFrame[] = [];
+  private readonly buffered: BufferedDelivery[] = [];
   /**
    * Accepted frames whose 'delivered' receipt has not been earned yet:
    * still buffered here or still queued in the session's input queue.
@@ -178,8 +192,11 @@ export class PeerMessaging {
     const gate = new InboundGate({
       getApprovalMode: options.getApprovalMode,
       getPolicySetting: options.getPolicySetting,
+      ...(options.getHeldExpiryMs !== undefined
+        ? { getHeldExpiryMs: options.getHeldExpiryMs }
+        : {}),
       getSessionId: options.getSessionId,
-      deliver: (frame) => messaging.deliver(frame),
+      deliver: (frame, origin) => messaging.deliver(frame, origin.selfSent),
       reportStatus: (frame, status) => {
         if (!frame.from) return;
         return sendDeliveryStatus(
@@ -216,13 +233,18 @@ export class PeerMessaging {
     // session's own pair once the socket is accepting.
     clearInheritedPeerMessagingEnv();
 
+    // Two tokens for two audiences. The first is published in the registry
+    // record for peers; the second exists only in this process's
+    // environment, so presenting it proves descent from this session.
     const ipcToken = options.ipcToken ?? randomBytes(32).toString('hex');
+    const childToken = options.childToken ?? randomBytes(32).toString('hex');
     const inbox = await startPeerInbox({
       ...(options.socketPath !== undefined
         ? { socketPath: options.socketPath }
         : {}),
       requiredToken: ipcToken,
-      onFrame: (frame) => messaging.onFrame(frame),
+      childToken,
+      onFrame: (frame, auth) => messaging.onFrame(frame, auth === 'child'),
     });
     if (!inbox) return null;
 
@@ -239,9 +261,11 @@ export class PeerMessaging {
 
     // Exported even if the registry publish above failed: children inherit
     // the environment, not the record, and the inbox is accepting either
-    // way.
+    // way. Children get the child token, never the published one: what
+    // makes a child's message recognizable as the session's own is that
+    // nothing else ever holds this value.
     process.env[MESSAGING_SOCKET_ENV] = inbox.socketPath;
-    process.env[MESSAGING_TOKEN_ENV] = ipcToken;
+    process.env[MESSAGING_TOKEN_ENV] = childToken;
 
     return messaging;
   }
@@ -261,7 +285,7 @@ export class PeerMessaging {
     // buffered — `deliver` retries them, in order, on the next arrival.
     while (this.buffered.length > 0) {
       const head = this.buffered[0];
-      if (!head || !this.submit(head)) break;
+      if (!head || !this.submit(head.frame, head.selfSent)) break;
       this.buffered.shift();
     }
   }
@@ -279,6 +303,14 @@ export class PeerMessaging {
 
   getHeld(): readonly HeldMessage[] {
     return this.gate?.getHeld() ?? [];
+  }
+
+  /**
+   * How long a held message has to live, in milliseconds, or null when
+   * holds do not expire. Used by `/peers` to show what is left.
+   */
+  getHeldExpiryMs(): number | null {
+    return this.gate?.getHeldExpiryMs() ?? null;
   }
 
   /**
@@ -300,20 +332,56 @@ export class PeerMessaging {
     }));
   }
 
-  /** True when the held set no longer matches the last recorded listing. */
+  /**
+   * True when the held set no longer matches the last recorded listing.
+   *
+   * Entries *leaving* the set are not a change. The expiry timer removes
+   * them with no peer or user activity -- a fourth mover the rationale
+   * above does not name -- and a shrinking set can never make a printed
+   * handle resolve to a different message: `resolveHeld` prefix-matches
+   * over the current set, so removing entries only narrows it. Bouncing
+   * those refuses a decision that would have been correct, and tells the
+   * user the list changed when what they can still uniquely name is
+   * exactly what they reviewed.
+   *
+   * Dropping an expired entry is safe because the gate tombstones it
+   * before it leaves the set, so a re-admitted id arrives with a fresh
+   * `heldAt` and still mismatches the pin below.
+   *
+   * What must still bounce: an arrival, and a re-sent id whose body may
+   * have been swapped, which the `heldAt` pin is what catches.
+   */
   heldSetChangedSinceListing(): boolean {
     const listed = this.listedHeld;
     if (listed === null) return true;
-    const held = this.getHeld();
-    return (
-      held.length !== listed.length ||
-      held.some((entry, index) => {
-        const snapshot = listed[index];
-        return (
-          entry.frame.msgId !== snapshot.id || entry.heldAt !== snapshot.heldAt
-        );
-      })
+    const pinned = new Map(listed.map((entry) => [entry.id, entry.heldAt]));
+    const current = this.getHeld();
+    if (current.some((entry) => pinned.get(entry.frame.msgId) !== entry.heldAt))
+      return true;
+
+    // A departure is normally harmless -- `resolveHeld` prefix-matches
+    // over the current set, so a smaller set only narrows what a printed
+    // handle can mean. The exception is an id that *extends* the departed
+    // one: `msgId` is peer-chosen and only shape-checked, so a peer can
+    // park `abc` beside `abc12345`. While both are held the handles are
+    // distinct, and `resolveHeld`'s exact-match tier gives `abc` to the
+    // shorter. Once `abc` expires, that same handle falls through to
+    // prefix-matching and silently decides `abc12345` -- a different
+    // message than the one the user reviewed, released under the reviewed
+    // one's handle.
+    //
+    // Canonicalized the way `resolveHeld` canonicalizes, or the check
+    // would miss the dashed forms it matches on.
+    const liveIds = current.map((entry) =>
+      canonicalizeMsgId(entry.frame.msgId),
     );
+    const liveSet = new Set(liveIds);
+    for (const id of pinned.keys()) {
+      const departed = canonicalizeMsgId(id);
+      if (liveSet.has(departed)) continue;
+      if (liveIds.some((live) => live.startsWith(departed))) return true;
+    }
+    return false;
   }
 
   decide(
@@ -409,7 +477,11 @@ export class PeerMessaging {
     await Promise.allSettled(receipts);
   }
 
-  private onFrame(frame: PeerFrame): void {
+  /**
+   * `selfSent` is the transport's finding that the connection presented
+   * the child token; it is never read off the frame.
+   */
+  private onFrame(frame: PeerFrame, selfSent: boolean): void {
     if (frame.type === 'control') {
       // A receipt for a message this session sent. Any process that can
       // reach the socket can write one for any id, so only ids the
@@ -470,26 +542,26 @@ export class PeerMessaging {
       });
       return;
     }
-    this.gate?.admit(frame);
+    this.gate?.admit(frame, { selfSent });
   }
 
-  private deliver(frame: PeerUserFrame): void {
+  private deliver(frame: PeerUserFrame, selfSent: boolean): void {
     if (!this.submitFn) {
       if (this.buffered.length >= MAX_ACCEPTED_BACKLOG) {
         throw new Error('accepted-message backlog is full');
       }
-      this.buffered.push(frame);
+      this.buffered.push({ frame, selfSent });
       this.trackOutstanding(frame);
       return;
     }
     while (this.buffered.length > 0) {
       const head = this.buffered[0];
-      if (!head || !this.submit(head)) {
+      if (!head || !this.submit(head.frame, head.selfSent)) {
         throw new Error('accepted-message backlog is full');
       }
       this.buffered.shift();
     }
-    if (!this.submit(frame)) {
+    if (!this.submit(frame, selfSent)) {
       throw new Error('accepted-message backlog is full');
     }
     this.trackOutstanding(frame);
@@ -506,19 +578,23 @@ export class PeerMessaging {
     }
   }
 
-  private submit(frame: PeerUserFrame): boolean {
-    const from = frame.from ?? 'unknown session';
+  private submit(frame: PeerUserFrame, selfSent: boolean): boolean {
+    // A script injecting into its own session rarely listens for a reply,
+    // so it usually has no address to give; say what it is instead.
+    const from = frame.from ?? (selfSent ? 'own process' : 'unknown session');
     return (
       this.submitFn?.(
         formatPeerEnvelope({
           from,
           ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
           content: frame.message.content,
+          selfSent,
         }),
         formatPeerDisplay({
           from,
           ...(frame.fromName !== undefined ? { fromName: frame.fromName } : {}),
           content: frame.message.content,
+          selfSent,
         }),
         {
           msgId: frame.msgId,

@@ -16,6 +16,7 @@ import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { connectionIdOf } from './mcp-pool-key.js';
 import { listDescendantPids, sigtermPids } from './pid-descendants.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 vi.mock('./mcp-client.js', async () => {
   const originalModule = await vi.importActual('./mcp-client.js');
@@ -1719,7 +1720,7 @@ describe('McpClientManager', () => {
     expect(elapsed).toBeGreaterThanOrEqual(40);
     // Generous upper bound — the 50ms timeout should fire well within 2s
     // even on a heavily-loaded CI runner.
-    expect(elapsed).toBeLessThan(2000);
+    expectWithinLatencyBudget(elapsed, 2000);
     // discoveryAllMcpToolsIncremental must always settle the state, even
     // when every server times out. Otherwise the cli's deferred-finalize
     // path would hang forever.

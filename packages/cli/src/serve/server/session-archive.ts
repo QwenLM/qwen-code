@@ -629,7 +629,10 @@ export async function deleteDaemonSessionIfOrphan(params: {
   service: SessionService;
   bridge: Pick<
     AcpSessionBridge,
-    'killSession' | 'markSessionCatalogChanged' | 'deleteSessionAttachments'
+    | 'deleteSessionAttachments'
+    | 'getSessionSummary'
+    | 'killSession'
+    | 'markSessionCatalogChanged'
   >;
   coordinator: SessionArchiveCoordinator;
 }): Promise<boolean> {
@@ -646,7 +649,12 @@ export async function deleteDaemonSessionIfOrphan(params: {
       killed = true;
     }
     if (!killed) {
-      return undefined;
+      try {
+        bridge.getSessionSummary(sessionId);
+        return undefined;
+      } catch (error) {
+        if (!isSessionNotFoundError(error)) throw error;
+      }
     }
     const removal = await deletePersistedSessionWithLease(service, sessionId);
     if (removal.kind !== 'error') {

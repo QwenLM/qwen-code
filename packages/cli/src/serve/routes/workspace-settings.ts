@@ -73,7 +73,7 @@ const VALID_WRITE_SCOPES = new Set(['workspace', 'user']);
 const QUALIFIED_WRITE_SCOPES = new Set(['workspace']);
 const mcpServerMutationQueues = new Map<string, Promise<void>>();
 
-interface McpServerSettingMutation {
+export interface McpServerSettingMutation {
   operation: 'set' | 'remove';
   name: string;
 }
@@ -225,7 +225,7 @@ const SCOPE_MAP: Record<string, SettingScope> = {
   workspace: SettingScope.Workspace,
 };
 
-function prepareSettingWrite(
+export function prepareSettingWrite(
   workspace: string,
   scope: SettingScope,
   key: string,
@@ -279,7 +279,7 @@ function parseMcpServerMutation(
   return { operation, name };
 }
 
-async function withMcpServerMutationLock<T>(
+export async function withMcpServerMutationLock<T>(
   workspace: string,
   scope: SettingScope,
   operation: () => Promise<T>,

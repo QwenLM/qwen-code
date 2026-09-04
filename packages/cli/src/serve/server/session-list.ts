@@ -473,6 +473,7 @@ function toSummary(item: {
   mtime: number;
   prompt: string;
   customTitle?: string;
+  titleSource?: 'manual' | 'auto';
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
@@ -484,6 +485,9 @@ function toSummary(item: {
     createdAt: item.startTime,
     updatedAt: new Date(item.mtime).toISOString(),
     displayName: item.customTitle || item.prompt,
+    ...(item.customTitle && item.titleSource
+      ? { titleSource: item.titleSource }
+      : {}),
     ...(item.parentSessionId ? { parentSessionId: item.parentSessionId } : {}),
     ...(item.sourceType ? { sourceType: item.sourceType } : {}),
     ...(item.sourceId !== undefined ? { sourceId: item.sourceId } : {}),
