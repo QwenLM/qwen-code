@@ -874,6 +874,12 @@ qwen sessions answer 0f8e1c42 "yes, write the report"
 qwen sessions stop 0f8e1c42
 ```
 
+An answer that starts with a dash would otherwise look like a flag, so take it verbatim after `--` (a bare `--help` still shows the command's help):
+
+```bash
+qwen sessions answer 0f8e1c42 -- --force
+```
+
 All three talk to a supervisor that is already running and never start one: if none is, they say so rather than spawning a process to report that nothing exists.
 
 ## 6. Messaging Another Running Session

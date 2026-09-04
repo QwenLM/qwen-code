@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import yargs from 'yargs';
 
 const connectExistingAgentViewSupervisor = vi.fn();
 
@@ -70,7 +71,7 @@ describe('session control command reporting', () => {
         .fn()
         .mockRejectedValue(new Error('No Agent View session found for zz.')),
     });
-    await run(answerCommand, { session: 'zz', text: 'yes' });
+    await run(answerCommand, { session: 'zz', text: ['yes'] });
     expect(stderr).toEqual(['No Agent View session found for zz.']);
     expect(stdout).toEqual([]);
     expect(process.exitCode).toBe(1);
@@ -80,9 +81,55 @@ describe('session control command reporting', () => {
     connectExistingAgentViewSupervisor.mockResolvedValue({
       answer: vi.fn().mockResolvedValue({ sessionId: SESSION, answered: true }),
     });
-    await run(answerCommand, { session: SESSION, text: 'yes' });
+    await run(answerCommand, { session: SESSION, text: ['yes'] });
     expect(stdout).toEqual(['Answer delivered.']);
     expect(stderr).toEqual([]);
     expect(process.exitCode).toBeUndefined();
+  });
+});
+
+describe('answer command parsing', () => {
+  // Parse-level tests against the real yargs tree: the handler joins the
+  // variadic tail, so what reaches it — not what the user quoted — is
+  // what a dash-leading answer must survive.
+  async function parse(argv: string[]): Promise<void> {
+    await yargs(argv).command(answerCommand).strict().parseAsync();
+  }
+
+  function mockDelivered() {
+    const answer = vi
+      .fn()
+      .mockResolvedValue({ sessionId: SESSION, answered: true });
+    connectExistingAgentViewSupervisor.mockResolvedValue({ answer });
+    return answer;
+  }
+
+  it('delivers a dash-leading answer instead of parsing it as options', async () => {
+    const answer = mockDelivered();
+    await parse(['answer', SESSION, '--force']);
+    expect(answer).toHaveBeenCalledWith(SESSION, '--force');
+    expect(stdout).toEqual(['Answer delivered.']);
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it('takes the tokens after -- as the answer', async () => {
+    const answer = mockDelivered();
+    await parse(['answer', SESSION, '--', '--force']);
+    expect(answer).toHaveBeenCalledWith(SESSION, '--force');
+    expect(stdout).toEqual(['Answer delivered.']);
+  });
+
+  it('keeps a plain answer working', async () => {
+    const answer = mockDelivered();
+    await parse(['answer', SESSION, 'yes, go ahead']);
+    expect(answer).toHaveBeenCalledWith(SESSION, 'yes, go ahead');
+  });
+
+  it('refuses an empty answer rather than parsing one out of nothing', async () => {
+    const answer = mockDelivered();
+    await parse(['answer', SESSION]);
+    expect(answer).not.toHaveBeenCalled();
+    expect(stderr).toEqual(['An answer cannot be empty.']);
+    expect(process.exitCode).toBe(1);
   });
 });

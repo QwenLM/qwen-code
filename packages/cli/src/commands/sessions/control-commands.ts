@@ -29,7 +29,7 @@ interface SessionIdArgs {
 }
 
 interface AnswerArgs extends SessionIdArgs {
-  text: string;
+  text?: string[];
 }
 
 /**
@@ -77,17 +77,43 @@ export const peekCommand: CommandModule<unknown, SessionIdArgs> = {
 };
 
 export const answerCommand: CommandModule<unknown, AnswerArgs> = {
-  command: 'answer <session> <text>',
+  // A variadic tail, not a single positional: with one, yargs parses a
+  // dash-leading answer (`answer 0f8e1c42 --force`) as options and
+  // refuses the command, and even `--` does not separate it.
+  command: 'answer <session> [text..]',
   describe: 'Answer a background session that is waiting for input',
   builder: (yargs: Argv) =>
-    sessionPositional(yargs).positional('text', {
-      type: 'string',
-      describe: 'What to tell it',
-      demandOption: true,
-    }) as Argv<AnswerArgs>,
+    sessionPositional(yargs)
+      .parserConfiguration({
+        // An answer is free text: it may quote a flag or paste a command
+        // snippet. Parse unknown options as the text and take what
+        // follows `--` verbatim, the way `mcp add` takes server args.
+        'unknown-options-as-args': true,
+        'populate--': true,
+      })
+      .positional('text', {
+        type: 'string',
+        describe:
+          'What to tell it; tokens after `--` are taken as-is, but a bare --help still shows this help',
+      })
+      .middleware((argv) => {
+        // Fold the verbatim tail (`answer <id> -- --force`) into the
+        // answer text, the way `mcp add` folds `--` into server args.
+        const verbatim = argv['--'];
+        if (verbatim && verbatim.length > 0) {
+          argv.text = [
+            ...((argv.text as string[] | undefined) ?? []),
+            ...verbatim.map(String),
+          ];
+        }
+      }) as Argv<AnswerArgs>,
   handler: async (argv) => {
     report(
-      await answerManagedSession(argv.session, argv.text, connectSupervisor),
+      await answerManagedSession(
+        argv.session,
+        (argv.text ?? []).join(' '),
+        connectSupervisor,
+      ),
     );
   },
 };
