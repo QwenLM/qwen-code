@@ -234,6 +234,7 @@ export type {
   WebShellAgentTask,
   WebShellShellTask,
   WebShellMonitorTask,
+  WebShellWorkflowTask,
   WebShellPreparedSubmit,
   WebShellSubmitSnapshot,
   WebShellSessionArtifactsChange,
