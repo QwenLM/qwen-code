@@ -10191,6 +10191,62 @@ describe('createServeApp', () => {
       expect(bridge.sessionResourcesCalls).toEqual(['s-1']);
     });
 
+    it('marks supported-commands responses no-store after command metadata changes', async () => {
+      let commands: ServeSessionSupportedCommandsStatus = {
+        v: 1,
+        sessionId: 's-1',
+        availableCommands: [
+          {
+            name: 'review',
+            description: 'Review',
+            input: { hint: '' },
+            _meta: { source: 'skill-dir-command', argumentHint: '' },
+          },
+        ],
+        availableSkills: ['review'],
+      };
+      const bridge = fakeBridge({
+        sessionSupportedCommandsImpl: async () => commands,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const before = await request(app)
+        .get('/session/s-1/supported-commands')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(before.status).toBe(200);
+      expect(before.headers['cache-control']).toBe('no-store');
+
+      // Simulate the bridge returning refreshed Skill metadata.
+      commands = {
+        ...commands,
+        availableCommands: [
+          {
+            name: 'review',
+            description: 'Review the staged diff',
+            input: { hint: '<path>' },
+            _meta: { source: 'skill-dir-command', argumentHint: '<path>' },
+          },
+        ],
+      };
+
+      const after = await request(app)
+        .get('/session/s-1/supported-commands')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('If-None-Match', before.headers['etag']);
+
+      expect(after.status).toBe(200);
+      expect(after.headers['cache-control']).toBe('no-store');
+      expect(after.body.availableCommands[0].description).toBe(
+        'Review the staged diff',
+      );
+      expect(after.body.availableCommands[0]._meta.argumentHint).toBe('<path>');
+    });
+
     it('dispatches read-only session snapshots through the live owner runtime', async () => {
       const primaryBridge = fakeBridge();
       const secondaryBridge = fakeBridge({
@@ -10692,6 +10748,7 @@ describe('createServeApp', () => {
         .set('Authorization', 'Bearer secret');
 
       expect(commandsRes.status).toBe(200);
+      expect(commandsRes.headers['cache-control']).toBe('no-store');
       expect(commandsRes.body).toMatchObject({
         workflowsEnabled: false,
         savedWorkflows: [],
@@ -10853,6 +10910,7 @@ describe('createServeApp', () => {
         availableCommands: [],
         availableSkills: [],
       });
+      expect(commands.headers['cache-control']).toBe('no-store');
       expect(heartbeat.status).toBe(200);
       expect(heartbeat.body).toMatchObject({
         sessionId,
