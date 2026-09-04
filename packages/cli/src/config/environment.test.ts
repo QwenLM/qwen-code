@@ -820,6 +820,9 @@ describe('loadEnvironment', () => {
     expect(
       process.env['QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME'],
     ).toBeUndefined();
+    expect(
+      process.env['qwen_code_private_conversations_runtime'],
+    ).toBeUndefined();
     expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
   });
 
