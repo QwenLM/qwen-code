@@ -917,6 +917,7 @@ describe('resolve-health: decisions', () => {
       streak: 5,
       unanswered: [],
       newestUnanswered: null,
+      newestRequest: null,
       latest: failing.latestAttempt.id,
     });
     assert.ok(
@@ -951,6 +952,9 @@ describe('resolve-health: decisions', () => {
       streak: 0,
       unanswered: stale.unanswered.map((u) => u.id),
       newestUnanswered: stale.unanswered.at(-1).at,
+      // The live request floor is recorded too, so the barrier survives the
+      // request comments themselves being deleted.
+      newestRequest: stale.unanswered.at(-1).at,
       latest: null,
     });
   });
@@ -1032,6 +1036,62 @@ describe('resolve-health: decisions', () => {
         "5 in a row (0 never reached the agent's verdict, 5 resolved the conflict but the push was rejected, 0 were the agent giving up",
       ),
       body,
+    );
+  });
+
+  it('does not claim a change on the first tick that reads no state', () => {
+    // Production's second tick of every incident: the issue body carries the
+    // marker but findOpenIssue never reads it back as state, so `texts` is
+    // empty and `previous` is null. The write must happen — it is how state
+    // first reaches a comment the watch trusts — but the picture has not
+    // changed, and the comment must not say it has. Every other decide() test
+    // seeds `texts` with the creation body, a shape production never makes.
+    const first = decide(failing, {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [],
+    });
+    assert.deepEqual(
+      first.map((a) => a.type),
+      ['comment'],
+    );
+    assert.ok(first[0].body.includes(HEALTH_MARKER));
+    assert.deepEqual(
+      readState([first[0].body]),
+      readState([decide(failing, null)[0].body]),
+    );
+    assert.ok(
+      !first[0].body.includes('the picture has changed'),
+      first[0].body,
+    );
+    // ...and once that state is readable, a real change still reports as one.
+    const existing = {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [first[0].body],
+    };
+    const moved = assess(
+      [
+        {
+          number: 3,
+          comments: [
+            ...[1, 2, 3, 4, 5].map((d) =>
+              result(`2026-08-2${d}T00:00:00Z`, INFRA_FAILED, 3),
+            ),
+            result('2026-08-26T00:00:00Z', AGENT_FAILED, 3),
+          ],
+        },
+      ],
+      { now },
+    );
+    const update = decide(moved, existing);
+    assert.deepEqual(
+      update.map((a) => a.type),
+      ['comment'],
+    );
+    assert.ok(
+      update[0].body.includes('the picture has changed'),
+      update[0].body,
     );
   });
 
@@ -1435,6 +1495,116 @@ describe('resolve-health: decisions', () => {
     // Not closed — and not refreshed again either: the barrier recorded above
     // now holds, so the write does not repeat every tick.
     assert.deepEqual(decide(tick3, { number: 47, texts }), []);
+  });
+
+  it('holds for a request its author edited after posting', () => {
+    // The producer fires on comment creation only, so the unanswered ROSTER
+    // must ignore an edited comment: a trusted account could otherwise edit an
+    // old comment into request shape and manufacture entries. The barrier must
+    // not inherit that blindness — the lane really was asked at 11:00, and a
+    // typo fix at 11:30 cannot un-ask it — or every request its author touched
+    // re-opens the false-close this floor exists to shut.
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 70),
+    );
+    const push = result('2026-08-26T10:00:00Z', PUSHED, 70);
+    const edited = request(
+      '2026-08-26T11:00:00Z',
+      71,
+      'maintainer',
+      '2026-08-26T11:30:00Z',
+    );
+    const lane = [
+      { number: 70, state: 'open', comments: [...failures, push] },
+      { number: 71, state: 'open', comments: [edited] },
+    ];
+    const quiet = assess(lane, { now });
+    assert.equal(quiet.alarm, false);
+    // The roster stays strict: an edited comment never ran a lane, so it is
+    // not evidence of an unserved request...
+    assert.equal(quiet.unanswered.length, 0);
+    // ...but the barrier reads it, at the creation time no edit can move.
+    assert.equal(quiet.newestRequest, '2026-08-26T11:00:00Z');
+    const held = decide(quiet, { number: 70, createdAt: FILED_AT, texts: [] });
+    assert.deepEqual(
+      held.map((a) => a.type),
+      ['comment'],
+      'refuses to read the 10:00 push as a recovery from an 11:00 request',
+    );
+    // A push that postdates the request does close it.
+    const served = assess(
+      [
+        {
+          number: 70,
+          state: 'open',
+          comments: [...failures, result('2026-08-26T12:00:00Z', PUSHED, 70)],
+        },
+        lane[1],
+      ],
+      { now },
+    );
+    assert.deepEqual(
+      decide(served, { number: 70, createdAt: FILED_AT, texts: [] }).map(
+        (a) => a.type,
+      ),
+      ['comment', 'close'],
+    );
+  });
+
+  it('records the request it saw, so a later deletion cannot certify recovery', () => {
+    // The live floor reads comments, so it cannot read a request that has been
+    // deleted. Carrying it in the state the watch writes means any tick that
+    // SAW the request keeps it: only a deletion before the first tick — at
+    // most one tick interval — reaches neither source.
+    const filedOnStreak =
+      '<!-- qwen-resolve-health-state {"streak":5,"unanswered":[],"newestUnanswered":null,"latest":null} -->';
+    const failures = [1, 2, 3, 4].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 72),
+    );
+    const push = result('2026-08-27T10:00:00Z', PUSHED, 72);
+    const lane = (withRequest) => [
+      { number: 72, state: 'open', comments: [...failures, push] },
+      {
+        number: 73,
+        state: 'open',
+        comments: withRequest ? [request('2026-08-27T11:00:00Z', 73)] : [],
+      },
+    ];
+    // Tick 1: the request is an hour old, too young for the roster, so it
+    // reaches no marker on its own. The refresh must still record it.
+    const seen = assess(lane(true), { now });
+    assert.equal(seen.unanswered.length, 0, 'a 1h-old request is not stale');
+    const tick1 = decide(seen, {
+      number: 42,
+      createdAt: FILED_AT,
+      texts: [filedOnStreak],
+    });
+    assert.deepEqual(
+      tick1.map((a) => a.type),
+      ['comment'],
+    );
+    assert.equal(
+      readState([tick1[0].body]).newestRequest,
+      '2026-08-27T11:00:00Z',
+    );
+    // Tick 2: the request comment is gone. The recorded floor still holds the
+    // 10:00 push back.
+    const gone = assess(lane(false), { now });
+    assert.equal(
+      gone.newestRequest,
+      null,
+      'nothing can read a deleted comment',
+    );
+    assert.equal(gone.latestAttempt.kind, 'pushed');
+    assert.deepEqual(
+      decide(gone, {
+        number: 42,
+        createdAt: FILED_AT,
+        texts: [tick1[0].body],
+      }),
+      [],
+      'no close, and nothing new to record',
+    );
   });
 
   it('holds for a request no tick ever saw, because its PR closed first', () => {

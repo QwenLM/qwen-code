@@ -202,23 +202,36 @@ export function assess(prs, options = {}) {
   // not, on a PR still open or long since closed. It is NOT a signal that
   // anything is wrong (it never feeds the alarm), only the latest moment the
   // lane was asked to do something: a push from before it cannot show the
-  // lane can serve it. decide() floors the recovery barrier here, which is
-  // what covers the two ways the REMEMBERED barrier goes missing — a request
-  // whose PR closed before any tick saw it stale, and a marker someone
-  // deleted — for as long as the request itself is still in the window.
+  // lane can serve it. decide() floors the recovery barrier here, and carries
+  // it forward in the state it writes, so a request survives its PR closing,
+  // a marker someone deleted, and — once any tick has seen it — its own
+  // deletion. What it does NOT survive is deletion before the first tick that
+  // could record it, which no source can reach; that residue is bounded by
+  // one tick interval.
+  //
+  // Read with a looser predicate than the roster below. The producer fires on
+  // comment CREATION only (`issue_comment: types: ['created']`), so a comment
+  // edited into request shape never ran a lane — which is why the roster must
+  // stay strict, or a trusted account could manufacture unanswered entries out
+  // of old comments. The barrier is safe under both readings: a comment whose
+  // body is still request-shaped either was one at creation (the lane really
+  // was asked) or was edited into one (the lane was not, and counting it only
+  // REFUSES a close). It floors with `created_at`, which no edit moves, so an
+  // old comment edited today cannot outrank a recent push.
   let newestRequest = null;
-  const isAnswerableRequest = (c) =>
+  const isRequestShaped = (c) =>
     c.user !== opts.bot &&
-    c.updated_at === c.created_at &&
     ANSWERABLE_ASSOCIATIONS.has(c.author_association) &&
     isRequest(c.body);
+  const isAnswerableRequest = (c) =>
+    isRequestShaped(c) && c.updated_at === c.created_at;
   for (const pr of prs) {
     const comments = [...pr.comments]
       .filter((c) => c.created_at >= windowStart)
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
     for (const c of comments) {
       if (
-        isAnswerableRequest(c) &&
+        isRequestShaped(c) &&
         (!newestRequest || c.created_at > newestRequest)
       ) {
         newestRequest = c.created_at;
@@ -329,11 +342,18 @@ export function assess(prs, options = {}) {
 function stateOf(assessment, previous = null) {
   const newest = assessment.unanswered.at(-1)?.at ?? null;
   const carried = previous?.newestUnanswered ?? null;
+  // The live request floor is carried the same way, and for a stronger
+  // reason: a request the watch can read today may be deleted tomorrow, and
+  // the recovery gate must not read that deletion as a recovery. Recording it
+  // means any tick that SAW the request keeps it.
+  const request = previous?.newestRequest ?? null;
+  const seen = assessment.newestRequest ?? null;
   return {
     streak: assessment.streak,
     unanswered: assessment.unanswered.map((u) => u.id),
     newestUnanswered:
       carried && (!newest || carried > newest) ? carried : newest,
+    newestRequest: request && (!seen || request > seen) ? request : seen,
     latest: assessment.latestAttempt?.id ?? null,
   };
 }
@@ -364,8 +384,18 @@ function validState(state) {
   // A field that is absent reads as "not recorded", which every gate already
   // handles; a field that is PRESENT must have the type the watch writes.
   const ok = (v, type) => v === undefined || v === null || typeof v === type;
-  const { streak, unanswered, newestUnanswered, latest, recovered } = state;
+  const {
+    streak,
+    unanswered,
+    newestUnanswered,
+    newestRequest,
+    latest,
+    recovered,
+  } = state;
   if (!ok(streak, 'number') || !ok(newestUnanswered, 'string')) {
+    return null;
+  }
+  if (!ok(newestRequest, 'string')) {
     return null;
   }
   if (!ok(latest, 'number') || !ok(recovered, 'number')) {
@@ -474,6 +504,22 @@ export function renderUpdate(assessment, options = {}, previous = null) {
   ].join('\n');
 }
 
+// The first alarming tick after the issue is filed: the body is what FINDS
+// the issue, never what the watch believes, so `texts` is empty, `previous` is
+// null, and `sameState` cannot compare anything. The write is required — it is
+// how state first reaches a comment the watch trusts, and suppressing it puts
+// the barrier back where a deleted comment can take it — but it must not claim
+// a change it never saw.
+function renderFirstRecord(assessment, options = {}) {
+  return [
+    HEALTH_MARKER,
+    stateMarker(stateOf(assessment)),
+    'Still failing. This issue carried no state the watch reads back, so this is a first record of the picture, not a report of a change.',
+    '',
+    renderReport(assessment, options),
+  ].join('\n');
+}
+
 // The write decide() makes with the alarm quiet: it records state and claims
 // nothing else, so it must not reuse the update's "still failing" headline.
 function renderStateRefresh(assessment, options = {}, previous = null) {
@@ -521,7 +567,9 @@ export function decide(assessment, existing, options = {}) {
         actions.push({
           type: 'comment',
           number: existing.number,
-          body: renderUpdate(assessment, options, previous),
+          body: previous
+            ? renderUpdate(assessment, options, previous)
+            : renderFirstRecord(assessment, options),
         });
       }
     }
@@ -557,15 +605,20 @@ export function decide(assessment, existing, options = {}) {
     //     outlives the window, but it lives on GitHub where a triage user can
     //     delete the comments carrying it;
     //   - what it can still SEE (the newest request in this window, answered
-    //     or not, open PR or closed) — needs no record at all, so it survives
-    //     deleted comments, and it covers a request whose PR closed before any
-    //     tick observed it stale, which never reached a marker in the first
-    //     place;
+    //     or not, open PR or closed) — needs no record of its own, so it
+    //     covers a request whose PR closed before any tick observed it stale,
+    //     which never reached a marker in the first place. It is carried into
+    //     every marker the watch writes, so it also survives the request
+    //     comment itself being deleted, once any tick has seen it. A request
+    //     deleted before the FIRST tick that could record it reaches neither
+    //     source; nothing can read a comment that is gone, and that residue is
+    //     bounded by one tick interval;
     //   - and the issue's own creation time — unforgeable, always available,
     //     and sound on its own terms: the issue exists because the lane was
     //     failing then, so an earlier push cannot show it recovered.
-    const recorded = stateOf(assessment, previous).newestUnanswered;
-    const barrier = [recorded, assessment.newestRequest, existing.createdAt]
+    const carried = stateOf(assessment, previous);
+    const recorded = carried.newestUnanswered;
+    const barrier = [recorded, carried.newestRequest, existing.createdAt]
       .filter((t) => typeof t === 'string' && t)
       .reduce((a, b) => (a > b ? a : b), '');
     if (latest && latest.kind === 'pushed' && latest.at > barrier) {
@@ -584,14 +637,18 @@ export function decide(assessment, existing, options = {}) {
       actions.push({ type: 'close', number: existing.number });
     } else if (
       !previous ||
-      (recorded ?? '') > (previous.newestUnanswered ?? '')
+      (recorded ?? '') > (previous.newestUnanswered ?? '') ||
+      (carried.newestRequest ?? '') > (previous.newestRequest ?? '')
     ) {
       // Persist the barrier while the alarm is quiet. A request that goes
       // unanswered below the threshold reaches no marker otherwise, and once
       // its PR closes assess() drops it by design: the gate above would fall
       // back to the creation-time floor and close on a push that predates the
-      // request. Keyed on the RECORDED barrier, not the floored one, so the
-      // floor alone never makes the watch chatter on a quiet lane.
+      // request. Keyed on the two barriers that RISE — the recorded one and
+      // the request floor — never on the creation-time floor, which is
+      // constant and would say nothing; each key rises only when a new
+      // request appears, so a quiet lane gets one comment per request and
+      // never chatters.
       actions.push({
         type: 'comment',
         number: existing.number,
