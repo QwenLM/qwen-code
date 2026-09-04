@@ -18,12 +18,15 @@ const isPidAlive = vi.fn((pid: number) => pid > 0);
 /** The start token the OS would report for a pid right now. */
 const currentProcStart = vi.fn((pid: number): string | null => `start-${pid}`);
 const pidNamespaceId = vi.fn((): number | null => null);
+/** The boot id this machine reports; null models an unreadable boot id. */
+const localBootId = vi.fn((): string | null => 'boot-local');
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
   readProcStartToken: (...args: unknown[]) =>
     currentProcStart(...(args as [number])),
   readPidNamespaceId: () => pidNamespaceId(),
+  readLocalBootId: () => localBootId(),
   // Mirrors the real degradation contract rather than stubbing a verdict,
   // so a test that records no token exercises the same fall-through to a
   // bare liveness check that a pre-identity worker file gets in
@@ -51,6 +54,8 @@ beforeEach(() => {
   currentProcStart.mockImplementation((pid: number) => `start-${pid}`);
   pidNamespaceId.mockReset();
   pidNamespaceId.mockImplementation(() => null);
+  localBootId.mockReset();
+  localBootId.mockImplementation(() => 'boot-local');
 });
 
 function state(
@@ -257,6 +262,82 @@ describe('managedSessionRows', () => {
       NOW,
     );
     expect(row.pid).toBe(200);
+  });
+
+  it('refuses a pid recorded under another boot when ours is unreadable', () => {
+    // Two machines sharing one `~/.qwen` both live in the initial PID
+    // namespace, whose inode is a kernel constant, so the namespace guard
+    // never fires between them — the boot-id prefix is the only
+    // cross-machine identity. The guard must not depend on our own boot
+    // id being readable: during the same outage `isSameProcess` degrades
+    // to a bare liveness check (the current token is unreadable too),
+    // which vouches for whatever local process holds the number — here
+    // pid 87, alive locally but nobody's worker.
+    localBootId.mockImplementation(() => null);
+    currentProcStart.mockImplementation(() => null);
+    const [row] = managedSessionRows(
+      [
+        snapshot({
+          worker: workerFile({ workerPid: 87, workerProcStart: 'bootA:1234' }),
+        }),
+      ],
+      NOW,
+    );
+    expect(isPidAlive(87)).toBe(true);
+    expect(row.pid).toBeUndefined();
+  });
+
+  it('refuses a pid whose recorded boot prefix differs from the local one', () => {
+    localBootId.mockImplementation(() => 'bootB');
+    currentProcStart.mockImplementation(() => null);
+    const [row] = managedSessionRows(
+      [
+        snapshot({
+          worker: workerFile({ workerPid: 87, workerProcStart: 'bootA:1234' }),
+        }),
+      ],
+      NOW,
+    );
+    expect(row.pid).toBeUndefined();
+  });
+
+  it('still reports a pid recorded under the local boot', () => {
+    // The boot guard skips only foreign boots; a matching prefix hands
+    // the candidate to the identity check as before.
+    localBootId.mockImplementation(() => 'bootA');
+    currentProcStart.mockImplementation(() => 'bootA:1234');
+    const [row] = managedSessionRows(
+      [
+        snapshot({
+          worker: workerFile({ workerPid: 87, workerProcStart: 'bootA:1234' }),
+        }),
+      ],
+      NOW,
+    );
+    expect(row.pid).toBe(87);
+  });
+
+  it('falls back to the host pid when the worker pid is from another boot', () => {
+    // The guard is per candidate: a foreign worker token must not blank
+    // a host pid recorded under the local boot.
+    localBootId.mockImplementation(() => 'bootA');
+    currentProcStart.mockImplementation((pid: number) =>
+      pid === 100 ? 'bootA:55' : null,
+    );
+    const [row] = managedSessionRows(
+      [
+        snapshot({
+          worker: workerFile({
+            hostPid: 100,
+            hostProcStart: 'bootA:55',
+            workerPid: 87,
+            workerProcStart: 'bootB:1234',
+          }),
+        }),
+      ],
+      NOW,
+    );
+    expect(row.pid).toBe(100);
   });
 
   it('leaves the pid unset when no process is recorded, rather than reporting 0', () => {

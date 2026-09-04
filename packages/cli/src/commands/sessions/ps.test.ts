@@ -14,6 +14,7 @@ const isPidAlive = vi.fn();
 /** The start token the OS would report for a pid right now. */
 const currentProcStart = vi.fn((pid: number): string | null => `start-${pid}`);
 const pidNamespaceId = vi.fn((): number | null => null);
+const localBootId = vi.fn((): string | null => 'boot-local');
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   listLiveSessions: (...args: unknown[]) => listLiveSessions(...args),
@@ -21,6 +22,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   readProcStartToken: (...args: unknown[]) =>
     currentProcStart(...(args as [number])),
   readPidNamespaceId: () => pidNamespaceId(),
+  readLocalBootId: () => localBootId(),
   // Mirrors the real degradation contract, matching `managed-rows.test.ts`:
   // a fixture that records no token exercises the same fall-through to a
   // bare liveness check that a pre-identity worker file gets in
@@ -128,6 +130,8 @@ beforeEach(() => {
   currentProcStart.mockImplementation((pid: number) => `start-${pid}`);
   pidNamespaceId.mockReset();
   pidNamespaceId.mockImplementation(() => null);
+  localBootId.mockReset();
+  localBootId.mockImplementation(() => 'boot-local');
 });
 
 afterEach(() => {

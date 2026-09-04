@@ -34,6 +34,7 @@
 
 import {
   isSameProcess,
+  readLocalBootId,
   readPidNamespaceId,
   type SessionRegistryRecord,
 } from '@qwen-code/qwen-code-core';
@@ -168,6 +169,16 @@ export function managedSessionRows(
  * sides are known and disagree; an unreadable namespace on either side
  * must not blank a real worker's pid.
  *
+ * The boot-id prefix of a recorded token gets the same treatment the
+ * registry gives it: two machines sharing one `~/.qwen` both live in the
+ * initial PID namespace, whose inode is a kernel constant, so the
+ * namespace guard never fires between them and the boot prefix is the
+ * only cross-machine identity. A candidate recorded under another boot —
+ * or under any boot while our own boot id is unreadable, because during
+ * the same outage `isSameProcess` degrades to a bare liveness check that
+ * vouches for whatever local process holds the number — is skipped. A
+ * candidate with no boot prefix keeps the liveness fall-through.
+ *
  * When nothing qualifies the row prints `-`, exactly like a session that
  * never had a worker.
  */
@@ -183,14 +194,28 @@ function liveWorkerPid(
   ) {
     return undefined;
   }
+  const ownBootId = readLocalBootId();
   const candidates = [
     [worker.workerPid, worker.workerProcStart],
     [worker.hostPid, worker.hostProcStart],
   ] as const;
   for (const [pid, procStart] of candidates) {
-    if (pid !== undefined && isSameProcess(pid, procStart)) return pid;
+    if (pid === undefined) continue;
+    // Mirrors the guard `listLiveSessions` applies to registry records:
+    // it must fire on an unreadable local boot id as well, not only on a
+    // positive mismatch, and it must leave token-less candidates to the
+    // liveness fall-through.
+    const recordBootId = procStart == null ? null : bootIdOf(procStart);
+    if (recordBootId !== null && recordBootId !== ownBootId) continue;
+    if (isSameProcess(pid, procStart)) return pid;
   }
   return undefined;
+}
+
+/** The boot-id prefix of a `<boot_id>:<starttime>` token, or null. */
+function bootIdOf(procStart: string): string | null {
+  const sep = procStart.indexOf(':');
+  return sep === -1 ? null : procStart.slice(0, sep);
 }
 
 /** Row for one live registry record. */
