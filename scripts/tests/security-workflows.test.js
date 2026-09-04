@@ -106,11 +106,17 @@ describe('security workflows', () => {
       'audit npm audit --omit=dev --audit-level=high --workspaces=false',
     );
     expect(auditStep).not.toContain('|| true');
-    // The retry is bounded on both axes: every attempt is capped, and the job
-    // ceiling covers the worst case (2 audit sites x 2 attempts x 300s). Drop
-    // either and a registry outage turns a reported verdict into a job cancel.
+    // Every factor of the worst-case arithmetic is pinned, because the job
+    // ceiling is only safe while none of them drifts: the per-attempt cap, the
+    // backoff between attempts, and the ceiling itself — three audit sites
+    // (root plus the two vendored lockfiles the loop does not skip), two
+    // attempts each, 300s + 15s + 300s per site = 1845s of audit work. The
+    // attempt count is pinned behaviourally by the call counters in
+    // security-checks-audit-retry.test.js. Loosen any of these and a registry
+    // outage turns a reported verdict into a bare job cancel.
     expect(auditStep).toContain('timeout 300 "$@"');
-    expect(dependencyJob).toContain('timeout-minutes: 25');
+    expect(auditStep).toContain('sleep 15');
+    expect(dependencyJob).toContain('timeout-minutes: 40');
     expect(trufflehogStep).not.toContain('continue-on-error');
     const trufflehogPin = trufflehogStep.match(
       /trufflesecurity\/trufflehog@[0-9a-f]{40}' # v([\d.]+)/,

@@ -44,15 +44,19 @@ describe('security-checks audit step endpoint-error retry', () => {
   const ENDPOINT_ERROR = 'npm error audit endpoint returned an error';
   const NO_VERDICT = '::error::npm audit returned no verdict after 2 attempts';
 
-  // One vendored lockfile, so a full pass audits twice: once at the root and
-  // once inside the per-package loop. The loop keeps going after a root failure
-  // (`|| status=$?` accumulates rather than aborts), so a persistent failure is
-  // audited and retried at both sites.
+  // Three audit sites, matching the real tree: the root `npm audit` plus the
+  // two vendored lockfiles the per-package loop does not skip. The loop keeps
+  // going after a root failure (`|| status=$?` accumulates rather than aborts),
+  // so a persistent failure is audited and retried at all three.
   function runAuditStep({ auditMode, pipefail = true }) {
     const dir = mkdtempSync(join(tmpdir(), 'qwen-cve-audit-'));
     try {
-      mkdirSync(join(dir, 'packages/live-host'), { recursive: true });
-      writeFileSync(join(dir, 'packages/live-host/package-lock.json'), '{}');
+      // mobile-mcp is the one lockfile the loop skips. Including it means
+      // deleting that skip line changes the counts below instead of passing.
+      for (const pkg of ['desktop-shell', 'live-host', 'mobile-mcp']) {
+        mkdirSync(join(dir, 'packages', pkg), { recursive: true });
+        writeFileSync(join(dir, 'packages', pkg, 'package-lock.json'), '{}');
+      }
 
       const counters = {
         audit: join(dir, 'audit-calls'),
@@ -169,7 +173,8 @@ describe('security-checks audit step endpoint-error retry', () => {
   it('passes a clean audit through unchanged, without retrying', () => {
     const { status, auditCalls, sleeps } = runAuditStep({ auditMode: 'clean' });
     expect(status).toBe(0);
-    expect(auditCalls).toBe(2);
+    // Root plus the two vendored lockfiles; mobile-mcp is skipped.
+    expect(auditCalls).toBe(3);
     expect(sleeps).toBe(0);
   });
 
@@ -178,9 +183,9 @@ describe('security-checks audit step endpoint-error retry', () => {
       auditMode: 'endpoint-error-then-clean',
     });
     expect(status).toBe(0);
-    // Root audit fails once and is retried; the vendored lockfile then audits
-    // clean on its first attempt.
-    expect(auditCalls).toBe(3);
+    // The root audit fails once and is retried; the two vendored lockfiles then
+    // audit clean on their first attempt.
+    expect(auditCalls).toBe(4);
     expect(sleeps).toBe(1);
     expect(output).toContain(
       '::warning::npm audit returned no verdict (attempt 1/2), retrying',
@@ -192,10 +197,10 @@ describe('security-checks audit step endpoint-error retry', () => {
       auditMode: 'timeout-then-clean',
     });
     expect(status).toBe(0);
-    // The killed attempt never reached npm; the retry and the vendored lockfile
-    // both did.
-    expect(timeoutCalls).toBe(3);
-    expect(auditCalls).toBe(2);
+    // The killed attempt never reached npm; the retry and both vendored
+    // lockfiles did.
+    expect(timeoutCalls).toBe(4);
+    expect(auditCalls).toBe(3);
     expect(sleeps).toBe(1);
   });
 
@@ -204,9 +209,11 @@ describe('security-checks audit step endpoint-error retry', () => {
       auditMode: 'endpoint-error-always',
     });
     expect(status).not.toBe(0);
-    // Two attempts at each of the two audit sites, sleeping between them.
-    expect(auditCalls).toBe(4);
-    expect(sleeps).toBe(2);
+    // Two attempts at each of the three audit sites, sleeping between them.
+    // These counts are what the job ceiling is sized from: 3 x (300s + 15s +
+    // 300s) = 1845s of audit work in a persistent outage.
+    expect(auditCalls).toBe(6);
+    expect(sleeps).toBe(3);
     expect(output).toContain(NO_VERDICT);
     expect(output).toContain('not a CVE finding');
   });
@@ -216,9 +223,9 @@ describe('security-checks audit step endpoint-error retry', () => {
       auditMode: 'timeout-always',
     });
     expect(status).not.toBe(0);
-    expect(timeoutCalls).toBe(4);
+    expect(timeoutCalls).toBe(6);
     expect(auditCalls).toBe(0);
-    expect(sleeps).toBe(2);
+    expect(sleeps).toBe(3);
     expect(output).toContain(NO_VERDICT);
     expect(output).toContain('not a CVE finding');
   });
@@ -228,9 +235,9 @@ describe('security-checks audit step endpoint-error retry', () => {
       auditMode: 'cve-found',
     });
     expect(status).not.toBe(0);
-    // Both audit sites report the finding once each; neither is retried, and
+    // All three audit sites report the finding once each; none is retried, and
     // the loop still runs after the root failure.
-    expect(auditCalls).toBe(2);
+    expect(auditCalls).toBe(3);
     expect(sleeps).toBe(0);
     expect(output).toContain('1 vulnerability (1 high)');
     expect(output).not.toContain('retrying');

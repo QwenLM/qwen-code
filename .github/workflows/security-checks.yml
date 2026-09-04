@@ -27,11 +27,14 @@ jobs:
   dependency-cve:
     name: 'Dependency CVE audit'
     runs-on: 'ubuntu-latest'
-    # A healthy run finishes in ~4 minutes. The ceiling covers the audit retry
-    # below at its worst — two audit sites, two attempts each, every attempt
-    # capped at 300s — so a registry outage ends in a reported verdict rather
-    # than a job cancel.
-    timeout-minutes: 25
+    # A healthy run finishes in ~4-6 minutes. The ceiling covers the audit
+    # retry below at its worst: three audit sites (the root call plus the two
+    # vendored lockfiles the loop does not skip), two attempts each, every
+    # attempt capped at 300s with a 15s backoff between them — 3 x 615s = 1845s
+    # of audit work — plus checkout, setup and the installs. A ceiling below
+    # that cancels the job mid-outage, so the `not a CVE finding` verdict below
+    # would never be emitted and the run would surface as a bare cancel.
+    timeout-minutes: 40
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
