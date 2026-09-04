@@ -279,7 +279,7 @@ import {
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   clearReasoningRequestOverrides,
-  getModelConfiguration,
+  getConfiguredModelReasoning,
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
   parseReasoningSelection,
@@ -7280,7 +7280,9 @@ class QwenAgent implements Agent {
                     model.id,
                     model.registryBaseUrl ?? model.baseUrl,
                   )?.generationConfig.thinkingMandatory === true,
+                  model.capabilities?.reasoning,
                 ),
+                model.capabilities?.reasoning,
               );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
@@ -13732,16 +13734,17 @@ class QwenAgent implements Agent {
     }
     const generation = config.getContentGeneratorConfig?.();
     const modelId = generation?.model ?? config.getModel();
+    const modelReasoning = getConfiguredModelReasoning(config, modelId);
     if (
       !isReasoningSelectionSupported(
         modelId,
         selection,
         generation?.thinkingMandatory === true,
+        modelReasoning,
       )
     ) {
       return;
     }
-    const modelReasoning = this.getModelReasoningConfiguration(config);
     if (generation && modelReasoning && !modelReasoning.toggleOnly) {
       clearReasoningRequestOverrides(generation);
     }
@@ -14291,12 +14294,19 @@ class QwenAgent implements Agent {
       options: configModelOptions,
     };
 
+    const modelReasoning = this.getModelReasoningConfiguration(
+      config,
+      currentModelId,
+    );
+
     if (
       activeRuntimeSnapshot ||
       currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
       !isReasoningSelectionSupported(
         rawCurrentModelId,
         REASONING_EFFORT_DEFAULT,
+        false,
+        modelReasoning,
       )
     ) {
       return [modeConfigOption, modelConfigOption];
@@ -14306,10 +14316,6 @@ class QwenAgent implements Agent {
     if (!generation) {
       return [modeConfigOption, modelConfigOption];
     }
-    const modelReasoning = this.getModelReasoningConfiguration(
-      config,
-      currentModelId,
-    );
     const currentModelEffort = config.getReasoningEffort?.();
     const reasoningOverride = config.getReasoningEffortOverride?.();
     const reasoningOverrideValue = reasoningOverride
@@ -14353,7 +14359,7 @@ class QwenAgent implements Agent {
         ? mandatoryUsesDefaultEffort
           ? modelReasoning.defaultEffort
           : normalizedOverrideEffort
-            ? (modelReasoning.efforts.find(
+            ? (modelReasoning.efforts?.find(
                 (effort) => effort === normalizedOverrideEffort,
               ) ?? modelReasoning.defaultEffort)
             : currentModelEffort
@@ -14363,11 +14369,15 @@ class QwenAgent implements Agent {
       (!reasoningOverride || !overrideDisablesReasoning);
     const canDisableReasoning = generation.thinkingMandatory !== true;
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
-      ? buildModelReasoningConfigOption(rawCurrentModelId, {
-          enabled: reasoningEnabled,
-          effort: effectiveModelEffort,
-          thinkingMandatory: generation.thinkingMandatory === true,
-        })
+      ? buildModelReasoningConfigOption(
+          rawCurrentModelId,
+          {
+            enabled: reasoningEnabled,
+            effort: effectiveModelEffort,
+            thinkingMandatory: generation.thinkingMandatory === true,
+          },
+          modelReasoning,
+        )
       : undefined) ?? {
       id: 'reasoning_effort',
       name: 'Reasoning effort',
@@ -14423,8 +14433,7 @@ class QwenAgent implements Agent {
     if (completeModelId.startsWith(ACP_ROUTE_ID_PREFIX)) {
       return undefined;
     }
-    const reasoning = getModelConfiguration(config.getModel())?.reasoning;
-    return reasoning?.thinking ? reasoning : undefined;
+    return getConfiguredModelReasoning(config);
   }
 
   private buildSelectableModelOptions(config: Config) {

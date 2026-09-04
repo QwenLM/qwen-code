@@ -10,18 +10,50 @@ import {
   applyReasoningSelection,
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
+  getConfiguredModelReasoning,
   getModelConfiguration,
   isReasoningSelectionSupported,
   resolvePersistedReasoningConfigState,
 } from './model-configuration.js';
 
 describe('model configuration manifest', () => {
+  it('projects reasoning declared by the resolved provider model', () => {
+    const reasoning = {
+      thinking: true,
+      efforts: ['high', 'max'],
+      defaultEffort: 'high',
+      disableField: 'thinking',
+    } as const;
+    const config = {
+      getModel: () => 'deepseek-v4-pro',
+      getAuthType: () => 'openai',
+      getContentGeneratorConfig: () => ({
+        model: 'deepseek-v4-pro',
+        authType: 'openai',
+        baseUrl: 'https://api.deepseek.com',
+      }),
+      getResolvedModelConfig: () => ({ capabilities: { reasoning } }),
+    } as unknown as Config;
+
+    expect(getConfiguredModelReasoning(config)).toBe(reasoning);
+    expect(
+      buildModelReasoningConfigOption('deepseek-v4-pro', {}, reasoning),
+    ).toMatchObject({
+      currentValue: 'high',
+      options: [{ value: 'none' }, { value: 'high' }, { value: 'max' }],
+    });
+    expect(
+      isReasoningSelectionSupported('deepseek-v4-pro', 'low', false, reasoning),
+    ).toBe(false);
+  });
+
   it('registers the exact stable qwen3.8-max reasoning controls', () => {
     expect(getModelConfiguration('qwen3.8-max')).toEqual({
       reasoning: {
         thinking: true,
         efforts: ['low', 'medium', 'xhigh'],
         defaultEffort: 'xhigh',
+        disableField: 'reasoning_effort',
       },
     });
   });
@@ -147,6 +179,7 @@ describe('model configuration manifest', () => {
       reasoning: {
         thinking: true,
         toggleOnly: true,
+        disableField: 'enable_thinking',
       },
     });
   });

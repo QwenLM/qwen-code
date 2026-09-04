@@ -8,45 +8,59 @@ import {
   REASONING_EFFORT_TIERS,
   type Config,
   type ContentGeneratorConfig,
+  type ProviderModelConfig,
   type ReasoningEffort,
 } from '@qwen-code/qwen-code-core';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 
-export type ModelReasoningConfiguration =
-  | {
-      readonly thinking: true;
-      readonly toggleOnly: true;
-    }
-  | {
-      readonly thinking: true;
-      readonly toggleOnly?: false;
-      readonly efforts: readonly ReasoningEffort[];
-      readonly defaultEffort: ReasoningEffort;
-    };
+export type ModelReasoningConfiguration = NonNullable<
+  NonNullable<ProviderModelConfig['capabilities']>['reasoning']
+>;
 
 const MODEL_CONFIGURATIONS: Readonly<
   Record<string, { readonly reasoning?: ModelReasoningConfiguration }>
 > = {
   'qwen3.5-plus': {
-    reasoning: { thinking: true, toggleOnly: true },
+    reasoning: {
+      thinking: true,
+      toggleOnly: true,
+      disableField: 'enable_thinking',
+    },
   },
   'qwen3.6-plus': {
-    reasoning: { thinking: true, toggleOnly: true },
+    reasoning: {
+      thinking: true,
+      toggleOnly: true,
+      disableField: 'enable_thinking',
+    },
   },
   'qwen3.6-flash': {
-    reasoning: { thinking: true, toggleOnly: true },
+    reasoning: {
+      thinking: true,
+      toggleOnly: true,
+      disableField: 'enable_thinking',
+    },
   },
   'qwen3.7-plus': {
-    reasoning: { thinking: true, toggleOnly: true },
+    reasoning: {
+      thinking: true,
+      toggleOnly: true,
+      disableField: 'enable_thinking',
+    },
   },
   'qwen3.7-max': {
-    reasoning: { thinking: true, toggleOnly: true },
+    reasoning: {
+      thinking: true,
+      toggleOnly: true,
+      disableField: 'enable_thinking',
+    },
   },
   'qwen3.8-max': {
     reasoning: {
       thinking: true,
       efforts: ['low', 'medium', 'xhigh'],
       defaultEffort: 'xhigh',
+      disableField: 'reasoning_effort',
     },
   },
 };
@@ -82,12 +96,18 @@ export function resolvePersistedReasoningConfigState(
   modelId: string | undefined,
   value: unknown,
   thinkingMandatory = false,
+  reasoning?: ModelReasoningConfiguration,
 ): ModelReasoningConfigState {
   const selection = parseReasoningSelection(value);
   if (
     !selection ||
     selection === REASONING_EFFORT_DEFAULT ||
-    !isReasoningSelectionSupported(modelId, selection, thinkingMandatory)
+    !isReasoningSelectionSupported(
+      modelId,
+      selection,
+      thinkingMandatory,
+      reasoning,
+    )
   ) {
     return { thinkingMandatory };
   }
@@ -96,12 +116,50 @@ export function resolvePersistedReasoningConfigState(
     : { enabled: true, effort: selection, thinkingMandatory };
 }
 
-export function getModelConfiguration(modelId: string | undefined):
+export function getModelConfiguration(
+  modelId: string | undefined,
+  reasoning?: ModelReasoningConfiguration,
+):
   | {
       readonly reasoning?: ModelReasoningConfiguration;
     }
   | undefined {
-  return modelId ? MODEL_CONFIGURATIONS[modelId] : undefined;
+  return reasoning
+    ? { reasoning }
+    : modelId
+      ? MODEL_CONFIGURATIONS[modelId]
+      : undefined;
+}
+
+export function getConfiguredModelReasoning(
+  config: Config,
+  modelId = config.getModel?.(),
+): ModelReasoningConfiguration | undefined {
+  const generation = config.getContentGeneratorConfig?.();
+  const authType = generation?.authType ?? config.getAuthType?.();
+  const baseUrl =
+    generation?.baseUrl ??
+    config.getCurrentModelRegistryBaseUrl?.() ??
+    undefined;
+  const configured = authType
+    ? config.getResolvedModelConfig?.(authType, modelId, baseUrl)
+    : undefined;
+  return (
+    configured?.capabilities?.reasoning ??
+    getModelConfiguration(modelId)?.reasoning
+  );
+}
+
+export function getReasoningEffortsForConfig(
+  config: Config,
+): readonly ReasoningEffort[] {
+  const modelId = config.getModel?.();
+  const reasoning = getConfiguredModelReasoning(config, modelId);
+  if (reasoning) return reasoning.toggleOnly ? [] : reasoning.efforts;
+  const normalized = modelId?.toLowerCase();
+  return normalized?.startsWith('qwen') || normalized === 'coder-model'
+    ? []
+    : REASONING_EFFORT_TIERS;
 }
 
 export function parseReasoningSelection(
@@ -117,18 +175,24 @@ export function isReasoningSelectionSupported(
   modelId: string | undefined,
   selection: ReasoningSelection,
   thinkingMandatory = false,
+  configuredReasoning?: ModelReasoningConfiguration,
 ): boolean {
   if (!modelId) return false;
-  const reasoning = getModelConfiguration(modelId)?.reasoning;
+  const reasoning = getModelConfiguration(
+    modelId,
+    configuredReasoning,
+  )?.reasoning;
   if (!reasoning?.thinking) {
     const normalized = modelId.toLowerCase();
     if (normalized.startsWith('qwen') || normalized === 'coder-model')
       return false;
   }
   if (selection === REASONING_EFFORT_DEFAULT) return true;
-  if (selection === REASONING_EFFORT_NONE) return !thinkingMandatory;
+  if (selection === REASONING_EFFORT_NONE) {
+    return reasoning?.canDisable !== false && !thinkingMandatory;
+  }
   return reasoning?.thinking
-    ? !reasoning.toggleOnly && reasoning.efforts.includes(selection)
+    ? !reasoning.toggleOnly && reasoning.efforts?.includes(selection) === true
     : REASONING_EFFORT_TIERS.includes(selection);
 }
 
@@ -191,18 +255,24 @@ export function applyReasoningSelection(
 export function buildModelReasoningConfigOption(
   modelId: string | undefined,
   state: ModelReasoningConfigState = {},
+  configuredReasoning?: ModelReasoningConfiguration,
 ): SessionConfigOption | undefined {
-  const reasoning = getModelConfiguration(modelId)?.reasoning;
+  const reasoning = getModelConfiguration(
+    modelId,
+    configuredReasoning,
+  )?.reasoning;
   if (!reasoning?.thinking) return undefined;
-  const thinkingMandatory = state.thinkingMandatory === true;
+  const canDisable =
+    reasoning.canDisable !== false && state.thinkingMandatory !== true;
 
   const currentValue =
-    state.enabled === false && !thinkingMandatory
+    state.enabled === false && canDisable
       ? REASONING_EFFORT_NONE
       : reasoning.toggleOnly
         ? REASONING_EFFORT_DEFAULT
-        : (reasoning.efforts.find((effort) => effort === state.effort) ??
-          reasoning.defaultEffort);
+        : (reasoning.efforts?.find((effort) => effort === state.effort) ??
+          reasoning.defaultEffort ??
+          REASONING_EFFORT_DEFAULT);
 
   return {
     id: 'reasoning_effort',
@@ -212,15 +282,15 @@ export function buildModelReasoningConfigOption(
     type: 'select',
     currentValue,
     options: [
-      ...(thinkingMandatory
-        ? []
-        : [
+      ...(canDisable
+        ? [
             {
               value: REASONING_EFFORT_NONE,
               name: 'Thinking off',
               description: 'Disable thinking for this session',
             },
-          ]),
+          ]
+        : []),
       ...(reasoning.toggleOnly
         ? [
             {
@@ -229,21 +299,34 @@ export function buildModelReasoningConfigOption(
               description: 'Use the model or provider thinking default',
             },
           ]
-        : reasoning.efforts.map((effort) => ({
-            value: effort,
-            name: REASONING_EFFORT_NAMES[effort],
-            description: 'Apply this effort to the next request',
-          }))),
+        : [
+            ...(reasoning.defaultEffort
+              ? []
+              : [
+                  {
+                    value: REASONING_EFFORT_DEFAULT,
+                    name: 'Default',
+                    description: 'Use the model or provider default',
+                  },
+                ]),
+            ...reasoning.efforts.map((effort) => ({
+              value: effort,
+              name: REASONING_EFFORT_NAMES[effort],
+              description: 'Apply this effort to the next request',
+            })),
+          ]),
     ],
     _meta: {
       'qwenCode/reasoning': reasoning.toggleOnly
         ? {
             toggleOnly: true,
-            ...(thinkingMandatory ? { thinkingMandatory: true } : {}),
+            ...(canDisable ? {} : { thinkingMandatory: true }),
           }
         : {
-            defaultEffort: reasoning.defaultEffort,
-            ...(thinkingMandatory ? { thinkingMandatory: true } : {}),
+            ...(reasoning.defaultEffort
+              ? { defaultEffort: reasoning.defaultEffort }
+              : {}),
+            ...(canDisable ? {} : { thinkingMandatory: true }),
           },
     },
   };
@@ -252,9 +335,17 @@ export function buildModelReasoningConfigOption(
 export function buildModelReasoningConfigPreview(
   modelId: string | undefined,
   state: ModelReasoningConfigState = {},
+  configuredReasoning?: ModelReasoningConfiguration,
 ): SessionConfigOption[] | undefined {
-  const reasoning = getModelConfiguration(modelId)?.reasoning;
+  const reasoning = getModelConfiguration(
+    modelId,
+    configuredReasoning,
+  )?.reasoning;
   if (!reasoning?.thinking) return undefined;
-  const option = buildModelReasoningConfigOption(modelId, state);
+  const option = buildModelReasoningConfigOption(
+    modelId,
+    state,
+    configuredReasoning,
+  );
   return option ? [option] : undefined;
 }

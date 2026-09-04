@@ -19,6 +19,7 @@ import {
   REASONING_EFFORT_TIERS,
 } from '@qwen-code/qwen-code-core';
 import { formatEffortChangeMessage } from './effort-utils.js';
+import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 const TIER_LIST = REASONING_EFFORT_TIERS.join(', ');
 
@@ -54,10 +55,21 @@ export const effortCommand: SlashCommand = {
     }
 
     const args = context.invocation?.args?.trim() || actionArgs.trim();
+    const availableTiers = getReasoningEffortsForConfig(config);
+    const availableTierList = availableTiers.join(', ');
 
     // No argument: open the interactive picker, or (non-interactive/ACP) report
     // the current tier and the available options.
     if (!args) {
+      if (availableTiers.length === 0) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: t(
+            'The current model does not expose reasoning effort tiers.',
+          ),
+        };
+      }
       if (context.executionMode === 'interactive') {
         return { type: 'dialog', dialog: 'effort' };
       }
@@ -68,23 +80,23 @@ export const effortCommand: SlashCommand = {
         content: current
           ? t(
               'Current reasoning effort: {{current}}\nAvailable: {{tiers}}\nUse "/effort <tier>" to change it.',
-              { current, tiers: TIER_LIST },
+              { current, tiers: availableTierList },
             )
           : t(
               'Reasoning effort: not set (using the model/provider default).\nAvailable: {{tiers}}\nUse "/effort <tier>" to set it.',
-              { tiers: TIER_LIST },
+              { tiers: availableTierList },
             ),
       };
     }
 
     const tier = normalizeReasoningEffort(args);
-    if (!tier) {
+    if (!tier || !availableTiers.includes(tier)) {
       return {
         type: 'message',
         messageType: 'error',
         content: t(
           'Unknown reasoning effort "{{value}}". Choose one of: {{tiers}}.',
-          { value: args, tiers: TIER_LIST },
+          { value: args, tiers: availableTierList },
         ),
       };
     }

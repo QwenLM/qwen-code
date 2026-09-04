@@ -10,6 +10,20 @@ import type {
   InputModalities,
 } from '../core/contentGenerator.js';
 import type { ConfigSources } from '../utils/configResolver.js';
+import type { ReasoningEffort } from '../core/reasoning-effort.js';
+
+export type ModelReasoningCapabilities = (
+  | { toggleOnly: true }
+  | {
+      toggleOnly?: false;
+      efforts: readonly ReasoningEffort[];
+      defaultEffort?: ReasoningEffort;
+    }
+) & {
+  thinking: true;
+  canDisable?: false;
+  disableField: 'enable_thinking' | 'reasoning_effort' | 'thinking';
+};
 
 /**
  * Model capabilities configuration
@@ -19,6 +33,8 @@ export interface ModelCapabilities {
   vision?: boolean;
   /** Can run the normal agent tool loop, not only transcription requests. */
   agent?: boolean;
+  /** Declarative reasoning controls and wire behavior for this model route. */
+  reasoning?: ModelReasoningCapabilities;
 }
 
 /**

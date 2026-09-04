@@ -24,7 +24,7 @@ describe('deepseekProvider', () => {
     const plan = buildInstallPlan(deepseekProvider, {
       baseUrl: 'https://api.deepseek.com',
       apiKey: 'sk-deepseek',
-      modelIds: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+      modelIds: ['deepseek-v4-flash', 'DeepSeek-V4-Pro'],
     });
 
     const models = plan.modelProviders?.[0]?.models;
@@ -37,8 +37,13 @@ describe('deepseekProvider', () => {
       contextWindowSize: 1000000,
     });
     expect(models?.[1]?.generationConfig).toEqual({
-      extra_body: { enable_thinking: true },
       contextWindowSize: 1000000,
+    });
+    expect(models?.[1]?.capabilities?.reasoning).toEqual({
+      thinking: true,
+      efforts: ['high', 'max'],
+      defaultEffort: 'high',
+      disableField: 'thinking',
     });
   });
 

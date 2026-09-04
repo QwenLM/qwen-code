@@ -1683,6 +1683,63 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.enable_thinking).toBe(true);
     });
 
+    it.each([
+      [{ effort: 'max' as const }, 'max', undefined],
+      [{ effort: 'low' as const }, undefined, undefined],
+      [false as const, undefined, { type: 'disabled' }],
+    ])(
+      'applies a resolved model reasoning capability for %j',
+      async (reasoning, expectedEffort, expectedThinking) => {
+        const capability = {
+          thinking: true,
+          efforts: ['high', 'max'],
+          defaultEffort: 'high',
+          disableField: 'thinking',
+        } as const;
+        mockContentGeneratorConfig = {
+          ...mockContentGeneratorConfig,
+          model: 'deepseek-v4-pro',
+          baseUrl: 'https://example.com/v1',
+          reasoning,
+        } as ContentGeneratorConfig;
+        mockCliConfig = {
+          getResolvedModelConfig: vi.fn().mockReturnValue({
+            capabilities: { reasoning: capability },
+          }),
+        } as unknown as Config;
+        mockConfig = {
+          ...mockConfig,
+          cliConfig: mockCliConfig,
+          contentGeneratorConfig: mockContentGeneratorConfig,
+        };
+        pipeline = new ContentGenerationPipeline(mockConfig);
+        (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue([
+          { role: 'user', content: 'Hello' },
+        ]);
+        (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+          new GenerateContentResponse(),
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue({
+          id: 'r',
+          choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+        } as OpenAI.Chat.ChatCompletion);
+
+        await pipeline.execute(
+          {
+            model: 'deepseek-v4-pro',
+            contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+          },
+          'main',
+        );
+
+        const apiCall = (mockClient.chat.completions.create as Mock).mock
+          .calls[0][0];
+        expect(apiCall.reasoning_effort).toBe(expectedEffort);
+        expect(apiCall.thinking).toEqual(expectedThinking);
+        expect(apiCall.reasoning).toBeUndefined();
+      },
+    );
+
     it('emits thinking:disabled on DeepSeek hostname when includeThoughts is false', async () => {
       // DeepSeek V4+ defaults thinking.type to 'enabled' — just stripping
       // the effort knob keeps thinking on, leaking latency/cost into side

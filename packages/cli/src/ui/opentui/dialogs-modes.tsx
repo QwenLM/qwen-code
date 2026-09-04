@@ -29,6 +29,7 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 import { applyOutputStyleSelection } from '../commands/output-style-utils.js';
 import { toOriginalKey } from './key-map.js';
 import { C } from './theme.js';
+import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 function useEsc(onClose: () => void) {
   const renderer = useRenderer();
@@ -177,7 +178,9 @@ export function OpenTuiEffortDialog(props: {
   onClose: () => void;
 }) {
   const { config, settings, onClose } = props;
-  const tiers = REASONING_EFFORT_TIERS as ReasoningEffort[];
+  const tiers = config
+    ? [...getReasoningEffortsForConfig(config)]
+    : (REASONING_EFFORT_TIERS as ReasoningEffort[]);
   // Pre-select the live tier only when one is configured; an unset effort
   // starts at the top (ink EffortDialog initialIndex parity).
   const currentEffort = config?.getReasoningEffort?.();
