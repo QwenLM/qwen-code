@@ -32,6 +32,7 @@ import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   containsXmlToolCalls,
+  markdownFenceRanges,
   tryRecoverXmlToolCalls,
 } from './xml-tool-call-fallback.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
@@ -1414,16 +1415,24 @@ const PROTOCOL_TAG_PREFIXES = [
   '<summary',
   '</summary',
 ] as const;
-const LEAKED_TOOL_CALL_TAGS =
-  /(?:[}\]]\s*)?<\/parameter>\s*<\/(?:function|invoke)>/iy;
-const TOOL_CALL_OPEN_TAG = /<(?:function|invoke)\b/iy;
-const TOOL_CALL_CLOSE_TAG = /<\/(?:function|invoke)>/iy;
+const LEAKED_TOOL_CALL_TAGS = /<\/parameter>\s*<\/(function|invoke)>/iy;
+const TOOL_CALL_OPEN_TAG =
+  /<(?:(invoke)\s+name=["'][^"']+["']|(function)(?:=[^\s>]+|\s+name=["'][^"']+["'])[^>]*)>/iy;
+const TOOL_CALL_CLOSE_TAG = /<\/(function|invoke)>/iy;
 
 function hasLeakedToolCallTags(text: string): boolean {
   let inString = false;
   let escaped = false;
-  let openToolCallTags = 0;
+  const openToolCallTags: string[] = [];
+  const fencedRanges = markdownFenceRanges(text);
+  let fenceRangeIndex = 0;
   for (let i = 0; i < text.length; i++) {
+    while (
+      fenceRangeIndex < fencedRanges.length &&
+      i > fencedRanges[fenceRangeIndex]![1]
+    ) {
+      fenceRangeIndex++;
+    }
     const char = text[i];
     if (inString) {
       if (escaped) escaped = false;
@@ -1431,20 +1440,30 @@ function hasLeakedToolCallTags(text: string): boolean {
       else if (char === '"') inString = false;
     } else if (char === '"') {
       inString = true;
-    } else if (char === '<' || char === '}' || char === ']') {
+    } else if (
+      fenceRangeIndex < fencedRanges.length &&
+      i >= fencedRanges[fenceRangeIndex]![0]
+    ) {
+      continue;
+    } else if (char === '<') {
       LEAKED_TOOL_CALL_TAGS.lastIndex = i;
-      if (LEAKED_TOOL_CALL_TAGS.test(text) && openToolCallTags === 0) {
+      const leakMatch = LEAKED_TOOL_CALL_TAGS.exec(text);
+      const enclosingTag = openToolCallTags.at(-1);
+      if (leakMatch && enclosingTag !== leakMatch[1]) {
         return true;
       }
-      if (char !== '<') continue;
       TOOL_CALL_OPEN_TAG.lastIndex = i;
-      if (TOOL_CALL_OPEN_TAG.test(text)) {
-        openToolCallTags++;
+      const openMatch = TOOL_CALL_OPEN_TAG.exec(text);
+      if (openMatch) {
+        if (!/\/\s*>$/.test(openMatch[0])) {
+          openToolCallTags.push(openMatch[1] ?? openMatch[2]!);
+        }
         continue;
       }
       TOOL_CALL_CLOSE_TAG.lastIndex = i;
-      if (TOOL_CALL_CLOSE_TAG.test(text)) {
-        openToolCallTags = Math.max(0, openToolCallTags - 1);
+      const closeMatch = TOOL_CALL_CLOSE_TAG.exec(text);
+      if (closeMatch && enclosingTag === closeMatch[1]) {
+        openToolCallTags.pop();
       }
     }
   }
@@ -5638,14 +5657,16 @@ export class LlmChat {
       }
     }
 
-    const hasProtocolTagLeak =
-      protocolTagDetector.leaked ||
-      (contentText ? hasLeakedToolCallTags(contentText) : false);
-    if (streamError === null && hasProtocolTagLeak && !hasToolCall) {
-      throw new InvalidStreamError(
-        'Model response contained leaked protocol tags.',
-        'PROTOCOL_TAG_LEAK',
-      );
+    if (streamError === null && !hasToolCall) {
+      const hasProtocolTagLeak =
+        protocolTagDetector.leaked ||
+        (contentText ? hasLeakedToolCallTags(contentText) : false);
+      if (hasProtocolTagLeak) {
+        throw new InvalidStreamError(
+          'Model response contained leaked protocol tags.',
+          'PROTOCOL_TAG_LEAK',
+        );
+      }
     }
 
     // Stream validation logic: A stream is considered successful if:

@@ -13166,44 +13166,90 @@ describe('LlmChat', async () => {
     }
   });
 
-  it('retries orphaned XML tool-call closing tags after quoted opener text', async () => {
-    vi.useFakeTimers();
-    try {
-      const leakedText =
-        JSON.stringify({ example: '<invoke>' }) + '\n</parameter>\n</invoke>\n';
-      vi.mocked(mockContentGenerator.generateContentStream)
-        .mockResolvedValueOnce(
-          streamResponse(stopResponse([{ text: leakedText }])),
-        )
-        .mockResolvedValueOnce(
-          streamResponse(stopResponse([{ text: 'Successful final response' }])),
+  it.each([
+    {
+      name: 'quoted opener text',
+      leakedText:
+        JSON.stringify({ example: '<invoke>' }) + '\n</parameter>\n</invoke>\n',
+    },
+    {
+      name: 'unclosed opener prose',
+      leakedText:
+        'The example starts with <invoke but does not open a tool call.\n' +
+        '</parameter>\n</invoke>\n',
+    },
+    {
+      name: 'fenced opener text',
+      leakedText:
+        '```xml\n<invoke name="read_file">\n```\n\n</parameter>\n</invoke>\n',
+    },
+    {
+      name: 'balanced function example',
+      leakedText:
+        '<function=run_shell_command>\n' +
+        '<parameter name="command">ls</parameter>\n' +
+        '</function>\n\n</parameter>\n</function>\n',
+    },
+    {
+      name: 'self-closing invoke example',
+      leakedText: '<invoke name="read_file" />\n</parameter>\n</invoke>\n',
+    },
+  ])(
+    'retries orphaned XML tool-call closing tags after $name',
+    async ({ leakedText }) => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            streamResponse(stopResponse([{ text: leakedText }])),
+          )
+          .mockResolvedValueOnce(
+            streamResponse(
+              stopResponse([{ text: 'Successful final response' }]),
+            ),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-xml-open-tag-before-orphaned-close',
         );
+        const events = await collectStreamWithFakeTimers(stream);
 
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-id-quoted-xml-open-tag-before-orphaned-close',
-      );
-      const events: StreamEvent[] = [];
-      const iterator = stream[Symbol.asyncIterator]();
-      for (;;) {
-        const next = iterator.next();
-        await vi.advanceTimersByTimeAsync(5_000);
-        const result = await next;
-        if (result.done) break;
-        events.push(result.value);
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some((event) => event.type === StreamEventType.RETRY),
+        ).toBe(true);
+        expect(chat.getLastModelMessageText()).toBe(
+          'Successful final response',
+        );
+      } finally {
+        vi.useRealTimers();
       }
+    },
+  );
 
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        2,
-      );
-      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
-        true,
-      );
-      expect(chat.getLastModelMessageText()).toBe('Successful final response');
-    } finally {
-      vi.useRealTimers();
-    }
+  it('does not retry XML closing tags inside fenced code blocks', async () => {
+    const response = 'Example:\n```xml\n</parameter>\n</invoke>\n```\nDone.';
+    vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValueOnce(
+      streamResponse(stopResponse([{ text: response }])),
+    );
+
+    const stream = await chat.sendMessageStream(
+      'test-model',
+      { message: 'test' },
+      'prompt-id-fenced-xml-closing-tag-example',
+    );
+    const events: StreamEvent[] = [];
+    for await (const event of stream) events.push(event);
+
+    expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
+      false,
+    );
+    expect(chat.getLastModelMessageText()).toBe(response);
   });
 
   it('retries leaked JSON before a structured tool call', async () => {

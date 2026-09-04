@@ -94,43 +94,55 @@ function computeInvokeRanges(text: string): Array<[number, number]> {
 }
 
 /**
- * Returns true when `index` falls inside an unclosed fenced code block.
+ * Returns fenced code block ranges.
  * Tracks delimiter type and length so a fence is only closed by a run of
  * the same delimiter that is at least as long as the opener, consistent
  * with CommonMark §4.5 (a shorter same-delimiter run is content, not a
  * close). A closing fence must also be whitespace-only after the delimiter
  * run — CommonMark forbids an info string on a closing fence.
  *
- * Lines inside `invokeRanges` are skipped: they are parameter values,
+ * Lines inside `ignoredRanges` are skipped: they are parameter values,
  * not prose, so fence-like content there must not affect fence state.
  */
-function positionInsideFence(
+export function markdownFenceRanges(
   text: string,
-  index: number,
-  invokeRanges: Array<[number, number]>,
-): boolean {
-  let openFence: { delim: string; len: number } | null = null;
+  ignoredRanges: Array<[number, number]> = [],
+): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let openFence: { delim: string; len: number; start: number } | null = null;
   let lineStart = 0;
-  for (const line of text.slice(0, index).split('\n')) {
+  for (const line of text.split('\n')) {
+    const currentLineStart = lineStart;
     const lineEnd = lineStart + line.length;
-    const insideInvoke = invokeRanges.some(
+    const insideIgnoredRange = ignoredRanges.some(
       ([start, end]) => lineStart >= start && lineEnd <= end,
     );
     lineStart = lineEnd + 1;
-    if (insideInvoke) continue;
+    if (insideIgnoredRange) continue;
     const m = /^ {0,3}((`{3,})|~{3,})/.exec(line);
     if (!m) continue;
     const delim = m[2] ? '`' : '~';
     const len = m[1].length;
-    if (openFence === null) openFence = { delim, len };
-    else if (
+    if (openFence === null) {
+      openFence = { delim, len, start: currentLineStart };
+    } else if (
       openFence.delim === delim &&
       len >= openFence.len &&
       line.slice(m[0].length).trim() === ''
-    )
+    ) {
+      ranges.push([openFence.start, lineEnd]);
       openFence = null;
+    }
   }
-  return openFence !== null;
+  if (openFence !== null) ranges.push([openFence.start, text.length]);
+  return ranges;
+}
+
+function positionInsideRanges(
+  index: number,
+  ranges: Array<[number, number]>,
+): boolean {
+  return ranges.some(([start, end]) => index >= start && index <= end);
 }
 
 /**
@@ -142,13 +154,14 @@ function positionInsideFence(
 export function extractXmlToolCalls(text: string): ExtractedToolCall[] {
   const results: ExtractedToolCall[] = [];
   const invokeRanges = computeInvokeRanges(text);
+  const fenceRanges = markdownFenceRanges(text, invokeRanges);
 
   // Reset lastIndex for global regex
   INVOKE_PATTERN.lastIndex = 0;
 
   let match: RegExpExecArray | null;
   while ((match = INVOKE_PATTERN.exec(text)) !== null) {
-    if (positionInsideFence(text, match.index, invokeRanges)) {
+    if (positionInsideRanges(match.index, fenceRanges)) {
       continue;
     }
 
@@ -210,6 +223,7 @@ export function tryRecoverXmlToolCalls(text: string): {
   }
 
   const invokeRanges = computeInvokeRanges(text);
+  const fenceRanges = markdownFenceRanges(text, invokeRanges);
 
   // Strip only invoke blocks that contain parameters and are outside
   // fenced code blocks (the ones we actually recovered). Parameterless
@@ -219,7 +233,7 @@ export function tryRecoverXmlToolCalls(text: string): {
     .replace(
       INVOKE_PATTERN,
       (block, _name: string, _body: string, offset: number) => {
-        if (positionInsideFence(text, offset, invokeRanges)) {
+        if (positionInsideRanges(offset, fenceRanges)) {
           return block;
         }
         PARAMETER_PATTERN.lastIndex = 0;
