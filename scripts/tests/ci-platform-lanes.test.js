@@ -343,6 +343,16 @@ describe('post-merge push lane', () => {
     expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
       '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
     );
+    // The needs edge is what makes every needs.classify_pr.outputs.* this
+    // describe relies on non-empty at runtime. Drop it and the lane silently
+    // decouples from the classifier: runs-on falls through the `|| '…'` to
+    // hosted runners, skip_ci reads '' so a release-sync PR promised a no-op
+    // pass runs the full battery, and `Use trusted CI profile` takes its
+    // documented degraded empty→full fallback.
+    expect(
+      [].concat(ci.jobs.lint_and_static.needs ?? []),
+      'lint_and_static must consume the classifier',
+    ).toContain('classify_pr');
   });
 
   it('lint_and_static keeps the minimal token its required-check role needs', () => {
@@ -393,10 +403,21 @@ describe('post-merge push lane', () => {
       );
     const t = byName('test');
     const l = byName('lint_and_static');
+    // The serializer is the guard's eyes: both sides of every comparison below
+    // flow through it, so a regression that drops nested fields compares `{}`
+    // to `{}` and the drift loop reports green — the exact array-replacer blind
+    // spot the recursion above replaced. Pin a known nested key on the
+    // serialized OUTPUT rather than on canon alone, because the regression that
+    // matters is a call site swapped back to an allowlist, which a canon-only
+    // fixture cannot see.
+    expect(t.get('Checkout')).toContain('"fetch-depth":1');
     const shared = [...t.keys()].filter((n) => l.has(n));
     // The prelude is what is duplicated; if this floor ever drops, steps
-    // were renamed apart and the guard is no longer guarding anything.
-    expect(shared.length).toBeGreaterThanOrEqual(12);
+    // were renamed apart and the guard is no longer guarding anything. 13 and
+    // not 12: the collector is deliberately in both jobs, so it is in the
+    // intersection, and a floor below the real count lets any one shared step
+    // be deleted out of either job without turning this red.
+    expect(shared.length).toBeGreaterThanOrEqual(13);
     for (const n of shared) {
       expect(l.get(n), `step "${n}" drifted between the two jobs`).toBe(
         t.get(n),

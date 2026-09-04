@@ -1214,8 +1214,14 @@ jobs:
       # State-at-failure dump for the 19 substantive steps after install: the
       # install sampler is reaped by that step's `trap … EXIT`, so a death in
       # ESLint or the bundle-closure build would otherwise upload an artifact
-      # holding only install-window samples. Appends — a bare `>` would
-      # truncate exactly those samples.
+      # holding only install-window samples. `tee -a` appends — a bare `>`
+      # would truncate exactly those samples — and mirrors to the job log,
+      # because the file it appends to is the one whose writability is under
+      # investigation: redirected straight into it, an ENOSPC death loses the
+      # dump and its own diagnostic together, leaving oncall unable to tell
+      # "dumped, nothing interesting" from "could not write". tee still emits
+      # the data to stdout when the file write fails, and reports why on the
+      # stderr this block does not swallow; it exits 1 there, hence `|| true`.
       - name: 'Dump disk state on failure'
         if: '${{ failure() }}'
         run: |-
@@ -1225,13 +1231,16 @@ jobs:
             df -hT || true
             df -i || true
             grep -E 'MemTotal|MemAvailable' /proc/meminfo || true
-          } >> "$DISK_SAMPLES" 2>/dev/null || true
+          } 2>/dev/null | tee -a "$DISK_SAMPLES" || true
       # Collector for the #10035 telemetry, kept as the LAST step: failure()
       # is evaluated when the step is reached and never revisited, so at its
       # old slot just after install it had already been passed (and skipped,
       # nothing yet failed) by the time any lint/static step could die — it
-      # could only ever collect a prelude failure. Mirrored from `test`, whose
-      # collector likewise follows its heavy step. Distinct artifact name:
+      # could only ever collect a prelude failure. `test` is NOT mirrored here
+      # and does not get that treatment: its collector sits four steps from the
+      # end, so a failure in the packaging or upload steps that follow it is
+      # never collected in that job. Same loss class, deliberately left to a
+      # follow-up rather than widened into this change. Distinct artifact name:
       # both jobs can fail in one run and upload-artifact v4+ rejects
       # duplicate names.
       - name: 'Upload disk-pressure samples'
