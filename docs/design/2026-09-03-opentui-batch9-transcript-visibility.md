@@ -349,6 +349,14 @@ folds two rows (`expected [ …(2) ] to have a length of 1 but got 2`) while the
     expressible through it — U-29 rests on the unit wiring plus the local smoke
     below. U-27 would need an unsupported image inside a submitted prompt,
     which the fake server's scripted turns do not model.
+  - **When it runs**: the spec is collected only by `e2e.yml`'s
+    `e2e-interactive-opentui` job, and that workflow never triggers on
+    `pull_request` — only pushes to `main`, the nightly schedule, and
+    `workflow_dispatch` (its own comment gives the reason: E2E is slow and
+    flaky, so it stays out of the merge queue). Pre-merge the evidence is
+    therefore local, plus one manual dispatch against this branch
+    (run 33830499451), whose result is recorded on the review thread that
+    raised this rather than asserted here.
 - **Adjacent finding, not fixed here**: no OpenTUI path calls
   `recordMidTurnUserMessage`. ink records each steered message to the chat log
   inside `accept()` (use-llm-stream.ts:3352-3358) and the ACP session does the
