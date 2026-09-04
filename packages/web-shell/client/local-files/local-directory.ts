@@ -436,6 +436,14 @@ export class LocalDirectory {
         '`pattern` must be a non-empty string.',
       );
     }
+    // Matching is per line, so a multi-line pattern can never hit; scanning
+    // to a definitive "No match" would be a silent false negative.
+    if (pattern.includes('\n')) {
+      throw new LocalDirectoryError(
+        'invalid_path',
+        'Multi-line patterns are not supported: search matches one line at a time.',
+      );
+    }
     const segments = splitRelativePath(options.path ?? '');
     const root = await this.resolveDirectory(
       segments,

@@ -403,6 +403,14 @@ describe('LocalDirectory.search', () => {
     expect(result.truncated).toBe(false);
   });
 
+  it('rejects a multi-line pattern instead of reporting a silent no-match', async () => {
+    // Matching is per line, so this pattern could never hit; a definitive
+    // "No match" would be a false negative the model acts on.
+    await expect(
+      new LocalDirectory(tree()).search('export default a;\nconst'),
+    ).rejects.toMatchObject({ code: 'invalid_path' });
+  });
+
   it('searches a subtree only', async () => {
     const result = await new LocalDirectory(tree()).search('export', {
       path: 'src/util',
