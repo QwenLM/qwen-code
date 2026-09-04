@@ -376,15 +376,34 @@ export class OpenTuiSlashDispatcher {
   }
 
   /**
-   * Whether the command in `text` opted into running while a model turn
-   * streams (ink AppContainer's canRunDuringStreaming fast path).
+   * Mid-turn admission (ink AppContainer.handleFinalSubmit): while a model
+   * turn responds, a slash submission runs immediately only when its command
+   * opted into `canRunDuringStreaming`; everything else the dispatcher would
+   * take waits for idle. False for input `handle()` hands back to the model
+   * (a `/`-prefixed path) and for btw side-questions (`/btw`, `?btw`), which
+   * ink submits mid-turn as steering rather than queueing.
+   *
+   * Quit is exempt ahead of the opt-in check: ink runs its quit family before
+   * the queue precisely so an exit can stop an active stream instead of
+   * waiting for it to end.
    */
-  canRunDuringStreaming(text: string): boolean {
-    const { commandToExecute } = parseSlashCommand(
-      text.trim(),
-      this.commandList,
-    );
-    return commandToExecute?.canRunDuringStreaming === true;
+  mustDeferDuringStreaming(rawQuery: string): boolean {
+    const trimmed = rawQuery.trim();
+    if (!this.takesAsSlashCommand(trimmed) || isBtwCommand(trimmed)) {
+      return false;
+    }
+    const { commandToExecute } = parseSlashCommand(trimmed, this.commandList);
+    // Matched on the resolved command, so `/exit` is covered as an altName.
+    if (commandToExecute?.name === 'quit') return false;
+    return commandToExecute?.canRunDuringStreaming !== true;
+  }
+
+  /** Whether {@link handle} processes this input instead of handing it back. */
+  private takesAsSlashCommand(trimmed: string): boolean {
+    if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
+      return false;
+    }
+    return !(trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed));
   }
 
   /**
@@ -411,10 +430,7 @@ export class OpenTuiSlashDispatcher {
    */
   async handle(rawQuery: string): Promise<OpenTuiDispatchOutcome | false> {
     const trimmed = rawQuery.trim();
-    if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
-      return false;
-    }
-    if (trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed)) {
+    if (!this.takesAsSlashCommand(trimmed)) {
       return false;
     }
     return this.run(trimmed, {});

@@ -69,6 +69,10 @@ export interface DaemonChannelSessionClient {
     requestId: string,
     response: RequestPermissionResponse,
   ): Promise<boolean>;
+  respondToSessionPermission?(
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): Promise<boolean>;
   shellCommand?(
     command: string,
     signal?: AbortSignal,
@@ -111,6 +115,15 @@ export interface DaemonChannelBridgeOptions {
    * instead, as before the upload path existed.
    */
   sessionAttachments?: boolean;
+  /**
+   * The daemon advertises the `session_permission_vote` capability.
+   *
+   * Unconditional in `SERVE_CAPABILITY_REGISTRY` since the session-scoped route
+   * landed, and older than the channel worker itself, so the daemon-managed
+   * worker never takes the legacy branch below. Retained for parity with
+   * `sessionAttachments`, and for hosts that construct this bridge themselves.
+   */
+  sessionPermissionVote?: boolean;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -791,7 +804,11 @@ export class DaemonChannelBridge
       return false;
     }
     try {
-      const accepted = await session.respondToPermission(requestId, response);
+      const accepted =
+        this.options.sessionPermissionVote &&
+        typeof session.respondToSessionPermission === 'function'
+          ? await session.respondToSessionPermission(requestId, response)
+          : await session.respondToPermission(requestId, response);
       this.requestToSession.delete(requestId);
       if (accepted) {
         this.rememberRespondedPermissionRequest(requestId, sessionId);

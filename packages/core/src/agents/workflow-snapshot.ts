@@ -35,8 +35,12 @@ export const MAX_RETAINED_SNAPSHOTS = 30;
 /** JSON-serializable projection of a terminal workflow run. */
 export interface WorkflowSnapshot {
   runId: string;
+  /** Tool call that launched the run. Absent on legacy snapshots. */
+  toolUseId?: string;
   /** Human-readable fallback when a workflow has no exported meta block. */
   description?: string;
+  /** Saved workflow definition name. Absent for inline and legacy runs. */
+  workflowName?: string;
   /** Prior run used by retry or rerun. Absent on legacy snapshots. */
   sourceRunId?: string;
   /** How this run was started from sourceRunId. */
@@ -72,7 +76,9 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
   }
   return {
     runId: task.runId,
+    ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
     description: task.description,
+    ...(task.workflowName ? { workflowName: task.workflowName } : {}),
     sourceRunId: task.sourceRunId,
     startMode: task.startMode,
     meta: task.meta,
@@ -367,7 +373,9 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
   return (
     typeof value['runId'] === 'string' &&
     value['runId'].length > 0 &&
+    isOptionalString(value['toolUseId']) &&
     isOptionalString(value['description']) &&
+    isOptionalString(value['workflowName']) &&
     isOptionalString(value['sourceRunId']) &&
     (value['startMode'] === undefined ||
       value['startMode'] === 'retry' ||

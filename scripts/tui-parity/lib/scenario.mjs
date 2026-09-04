@@ -11,6 +11,7 @@ const TOP_LEVEL_KEYS = new Set([
   'commands',
   'compareParams',
   'thresholds',
+  'expectBaseFailure',
   'proves',
   'doesNotProve',
 ]);
@@ -356,6 +357,15 @@ export function validateScenario(input, label = 'scenario') {
     }
   }
 
+  let expectBaseFailure = false;
+  if (input.expectBaseFailure !== undefined) {
+    if (typeof input.expectBaseFailure !== 'boolean') {
+      problems.push('expectBaseFailure must be a boolean');
+    } else {
+      expectBaseFailure = input.expectBaseFailure;
+    }
+  }
+
   if (problems.length > 0) {
     throw new Error(`scenario ${label}: ${problems.join('; ')}`);
   }
@@ -369,6 +379,7 @@ export function validateScenario(input, label = 'scenario') {
     commands,
     compareParams,
     thresholds,
+    expectBaseFailure,
     proves: input.proves,
     doesNotProve: input.doesNotProve,
   };

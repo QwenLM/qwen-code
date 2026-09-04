@@ -32,6 +32,7 @@ import type {
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
 } from '@qwen-code/channel-base';
+import type { ServeFeature } from '../../serve/capabilities.js';
 import type { ServeChannelSelection } from '../../serve/types.js';
 import { normalizeServeChannelSelection } from '../../serve/channel-selection.js';
 import {
@@ -95,9 +96,12 @@ import {
   isChannelCronEnabled,
 } from './loop-runtime.js';
 
-const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
-const SESSION_ATTACHMENTS_FEATURE = 'session_attachments';
-const SESSION_BTW_FEATURE = 'session_btw';
+// Typed against the registry so renaming a capability key fails the build here
+// instead of silently degrading the worker to the pre-capability behavior.
+const SESSION_SHELL_COMMAND_FEATURE: ServeFeature = 'session_shell_command';
+const SESSION_ATTACHMENTS_FEATURE: ServeFeature = 'session_attachments';
+const SESSION_BTW_FEATURE: ServeFeature = 'session_btw';
+const SESSION_PERMISSION_VOTE_FEATURE: ServeFeature = 'session_permission_vote';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
@@ -531,6 +535,9 @@ export async function runChannelDaemonWorker(
     }),
     sessionAttachments: capabilities.features.includes(
       SESSION_ATTACHMENTS_FEATURE,
+    ),
+    sessionPermissionVote: capabilities.features.includes(
+      SESSION_PERMISSION_VOTE_FEATURE,
     ),
     ...(opts.promptAuthorization
       ? { promptAuthorization: opts.promptAuthorization }

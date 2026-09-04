@@ -87,6 +87,7 @@ interface FakeSession extends DaemonChannelSessionClient {
   cancel: ReturnType<typeof vi.fn>;
   setModel: ReturnType<typeof vi.fn>;
   respondToPermission: ReturnType<typeof vi.fn>;
+  respondToSessionPermission: ReturnType<typeof vi.fn>;
 }
 
 function createFakeSession(
@@ -110,6 +111,7 @@ function createFakeSession(
     cancel: vi.fn().mockResolvedValue(undefined),
     setModel: vi.fn().mockResolvedValue({}),
     respondToPermission: vi.fn().mockResolvedValue(true),
+    respondToSessionPermission: vi.fn().mockResolvedValue(true),
   };
 }
 
@@ -1923,12 +1925,43 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('routes permission responses back through the owning daemon session', async () => {
+  it.each([
+    {
+      name: 'uses session-scoped permission voting when supported',
+      sessionPermissionVote: true,
+      sessionMethod: true,
+    },
+    {
+      name: 'uses legacy permission voting for older daemons',
+      sessionPermissionVote: false,
+      sessionMethod: true,
+    },
+    {
+      name: 'uses legacy permission voting for older clients',
+      sessionPermissionVote: true,
+      sessionMethod: false,
+    },
+  ])('$name', async ({ sessionPermissionVote, sessionMethod }) => {
     const events = new EventQueue();
     const session = createFakeSession(events);
+    const scopedVote = session.respondToSessionPermission;
+    if (!sessionMethod) {
+      delete (session as { respondToSessionPermission?: unknown })
+        .respondToSessionPermission;
+    }
+    if (sessionPermissionVote && sessionMethod) {
+      session.respondToPermission.mockResolvedValue(false);
+    }
+    const expectedVote =
+      sessionPermissionVote && sessionMethod
+        ? scopedVote
+        : session.respondToPermission;
+    const unexpectedVote =
+      expectedVote === scopedVote ? session.respondToPermission : scopedVote;
     const bridge = new DaemonChannelBridge({
       cwd: '/repo',
       sessionFactory: vi.fn().mockResolvedValue(session),
+      sessionPermissionVote,
     });
     const permissionRequest = vi.fn();
     bridge.on('permissionRequest', permissionRequest);
@@ -1970,7 +2003,8 @@ describe('DaemonChannelBridge', () => {
     await expect(bridge.respondToPermission('req-1', response)).resolves.toBe(
       true,
     );
-    expect(session.respondToPermission).toHaveBeenCalledWith('req-1', response);
+    expect(expectedVote).toHaveBeenCalledWith('req-1', response);
+    expect(unexpectedVote).not.toHaveBeenCalled();
     await expect(bridge.respondToPermission('req-1', response)).resolves.toBe(
       false,
     );
@@ -3812,6 +3846,84 @@ describe('DaemonChannelBridge', () => {
     ).rejects.toThrow('permission failed');
     await expect(
       bridge.respondToPermission('req-fail', response),
+    ).resolves.toBe(false);
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('passes refused and failed session-scoped permission votes through', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      sessionPermissionVote: true,
+    });
+    const permissionRequest = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-refused',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'edit',
+          title: 'Edit file',
+          rawInput: {},
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      },
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledOnce());
+
+    const response: RequestPermissionResponse = {
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    };
+    session.respondToSessionPermission.mockResolvedValueOnce(false);
+    await expect(
+      bridge.respondToPermission('req-refused', response),
+    ).resolves.toBe(false);
+    expect(session.respondToSessionPermission).toHaveBeenCalledWith(
+      'req-refused',
+      response,
+    );
+
+    events.push({
+      id: 2,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-failed',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'edit',
+          title: 'Edit file',
+          rawInput: {},
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      },
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledTimes(2));
+
+    session.respondToSessionPermission.mockRejectedValueOnce(
+      new Error('permission failed'),
+    );
+    await expect(
+      bridge.respondToPermission('req-failed', response),
+    ).rejects.toThrow('permission failed');
+    await expect(
+      bridge.respondToPermission('req-failed', response),
     ).resolves.toBe(false);
 
     events.close();

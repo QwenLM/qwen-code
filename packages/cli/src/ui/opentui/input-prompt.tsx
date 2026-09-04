@@ -66,6 +66,7 @@ import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import type { Suggestion } from '../utils/suggestions.js';
 import { cpLen, toCodePoints } from '../utils/textUtils.js';
+import { t } from '../../i18n/index.js';
 import { C } from './theme.js';
 import { InputHistory } from './input-history.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
@@ -157,11 +158,15 @@ function promptChrome(approvalMode: ApprovalMode | undefined): {
 } {
   switch (approvalMode) {
     case ApprovalMode.AUTO_EDIT:
-      return { prefix: '>', color: C.yellow, statusText: 'Accepting edits' };
+      return {
+        prefix: '>',
+        color: C.yellow,
+        statusText: t('Accepting edits'),
+      };
     case ApprovalMode.AUTO:
-      return { prefix: '>', color: C.accent, statusText: 'Auto mode' };
+      return { prefix: '>', color: C.accent, statusText: t('Auto mode') };
     case ApprovalMode.YOLO:
-      return { prefix: '*', color: C.red, statusText: 'YOLO mode' };
+      return { prefix: '*', color: C.red, statusText: t('YOLO mode') };
     case ApprovalMode.PLAN:
     case ApprovalMode.DEFAULT:
       return { prefix: '>' };
@@ -1087,6 +1092,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             </text>
           )}
         </box>
+      )}
+      {/* No "(shift + tab to cycle)" suffix like ink's AutoAcceptIndicator:
+          nextApprovalMode is not bound to any key in this renderer yet. */}
+      {chrome.statusText && (
+        <text fg={chrome.color ?? C.dim}>{chrome.statusText}</text>
       )}
       {escapeArmed && <text fg={C.dim}>{ESCAPE_ARM_HINT}</text>}
     </box>
