@@ -5647,6 +5647,10 @@ export abstract class ChannelBase {
     if (limit <= 0 || envelope.text.trim().length === 0) {
       return;
     }
+    // An adapter placeholder is not something a member typed, so quoting it
+    // back as history would inject `(image)` into the next prompt as user
+    // text.
+    if (envelope.syntheticText) return;
     const senderId = truncateGroupHistoryField(envelope.senderId);
     if (
       this.config.groupPolicy !== 'pairing' &&
@@ -5748,6 +5752,9 @@ export abstract class ChannelBase {
     envelope: Envelope,
     options: PreflightInboundOptions = {},
   ): boolean | Promise<boolean> {
+    // Ahead of both pairing gates on purpose: a pairing request is a reply,
+    // and replying to every unprefixed message would be exactly the traffic
+    // the prefix exists to suppress. First contact carries the prefix too.
     if (this.messagePrefixRejectedEnvelopes.has(envelope)) return false;
     if (!this.messagePrefixCheckedEnvelopes.has(envelope)) {
       this.messagePrefixCheckedEnvelopes.add(envelope);

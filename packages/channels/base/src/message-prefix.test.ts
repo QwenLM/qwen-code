@@ -129,6 +129,30 @@ describe('applyMessagePrefix', () => {
     expect(input.messagePrefixText).toBe('inspect this');
   });
 
+  it('falls back to the search when the adapter offset does not fit', () => {
+    // A stale or forged offset must not splice the payload at the wrong
+    // range: the guard demotes it to the search path, which locates the
+    // one real occurrence.
+    const input = envelope({
+      text: '[atMention=false] [Alice]: review: inspect this\n机器人 OPENID: BOT',
+      displayText: 'review: inspect this',
+      displayTextOffset: 3,
+      alreadyPrefixed: true,
+    });
+
+    expect(applyMessagePrefix(input, 'review:')).toBe(true);
+    expect(input.text).toBe(
+      '[atMention=false] [Alice]: inspect this\n机器人 OPENID: BOT',
+    );
+  });
+
+  it('lets adapter-synthesized media placeholders bypass the filter', () => {
+    const input = envelope({ text: '(image)', syntheticText: true });
+
+    expect(applyMessagePrefix(input, '/review')).toBe(true);
+    expect(input.text).toBe('(image)');
+  });
+
   it('lets system envelopes bypass the filter', () => {
     const input = envelope({ bypassMessagePrefix: true });
 

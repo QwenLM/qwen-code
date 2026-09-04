@@ -756,6 +756,23 @@ describe('ChannelBase', () => {
       ).toBe(true);
     });
 
+    it('requires the prefix on a pairing first contact too', async () => {
+      // Deliberate ordering: the prefix gate runs ahead of the pairing
+      // gates. A pairing code is a reply, and replying to every unprefixed
+      // message is exactly the traffic the prefix suppresses.
+      const ch = createChannel({
+        messagePrefix: '/review',
+        senderPolicy: 'pairing',
+        allowedUsers: [],
+      });
+
+      await ch.handleInbound(envelope({ text: 'hello' }));
+      expect(ch.sent).toEqual([]);
+
+      await ch.handleInbound(envelope({ text: '/review hello' }));
+      expect(ch.sent[0]?.text).toContain('pairing code');
+    });
+
     it('allows explicitly marked system envelopes through', async () => {
       const ch = createChannel({ messagePrefix: '/review' });
 
@@ -2980,6 +2997,44 @@ describe('ChannelBase', () => {
       const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[0][1] as string;
       expect(prompt).toBe('[User 1] @bot current');
+    });
+
+    it('keeps adapter media placeholders out of the recorded history', async () => {
+      // A `(image)` placeholder is adapter text, not something a member
+      // typed, so quoting it back would put it in the next prompt as if
+      // Alice had written it.
+      const ch = createChannel(
+        {
+          groupPolicy: 'open',
+          groupHistoryLimit: 10,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: false,
+          senderId: 'u1',
+          senderName: 'Alice',
+          text: '(image)',
+          syntheticText: true,
+        }),
+      );
+      await ch.handleInbound(
+        envelope({
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'u2',
+          senderName: 'Bob',
+          text: '@bot summarize',
+        }),
+      );
+
+      const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as string;
+      expect(prompt).toBe('[Bob] @bot summarize');
     });
 
     it('injects authorized unmentioned group messages on the next trigger', async () => {

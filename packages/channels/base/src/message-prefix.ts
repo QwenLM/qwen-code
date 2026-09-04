@@ -58,7 +58,9 @@ export function applyMessagePrefix(
   envelope: Envelope,
   prefix: string | undefined,
 ): boolean {
-  if (!prefix || envelope.bypassMessagePrefix) return true;
+  if (!prefix || envelope.bypassMessagePrefix || envelope.syntheticText) {
+    return true;
+  }
 
   const displayText = envelope.displayText;
   const prefixText = envelope.messagePrefixText;

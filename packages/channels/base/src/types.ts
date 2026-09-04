@@ -126,10 +126,23 @@ export interface Envelope {
    * occurrences.
    */
   displayTextOffset?: number;
-  /** User-authored text with platform mention tokens removed for prefix matching. */
+  /**
+   * The user-authored text with the leading mention run removed, for
+   * adapters whose mention markers the shared prefix matcher cannot read as
+   * one token. Mentions after the prefix stay in place.
+   */
   messagePrefixText?: string;
   /** System event, or adapter input whose prefix was already checked. */
   bypassMessagePrefix?: true;
+  /**
+   * `text` is an adapter-synthesized placeholder (`(image)`, `(voice
+   * message)`, `(file: …)`) rather than something the user typed.
+   *
+   * No user action can put the configured prefix on it, so it bypasses the
+   * prefix filter -- and it is never recorded as quoted group history,
+   * where it would reach the next prompt as if a member had typed it.
+   */
+  syntheticText?: true;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
   messageId?: string;
