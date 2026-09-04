@@ -544,6 +544,13 @@ async function resolveSteeredPromptParts(
   return { parts, events, restore: [] };
 }
 
+// How long a turn waits for a startup initialization that is already in
+// flight to create the chat. Bounded so a config that never finishes
+// initializing still reports its own error instead of hanging the prompt —
+// the same budget commands-dispatch gives its registry self-heal.
+const STARTUP_CHAT_WAIT_MS = 15_000;
+const STARTUP_CHAT_POLL_MS = 100;
+
 /**
  * Sends one user prompt through the real client and yields neutral events.
  * The caller (backend) drains this into the streaming model.
@@ -565,6 +572,16 @@ export async function* livePromptEvents(
     /* already initialized by command loading / startup */
   }
   const client = config.getGeminiClient();
+  // `Config.initialize()` flips its own guard before the work runs, so the
+  // boot-time command-registry load owning that flight makes the call above
+  // throw while `startChat()` has not run yet. Sending then dies in
+  // `getChat()` and the prompt is dropped as "Chat not initialized". The
+  // registry self-heal in commands-dispatch bounds the same window; this
+  // waits it out so the turn starts against a real chat.
+  const chatDeadline = Date.now() + STARTUP_CHAT_WAIT_MS;
+  while (!client.isInitialized() && Date.now() < chatDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, STARTUP_CHAT_POLL_MS));
+  }
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
   // Read per boundary rather than once: the vision bridge can pick a full-turn

@@ -188,10 +188,11 @@ vi.mock('../hooks/atCommandProcessor.js', () => ({
 function createFakeConfig(
   sendMessageStream: (...args: unknown[]) => unknown,
   bridgeModel?: VisionBridgeModelSelection,
+  isInitialized: () => boolean = () => true,
 ) {
   return {
     initialize: vi.fn(async () => {}),
-    getGeminiClient: () => ({ sendMessageStream }),
+    getGeminiClient: () => ({ sendMessageStream, isInitialized }),
     getSessionId: () => 'session-1',
     getModel: () => 'test-model',
     getMaxSessionTurns: () => 10,
@@ -274,6 +275,32 @@ describe('livePromptEvents', () => {
     expect(prompt).toBe('hello');
     expect(passedSignal).toBe(signal);
     expect(options).toEqual({ type: SendMessageType.UserQuery });
+  });
+
+  it('waits for the chat an in-flight startup initialization creates', async () => {
+    // The boot-time command-registry load owns the initialize() flight, so the
+    // turn's own call throws "already initialized" and its catch proceeds
+    // while startChat() has not run yet. The real client then throws from
+    // getChat(); the stand-in throws the same way, so the wait is what keeps
+    // the turn alive.
+    let chatReady = false;
+    const sendMessageStream = vi.fn(function* () {
+      if (!chatReady) throw new Error('Chat not initialized');
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream, undefined, () => chatReady),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+    } as unknown as Config;
+    setTimeout(() => {
+      chatReady = true;
+    }, 250);
+
+    await drain(livePromptEvents(config, 'hello'));
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
   });
 
   it('uses the ink promptId format and increments promptCount per turn', async () => {
