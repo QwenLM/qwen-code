@@ -11,10 +11,28 @@ import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
 const listLiveSessions = vi.fn();
 const listAgentViewSessionSnapshots = vi.fn();
 const isPidAlive = vi.fn();
+/** The start token the OS would report for a pid right now. */
+const currentProcStart = vi.fn((pid: number): string | null => `start-${pid}`);
+const pidNamespaceId = vi.fn((): number | null => null);
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   listLiveSessions: (...args: unknown[]) => listLiveSessions(...args),
   isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
+  readProcStartToken: (...args: unknown[]) =>
+    currentProcStart(...(args as [number])),
+  readPidNamespaceId: () => pidNamespaceId(),
+  // Mirrors the real degradation contract, matching `managed-rows.test.ts`:
+  // a fixture that records no token exercises the same fall-through to a
+  // bare liveness check that a pre-identity worker file gets in
+  // production, so `isPidAlive.mockReturnValue(false)` still means exactly
+  // "this pid is dead" here.
+  isSameProcess: (pid: number, procStart?: string | null) => {
+    if (!isPidAlive(pid)) return false;
+    if (procStart == null) return true;
+    const current = currentProcStart(pid);
+    if (current === null) return true;
+    return current === procStart;
+  },
 }));
 
 vi.mock('../../agent-view/supervisor-store.js', () => ({
@@ -103,6 +121,10 @@ beforeEach(() => {
   listAgentViewSessionSnapshots.mockResolvedValue([]);
   isPidAlive.mockReset();
   isPidAlive.mockReturnValue(true);
+  currentProcStart.mockReset();
+  currentProcStart.mockImplementation((pid: number) => `start-${pid}`);
+  pidNamespaceId.mockReset();
+  pidNamespaceId.mockImplementation(() => null);
 });
 
 afterEach(() => {
