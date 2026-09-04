@@ -19,6 +19,7 @@ import { AgentChatView } from '../components/agent-view/AgentChatView.js';
 import { AgentComposer } from '../components/agent-view/AgentComposer.js';
 import { LiveAgentPanel } from '../components/background-view/LiveAgentPanel.js';
 import { getLiveAgentPanelVpMaxRows } from '../components/background-view/liveAgentPanelVisibility.js';
+import { ContextMenuOverlay } from '../context-menu/ContextMenuOverlay.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useAgentViewState } from '../contexts/AgentViewContext.js';
@@ -160,6 +161,10 @@ export const DefaultAppLayout: React.FC = () => {
 
       {/* Tab bar: visible whenever in-process agents exist and input is active */}
       {hasAgents && !uiState.dialogsVisible && <AgentTabBar />}
+
+      {/* Right-click context menu: absolutely-positioned overlay, drawn last
+          so it paints over the transcript. Renders nothing while closed. */}
+      <ContextMenuOverlay />
     </Box>
   );
 };
