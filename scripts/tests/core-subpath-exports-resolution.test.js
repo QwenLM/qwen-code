@@ -164,3 +164,57 @@ describe('core subpath specifiers bundle from the core src tree', () => {
     }
   });
 });
+
+// The core subpath specifiers the bundle reaches through @qwen-code/acp-bridge
+// — goalWire and transcriptRecords from transcript-replay.ts,
+// subSessionConstants from bridgeOptions.ts, noFollowOpen from
+// sessionArtifacts.ts — each mapped to the core source file the matching
+// named `paths` entry in packages/acp-bridge/tsconfig.json must resolve it
+// to. esbuild.config.js's mainBuild passes no `tsconfig` option, so the
+// shipped bundle resolves these by discovering packages/acp-bridge/tsconfig.json
+// per importing file, not the cli tsconfig pinned above — a guard arm that
+// only probes the cli route is blind to mutations of these entries.
+const expectedAcpBridgeSrcTargets = {
+  '@qwen-code/qwen-code-core/goalWire': 'packages/core/src/goals/goal-wire.ts',
+  '@qwen-code/qwen-code-core/transcriptRecords':
+    'packages/core/src/utils/transcript-records.ts',
+  '@qwen-code/qwen-code-core/subSessionConstants':
+    'packages/core/src/tools/sub-session-constants.ts',
+  '@qwen-code/qwen-code-core/noFollowOpen':
+    'packages/core/src/utils/no-follow-open.ts',
+};
+
+describe('acp-bridge-routed core subpaths bundle from the core src tree', () => {
+  it('resolves every acp-bridge-routed subpath under packages/core/src', () => {
+    const result = buildSync({
+      absWorkingDir: root,
+      stdin: {
+        contents: Object.keys(expectedAcpBridgeSrcTargets)
+          .map((specifier) => `import ${JSON.stringify(specifier)};`)
+          .join('\n'),
+        resolveDir: join(root, 'packages', 'acp-bridge', 'src'),
+        sourcefile: 'core-subpath-bundle-probe-acp-bridge.ts',
+        loader: 'ts',
+      },
+      bundle: true,
+      write: false,
+      metafile: true,
+      platform: 'node',
+      format: 'esm',
+      logLevel: 'silent',
+      // Deliberately no `tsconfig` option: mainBuild carries none, so esbuild
+      // discovers packages/acp-bridge/tsconfig.json per importing file — the
+      // resolution route the shipped bundle actually uses for these imports.
+    });
+    // Same backslash normalization as the cli-routed arm above.
+    const inputs = Object.keys(result.metafile.inputs).map((input) =>
+      input.replace(/\\/g, '/'),
+    );
+    expect(
+      inputs.filter((input) => input.includes('packages/core/dist/')),
+    ).toEqual([]);
+    for (const target of Object.values(expectedAcpBridgeSrcTargets)) {
+      expect(inputs).toContain(target);
+    }
+  });
+});
