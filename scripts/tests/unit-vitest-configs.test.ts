@@ -5,6 +5,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -30,6 +31,7 @@ import sdkTypescriptConfig from '../../packages/sdk-typescript/vitest.config.js'
 import vscodeCompanionConfig from '../../packages/vscode-ide-companion/vitest.config.js';
 import webShellConfig from '../../packages/web-shell/vitest.config.js';
 import webuiConfig from '../../packages/webui/vite.config.js';
+import { getWorkspacePackageJsonPaths } from '../workspaces.js';
 import scriptsTestsConfig from './vitest.config.js';
 
 // Every vitest project that `npm run test:ci` runs on the Windows/macOS
@@ -212,42 +214,67 @@ describe('shared-pool test timeout', () => {
     }
   });
 
+  // The gated ternaries: off the pool these must fall back to vitest's own
+  // default, so a hang on a developer machine still fails in 5s. One list,
+  // iterated by both off-pool arms below — a newly gated workspace gets
+  // registered in two places (the map and here), not three.
+  const OFF_POOL_DEFAULT = [
+    'integrations/external-context',
+    'integrations/external-context-mem0',
+    'packages/acp-bridge',
+    'packages/audio-capture',
+    'packages/channels/base',
+    'packages/channels/dingtalk',
+    'packages/channels/dws',
+    'packages/channels/feishu',
+    'packages/channels/github',
+    'packages/channels/gitlab',
+    'packages/channels/qqbot',
+    'packages/channels/telegram',
+    'packages/channels/wecom',
+    'packages/channels/weixin',
+    'packages/chrome-extension',
+    'packages/web-shell',
+  ] as const;
+
+  // cli and core gate the same way but pin 15s off the pool instead of the
+  // default. Naming the value is what stops either ternary being flattened to
+  // the pool number: the floor above passes on 60_000, so without this a real
+  // hang off CI would surface at 60s instead of 15s and nothing would go red.
+  // vscode-ide-companion pins the same 15s and is already asserted in both
+  // branches by `bundle-guard timeout ceiling` below.
+  const OFF_POOL_PINNED: Readonly<Record<string, number>> = {
+    'packages/cli': 15_000,
+    'packages/core': 15_000,
+  };
+
+  async function expectOffPoolCeilings() {
+    for (const name of OFF_POOL_DEFAULT) {
+      const mod = await configModules[name]!();
+      expect(mod.default.test?.testTimeout, name).toBeUndefined();
+    }
+    for (const [name, ms] of Object.entries(OFF_POOL_PINNED)) {
+      const mod = await configModules[name]!();
+      expect(mod.default.test?.testTimeout, name).toBe(ms);
+    }
+    // webui's vitest configuration is the function-form vite.config.ts.
+    const webui = await import('../../packages/webui/vite.config.js');
+    const config = await webui.default({ command: 'serve', mode: 'test' });
+    expect(config.test?.testTimeout, 'packages/webui').toBeUndefined();
+  }
+
   it('leaves the off-pool default alone', async () => {
     // The point of the ternary is that only the pool lane moves. Off it these
     // configs must stay on vitest's own default, so a hang on a developer
     // machine still fails in 5s rather than 60s. Sample every gated ternary:
-    // a flat `testTimeout: 60_000` in any of them must fail here. The other
-    // map entries stay out on purpose: cli/core/vscode-ide-companion pin a
-    // lower off-pool value (15s), node-repl/sdk-typescript/scripts/tests
+    // a flat `testTimeout: 60_000` in any of them must fail here. The rest of
+    // the map stays out on purpose: cli/core pin a lower off-pool value and
+    // `expectOffPoolCeilings` asserts it, node-repl/sdk-typescript/scripts/tests
     // carry flat ceilings, and qwen-live's ceiling is unconditional.
     vi.stubEnv('RUNNER_NAME', 'ubuntu-latest-runner');
     vi.resetModules();
     try {
-      for (const name of [
-        'integrations/external-context',
-        'integrations/external-context-mem0',
-        'packages/acp-bridge',
-        'packages/audio-capture',
-        'packages/channels/base',
-        'packages/channels/dingtalk',
-        'packages/channels/dws',
-        'packages/channels/feishu',
-        'packages/channels/github',
-        'packages/channels/gitlab',
-        'packages/channels/qqbot',
-        'packages/channels/telegram',
-        'packages/channels/wecom',
-        'packages/channels/weixin',
-        'packages/chrome-extension',
-        'packages/web-shell',
-      ]) {
-        const mod = await configModules[name]!();
-        expect(mod.default.test?.testTimeout, name).toBeUndefined();
-      }
-      // webui's vitest configuration is the function-form vite.config.ts.
-      const webui = await import('../../packages/webui/vite.config.js');
-      const config = await webui.default({ command: 'serve', mode: 'test' });
-      expect(config.test?.testTimeout, 'packages/webui').toBeUndefined();
+      await expectOffPoolCeilings();
     } finally {
       vi.unstubAllEnvs();
     }
@@ -266,34 +293,40 @@ describe('shared-pool test timeout', () => {
     vi.stubEnv('RUNNER_NAME', undefined);
     vi.resetModules();
     try {
-      for (const name of [
-        'integrations/external-context',
-        'integrations/external-context-mem0',
-        'packages/acp-bridge',
-        'packages/audio-capture',
-        'packages/channels/base',
-        'packages/channels/dingtalk',
-        'packages/channels/dws',
-        'packages/channels/feishu',
-        'packages/channels/github',
-        'packages/channels/gitlab',
-        'packages/channels/qqbot',
-        'packages/channels/telegram',
-        'packages/channels/wecom',
-        'packages/channels/weixin',
-        'packages/chrome-extension',
-        'packages/web-shell',
-      ]) {
-        const mod = await configModules[name]!();
-        expect(mod.default.test?.testTimeout, name).toBeUndefined();
-      }
-      // webui's vitest configuration is the function-form vite.config.ts.
-      const webui = await import('../../packages/webui/vite.config.js');
-      const config = await webui.default({ command: 'serve', mode: 'test' });
-      expect(config.test?.testTimeout, 'packages/webui').toBeUndefined();
+      await expectOffPoolCeilings();
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it('covers every workspace that runs on the shared pool', () => {
+    // configModules is hand-maintained, while `npm run test:ci --workspaces`
+    // runs whatever the root glob resolves. Without this cross-check a
+    // follow-up adding a workspace with a test:ci script and a bare vitest
+    // config joins the pool lane on vitest's 5s default — the #10490 flake
+    // class this pin exists to kill — with every test above still green.
+    // One-directional on purpose: the root glob carries negations,
+    // packages/channels/plugin-example is a workspace without test:ci, and
+    // scripts/tests is in the map without being a workspace.
+    const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+    const { workspaces } = JSON.parse(
+      readFileSync(join(repoRoot, 'package.json'), 'utf8'),
+    ) as { workspaces: string[] };
+    const missing = getWorkspacePackageJsonPaths(repoRoot, workspaces)
+      .filter((packageJsonPath) => {
+        const { scripts } = JSON.parse(
+          readFileSync(join(repoRoot, packageJsonPath), 'utf8'),
+        ) as { scripts?: Record<string, string> };
+        return Boolean(scripts?.['test:ci']);
+      })
+      .map((packageJsonPath) =>
+        packageJsonPath.slice(0, -'/package.json'.length),
+      )
+      .filter((name) => !(name in configModules) && name !== 'packages/webui');
+    expect(
+      missing,
+      'runs test:ci but has no entry in configModules above',
+    ).toEqual([]);
   });
 });
 
