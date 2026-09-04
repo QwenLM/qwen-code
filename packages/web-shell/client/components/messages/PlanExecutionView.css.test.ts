@@ -71,6 +71,10 @@ describe('PlanExecutionView stylesheet', () => {
       /\.dependencyChip\s+\.dependencyTitle,\s*\n\s*\.dependencyLink\s+\.dependencyTitle\s*\{[^}]*\}/,
     )?.[0];
     expect(title).toMatch(/text-overflow:\s*ellipsis/);
+    // `text-overflow` only takes effect on a box whose own `overflow` is
+    // hidden; overflow is not inherited, and the chip's own clipping does
+    // not reach the title span, so the declaration must live on this rule.
+    expect(title).toMatch(/overflow:\s*hidden/);
     expect(title).toMatch(/min-width:\s*0/);
     // The `> span` rules mute every direct-child span, the title included;
     // without its own colour the title would render muted while the chip's
@@ -103,10 +107,26 @@ describe('PlanExecutionView stylesheet', () => {
     const narrow = planCss.match(
       /@media\s*\(max-width:\s*720px\)\s*\{[\s\S]*?\n\}/,
     )?.[0];
-    expect(narrow).toMatch(/--plan-layer-width:\s*168px/);
+    // The width pin names the block's owner selector too: a declaration
+    // moved onto a selector `.layer` never reads from must fail the guard
+    // even though the value still appears inside the media block.
+    expect(narrow).toMatch(/\.dagCanvas\s*\{[^}]*--plan-layer-width:\s*168px/);
+    // The fit also rests on the paired gutter narrowing: dropping it falls
+    // back to the base 64px gap, putting a three-layer plan past the
+    // viewport this step exists to fit.
+    expect(narrow).toMatch(/gap:\s*32px/);
     const narrower = planCss.match(
       /@media\s*\(max-width:\s*480px\)\s*\{[\s\S]*?\n\}/,
     )?.[0];
-    expect(narrower).toMatch(/--plan-layer-width:\s*116px/);
+    expect(narrower).toMatch(
+      /\.dagCanvas\s*\{[^}]*--plan-layer-width:\s*116px/,
+    );
+    // Same pairing at the phone step: 3×116px lanes only fit because the
+    // gap narrows to 18px and the canvas padding to 6px a side
+    // (3×116 + 2×18 + 2×6 = 396px). Dropping any of the three restores
+    // the two-axis scroll the step was added to remove.
+    expect(narrower).toMatch(/gap:\s*18px/);
+    expect(narrower).toMatch(/padding-right:\s*6px/);
+    expect(narrower).toMatch(/padding-left:\s*6px/);
   });
 });
