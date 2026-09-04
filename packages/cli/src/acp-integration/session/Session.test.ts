@@ -23625,6 +23625,293 @@ describe('Session', () => {
         }
       });
 
+      describe('a tool that ends the turn', () => {
+        const activeGoalSnapshot = {
+          v: 2 as const,
+          activity: 'running' as const,
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'write a poem',
+            status: 'active' as const,
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        };
+
+        /**
+         * Mocks every tool as an allowed read, with `update_goal` alone
+         * reporting that it wants the turn to end -- the shape
+         * `UpdateGoalTool` returns once a proposal is queued for
+         * verification.
+         */
+        const mockToolsWithTerminatingUpdateGoal = (
+          updateGoalTerminates = true,
+        ) => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockToolRegistry.getTool.mockImplementation((name: string) => ({
+            name,
+            displayName: name,
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: {},
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue(name),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn().mockResolvedValue(
+                name === 'update_goal'
+                  ? {
+                      llmContent: '{"proposalRecorded":true}',
+                      returnDisplay: 'Proposal queued for verification',
+                      ...(updateGoalTerminates ? { terminateTurn: true } : {}),
+                    }
+                  : { llmContent: 'ok', returnDisplay: 'ok' },
+              ),
+            }),
+          }));
+        };
+
+        const streamCalling = (...calls: Array<{ id: string; name: string }>) =>
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: calls.map((call) => ({ ...call, args: {} })),
+              },
+            },
+          ]);
+
+        it('ends a Goal turn without another model request', async () => {
+          // The proposal only reaches the verifier at a turn boundary, so a
+          // continuation that keeps the turn alive parks it indefinitely:
+          // the objective is already met, and the runtime refuses every
+          // later proposal for the same turn.
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-terminating-tool',
+          };
+          const turnKey = 'goal-runtime:turn-terminating-tool';
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          expect(boundGoalHost).toBeDefined();
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          // Settled as a completed iteration, not paused as a failure.
+          expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+          // The turn ends, but its own tool response still has to reach the
+          // transcript, or the next request carries a call with no result.
+          expect(mockChat.addHistory).toHaveBeenCalledWith({
+            role: 'user',
+            parts: expect.arrayContaining([
+              expect.objectContaining({
+                functionResponse: expect.objectContaining({
+                  id: 'call-update',
+                }) as unknown,
+              }),
+            ]) as unknown,
+          });
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            expect.objectContaining({ reason: 'end_turn', source: 'goal' }),
+          );
+        });
+
+        it('keeps a Goal turn running when no tool asked to end it', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-open-proposal',
+          };
+          const turnKey = 'goal-runtime:turn-open-proposal';
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockToolsWithTerminatingUpdateGoal(false);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          expect(boundGoalHost).toBeDefined();
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          // An audit-only proposal keeps the turn going: the model is meant
+          // to carry on until it stops on its own.
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+
+        it('ends a Goal turn on the last call of a multi-call batch', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-terminating-batch',
+          };
+          const turnKey = 'goal-runtime:turn-terminating-batch';
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling(
+                { id: 'call-read', name: 'read_file' },
+                { id: 'call-update', name: 'update_goal' },
+              ),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          expect(boundGoalHost).toBeDefined();
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          // Every call in the batch keeps its response, not just the one
+          // that ended the turn: a preserved batch missing a response
+          // leaves the transcript unusable for the next request.
+          const preserved = vi
+            .mocked(mockChat.addHistory)
+            .mock.calls.map(([message]) => message)
+            .find((message) =>
+              (message as core.Content)?.parts?.some(
+                (part) =>
+                  (part as { functionResponse?: { id?: string } })
+                    .functionResponse?.id === 'call-update',
+              ),
+            ) as core.Content;
+          expect(preserved).toBeDefined();
+          expect(
+            preserved.parts?.map(
+              (part) =>
+                (part as { functionResponse?: { id?: string } })
+                  .functionResponse?.id,
+            ),
+          ).toEqual(expect.arrayContaining(['call-read', 'call-update']));
+        });
+
+        it('ends a Goal turn from inside a Stop hook continuation', async () => {
+          // A blocking Stop hook runs its continuation on a second loop that
+          // executes tools of its own, so the Goal tools are reachable from
+          // there too -- and a turn parked there is parked just as hard.
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-stop-hook',
+          };
+          const turnKey = 'goal-runtime:turn-stop-hook';
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockToolsWithTerminatingUpdateGoal();
+          let stopCalls = 0;
+          mockConfig.getMessageBus = vi.fn().mockReturnValue({
+            request: vi.fn().mockImplementation(async (request) => {
+              if (request.eventName !== 'Stop') {
+                return { success: true, output: {} };
+              }
+              stopCalls++;
+              return stopCalls === 1
+                ? {
+                    success: true,
+                    output: { decision: 'block', reason: 'keep going' },
+                  }
+                : { success: true, output: {} };
+            }),
+          });
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((name: string) => name === 'Stop');
+          mockChat.sendMessageStream = vi
+            .fn()
+            // The turn itself ends quietly, which is what fires the hook.
+            .mockResolvedValueOnce(createEmptyStream())
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          expect(boundGoalHost).toBeDefined();
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          // The turn's own request plus the hook's continuation, and no
+          // third request carrying the Goal tool's result back.
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
+        });
+
+        it('ignores the flag outside a Goal turn', async () => {
+          // Nothing but the Goal tool sets it today, and an ordinary turn
+          // has no verification boundary to reach, so an ordinary turn must
+          // keep the tool loop it has always had.
+          mockGoalRuntime.getSnapshot.mockReturnValue({
+            v: 2,
+            activity: 'idle',
+            goal: null,
+          });
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValue(createEmptyStream());
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'go' }],
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+      });
+
       it('pauses without counting a Goal turn cancelled before the model request', async () => {
         // `modelStarted` decides whether settlement records an iteration.
         // A user cancel still pauses the Goal before that point; releasing

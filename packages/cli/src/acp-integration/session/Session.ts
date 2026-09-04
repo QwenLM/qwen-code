@@ -537,6 +537,12 @@ type RunToolResult = {
   loopDetected?: boolean;
   repeatedToolFailureBatch?: RepeatedToolFailureBatch;
   memoryWriteCandidates?: MemoryWriteCandidate[];
+  /**
+   * A tool in this batch asked to end the turn once its result is recorded.
+   * Mirrors `ToolResult.terminateTurn`, which today only the Goal proposal
+   * tool sets, and only once its proposal is queued for verification.
+   */
+  terminateTurn?: boolean;
 };
 
 type MidTurnDrainResult = {
@@ -5761,6 +5767,13 @@ export class Session implements SessionContext {
                     ),
                   };
                 }
+                if (await this.#endGoalTurnAfterToolRun(toolRun, goalTurn)) {
+                  return {
+                    stopReason: getAbortAwareEndTurnStopReason(
+                      pendingSend.signal,
+                    ),
+                  };
+                }
                 const nextAfterTools = await this.#buildNextMessageAfterToolRun(
                   toolRun,
                   pendingSend.signal,
@@ -6139,6 +6152,13 @@ export class Session implements SessionContext {
                       ),
                     };
                   }
+                  if (await this.#endGoalTurnAfterToolRun(toolRun, goalTurn)) {
+                    return {
+                      stopReason: getAbortAwareEndTurnStopReason(
+                        pendingSend.signal,
+                      ),
+                    };
+                  }
                   const nextAfterTools =
                     await this.#buildNextMessageAfterToolRun(
                       toolRun,
@@ -6193,6 +6213,7 @@ export class Session implements SessionContext {
                 fullTurnModelOverride,
                 responseCapture,
                 rejectOnLoopDetected,
+                goalTurn,
               );
               if (result.stopReason !== 'cancelled') {
                 responseCapture.agentOutput.writeToSpan(
@@ -6277,6 +6298,7 @@ export class Session implements SessionContext {
     modelOverride?: string,
     responseCapture?: AgentResponseCapture,
     rejectOnLoopDetected = false,
+    goalTurn?: AcpGoalTurn,
   ): Promise<{
     stopReason: PromptResponse['stopReason'];
     loopProtectionStopped?: boolean;
@@ -6346,6 +6368,7 @@ export class Session implements SessionContext {
               getModelOverride: () => modelOverride,
               responseCapture,
               rejectOnLoopDetected,
+              ...(goalTurn ? { goalTurn } : {}),
             },
           );
           if (continuation.kind === 'terminal') {
@@ -6446,6 +6469,7 @@ export class Session implements SessionContext {
                 getModelOverride: () => modelOverride,
                 responseCapture,
                 rejectOnLoopDetected,
+                ...(goalTurn ? { goalTurn } : {}),
               },
             );
             if (continuation.kind === 'terminal') {
@@ -6581,6 +6605,7 @@ export class Session implements SessionContext {
           getModelOverride: () => modelOverride,
           responseCapture,
           rejectOnLoopDetected,
+          ...(goalTurn ? { goalTurn } : {}),
         },
       );
       if (continuation.supersededAutomaticContinuation && externalReason) {
@@ -6607,6 +6632,7 @@ export class Session implements SessionContext {
       getModelOverride?: () => string | undefined;
       responseCapture?: AgentResponseCapture;
       rejectOnLoopDetected?: boolean;
+      goalTurn?: AcpGoalTurn;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -7200,6 +7226,15 @@ export class Session implements SessionContext {
               ? cancelledOrThrowLoopDetected(pendingSend.signal, toolLoopState)
               : getAbortAwareEndTurnStopReason(pendingSend.signal),
             loopProtectionStopped: true,
+            ...(supersededAutomaticContinuation
+              ? { supersededAutomaticContinuation: true }
+              : {}),
+          };
+        }
+        if (await this.#endGoalTurnAfterToolRun(toolRun, options.goalTurn)) {
+          return {
+            kind: 'terminal',
+            stopReason: getAbortAwareEndTurnStopReason(pendingSend.signal),
             ...(supersededAutomaticContinuation
               ? { supersededAutomaticContinuation: true }
               : {}),
@@ -7886,6 +7921,44 @@ export class Session implements SessionContext {
       true,
     );
     await this.messageRewriter?.waitForPendingRewrites();
+  }
+
+  /**
+   * Ends a Goal turn whose tool batch asked for it, mirroring the interactive
+   * and headless paths.
+   *
+   * `update_goal` sets the flag once its proposal is queued for verification,
+   * and verification only ever runs at a turn boundary. Feeding that result
+   * back to the model instead leaves the proposal parked: the objective is
+   * already satisfied, so the model has nothing left to do but call the Goal
+   * tools again, and the runtime rejects every later proposal for the same
+   * turn. Observed runs looped between the two Goal tools until a human
+   * cancelled them, with the turn count never leaving zero.
+   *
+   * The batch's own responses are preserved so the transcript keeps a
+   * response for every call, but mid-turn user input is deliberately left
+   * queued for the next continuation rather than drained into a turn that is
+   * already over.
+   *
+   * Returns false outside a Goal turn, where nothing sets the flag today and
+   * a turn has no verification boundary to reach.
+   */
+  async #endGoalTurnAfterToolRun(
+    toolRun: RunToolResult,
+    goalTurn: AcpGoalTurn | undefined,
+  ): Promise<boolean> {
+    // Loop protection keeps its own stop path, with the telemetry and the
+    // context message that go with it, so it wins a batch that trips both.
+    if (!goalTurn || toolRun.terminateTurn !== true || toolRun.loopDetected) {
+      return false;
+    }
+    this.todoStopGuard.suspend();
+    this.#preserveUnsentMessageHistory(
+      { role: 'user', parts: toolRun.parts },
+      true,
+    );
+    await this.messageRewriter?.waitForPendingRewrites();
+    return true;
   }
 
   async #buildNextMessageAfterToolRun(
@@ -10671,6 +10744,11 @@ export class Session implements SessionContext {
         sequence: toolResultRecordSequence++,
       });
     };
+    // Batch-level, like `memoryWriteCandidates`, but folded in by
+    // `finalizeRunToolResult` rather than passed to it: a tool that asked to
+    // end the turn asked no matter which of the exits below the batch takes,
+    // and the exits that run before any tool does read it as false anyway.
+    let batchTerminatesTurn = false;
     const finalizeRunToolResult = async (
       result: RunToolResult,
     ): Promise<RunToolResult> => {
@@ -10694,7 +10772,11 @@ export class Session implements SessionContext {
         })),
       };
       if (orderedRecords.length === 0) {
-        return { ...result, repeatedToolFailureBatch };
+        return {
+          ...result,
+          repeatedToolFailureBatch,
+          ...(batchTerminatesTurn ? { terminateTurn: true } : {}),
+        };
       }
       const finalized = await finalizeToolResponses(
         this.config,
@@ -10738,6 +10820,7 @@ export class Session implements SessionContext {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
         repeatedToolFailureBatch,
+        ...(batchTerminatesTurn ? { terminateTurn: true } : {}),
       };
     };
     let skippedToolCallCounter = 0;
@@ -11225,6 +11308,7 @@ export class Session implements SessionContext {
           for (const r of results) {
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
+            batchTerminatesTurn ||= r.terminateTurn === true;
             shouldStop ||= r.stopAfterPermissionCancel;
             shouldStopForLoop ||= r.loopDetected === true;
           }
@@ -11268,6 +11352,7 @@ export class Session implements SessionContext {
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
+            batchTerminatesTurn ||= r.terminateTurn === true;
             if (r.loopDetected) {
               await appendSkippedAfter(
                 parts,
@@ -13385,6 +13470,7 @@ export class Session implements SessionContext {
           return {
             parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,
+            ...(toolResult.terminateTurn ? { terminateTurn: true } : {}),
             memoryWriteCandidates:
               status === 'success'
                 ? [
