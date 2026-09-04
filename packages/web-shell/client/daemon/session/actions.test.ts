@@ -344,14 +344,18 @@ describe('createDaemonSessionActions', () => {
       expect(setPromptStatus).toHaveBeenCalledTimes(1);
     });
 
-    it('leaves a locally submitted prompt alone', () => {
+    it.each([
+      ['a conversation turn', (sessionId: string) => sessionId],
+      ['a shell command', (sessionId: string) => `${sessionId}:shell`],
+    ])('leaves %s this browser submitted alone', (_label, toKey) => {
       // This browser owns the prompt, so its own terminal handling settles it;
-      // a lagging live-state sample must not cut the turn short.
+      // a lagging live-state sample must not cut the turn short. Each prompt
+      // kind has its own active-prompt key, and every one of them counts.
       const session = createMockSession('session-local');
       const { actions, setPromptStatus } = createActionsHarness({
         session,
         activePrompts: new Map([
-          [session.sessionId, { controller: new AbortController() }],
+          [toKey(session.sessionId), { controller: new AbortController() }],
         ]),
         hasSessionActivePrompt: () => true,
       });

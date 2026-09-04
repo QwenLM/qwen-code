@@ -898,11 +898,12 @@ export function createDaemonSessionActions({
       // the event stream is its only settle path, which is exactly the failure
       // this backstop covers — so settle it here rather than deferring to it.
       const backstopSessionId = sessionRef.current?.sessionId;
-      const locallySubmitted =
+      if (
         backstopSessionId !== undefined &&
-        (activePromptsRef.current.has(backstopSessionId) ||
-          activePromptsRef.current.has(`${backstopSessionId}:shell`));
-      if (locallySubmitted) return;
+        hasLocallySubmittedPrompt(activePromptsRef.current, backstopSessionId)
+      ) {
+        return;
+      }
       settleRestoredActivePrompt();
       // Commit the buffered batch before reading the store. Without this the
       // read races the 16ms window: a chunk burst still buffered at flip time
@@ -2347,7 +2348,7 @@ export function createDaemonSessionActions({
         'Shell command failed',
         'send_shell_command',
       );
-      const shellKey = `${session.sessionId}:shell`;
+      const shellKey = getShellPromptKey(session.sessionId);
       setPromptStatus('waiting');
       const ctrl = new AbortController();
       activePromptsRef.current.set(shellKey, { controller: ctrl });
@@ -2865,6 +2866,33 @@ function waitForAcceptedPromptCompletion(
     });
     controller.signal.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+/**
+ * Key under which a shell command tracks its prompt in the active-prompt map.
+ * Shell commands run as their own prompt alongside a conversation turn, so they
+ * cannot share the plain session key.
+ */
+export function getShellPromptKey(sessionId: string): string {
+  return `${sessionId}:shell`;
+}
+
+/**
+ * Whether this browser has a prompt of any kind in flight for `sessionId`.
+ *
+ * Every active-prompt key scheme lives here. Readers that hand-rolled the
+ * membership check would silently miss a new prompt kind, and a reader that
+ * answers "no local prompt" for one that is running lets a lagging live-state
+ * sample settle a turn this browser is still driving (#9487).
+ */
+export function hasLocallySubmittedPrompt(
+  activePrompts: ReadonlyMap<string, ActivePrompt>,
+  sessionId: string,
+): boolean {
+  return (
+    activePrompts.has(sessionId) ||
+    activePrompts.has(getShellPromptKey(sessionId))
+  );
 }
 
 export function getPromptSettledKey(

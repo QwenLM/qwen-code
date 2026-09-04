@@ -52,6 +52,7 @@ import {
   getConnectionAfterSessionClear,
   getPromptSettledKey,
   getWorkspaceModelsAfterSessionClear,
+  hasLocallySubmittedPrompt,
   resolveSessionRestoreTimeouts,
 } from './actions.js';
 import {
@@ -2082,8 +2083,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           };
           const hasSessionActivePrompt = () =>
             restoredActivePrompt ||
-            activePromptsRef.current.has(activeSession.sessionId) ||
-            activePromptsRef.current.has(`${activeSession.sessionId}:shell`);
+            hasLocallySubmittedPrompt(
+              activePromptsRef.current,
+              activeSession.sessionId,
+            );
           hasCurrentSessionActivePrompt = hasSessionActivePrompt;
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
           settleCurrentSessionRestoredPromptRef.current =
