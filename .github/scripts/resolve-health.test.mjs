@@ -1610,6 +1610,33 @@ describe('resolve-health: decisions', () => {
       ['comment'],
       'refuses to certify while PR 32 has no result at all',
     );
+    // The same shape on ONE PR is the harder half: the trailing comment that
+    // lets the push clear the barrier is also the comment the roster's "any
+    // later result" reading would spend a second time, marking the lagged
+    // retry answered. The close gate matches each request to a result of its
+    // own, so that comment cannot be spent twice.
+    const samePr = assess(
+      [
+        {
+          number: 31,
+          state: 'open',
+          comments: [
+            request('2026-08-27T00:00:00Z', 31),
+            // Typed inside run A's push→comment lag, on run A's own PR. Its
+            // run never reports.
+            request('2026-08-27T05:00:00Z', 31),
+            result('2026-08-27T05:05:00Z', PUSHED, 31),
+          ],
+        },
+      ],
+      { now },
+    );
+    assert.equal(samePr.unserved, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(samePr, existing).map((a) => a.type),
+      ['comment'],
+      'one comment cannot be both the recovery and the retry it served',
+    );
     // And it must not be read off the ROSTER, which needs `staleHours`: on the
     // first tick the request is minutes old, the roster is empty and the alarm
     // is quiet, yet the trailing comment still clears its timestamp. This is

@@ -219,7 +219,11 @@ export function assess(prs, options = {}) {
   // REFUSES a close). It floors with `created_at`, which no edit moves, so an
   // old comment edited today cannot outrank a recent push.
   let newestRequest = null;
-  // The newest request the lane never answered — see the roster loop below.
+  // The newest request with no result of its own — see the roster loop below.
+  // Deliberately read WITHOUT `staleHours`: the roster needs it so a run still
+  // in flight does not raise the alarm, and the recovery gate needs the
+  // opposite reading, since a run in flight is precisely a reason not to
+  // certify that the lane works again. Read by decide(), never by the alarm.
   let unserved = null;
   const isRequestShaped = (c) =>
     c.user !== opts.bot &&
@@ -277,6 +281,29 @@ export function assess(prs, options = {}) {
     // creation only (so a comment edited into request shape never ran), and
     // only for someone it would have served (ANSWERABLE_ASSOCIATIONS).
     const requests = comments.filter(isAnswerableRequest);
+    // The close gate's own attribution, which the roster's proxy below cannot
+    // give it. Match each request, oldest first, to the earliest result that
+    // postdates it and no earlier request has taken. Runs on one PR are
+    // serialised by the producer's concurrency group, so results arrive in
+    // request order, and a request left with no result of its own is one the
+    // lane has not answered — including a retry typed inside the previous
+    // run's push→comment lag, whose trailing comment the roster's "any later
+    // result" reading would otherwise spend twice: once as proof the lane
+    // recovered, and again as proof this request was served.
+    let cursor = 0;
+    for (const req of requests) {
+      while (
+        cursor < prResults.length &&
+        prResults[cursor].at <= req.created_at
+      ) {
+        cursor += 1;
+      }
+      if (cursor < prResults.length) {
+        cursor += 1;
+      } else if (!unserved || req.created_at > unserved) {
+        unserved = req.created_at;
+      }
+    }
     for (const req of requests) {
       // Any result after the request answers it. Runs on one PR are
       // serialised by the workflow's concurrency group, so a later result
@@ -284,14 +311,6 @@ export function assess(prs, options = {}) {
       // first run reported must not leave the first request "unanswered"
       // forever because its result landed after the retry's timestamp.
       const answered = prResults.some((r) => r.at > req.created_at);
-      // A request with no result at all, at any age. The roster below needs
-      // `staleHours` so a run still in flight does not raise the alarm; the
-      // recovery gate needs the opposite reading — a request in flight is
-      // precisely a reason not to certify that the lane works again — so it
-      // reads this instead. See decide().
-      if (!answered && (!unserved || req.created_at > unserved)) {
-        unserved = req.created_at;
-      }
       const ageHours = (now.getTime() - Date.parse(req.created_at)) / 3_600_000;
       if (!answered && ageHours >= opts.staleHours) {
         unanswered.push({
@@ -671,11 +690,12 @@ export function decide(assessment, existing, options = {}) {
     // clears — certifying a recovery with a push that predates the request.
     // Push time appears in nothing the watch reads, so the gate cannot be
     // fixed by comparing better timestamps. What closes it is the request
-    // itself: a request the lane never answered is refused as evidence
-    // regardless of what the clocks say, and one typed in that lag is exactly
-    // that. Deliberately read WITHOUT `staleHours` — a run still in flight is
-    // a reason not to certify, not a reason to wait — so the ordinary close
-    // resumes as soon as every request has its result.
+    // itself: a request with no result OF ITS OWN is refused as evidence
+    // regardless of what the clocks say, and a request typed in that lag is
+    // exactly that — on the same PR as well as on another, because the
+    // matching in assess() will not spend one comment twice, as proof the
+    // lane recovered and again as proof the lagged request was served. The
+    // ordinary close resumes as soon as every request has its own result.
     if (
       latest &&
       latest.kind === 'pushed' &&
