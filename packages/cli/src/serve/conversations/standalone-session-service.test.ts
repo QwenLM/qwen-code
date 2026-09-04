@@ -111,6 +111,8 @@ interface Harness {
   restoreStagedStandaloneDirectory: ReturnType<typeof vi.fn>;
   removeStagedStandaloneDirectory: ReturnType<typeof vi.fn>;
   confirmStandaloneRootDurability: ReturnType<typeof vi.fn>;
+  getWorkspaceProvidersStatus: ReturnType<typeof vi.fn>;
+  assertExactRoot: ReturnType<typeof vi.fn>;
 }
 
 function createHarness(): Harness {
@@ -168,6 +170,15 @@ function createHarness(): Harness {
     deleteSessionAttachments: vi.fn(async () => undefined),
     markSessionCatalogChanged: vi.fn(),
   };
+  const getWorkspaceProvidersStatus = vi.fn(async () => ({
+    v: 1 as const,
+    workspaceCwd: root.canonicalRoot,
+    initialized: true,
+    acpChannelLive: false,
+    current: { authType: 'openai', modelId: 'qwen-test' },
+    approvalMode: 'default' as const,
+    providers: [],
+  }));
   const runtime = {
     workspaceId: 'conversations',
     workspaceCwd: root.canonicalRoot,
@@ -177,7 +188,8 @@ function createHarness(): Harness {
     trusted: true,
     removable: false,
     bridge: bridge as unknown as AcpSessionBridge,
-  } as WorkspaceRuntime;
+    workspaceService: { getWorkspaceProvidersStatus },
+  } as unknown as WorkspaceRuntime;
   const reservation = { release: vi.fn() };
   const restoreReservation = { release: vi.fn() };
   let runtimeQuarantined = false;
@@ -216,6 +228,7 @@ function createHarness(): Harness {
   const restoreStagedStandaloneDirectory = vi.fn(async () => identity);
   const removeStagedStandaloneDirectory = vi.fn(async () => undefined);
   const confirmStandaloneRootDurability = vi.fn(async () => undefined);
+  const assertExactRoot = vi.fn(async () => root);
   const lifecycle = new SessionArchiveCoordinator();
   const options: StandaloneSessionServiceOptions = {
     ensureRuntime,
@@ -229,7 +242,7 @@ function createHarness(): Harness {
     quarantineRuntime,
     runRuntimeActivity: async (_runtime, operation) => operation(),
     workspace: {
-      assertExactRoot: vi.fn(async () => root),
+      assertExactRoot,
       prepareStandaloneDirectory: vi.fn(async () => ({
         identity,
         created: true,
@@ -272,6 +285,8 @@ function createHarness(): Harness {
     restoreStagedStandaloneDirectory,
     removeStagedStandaloneDirectory,
     confirmStandaloneRootDurability,
+    getWorkspaceProvidersStatus,
+    assertExactRoot,
   };
 }
 
@@ -431,6 +446,61 @@ afterEach(() => {
 });
 
 describe('StandaloneSessionService', () => {
+  it('reads options from the exact runtime without exposing its cwd', async () => {
+    const harness = createHarness();
+
+    const options = await harness.service.getOptions();
+
+    expect(harness.ensureRuntime).toHaveBeenCalledOnce();
+    expect(harness.assertExactRoot).toHaveBeenCalledWith(root.canonicalRoot);
+    expect(harness.getWorkspaceProvidersStatus).toHaveBeenCalledWith({
+      route: 'GET /standalone/session-options',
+      workspaceCwd: root.canonicalRoot,
+    });
+    expect(options).toEqual({
+      v: 1,
+      initialized: true,
+      current: { authType: 'openai', modelId: 'qwen-test' },
+      approvalMode: 'default',
+      providers: [],
+    });
+    expect(options).not.toHaveProperty('workspaceCwd');
+    expect(options).not.toHaveProperty('acpChannelLive');
+    expect(harness.bridge.spawnStandaloneSession).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when provider status belongs to another runtime', async () => {
+    const harness = createHarness();
+    harness.getWorkspaceProvidersStatus.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/other',
+      initialized: true,
+      providers: [],
+    });
+
+    await expect(harness.service.getOptions()).rejects.toMatchObject({
+      code: 'conversation_runtime_ownership_compromised',
+      retryable: false,
+    });
+  });
+
+  it('fails closed when the runtime is quarantined during the read', async () => {
+    const harness = createHarness();
+    harness.getWorkspaceProvidersStatus.mockImplementationOnce(async () => {
+      await harness.quarantineRuntime(harness.runtime);
+      return {
+        v: 1,
+        workspaceCwd: root.canonicalRoot,
+        initialized: true,
+        providers: [],
+      };
+    });
+
+    await expect(harness.service.getOptions()).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+    });
+  });
+
   it('creates a durable standalone session without admitting a prompt', async () => {
     mockDurableStandalone();
     const harness = createHarness();
@@ -449,6 +519,26 @@ describe('StandaloneSessionService', () => {
     expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
     expect(harness.bridge.spawnStandaloneSession).toHaveBeenCalledOnce();
     expect(harness.reservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('surfaces a failed spawn-time model apply as modelApplied false', async () => {
+    mockDurableStandalone();
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      attached: false,
+      sourceType: 'standalone',
+      sourcePersisted: true,
+      modelApplied: false,
+    });
+
+    const created = await harness.service.create({
+      sessionId,
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+    });
+
+    expect(created.session).toMatchObject({ modelApplied: false });
   });
 
   it('detaches a create response client from its origin runtime after rollover', async () => {

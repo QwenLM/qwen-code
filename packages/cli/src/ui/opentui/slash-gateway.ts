@@ -16,13 +16,38 @@
  *    submission instead of silently misrouting `/help` to the model;
  *  - rejects a submission while a command is already running (the ink
  *    processor gates on isProcessing; the OpenTUI prompt does not disable);
- *  - routes Esc to `dispatcher.cancel()` while a command runs.
+ *  - routes Esc to `dispatcher.cancel()` while a command runs;
+ *  - normalizes ink's bare quit tokens to `/quit` for the shell, ahead of the
+ *    gate ({@link normalizeQuitSubmission}).
  */
 
 import type {
   OpenTuiDispatchOutcome,
   OpenTuiSlashDispatcher,
 } from './commands-dispatch.js';
+
+// ink's quit family (AppContainer.handleFinalSubmit): `/exit` is quit's own
+// altName, so the whole set collapses onto `/quit`.
+const QUIT_TOKENS = new Set([
+  '/quit',
+  '/exit',
+  'exit',
+  'quit',
+  ':q',
+  ':q!',
+  ':wq',
+  ':wq!',
+]);
+
+/**
+ * Rewrites a bare quit token to `/quit` so it reaches the dispatcher as the
+ * command it means. ink checks this ahead of its message queue — a quit has to
+ * be able to stop a live stream instead of queueing behind it, and anything the
+ * gate leaves alone would otherwise be submitted to the model as text.
+ */
+export function normalizeQuitSubmission(text: string): string {
+  return QUIT_TOKENS.has(text.trim()) ? '/quit' : text;
+}
 
 export type SlashSettlement =
   /** The dispatcher processed the input (false = not a slash command). */
@@ -63,11 +88,13 @@ export class OpenTuiSlashGateway {
   }
 
   /**
-   * Whether the command in `text` opted into running while a model turn
-   * streams (dispatcher passthrough; false before the dispatcher attaches).
+   * Whether a slash submission must wait for the in-flight model turn to end.
+   * Answered from the real registry, so it awaits readiness exactly like
+   * {@link dispatch}; a failed init has nothing to defer (dispatch reports it).
    */
-  canRunDuringStreaming(text: string): boolean {
-    return this.dispatcher?.canRunDuringStreaming(text) ?? false;
+  async mustDeferDuringStreaming(text: string): Promise<boolean> {
+    await this.ready;
+    return this.dispatcher?.mustDeferDuringStreaming(text) ?? false;
   }
 
   /** True while a dispatched command is still running. */

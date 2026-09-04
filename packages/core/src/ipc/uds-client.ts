@@ -17,6 +17,7 @@
 import * as net from 'node:net';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  buildAuthLine,
   buildDeliveryStatusFrame,
   encodePeerFrame,
   MAX_FRAME_BYTES,
@@ -69,6 +70,18 @@ export class PeerSendError extends Error {
   }
 }
 
+export interface SendPeerFrameOptions {
+  timeoutMs?: number;
+  /**
+   * The receiver's inbox token, sent as an auth line ahead of the frame.
+   * Omitted when the receiver's record advertises none — an inbox that
+   * requires one then drops the connection, which is the documented
+   * old-sender/new-receiver break; an inbox that requires none skips the
+   * line as unparseable, so leading with it is always safe.
+   */
+  authToken?: string;
+}
+
 /**
  * Write one frame to `socketPath`.
  *
@@ -87,8 +100,9 @@ export class PeerSendError extends Error {
 export function sendPeerFrame(
   socketPath: string,
   frame: PeerFrame,
-  timeoutMs: number = SEND_TIMEOUT_MS,
+  options: SendPeerFrameOptions = {},
 ): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? SEND_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     if (!isLocalIpcPath(socketPath)) {
       reject(
@@ -149,7 +163,14 @@ export function sendPeerFrame(
     }, timeoutMs);
     socket.on('error', fail);
     socket.on('connect', () => {
-      socket.end(encoded);
+      // The auth line rides in the same write as the frame: the receiver
+      // reads lines in order, and a separate write would only open a
+      // window for a partial flush to strand the frame unauthenticated.
+      socket.end(
+        options.authToken !== undefined
+          ? buildAuthLine(options.authToken) + encoded
+          : encoded,
+      );
     });
     socket.on('close', () => {
       if (settled) return;
@@ -172,9 +193,12 @@ export function sendPeerFrame(
 export async function sendDeliveryStatus(
   socketPath: string,
   fields: { status: PeerDeliveryStatus; origMsgId: string; from?: string },
+  authToken?: string,
 ): Promise<void> {
   try {
-    await sendPeerFrame(socketPath, buildDeliveryStatusFrame(fields));
+    await sendPeerFrame(socketPath, buildDeliveryStatusFrame(fields), {
+      ...(authToken !== undefined ? { authToken } : {}),
+    });
   } catch (error) {
     debugLogger.debug(
       `delivery-status (${fields.status}) to ${socketPath} failed: ${

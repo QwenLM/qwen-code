@@ -31,6 +31,7 @@ describe('getConnectionAfterSessionClear', () => {
         sessionId: 'session-a',
         clientId: 'client-a',
         displayName: 'Session A',
+        titleSource: 'manual',
         tokenCount: 42,
         goalState: { v: 2, goal: null, activity: 'idle' },
         commands: [commandInfo('old-command')],
@@ -58,6 +59,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('sessionId');
     expect(next).not.toHaveProperty('clientId');
     expect(next).not.toHaveProperty('displayName');
+    expect(next).not.toHaveProperty('titleSource');
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('goalState');
     expect(next).not.toHaveProperty('supportedCommands');
@@ -529,12 +531,16 @@ describe('createDaemonSessionActions', () => {
       createDetachedStandaloneSession,
     });
 
-    await expect(actions.createSession({ approvalMode: 'yolo' })).resolves.toBe(
-      nextSession,
-    );
+    await expect(
+      actions.createSession({
+        approvalMode: 'yolo',
+        modelServiceId: 'qwen3.8-max(USE_OPENAI)',
+      }),
+    ).resolves.toBe(nextSession);
 
     expect(createDetachedStandaloneSession).toHaveBeenCalledWith({
       approvalMode: 'yolo',
+      modelServiceId: 'qwen3.8-max(USE_OPENAI)',
     });
     expect(createDetachedSession).not.toHaveBeenCalled();
     expect(getConnection()).toMatchObject({
@@ -858,6 +864,27 @@ describe('createDaemonSessionActions', () => {
       expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
     },
   );
+
+  it('rejects a per-call model for workspace creation', async () => {
+    const createDetachedSession = vi.fn();
+    const createDetachedStandaloneSession = vi.fn();
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionContext: { kind: 'workspace', cwd: '/workspace' },
+      },
+      createDetachedSession,
+      createDetachedStandaloneSession,
+    });
+
+    await expect(
+      actions.createSession({ modelServiceId: 'qwen3.8-max(USE_OPENAI)' }),
+    ).rejects.toThrow(
+      'Per-call modelServiceId is only supported for standalone session creation',
+    );
+    expect(createDetachedSession).not.toHaveBeenCalled();
+    expect(createDetachedStandaloneSession).not.toHaveBeenCalled();
+  });
 
   it('does not apply the generic create timeout to standalone create', async () => {
     vi.useFakeTimers();
@@ -1919,6 +1946,31 @@ describe('createDaemonSessionActions', () => {
     );
   });
 
+  it('reads a saved workflow definition and unwraps the envelope', async () => {
+    const session = createMockSession('session-a');
+    const workflow = {
+      v: 1 as const,
+      sessionId: 'session-a',
+      name: 'deep-review',
+      source: 'project' as const,
+      scriptPath: '/workspace/.qwen/workflows/deep-review.js',
+      script: 'export const meta = { name: "deep-review", description: "d" }',
+      meta: { name: 'deep-review', description: 'd' },
+    };
+    session.savedWorkflow.mockResolvedValueOnce({
+      v: 1,
+      sessionId: 'session-a',
+      name: 'deep-review',
+      workflow,
+    });
+    const { actions } = createActionsHarness({ session });
+
+    await expect(actions.readSavedWorkflow('deep-review')).resolves.toEqual(
+      workflow,
+    );
+    expect(session.savedWorkflow).toHaveBeenCalledWith('deep-review');
+  });
+
   it('suppresses a stale workflow-control failure after switching sessions', async () => {
     const sessionA = createMockSession('session-a');
     const sessionB = createMockSession('session-b');
@@ -2263,6 +2315,7 @@ describe('createDaemonSessionActions', () => {
       connection: {
         status: 'connected',
         workspaceCwd: '/workspace',
+        commands: [commandInfo('help', 'builtin-command')],
         capabilities: {
           v: 1,
           mode: 'http-bridge',
@@ -2288,6 +2341,319 @@ describe('createDaemonSessionActions', () => {
       [],
     );
   });
+
+  it('does not upload attachments for built-in command aliases', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('compress', 'builtin-command', ['summarize'])],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/summarize', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [{ type: 'text', text: '/summarize' }],
+    });
+  });
+
+  it.each(['/Compress', '/SUMMARIZE'])(
+    'keeps attachments for unresolved wrong-case command %s',
+    async (text) => {
+      const session = createMockSession('session-a');
+      const { actions } = createActionsHarness({
+        session,
+        connection: {
+          status: 'connected',
+          workspaceCwd: '/workspace',
+          commands: [commandInfo('compress', 'builtin-command', ['summarize'])],
+          capabilities: {
+            v: 1,
+            mode: 'http-bridge',
+            features: ['session_attachments'],
+            modelServices: [],
+          },
+        },
+      });
+
+      await actions.submitPrompt(text, {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      });
+
+      expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('prefers a primary command name over another command alias', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [
+          commandInfo('compress', 'builtin-command', ['summarize']),
+          commandInfo('summarize', 'skill-dir-command'),
+        ],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/summarize', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+  });
+
+  it('recognizes built-in commands with whitespace after the slash', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('compress', 'builtin-command')],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/ compress', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it('does not upload an unknown slash command before command metadata loads', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('price-sheet', 'skill-dir-command')],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/remember this API shape', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it('does not upload a slash command before command metadata loads', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/remember this API shape', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    '// stack trace from prod',
+    '/* crash note */',
+    '/var/log/app.log shows the crash',
+    '/var\\log\\app.log shows the crash',
+  ])('uploads attachments for non-command slash input %s', async (text) => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt(text, {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [
+        { type: 'text', text },
+        {
+          type: 'image',
+          attachmentId: 'image.png',
+          mimeType: 'image/png',
+          size: 3,
+        },
+      ],
+    });
+  });
+
+  it('uploads attachments for unknown commands after metadata loads', async () => {
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('compress', 'builtin-command')],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/unlisted update', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+  });
+
+  it('uploads attachments used by skill slash commands', async () => {
+    const session = createMockSession('session-a');
+    const { actions, store } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        commands: [commandInfo('price-sheet', 'skill-dir-command')],
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+
+    await actions.submitPrompt('/price-sheet update these prices', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+
+    expect(session.uploadAttachment).toHaveBeenCalledWith(
+      expect.any(Blob),
+      'image.png',
+      'image/png',
+      undefined,
+    );
+    expect(session.submitPrompt).toHaveBeenCalledWith({
+      prompt: [
+        { type: 'text', text: '/price-sheet update these prices' },
+        {
+          type: 'image',
+          attachmentId: 'image.png',
+          mimeType: 'image/png',
+          size: 3,
+        },
+      ],
+    });
+    expect(store.appendLocalUserMessage).toHaveBeenCalledWith(
+      '/price-sheet update these prices',
+      [{ data: 'AQID', mimeType: 'image/png' }],
+      undefined,
+      [],
+    );
+  });
+
+  it.each([
+    ['skill-dir-command', true],
+    ['builtin-command', false],
+  ] as const)(
+    'classifies %s command attachments on the sendPrompt path',
+    async (source, shouldUpload) => {
+      const session = createMockSession('session-a');
+      const { actions } = createActionsHarness({
+        session,
+        connection: {
+          status: 'connected',
+          workspaceCwd: '/workspace',
+          commands: [commandInfo('price-sheet', source)],
+          capabilities: {
+            v: 1,
+            mode: 'http-bridge',
+            features: ['session_attachments'],
+            modelServices: [],
+          },
+        },
+      });
+
+      const prompt = actions.sendPrompt('/price-sheet update', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      });
+      await vi.waitFor(() => expect(session.submitPrompt).toHaveBeenCalled());
+
+      expect(session.uploadAttachment).toHaveBeenCalledTimes(
+        shouldUpload ? 1 : 0,
+      );
+      expect(session.submitPrompt).toHaveBeenCalledWith(
+        {
+          prompt: shouldUpload
+            ? [
+                { type: 'text', text: '/price-sheet update' },
+                {
+                  type: 'image',
+                  attachmentId: 'image.png',
+                  mimeType: 'image/png',
+                  size: 3,
+                },
+              ]
+            : [{ type: 'text', text: '/price-sheet update' }],
+        },
+        expect.any(AbortSignal),
+      );
+
+      await actions.cancel();
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+    },
+  );
 
   it('uploads text attachments and submits attachment references', async () => {
     const session = createMockSession('session-a');
@@ -3791,6 +4157,7 @@ function createMockSession(
       sessionWorkflowTaskAction: vi.fn(),
       removeSessionAttachment: vi.fn(async () => true),
     },
+    savedWorkflow: vi.fn(),
     cancel: vi.fn(async () => undefined),
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
@@ -3885,11 +4252,13 @@ function createDeferred<T>() {
   return { promise, resolve, reject };
 }
 
-function commandInfo(name: string) {
+function commandInfo(name: string, source?: string, altNames?: string[]) {
   const raw = commandRaw(name);
   return {
     name,
     description: '',
+    ...(source ? { source } : {}),
+    ...(altNames ? { altNames } : {}),
     raw,
   };
 }

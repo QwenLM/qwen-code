@@ -4171,6 +4171,32 @@ describe('runQwenServe telemetry validation', () => {
     expect(primaryEpochSource).toBeDefined();
     expect(secondaryEpochSource).toBeDefined();
     expect(primaryEpochSource).not.toBe(secondaryEpochSource);
+    const primaryMcpAuthenticationAdmission = createBridge.mock.calls.find(
+      ([options]) => options.boundWorkspace === canonicalizeWorkspace(primary),
+    )?.[0].acquireMcpAuthentication;
+    const secondaryMcpAuthenticationAdmission = createBridge.mock.calls.find(
+      ([options]) =>
+        options.boundWorkspace === canonicalizeWorkspace(secondary),
+    )?.[0].acquireMcpAuthentication;
+    expect(primaryMcpAuthenticationAdmission).toBeDefined();
+    expect(secondaryMcpAuthenticationAdmission).toBe(
+      primaryMcpAuthenticationAdmission,
+    );
+    const releaseAuthentication = primaryMcpAuthenticationAdmission!(
+      primary,
+      'aone',
+    );
+    expect(releaseAuthentication).toBeTypeOf('function');
+    expect(secondaryMcpAuthenticationAdmission!(secondary, 'yuque')).toBe(
+      undefined,
+    );
+    releaseAuthentication!();
+    const releaseSecondaryAuthentication = secondaryMcpAuthenticationAdmission!(
+      secondary,
+      'yuque',
+    );
+    expect(releaseSecondaryAuthentication).toBeTypeOf('function');
+    releaseSecondaryAuthentication!();
     for (const [options] of createBridge.mock.calls) {
       expect(options).toMatchObject({
         delegateReadTextFileToClient: false,
@@ -11632,7 +11658,10 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
         maxSessions: 1,
         ...extra,
       },
-      { bridge: makeFakeBridge() },
+      {
+        bridge: makeFakeBridge(),
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
     );
   }
 
@@ -12143,6 +12172,22 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     const handle = await bootHandle({ serveWebShell: false });
     try {
       await handle.runtimeReady;
+      const saturationInfo = {
+        requiredBytes: 200,
+        availableBytes: 20,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 220,
+        graceMs: 10_000,
+      };
+      for (const options of mockCreateSpawnChannelFactoryOptions) {
+        const hooks = options['pipeHooks'] as
+          | {
+              onQueueSaturated?: (info: typeof saturationInfo) => void;
+            }
+          | undefined;
+        expect(hooks?.onQueueSaturated).toEqual(expect.any(Function));
+        hooks?.onQueueSaturated?.(saturationInfo);
+      }
       const pipeHooks = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
         'pipeHooks'
       ] as
@@ -12189,6 +12234,17 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     } finally {
       await handle.close();
     }
+    const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
+    let logContent = '';
+    await vi.waitFor(() => {
+      logContent = fs.readFileSync(logPath, 'utf8');
+      expect(logContent).toContain('ACP NDJSON decoded queue saturated');
+    });
+    expect(logContent).toContain('requiredBytes=200');
+    expect(logContent).toContain('availableBytes=20');
+    expect(logContent).toContain('maxQueuedMessages=2');
+    expect(logContent).toContain('maxQueuedBytes=220');
+    expect(logContent).toContain('queueSaturationGraceMs=10000');
   });
 });
 
@@ -14184,8 +14240,21 @@ describe('runQwenServe channel worker supervisor', () => {
         body: JSON.stringify({ cwd: secondaryCwd }),
       });
       expect(readded.status).toBe(201);
-      expect(supervisorFactory).toHaveBeenCalledTimes(3);
+      expect(supervisorFactory).toHaveBeenCalledTimes(2);
       expect(createBridge).toHaveBeenCalledTimes(3);
+
+      const restarted = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer worker-remove-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['telegram', 'feishu'] },
+        }),
+      });
+      expect(restarted.status).toBe(200);
+      expect(supervisorFactory).toHaveBeenCalledTimes(3);
       const replacementSupervisor = workerSupervisors.get(secondaryCwd)!;
       expect(replacementSupervisor).not.toBe(removedSupervisor);
       expect(replacementSupervisor.start).toHaveBeenCalledOnce();

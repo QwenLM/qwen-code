@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
