@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonToolTranscriptBlock } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
 import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
 import type { SessionContentGenerator } from './AssistantMessage';
@@ -9,9 +10,13 @@ import {
   hasActiveAgents,
   isSubAgentToolCall,
 } from '../../adapters/toolClassification';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import { getTranslator, I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
-import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import {
+  TranscriptDocumentExpandedProvider,
+  TranscriptRenderModeProvider,
+} from '../../transcriptRenderMode';
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
@@ -92,13 +97,23 @@ function renderToolGroup(
     isStreaming?: boolean;
     beforeToolCallId?: string;
   }>,
-  compactSummary = false,
+  renderModeOrCompactSummary:
+    'interactive' | 'readonly' | 'document' | boolean = 'interactive',
   onOpenSubagent?: (tool: ACPToolCall) => void,
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
   language: 'en' | 'zh-CN' = 'en',
   generateContent?: SessionContentGenerator,
   mcpAppHostUrl?: string,
+  documentExpanded = true,
 ): HTMLElement {
+  const renderMode =
+    typeof renderModeOrCompactSummary === 'string'
+      ? renderModeOrCompactSummary
+      : 'interactive';
+  const compactSummary =
+    typeof renderModeOrCompactSummary === 'boolean'
+      ? renderModeOrCompactSummary
+      : false;
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -120,19 +135,23 @@ function renderToolGroup(
     );
     root.render(
       <I18nProvider language={language}>
-        <WebShellCustomizationProvider value={customization}>
-          {onOpenMonitor ? (
-            <MonitorDetailsProvider onOpen={onOpenMonitor}>
-              {group}
-            </MonitorDetailsProvider>
-          ) : onOpenSubagent ? (
-            <SubagentDetailsProvider onOpen={onOpenSubagent}>
-              {group}
-            </SubagentDetailsProvider>
-          ) : (
-            group
-          )}
-        </WebShellCustomizationProvider>
+        <TranscriptRenderModeProvider value={renderMode}>
+          <TranscriptDocumentExpandedProvider value={documentExpanded}>
+            <WebShellCustomizationProvider value={customization}>
+              {onOpenMonitor ? (
+                <MonitorDetailsProvider onOpen={onOpenMonitor}>
+                  {group}
+                </MonitorDetailsProvider>
+              ) : onOpenSubagent ? (
+                <SubagentDetailsProvider onOpen={onOpenSubagent}>
+                  {group}
+                </SubagentDetailsProvider>
+              ) : (
+                group
+              )}
+            </WebShellCustomizationProvider>
+          </TranscriptDocumentExpandedProvider>
+        </TranscriptRenderModeProvider>
       </I18nProvider>,
     );
   });
@@ -796,6 +815,56 @@ describe('tool row rendering', () => {
     expect(content.hasAttribute('inert')).toBe(false);
     expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
     expect(container.textContent).toContain('Architecture Agent');
+  });
+
+  it('keeps grouped tools and thoughts fully expanded in document mode', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'shell-1',
+          rawOutput: 'first document output',
+        }),
+        makeTool({
+          callId: 'shell-2',
+          rawOutput: 'second document output',
+        }),
+      ],
+      {},
+      [{ content: 'document thought' }],
+      'document',
+    );
+
+    expect(container.textContent).toContain('first document output');
+    expect(container.textContent).toContain('second document output');
+    expect(container.textContent).toContain('document thought');
+    expect(container.querySelector('[aria-expanded="false"]')).toBeNull();
+    expect(
+      (
+        container.querySelector(
+          '[class*="chatSummaryContentClip"]',
+        ) as HTMLElement | null
+      )?.style.display,
+    ).not.toBe('none');
+    expect(container.querySelector('button:not([disabled])')).toBeNull();
+  });
+
+  it('honors the document-wide collapsed state for tools and thoughts', () => {
+    const container = renderToolGroup(
+      [makeTool({ rawOutput: 'document tool output' })],
+      {},
+      [{ content: 'document thought' }],
+      'document',
+      undefined,
+      undefined,
+      'en',
+      undefined,
+      undefined,
+      false,
+    );
+
+    expect(container.textContent).not.toContain('document tool output');
+    expect(container.textContent).not.toContain('document thought');
+    expect(container.querySelector('button:not([disabled])')).toBeNull();
   });
 
   it('renders the aggregate summary for a multi-tool group', () => {
@@ -2498,11 +2567,137 @@ describe('tool output logic', () => {
     ).toBe(fileDiff);
   });
 
+  it('keeps confirmed diff content on a subsequently cancelled tool', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          wasCancelled: true,
+          content: [
+            {
+              type: 'diff',
+              oldText: 'old content',
+              newText: 'confirmed content',
+            },
+          ],
+        }),
+      ),
+    ).toContain('confirmed content');
+  });
+
   it('builds a unified diff for changed content blocks', () => {
     expect(buildUnifiedDiff('same\nold', 'same\nnew')).toBe(
       ' same\n-old\n+new',
     );
   });
+
+  it('uses a typed file-diff preview without raw output', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'DOCUMENT_DIFF_DETAIL',
+          },
+        }),
+      ),
+    ).toContain('DOCUMENT_DIFF_DETAIL');
+  });
+
+  it('uses an old-text-only preview for a delete-only diff', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          args: {
+            path: 'document.ts',
+            oldText: 'deleted content',
+          },
+        }),
+      ),
+    ).toContain('-deleted content');
+  });
+
+  it('does not render an attempted typed diff for a failed edit', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status: 'failed',
+          args: {
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'ATTEMPTED NEW CONTENT',
+          },
+          rawOutput: 'Error: old_string not found',
+        }),
+      ),
+    ).toBe('');
+  });
+
+  it.each(['cancelled', 'canceled'])(
+    'does not render an attempted typed diff for a %s safe projection',
+    (status) => {
+      const block: DaemonToolTranscriptBlock = {
+        id: 'cancelled-edit',
+        kind: 'tool',
+        toolCallId: 'edit-call',
+        title: 'Edit',
+        status,
+        toolName: 'edit',
+        preview: {
+          kind: 'file_diff',
+          path: 'document.ts',
+          oldText: 'old content',
+          newText: 'ATTEMPTED NEW CONTENT',
+        },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const messages = transcriptBlocksToDaemonMessages([block], {
+        safeToolProjection: true,
+      });
+      const tool =
+        messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+      expect(tool).toBeDefined();
+      expect(extractDiff(tool!)).toBe('');
+    },
+  );
+
+  it.each(['cancelled', 'canceled'])(
+    'does not render an attempted raw-input diff for a %s default projection',
+    (status) => {
+      const block: DaemonToolTranscriptBlock = {
+        id: 'cancelled-default-edit',
+        kind: 'tool',
+        toolCallId: 'edit-default-call',
+        title: 'Edit',
+        status,
+        toolName: 'edit',
+        preview: { kind: 'generic' },
+        rawInput: {
+          oldText: 'old content',
+          newText: 'ATTEMPTED NEW CONTENT',
+        },
+        clientReceivedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      const messages = transcriptBlocksToDaemonMessages([block]);
+      const tool =
+        messages[0]?.role === 'tool_group' ? messages[0].tools[0] : undefined;
+
+      expect(tool).toMatchObject({
+        status: 'completed',
+        wasCancelled: true,
+      });
+      expect(extractDiff(tool!)).toBe('');
+    },
+  );
 });
 
 describe('pending edit approval rows', () => {
