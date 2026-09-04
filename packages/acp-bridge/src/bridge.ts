@@ -77,6 +77,8 @@ import {
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
+  type ServeSessionAgentsStatus,
+  type ServeSessionAgentTrace,
   type ServeSessionStatsStatus,
   type ServeSessionContextStatus,
   type ServeSessionLspStatus,
@@ -215,6 +217,8 @@ import type {
   BridgeWorkspaceMemoryRememberResult,
   BridgeSessionTranscriptPage,
   BridgeSessionTranscriptPageRequest,
+  BridgeSessionTurnIndexPage,
+  BridgeSessionTurnIndexPageRequest,
   BridgeGenerationStreamEvent,
   BridgeWorkspaceGenerationStreamEvent,
   BridgePromptContentBlock,
@@ -7362,6 +7366,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   }
 
+  async function requestSessionTurnIndexPage(
+    req: BridgeSessionTurnIndexPageRequest,
+  ): Promise<BridgeSessionTurnIndexPage> {
+    try {
+      const response = await withEnsuredWorkspaceControl((info) =>
+        withTimeout(
+          Promise.race([
+            info.connection.extMethod(
+              SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+              { ...req, cwd: boundWorkspace },
+            ),
+            getChannelClosedReject(info),
+          ]),
+          Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
+          SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+        ),
+      );
+      return response as unknown as BridgeSessionTurnIndexPage;
+    } catch (err) {
+      if (isAcpSessionResourceNotFound(err, req.sessionId)) {
+        throw new SessionNotFoundError(req.sessionId);
+      }
+      throw err;
+    }
+  }
+
   async function refreshedReplayFieldsFor(
     entry: SessionEntry,
     historyPageSize: number,
@@ -12137,6 +12167,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async getSessionAgentsStatus(sessionId) {
+      return requestSessionStatus<ServeSessionAgentsStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionAgents,
+      );
+    },
+
+    async getSessionAgentTrace(sessionId, rootAgentId) {
+      return requestSessionStatus<ServeSessionAgentTrace>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionAgentTrace,
+        rootAgentId === undefined ? undefined : { rootAgentId },
+      );
+    },
+
     async getSessionLspStatus(sessionId) {
       return requestSessionStatus<ServeSessionLspStatus>(
         sessionId,
@@ -12161,6 +12206,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     async getSessionTranscriptPage(req) {
       return requestSessionTranscriptPage(req);
+    },
+
+    async flushSessionTranscript(sessionId) {
+      // The child flushes before every backward page; a one-record page is the
+      // existing read-only barrier without adding another ACP extension.
+      await requestSessionTranscriptPage({
+        sessionId,
+        direction: 'backward',
+        limit: 1,
+      });
+    },
+
+    async getSessionTurnIndexPage(req) {
+      return requestSessionTurnIndexPage(req);
     },
 
     async cancelSessionTask(sessionId, taskId, taskKind, context) {
@@ -12973,6 +13032,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
       return await entry.attachments.read(attachmentId);
+    },
+
+    async listSessionAttachments(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return await entry.attachments.list();
     },
 
     async removeSessionAttachment(sessionId, attachmentId, context) {

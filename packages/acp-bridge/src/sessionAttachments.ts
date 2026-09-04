@@ -618,6 +618,71 @@ export class SessionAttachmentStore {
     }
   }
 
+  async list(): Promise<SessionAttachmentReference[]> {
+    const found: Array<{
+      reference: SessionAttachmentReference;
+      mtimeMs: number;
+    }> = [];
+    const directories = [
+      this.persistentDirectory ?? this.activeDirectory,
+      this.persistentFallbackDirectory,
+    ].filter((directory): directory is string => Boolean(directory));
+    const foundNames = new Set<string>();
+    let directoryRead = false;
+    let directoryError: unknown;
+    for (const directory of directories) {
+      let entries;
+      try {
+        entries = await fs.readdir(directory, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          directoryError ??= error;
+        }
+        continue;
+      }
+      directoryRead = true;
+      for (const entry of entries) {
+        if (
+          !entry.isFile() ||
+          this.pendingNames.has(entry.name) ||
+          this.removingNames.has(entry.name) ||
+          foundNames.has(entry.name)
+        ) {
+          continue;
+        }
+        const name = safeAttachmentName(entry.name);
+        if (!name || name !== entry.name) continue;
+        try {
+          const stat = await fs.stat(path.join(directory, entry.name));
+          const mimeType = mimeTypeForName(entry.name);
+          found.push({
+            reference: {
+              type: isSupportedImageMimeType(mimeType) ? 'image' : 'resource',
+              attachmentId: entry.name,
+              mimeType,
+              size: stat.size,
+            },
+            mtimeMs: stat.mtimeMs,
+          });
+          foundNames.add(entry.name);
+        } catch {
+          // A file that vanished between readdir and stat is not an attachment.
+        }
+      }
+    }
+    if (!directoryRead && directoryError !== undefined) {
+      throw directoryError;
+    }
+    // Files are written once (flag 'wx'), so mtime is the upload time; stable
+    // order for the attachments panel is upload order, name as tiebreaker.
+    found.sort(
+      (a, b) =>
+        a.mtimeMs - b.mtimeMs ||
+        a.reference.attachmentId.localeCompare(b.reference.attachmentId),
+    );
+    return found.map(({ reference }) => reference);
+  }
+
   async copyFrom(source: SessionAttachmentStore): Promise<void> {
     if (source === this) return;
     if (this.closed || this.closing) {
