@@ -2262,8 +2262,6 @@ export async function loadCliConfig(
                 worktreeBaseDir: settings.agents.arena.worktreeBaseDir,
                 preserveArtifacts:
                   settings.agents.arena.preserveArtifacts ?? false,
-                maxRoundsPerAgent: settings.agents.arena.maxRoundsPerAgent,
-                timeoutSeconds: settings.agents.arena.timeoutSeconds,
               }
             : undefined,
         }
