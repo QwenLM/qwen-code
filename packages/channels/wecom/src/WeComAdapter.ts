@@ -454,6 +454,7 @@ export class WeComChannel extends ChannelBase {
       referencedText: extractQuoteText(quote),
     };
     let attachments: Attachment[] = [];
+    const hasInboundMedia = collectInboundMediaRefs(body).length > 0;
     const attachmentRouteKey = this.attachmentRouteKey(
       senderId,
       chatId,
@@ -486,6 +487,13 @@ export class WeComChannel extends ChannelBase {
         }
         if (attachments.length) {
           envelope.attachments = attachments;
+        }
+        if (
+          envelope.syntheticText &&
+          attachments.length === 0 &&
+          hasInboundMedia
+        ) {
+          envelope.text = '(User sent media but download failed)';
         }
         if (!envelope.text && attachments.length) {
           envelope.text = attachments.some((a) => a.type === 'image')

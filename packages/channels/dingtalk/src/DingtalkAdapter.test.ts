@@ -4454,6 +4454,24 @@ describe('DingtalkChannel quoted media', () => {
   });
 
   it.each([
+    ['an empty rich-text message', 'richText', { richText: [] }],
+    ['a picture without a download code', 'picture', {}],
+  ])(
+    'does not exempt %s from the configured prefix',
+    async (_label, msgtype, content) => {
+      const channel = createChannel({ messagePrefix: '/review' });
+
+      sendDirectMedia(channel, msgtype, content);
+
+      await vi.waitFor(() => {
+        expect(channel.handleInbound).toHaveBeenCalledOnce();
+      });
+      const envelope = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+      expect(envelope.syntheticText).toBeUndefined();
+    },
+  );
+
+  it.each([
     {
       label: 'a transcribed voice message stays gated',
       content: {

@@ -12,6 +12,7 @@ import {
 import {
   ChannelBase,
   isTerminalTaskLifecycleType,
+  startsWithMessagePrefix,
 } from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
@@ -152,6 +153,8 @@ export class TelegramChannel extends ChannelBase {
           process.stderr.write(
             `[Telegram:${this.name}] Failed to download photo: ${err instanceof Error ? err.message : err}\n`,
           );
+          const promptText = msg.caption ? envelope.text : '';
+          envelope.text = `${promptText}\n\n(User sent an image but download failed)`;
         }
       }).catch((err) => {
         this.reportInboundError(envelope, err, () =>
@@ -569,7 +572,10 @@ export class TelegramChannel extends ChannelBase {
     const configuredPrefix = this.configuredMessagePrefix();
     const bypassMessagePrefix =
       allowRegisteredCommandBypass &&
-      !(configuredPrefix && text.trim().startsWith(configuredPrefix)) &&
+      !(
+        configuredPrefix &&
+        startsWithMessagePrefix(text.trim(), configuredPrefix)
+      ) &&
       (entities?.some((entity) => {
         if (entity.type !== 'bot_command' || entity.offset !== 0) return false;
         const value = text.slice(0, entity.length).toLowerCase();

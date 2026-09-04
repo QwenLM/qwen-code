@@ -11,6 +11,7 @@ import {
   isChannelProactiveDeliveryError,
   isTerminalTaskLifecycleType,
   sanitizeSenderName,
+  startsWithMessagePrefix,
 } from '@qwen-code/channel-base';
 import {
   buildCardContent,
@@ -159,11 +160,13 @@ function stripLeadingMentionNames(
   prefix: string | undefined,
 ): string {
   let rest = text.trimStart();
+  const tokens = [
+    ...new Set(names.filter(Boolean).map((name) => `@${name}`)),
+  ].sort((a, b) => b.length - a.length);
   let consumed = true;
-  while (consumed && !(prefix && rest.startsWith(prefix))) {
+  while (consumed && !(prefix && startsWithMessagePrefix(rest, prefix))) {
     consumed = false;
-    for (const name of names) {
-      const token = `@${name}`;
+    for (const token of tokens) {
       if (!rest.startsWith(token)) continue;
       rest = rest.slice(token.length).trimStart();
       consumed = true;
@@ -2661,29 +2664,33 @@ export class FeishuChannel extends ChannelBase {
       let cleanText = content.text;
       const mentionNames = [...(content.mentionNames ?? [])];
       if (msg.mentions && msg.mentions.length > 0) {
+        const mentionReplacements = new Map<string, string>();
         for (const mention of msg.mentions) {
           const mentionId =
             mention.id.open_id || mention.id.user_id || mention.id.union_id;
-          if (mentionId === this.botOpenId) {
+          const isBotMention = mentionId === this.botOpenId;
+          if (isBotMention) {
             isMentioned = true;
           }
-          // Replace @mention placeholder in text
-          cleanText = cleanText.replaceAll(
+          // Resolve the structured placeholder directly. Removing the bot by
+          // rendered display name would corrupt a preceding member whose name
+          // merely starts with the bot's name.
+          mentionReplacements.set(
             mention.key,
-            () => `@${mention.name}`,
+            isBotMention ? '' : `@${mention.name}`,
           );
-          if (mention.name) mentionNames.push(mention.name);
+          if (!isBotMention && mention.name) mentionNames.push(mention.name);
         }
-        // Strip bot @mention from text — use replace (not replaceAll) to
-        // avoid removing literal occurrences of the bot's name the user typed.
-        if (isMentioned && this.botOpenId) {
-          for (const mention of msg.mentions) {
-            const mentionId =
-              mention.id.open_id || mention.id.user_id || mention.id.union_id;
-            if (mentionId === this.botOpenId) {
-              cleanText = cleanText.replace(`@${mention.name}`, '').trim();
-            }
-          }
+        const mentionKeys = [...mentionReplacements.keys()].sort(
+          (a, b) => b.length - a.length,
+        );
+        if (mentionKeys.length > 0) {
+          cleanText = cleanText
+            .replace(
+              new RegExp(mentionKeys.map(escapeRegExp).join('|'), 'gu'),
+              (key) => mentionReplacements.get(key) ?? key,
+            )
+            .trim();
         }
       }
 

@@ -2855,7 +2855,11 @@ describe('WeComChannel', () => {
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
     mocks.httpResponse.statusCode = 500;
-    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({ messagePrefix: '/review' }),
+      makeBridge(),
+    );
     await channel.connect();
     const client = lastClient();
 
@@ -2869,6 +2873,9 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(channel.envelopes[0]?.text).toBe(
+      '(User sent media but download failed)',
+    );
     expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('media download failed: HTTP 500'),

@@ -1,5 +1,12 @@
 import type { Envelope } from './types.js';
 
+export function startsWithMessagePrefix(text: string, prefix: string): boolean {
+  return (
+    text.startsWith(prefix) &&
+    (text.length === prefix.length || /\s/u.test(text.charAt(prefix.length)))
+  );
+}
+
 export function stripMessagePrefix(
   text: string,
   prefix: string | undefined,
@@ -13,14 +20,14 @@ export function stripMessagePrefix(
   // reject every correctly-prefixed message that carries a leading
   // mention of someone else.
   while (
-    !candidate.startsWith(prefix) &&
+    !startsWithMessagePrefix(candidate, prefix) &&
     (candidate.startsWith('@') || candidate.startsWith('<@'))
   ) {
     const mention = candidate.match(/^(?:@[^@\s]+|<@[^>]{1,64}>)\s+/u)?.[0];
     if (!mention) return undefined;
     candidate = candidate.slice(mention.length);
   }
-  if (!candidate.startsWith(prefix)) return undefined;
+  if (!startsWithMessagePrefix(candidate, prefix)) return undefined;
 
   const suffix = candidate.slice(prefix.length);
   if (!/^\s+\S[\s\S]*$/u.test(suffix)) return undefined;

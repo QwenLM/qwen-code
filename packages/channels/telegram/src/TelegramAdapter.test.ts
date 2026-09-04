@@ -537,6 +537,47 @@ describe('TelegramChannel', () => {
     });
   });
 
+  it('clears a captionless document placeholder after a successful download', async () => {
+    const channel = createChannel({ messagePrefix: '/review' });
+    const bot = installFakeBot(channel);
+    bot.api.getFile.mockResolvedValue({ file_path: 'report.pdf' });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    } as Response);
+    vi.spyOn(process, 'once').mockReturnValue(process);
+    await channel.connect();
+    const handler = bot.on.mock.calls.find(
+      ([event]) => event === 'message:document',
+    )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+    await handler!({
+      message: {
+        message_id: 1,
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+      api: bot.api,
+      reply: vi.fn(),
+    });
+    const preparation = channel.inboundPreparations[0]!;
+    await preparation.prepare();
+
+    expect(preparation.envelope.text).toBe('');
+    expect(preparation.envelope.attachments?.[0]).toMatchObject({
+      type: 'file',
+      fileName: 'report.pdf',
+    });
+    rmSync(dirname(preparation.envelope.attachments![0]!.filePath), {
+      recursive: true,
+    });
+  });
+
   it.each([
     {
       label: 'photo',
@@ -584,6 +625,13 @@ describe('TelegramChannel', () => {
   );
 
   it.each([
+    {
+      label: 'photo',
+      event: 'message:photo',
+      message: { photo: [{ file_id: 'photo-1' }] },
+      placeholder: '(image)',
+      note: '(User sent an image but download failed)',
+    },
     {
       label: 'document',
       event: 'message:document',
@@ -840,6 +888,22 @@ describe('TelegramChannel', () => {
     );
 
     expect(built.bypassMessagePrefix).toBeUndefined();
+  });
+
+  it('keeps a longer registered command eligible for the menu bypass', () => {
+    const channel = createChannel({ messagePrefix: '/ne' });
+
+    const built = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+      },
+      '/new',
+      [{ type: 'bot_command', offset: 0, length: 4 }],
+      true,
+    );
+
+    expect(built.bypassMessagePrefix).toBe(true);
   });
 
   it('handles the Telegram Start button when a prefix is configured', async () => {

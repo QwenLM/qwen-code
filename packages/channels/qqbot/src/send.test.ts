@@ -484,6 +484,36 @@ describe('group sender-name sanitization', () => {
     expect(audit!.split('\n')).toHaveLength(2);
   });
 
+  it('does not audit a slash command rejected by the configured prefix', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('/review');
+    (ch as unknown as { handleInbound: () => Promise<void> }).handleInbound =
+      () => Promise.resolve();
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-unprefixed-audit',
+      group_openid: 'grp-1',
+      content: '/clear',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+      mentions: [{ is_you: true, member_openid: 'bot-openid' }],
+    });
+
+    spy.mockRestore();
+
+    expect(writes.some((write) => write.includes('Slash cmd from'))).toBe(
+      false,
+    );
+  });
+
   it('sanitizes the sender name AND command text in the slash-command audit log (no log forging)', () => {
     vi.useFakeTimers();
     const ch = makeChannel();

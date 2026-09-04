@@ -29,6 +29,7 @@ describe('stripMessagePrefix', () => {
 
   it.each([
     ['@Qwen @bot hello', '@bot', 'hello'],
+    ['@botswana @bot do X', '@bot', 'do X'],
     ['<@U1> <@BOT> hi', '<@BOT>', 'hi'],
     ['@bot hello', '@bot', 'hello'],
   ])('accepts %j under the @-leading prefix %j', (text, prefix, expected) => {

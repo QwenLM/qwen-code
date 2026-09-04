@@ -612,7 +612,7 @@ describe('handleGroup', () => {
         author: {
           member_openid: 'ABCDEF0123456789ABCDEF0123456789',
           user_openid: 'ABCDEF0123456789ABCDEF0123456789',
-          username: '<@OPENID_OTHER> /review hello',
+          username: '<@OPENID_OTHER>  /review hello',
         },
         mentions: [
           { member_openid: 'other-openid', is_you: false },
@@ -624,9 +624,11 @@ describe('handleGroup', () => {
 
     const env = mockHandleInbound.mock.calls[0][0] as unknown as Envelope;
     expect(env.displayTextOffset).toBeGreaterThan(0);
+    expect(env.displayText).toBe('<@OPENID_OTHER>  /review hello');
+    expect(env.text.split(env.displayText!)).toHaveLength(3);
     expect(applyMessagePrefix(env, '/review')).toBe(true);
     expect(env.text).toContain('[atMention=');
-    expect(env.text).toContain('[<@OPENID_OTHER> /review hello(');
+    expect(env.text).toContain('[<@OPENID_OTHER>  /review hello(');
     expect(env.text).toContain(
       '机器人 OPENID: 0123456789ABCDEF0123456789ABCDEF',
     );

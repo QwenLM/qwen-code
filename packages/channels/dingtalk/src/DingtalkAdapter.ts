@@ -2641,14 +2641,14 @@ export class DingtalkChannel extends ChannelBase {
     mediaType?: 'image' | 'file' | 'audio' | 'video';
     fileName?: string;
     placeholder?: string;
-    userAuthoredText: boolean;
+    syntheticText: boolean;
   } {
     const msgtype = data.msgtype || 'text';
 
     if (msgtype === 'richText') {
       const richText = data.content?.richText;
       if (!Array.isArray(richText)) {
-        return { text: '', downloadCodes: [], userAuthoredText: false };
+        return { text: '', downloadCodes: [], syntheticText: false };
       }
       let text = '';
       const codes: string[] = [];
@@ -2664,7 +2664,7 @@ export class DingtalkChannel extends ChannelBase {
         text: text.trim() || (codes.length > 0 ? '(image)' : ''),
         downloadCodes: codes,
         mediaType: codes.length > 0 ? 'image' : undefined,
-        userAuthoredText: text.trim().length > 0,
+        syntheticText: text.trim().length === 0 && codes.length > 0,
       };
     }
 
@@ -2674,7 +2674,7 @@ export class DingtalkChannel extends ChannelBase {
         text: '(image)',
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
-        userAuthoredText: false,
+        syntheticText: Boolean(code),
       };
     }
 
@@ -2688,7 +2688,7 @@ export class DingtalkChannel extends ChannelBase {
         mediaType: this.mediaTypeFromMsgType(msgtype),
         fileName,
         placeholder,
-        userAuthoredText: false,
+        syntheticText: Boolean(code),
       };
     }
 
@@ -2704,7 +2704,7 @@ export class DingtalkChannel extends ChannelBase {
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
         placeholder: recognition ? undefined : '(audio)',
-        userAuthoredText: Boolean(recognition),
+        syntheticText: !recognition && Boolean(code),
       };
     }
 
@@ -2715,7 +2715,7 @@ export class DingtalkChannel extends ChannelBase {
         downloadCodes: code ? [code] : [],
         mediaType: this.mediaTypeFromMsgType(msgtype),
         placeholder: '(video)',
-        userAuthoredText: false,
+        syntheticText: Boolean(code),
       };
     }
 
@@ -2727,7 +2727,7 @@ export class DingtalkChannel extends ChannelBase {
       return {
         text: text || '(chat record)',
         downloadCodes: [],
-        userAuthoredText: false,
+        syntheticText: Boolean(text),
       };
     }
 
@@ -2735,7 +2735,7 @@ export class DingtalkChannel extends ChannelBase {
     return {
       text: data.text?.content?.trim() || '',
       downloadCodes: [],
-      userAuthoredText: true,
+      syntheticText: false,
     };
   }
 
@@ -2977,7 +2977,7 @@ export class DingtalkChannel extends ChannelBase {
           ? { chatName: conversationTitle }
           : {}),
         text: messageText,
-        ...(!content.userAuthoredText ? { syntheticText: true as const } : {}),
+        ...(content.syntheticText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
         isMentioned,

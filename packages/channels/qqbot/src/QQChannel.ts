@@ -2502,10 +2502,14 @@ export class QQChannel extends ChannelBase {
     // text is the right source -- `stripMessagePrefix` skips leading
     // mentions itself, and what decides "command" is the payload after
     // the prefix, not the raw text.
-    const commandText = configuredPrefix
-      ? (stripMessagePrefix(safeDisplayText, configuredPrefix) ?? safeCleanText)
+    const strippedCommandText = configuredPrefix
+      ? stripMessagePrefix(safeDisplayText, configuredPrefix)
       : safeCleanText;
-    const isSlash = effectiveIsAtBot && commandText.startsWith('/');
+    const commandText = strippedCommandText ?? safeCleanText;
+    const isSlash =
+      effectiveIsAtBot &&
+      strippedCommandText !== undefined &&
+      commandText.startsWith('/');
 
     // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
     // self-echoes or other bot messages. Instead, tag with [bot] prefix so the

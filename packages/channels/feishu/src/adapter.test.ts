@@ -829,6 +829,129 @@ describe('FeishuChannel', () => {
     expect(bridge.prompt).toHaveBeenCalledTimes(1);
   });
 
+  it('matches after a mentioned member whose name extends the bot name', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'overlapping-mention-names',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 /review inspect this',
+          }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+            {
+              key: '@_user_2',
+              id: { open_id: 'ou_member' },
+              name: 'Qwen Bot 2',
+            },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('inspect this');
+    expect(prompt).not.toContain('/review');
+  });
+
+  it('removes the structured bot mention without corrupting a longer member name', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'member-before-bot',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 /review inspect this',
+          }),
+          mentions: [
+            {
+              key: '@_user_1',
+              id: { open_id: 'ou_member' },
+              name: 'Qwen Fan',
+            },
+            { key: '@_user_2', id: { open_id: 'ou_bot' }, name: 'Qwen' },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('inspect this');
+    expect(prompt).not.toContain('/review');
+  });
+
+  it('does not mistake an extending mention name for an at-sign prefix', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '@bot' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+
+    getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+      channel,
+      {
+        message: {
+          message_id: 'at-prefix-boundary',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({
+            text: '@_user_1 @_user_2 @bot do X',
+          }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen' },
+            {
+              key: '@_user_2',
+              id: { open_id: 'ou_member' },
+              name: 'botswana',
+            },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      },
+    );
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('do X');
+    expect(prompt).not.toContain('@bot');
+  });
+
   it('keeps a mention the user typed after the prefix', async () => {
     // The matching text consumes only the leading mention run, so a
     // mention inside the payload reaches the agent exactly as it does
