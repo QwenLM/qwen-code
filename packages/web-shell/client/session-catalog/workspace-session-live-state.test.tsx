@@ -589,6 +589,39 @@ describe('useWorkspaceSessionLiveState', () => {
       );
     });
     expect(store.hasLiveSessions('/work')).toBe(true);
+
+    // Recovery must re-arm the full blip tolerance. If the streak were not
+    // reset, the next single failure would still be at the threshold and drop
+    // the snapshot again — authority would flap on every post-recovery blip.
+    // Stay inside the error-retry window so the recovering poll cannot mask it.
+    getLiveState.mockRejectedValueOnce(new Error('offline'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS * 2);
+    });
+    expect(store.hasLiveSessions('/work')).toBe(true);
+  });
+
+  it('does not count interactive refreshes toward staleness', async () => {
+    // Interactive refreshes bypass the error backoff, so they can fail seconds
+    // apart. Counting them would drop the snapshot inside the very blip the
+    // threshold exists to ride out — a user archiving a couple of sessions
+    // during a 10s daemon restart would settle a running turn.
+    await renderProbe();
+    const store = getSessionCatalogStore(client);
+    expect(store.hasLiveSessions('/work')).toBe(true);
+
+    getLiveState.mockRejectedValue(new Error('offline'));
+    for (
+      let attempt = 0;
+      attempt <= SESSION_LIVE_STATE_STALE_AFTER_FAILURES;
+      attempt += 1
+    ) {
+      await act(async () => {
+        store.invalidateWorkspace('/work', { interactive: true });
+        await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+      });
+    }
+    expect(store.hasLiveSessions('/work')).toBe(true);
   });
 
   it('lets an explicit refresh bypass live-state error backoff', async () => {

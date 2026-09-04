@@ -286,7 +286,12 @@ export function useWorkspaceSessionLiveState(
       } catch (error) {
         if (disposed) return;
         state.liveRetryAt = Date.now() + SESSION_LIVE_STATE_ERROR_RETRY_MS;
-        state.liveFailureStreak += 1;
+        // Only backoff-paced failures count. Interactive refreshes bypass
+        // `liveRetryAt`, so a user deleting or archiving a few sessions during
+        // a 10s daemon restart could otherwise push the streak to the
+        // threshold seconds apart — dropping the snapshot inside the very blip
+        // the threshold exists to ride out.
+        if (!bypassRetry) state.liveFailureStreak += 1;
         if (
           state.liveFailureStreak >= SESSION_LIVE_STATE_STALE_AFTER_FAILURES
         ) {

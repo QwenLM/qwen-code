@@ -341,9 +341,9 @@ describe('useSessionActivePromptState (#9487)', () => {
     expect(container.textContent).toBe('false');
   });
 
-  it('reports the answer as unknown until an authority covers the workspace', async () => {
-    // `known` gates settling a running turn: a `false` that only means
-    // "nothing has answered yet" must never be mistaken for "turn finished".
+  it('is not authoritative until a live-state response covers the workspace', async () => {
+    // `authoritative` gates settling a running turn: an answer that is only a
+    // catalog page, or no answer at all, must never settle one.
     const listPage = vi.fn(
       () =>
         new Promise<{ sessions: unknown[] }>(() => {
@@ -357,7 +357,7 @@ describe('useSessionActivePromptState (#9487)', () => {
 
     function KnownProbe() {
       const state = useSessionActivePromptState(client, '/work', 'sess-1');
-      return <span>{`${state.hasActivePrompt}/${state.known}`}</span>;
+      return <span>{`${state.hasActivePrompt}/${state.authoritative}`}</span>;
     }
 
     await act(async () => {
@@ -409,22 +409,37 @@ describe('useSessionActivePromptState (#9487)', () => {
     expect(container.textContent).toBe('true');
   });
 
-  it('does not answer for a session the bounded fallback page omits', async () => {
-    // The page is bounded, so "not on it" may just mean the session fell off a
-    // fresher first page. Reporting that as a known `false` would let a caller
-    // settle a turn that is still running.
+  it('never lets the bounded fallback page settle a turn', async () => {
+    // The catalog page is bounded and refetched on any invalidation, so a
+    // running session can drop off it and come back. Lighting the indicator
+    // from the page is fine; letting it settle a turn is the #9487 bug, so the
+    // page answer is never authoritative — present or absent.
     setQualifiedPage([
-      { sessionId: 'other', workspaceCwd: '/work', hasActivePrompt: true },
+      { sessionId: 'sess-1', workspaceCwd: '/work', hasActivePrompt: true },
     ]);
     const client = mocks.workspace.client as DaemonClient;
 
-    function KnownProbe() {
+    function AuthorityProbe() {
       const state = useSessionActivePromptState(client, '/work', 'sess-1');
-      return <span>{`${state.hasActivePrompt}/${state.known}`}</span>;
+      return <span>{`${state.hasActivePrompt}/${state.authoritative}`}</span>;
     }
 
     await act(async () => {
-      root.render(<KnownProbe />);
+      root.render(<AuthorityProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+    // The row lights the indicator, but carries no settling power.
+    expect(container.textContent).toBe('true/false');
+
+    // The row falls off a refetched first page: still not authoritative, so
+    // nothing downstream can read this as "the turn ended".
+    setQualifiedPage([
+      { sessionId: 'other', workspaceCwd: '/work', hasActivePrompt: true },
+    ]);
+    act(() => {
+      getSessionCatalogStore(client).invalidateWorkspace('/work');
+    });
+    await act(async () => {
       for (let i = 0; i < 8; i += 1) await Promise.resolve();
     });
     expect(container.textContent).toBe('false/false');

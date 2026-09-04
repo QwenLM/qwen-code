@@ -173,19 +173,21 @@ export function useSessionCatalogQueries(
 
 /**
  * Whether the daemon reports a prompt in flight for `sessionId`, together with
- * whether that answer is actually known.
+ * whether that answer is allowed to *settle* a running turn.
  *
- * `known: false` means no authority covers this workspace yet (no live-state
- * response and no loaded fallback page). Callers that only light up a spinner
- * can treat it as "not running"; callers that use a `false` to *settle* a
- * running turn must not, or an unknown answer would settle a turn that is
- * still going — the failure this whole signal exists to prevent (#9487).
+ * Only a live-state response is `authoritative`. It lists every live session
+ * regardless of paging, so its silence about a session genuinely means "not
+ * running". The catalog-page fallback cannot say that: the page is bounded, so
+ * a running session may simply have fallen off a fresher first page, and any
+ * invalidation refetches it. Lighting an indicator from the page is fine;
+ * settling a turn from it would end a turn that is still going — the failure
+ * this whole signal exists to prevent (#9487).
  */
 export function useSessionActivePromptState(
   client: DaemonClient,
   workspaceCwd: string | undefined,
   sessionId: string | undefined,
-): { hasActivePrompt: boolean; known: boolean } {
+): { hasActivePrompt: boolean; authoritative: boolean } {
   const store = useMemo(() => getSessionCatalogStore(client), [client]);
   const subscribeLiveSessions = useCallback(
     (listener: () => void) =>
@@ -243,22 +245,21 @@ export function useSessionActivePromptState(
     autoLoad: true,
   });
   if (!workspaceCwd || !sessionId) {
-    return { hasActivePrompt: false, known: false };
+    return { hasActivePrompt: false, authoritative: false };
   }
   if (liveActivePrompt !== undefined) {
-    return { hasActivePrompt: liveActivePrompt, known: true };
+    return { hasActivePrompt: liveActivePrompt, authoritative: true };
   }
   const row = page
     ? sessions.find((session) => session.sessionId === sessionId)
     : undefined;
   return {
     hasActivePrompt: row?.hasActivePrompt === true,
-    // Only a row actually on the page is an answer. The catalog page is
-    // bounded, so a session missing from it may simply have fallen off a
-    // fresher first page — unlike the live-state response, which lists every
-    // live session regardless of paging and whose absence therefore does mean
-    // "not running".
-    known: row !== undefined,
+    // Never settle-grade, whether or not the row is on the page. A row that
+    // drops off a bounded page between refetches is indistinguishable from one
+    // whose turn ended, and treating that as "the turn ended" is exactly the
+    // bug this signal exists to prevent.
+    authoritative: false,
   };
 }
 
@@ -279,7 +280,7 @@ export function useDaemonActivePromptBridge(
   workspaceCwd: string | undefined,
   sessionId: string | undefined,
 ): boolean {
-  const { hasActivePrompt, known } = useSessionActivePromptState(
+  const { hasActivePrompt, authoritative } = useSessionActivePromptState(
     client,
     workspaceCwd,
     sessionId,
@@ -288,7 +289,11 @@ export function useDaemonActivePromptBridge(
   // publishing the same value is harmless; a split pane, which renders a
   // ChatPane without an App around it, needs its own.
   const { setDaemonActivePrompt } = useActions();
-  const daemonActivePrompt = known ? hasActivePrompt : undefined;
+  // Publish only what may settle a turn. On the catalog-fallback path this is
+  // always `undefined`, so the provider never sees a `true` there and no
+  // fallback refetch can produce the `true -> undefined` transition that
+  // settles. A genuine loss of live-state coverage still does.
+  const daemonActivePrompt = authoritative ? hasActivePrompt : undefined;
   useEffect(() => {
     setDaemonActivePrompt(daemonActivePrompt);
   }, [daemonActivePrompt, setDaemonActivePrompt]);

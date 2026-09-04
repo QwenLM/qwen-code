@@ -1463,7 +1463,7 @@ vi.mock('./session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => sessionCatalogController,
   useSessionActivePromptState: () => ({
     hasActivePrompt: testState.sessionHasActivePrompt,
-    known: true,
+    authoritative: true,
   }),
   useDaemonActivePromptBridge: () => testState.sessionHasActivePrompt,
   // The Workspaces overview panel's per-row session counts; inert here.

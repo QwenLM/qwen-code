@@ -10049,6 +10049,15 @@ describe('DaemonSessionProvider', () => {
 
         expect(promptStatus).toBe('idle');
         expect(streamingAssistantBlocks()).toEqual([]);
+        // Folded, not discarded: a settle that dropped the pending batch
+        // instead of flushing it would also leave no streaming block, while
+        // silently losing the tail of the final assistant message.
+        expect(
+          blocks.some(
+            (block) =>
+              block.kind === 'assistant' && block.text.includes(' tail'),
+          ),
+        ).toBe(true);
       } finally {
         vi.useRealTimers();
       }
