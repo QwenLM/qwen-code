@@ -1106,6 +1106,26 @@ describe('runCliEntry', () => {
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
+    it('does not treat the background flag as a value-taking flag’s value', async () => {
+      // `qwen -p --bg`: the token sits in the prompt value slot, so it is
+      // the launch's data, not a background launch — a bare includes()
+      // fired the intercept here and declined the launch for `-p`, advice
+      // the user cannot follow (dropping `-p` leaves a bare `--bg`). The
+      // gate must answer exactly like the supervisor twin scan above.
+      await runCliEntry(['-p', BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not treat the background flag as any base value flag’s value', async () => {
+      // Same shape class for every BASE_VALUE_FLAGS flag.
+      await runCliEntry(['--resume', BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
     it('dispatches a background session and reports its exit code', async () => {
       mocks.runBackgroundDispatch.mockResolvedValue(0);
 

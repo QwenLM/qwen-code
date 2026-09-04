@@ -363,13 +363,28 @@ function lastPositionalArg(argv: readonly string[]): string | undefined {
 
 // The index of the background flag before any `--`, in its bare
 // (`--bg`) or attached (`--bg=<prompt>`) spelling, or -1. Tokens after
-// `--` are the user's own data and never count.
+// `--` are the user's own data and never count. The scan is
+// value-slot-aware, exactly like the supervisor-flag hasFlag scan this
+// intercept pairs with: a `--bg` sitting in a preceding value-taking
+// flag's value slot — `qwen -p --bg`, a launch whose prompt IS the
+// literal string `--bg` — is that launch's data, not a background
+// launch. Without the skip the gate fired and declined the launch for
+// the flag whose value the token was, advice that cannot work (dropping
+// the flag leaves a bare `--bg`).
 function backgroundFlagIndex(argv: readonly string[]): number {
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
     if (token === '--') {
       return -1;
     }
+    // Base parity (mirrors hasFlag): the base scan skipped the token
+    // after its hardcoded value flags unconditionally, even the `--`
+    // sentinel.
+    if (BASE_VALUE_FLAGS.has(token)) {
+      i++;
+      continue;
+    }
+    i = skipOptionValues(argv, i);
     if (token === BACKGROUND_FLAG || token.startsWith(`${BACKGROUND_FLAG}=`)) {
       return i;
     }
