@@ -33,6 +33,7 @@ import {
 } from './types.js';
 import { SubagentValidator } from './validation.js';
 import { AgentHeadless } from '../agents/runtime/agent-headless.js';
+import type { SubagentExecutor } from '../agents/runtime/subagent-executor.js';
 import type {
   AgentEventEmitter,
   AgentHooks,
@@ -58,6 +59,7 @@ import {
   COLOR_VALUES,
   isColor,
   isPermissionMode,
+  parseAgentExecutor,
   parseAgentHooks,
   parseAgentMcpServers,
   parseMaxTurns,
@@ -837,7 +839,7 @@ export class SubagentManager {
       /** Stable id used to keep one invocation grouped across resume. */
       subagentId?: string;
     },
-  ): Promise<{ subagent: AgentHeadless; dispose: () => Promise<void> }> {
+  ): Promise<{ subagent: SubagentExecutor; dispose: () => Promise<void> }> {
     // Track per-spawn cleanup callbacks declared outside the inner
     // `try/catch` so the catch can fire them on a constructor failure
     // before the caller ever receives the return value. The successful
@@ -955,6 +957,61 @@ export class SubagentManager {
       }
 
       try {
+        if (config.executor) {
+          // Re-validate at the consumption point, not only at frontmatter
+          // parse time: session-level subagents are injected as plain objects
+          // via `loadSessionSubagents` (spread verbatim, no parsing), so a
+          // `SubagentConfig` can reach here with an `executor` of arbitrary
+          // runtime shape. Frontmatter-parsed configs re-validate idempotently.
+          const executorSpec = parseAgentExecutor(config.executor);
+          if (!executorSpec) {
+            throw new SubagentError(
+              `Subagent "${config.name}" declares an executor block that failed validation ` +
+                `(expected { kind: 'acp', command: string, args?: string[] }). Refusing to ` +
+                `run it in-process: that would silently substitute a different agent for ` +
+                `the one the definition asked for.`,
+              SubagentErrorCode.INVALID_CONFIG,
+              config.name,
+            );
+          }
+          // Read from `runtimeContext`, NOT `subagentContext`: the derived
+          // wrapper is a distinct instance, and a field set on the base Config
+          // is not guaranteed to be visible through it (the same shadowing
+          // hazard `Config.setSessionWorkflowEnabledProvider` documents).
+          const externalExecutor = runtimeContext.getExternalAgentExecutor();
+          if (!externalExecutor) {
+            throw new SubagentError(
+              `Subagent "${config.name}" declares executor.kind="${executorSpec.kind}" ` +
+                `(command: ${executorSpec.command}) but this host registered no external ` +
+                `agent executor. Refusing to run it in-process: that would silently ` +
+                `substitute a different agent for the one the definition asked for.`,
+              SubagentErrorCode.INVALID_CONFIG,
+              config.name,
+            );
+          }
+          const subagent = await externalExecutor.create({
+            spec: executorSpec,
+            name: config.name,
+            ...(config.approvalMode
+              ? { approvalMode: config.approvalMode }
+              : {}),
+            ...(config.permissionMode
+              ? { permissionMode: config.permissionMode }
+              : {}),
+            promptConfig,
+            modelConfig,
+            runConfig,
+            ...(toolConfig ? { toolConfig } : {}),
+            ...(options?.eventEmitter
+              ? { eventEmitter: options.eventEmitter }
+              : {}),
+            ...(options?.hooks ? { hooks: options.hooks } : {}),
+            ...(options?.taskName ? { taskName: options.taskName } : {}),
+            ...(options?.subagentId ? { subagentId: options.subagentId } : {}),
+            runtimeContext: subagentContext,
+          });
+          return { subagent, dispose: runCleanup };
+        }
         const subagent = await AgentHeadless.create(
           config.name,
           subagentContext,
@@ -978,6 +1035,12 @@ export class SubagentManager {
         throw innerError;
       }
     } catch (error) {
+      // Already-classified errors carry an accurate message; re-wrapping them
+      // under "Failed to create AgentHeadless" would misreport the executor
+      // path, which never constructs an AgentHeadless at all.
+      if (error instanceof SubagentError) {
+        throw error;
+      }
       if (error instanceof Error) {
         throw new SubagentError(
           `Failed to create AgentHeadless: ${error.message}`,
@@ -1734,6 +1797,18 @@ function parseSubagentContent(
       );
     }
 
+    // executor: qwen-code extension (not part of the mirrored CC schema).
+    // Strictly validated because it names an external process to run; see
+    // `parseAgentExecutor`. Availability of the named command is NOT checked
+    // here — that is the injected executor's job at spawn time.
+    const executorRaw = frontmatter['executor'];
+    const executor = parseAgentExecutor(executorRaw);
+    if (executorRaw !== undefined && executor === undefined) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid executor (expected { kind: 'acp', command: string, args?: string[] }). Dropping field.`,
+      );
+    }
+
     const config: SubagentConfig = {
       name,
       description,
@@ -1751,6 +1826,7 @@ function parseSubagentContent(
       ...(maxTurns !== undefined ? { maxTurns } : {}),
       ...(mcpServers !== undefined ? { mcpServers } : {}),
       ...(hooks !== undefined ? { hooks } : {}),
+      ...(executor !== undefined ? { executor } : {}),
     };
 
     // Validate the parsed configuration

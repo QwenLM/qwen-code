@@ -2283,6 +2283,90 @@ bad`);
       });
     });
 
+    describe('createAgentHeadless — external executor dispatch', () => {
+      const executorConfig: SubagentConfig = {
+        name: 'external-agent',
+        description: 'Runs somewhere else',
+        systemPrompt: 'You are external.',
+        level: 'session' as const,
+        executor: { kind: 'acp', command: 'npx', args: ['-y', 'some-acp'] },
+      };
+
+      afterEach(() => {
+        mockAgentHeadlessCreate.mockReset();
+        vi.restoreAllMocks();
+      });
+
+      it('refuses to run in-process when no executor is registered', async () => {
+        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue(
+          undefined,
+        );
+
+        await expect(
+          manager.createAgentHeadless(executorConfig, mockConfig),
+        ).rejects.toThrow(/registered no external agent executor/);
+
+        // The load-bearing assertion: it must NOT silently substitute the
+        // in-process executor. A definition that asked for an external agent
+        // and got AgentHeadless would bill the wrong provider and report the
+        // wrong agent, with no signal either way.
+        expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+      });
+
+      it('re-validates the executor block at the consumption point', async () => {
+        // Session-level subagents are injected as plain objects and spread
+        // verbatim by loadSessionSubagents, bypassing frontmatter parsing — so
+        // an arbitrarily shaped executor can reach the dispatch.
+        const injected = {
+          ...executorConfig,
+          executor: { kind: 'acp', command: '   ' },
+        } as unknown as SubagentConfig;
+
+        await expect(
+          manager.createAgentHeadless(injected, mockConfig),
+        ).rejects.toThrow(/failed validation/);
+        expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+      });
+
+      it('dispatches to the registered executor with the validated spec', async () => {
+        const externalSubagent = { execute: vi.fn() };
+        const create = vi.fn().mockResolvedValue(externalSubagent as never);
+        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+          create,
+        });
+
+        const result = await manager.createAgentHeadless(
+          executorConfig,
+          mockConfig,
+        );
+
+        expect(result.subagent).toBe(externalSubagent);
+        expect(mockAgentHeadlessCreate).not.toHaveBeenCalled();
+        expect(create.mock.calls[0][0]).toMatchObject({
+          spec: { kind: 'acp', command: 'npx', args: ['-y', 'some-acp'] },
+          name: 'external-agent',
+        });
+      });
+
+      it('leaves the in-process path untouched when no executor is declared', async () => {
+        mockAgentHeadlessCreate.mockResolvedValue({
+          execute: vi.fn(),
+        } as never);
+        const create = vi.fn();
+        vi.spyOn(mockConfig, 'getExternalAgentExecutor').mockReturnValue({
+          create,
+        } as never);
+
+        await manager.createAgentHeadless(
+          { ...executorConfig, executor: undefined },
+          mockConfig,
+        );
+
+        expect(mockAgentHeadlessCreate).toHaveBeenCalled();
+        expect(create).not.toHaveBeenCalled();
+      });
+    });
+
     describe('createAgentHeadless model override', () => {
       const agentConfig: SubagentConfig = {
         name: 'model-test-agent',

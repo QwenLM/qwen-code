@@ -34,6 +34,7 @@ import {
   AgentHeadless,
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
+import type { SubagentExecutor } from '../../agents/runtime/subagent-executor.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
 import type { Content } from '@google/genai';
 import {
@@ -1674,7 +1675,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     eventEmitter: AgentEventEmitter = this.eventEmitter,
     subagentId?: string,
   ): Promise<{
-    subagent: AgentHeadless;
+    subagent: SubagentExecutor;
     initialMessages?: Content[];
     taskPrompt: string;
     toolConfig: ToolConfig;
@@ -1863,7 +1864,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   // the reason back and re-executes until the configured cap prevents a
   // misconfigured hook from looping forever.
   private async runSubagentStopHookLoop(
-    subagent: AgentHeadless,
+    subagent: SubagentExecutor,
     opts: {
       agentId: string;
       agentType: string;
@@ -2085,7 +2086,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    * as execution progresses.
    */
   private async runSubagentWithHooks(
-    subagent: AgentHeadless,
+    subagent: SubagentExecutor,
     contextState: ContextState,
     opts: {
       agentId: string;
@@ -3014,7 +3015,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       // Create the subagent. Fork bypasses SubagentManager because its runtime
       // configs are synthesized from the parent's cache-safe params.
-      let subagent: AgentHeadless;
+      let subagent: SubagentExecutor;
       let taskPrompt: string;
       let initialMessages: Content[] | undefined;
       let toolConfig: ToolConfig | undefined;
