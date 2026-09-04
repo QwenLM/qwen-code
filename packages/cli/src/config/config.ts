@@ -2454,14 +2454,15 @@ export async function loadCliConfig(
   // substitute a different agent for the one asked for and bill the wrong
   // provider with no signal either way.
   //
-  // Imported lazily to keep the ACP executor and its dependency off the CLI
-  // startup path for the overwhelmingly common case where no subagent declares
-  // an executor (same reasoning as the daemon's `daemon-git-worktree-guard`
-  // lazy import).
-  const { acpExternalAgentExecutor } = await import(
-    '../external-agents/acp-subagent-executor.js'
-  );
-  config.setExternalAgentExecutor(acpExternalAgentExecutor);
+  // Registered as a thunk so the ACP executor and its dependency stay off the
+  // CLI startup path: the dynamic import runs on the first subagent that
+  // actually declares an `executor`, not on every `loadCliConfig` call.
+  config.setExternalAgentExecutor({
+    create: (params) =>
+      import('../external-agents/acp-subagent-executor.js').then((module) =>
+        module.acpExternalAgentExecutor.create(params),
+      ),
+  });
 
   if (lspEnabled) {
     try {

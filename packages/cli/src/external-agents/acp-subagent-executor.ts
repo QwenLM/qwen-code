@@ -59,6 +59,8 @@ import {
   type SubagentExecutor,
   type SubagentExecutorCore,
 } from '@qwen-code/qwen-code-core/subagentRuntime';
+import { sanitizeChildEnv } from '@qwen-code/qwen-code-core';
+import { createStderrForwarder } from '@qwen-code/acp-bridge/spawnChannel';
 
 /**
  * Adapter-private steering method (`acp-agent.js:103`), advertised through
@@ -66,6 +68,15 @@ import {
  * only used when the handshake says it is there.
  */
 const STEER_METHOD = '_session/steering';
+
+/**
+ * Handshake deadline. Without one, a command that spawns and stays alive but
+ * never speaks ACP (`command: cat`, an adapter blocked on a missing credential,
+ * a wrapper script) hangs `create()` forever, which surfaces as an Agent tool
+ * call that never returns and never errors. Matches qwen-live's
+ * `INIT_TIMEOUT_MS`.
+ */
+const INIT_TIMEOUT_MS = 10_000;
 
 /**
  * Label reported through `getCore().modelConfig.model`. Deliberately not the
@@ -192,17 +203,32 @@ class AcpSubagentExecutor implements SubagentExecutor {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      env: process.env,
+      // The command is named by a project-level `.qwen/agents/*.md`, so a
+      // repository the user merely cloned chooses the executable. It must not
+      // inherit the daemon bearer token or other Qwen-internal secrets — the
+      // same reasoning `mcp-client.ts` applies to its MCP child spawn.
+      env: sanitizeChildEnv(process.env),
     });
 
-    // A spawn failure (ENOENT) emits 'error' and never 'exit'; without this
-    // listener the process dies with an uncaught error.
+    // A spawn failure (ENOENT) emits 'error' and never 'exit'; a child that
+    // spawns and then dies emits 'exit' and never 'error'. Both must reject the
+    // handshake racers — otherwise the most likely real-world failure (`npx -y`
+    // unable to resolve offline, an adapter erroring during boot) waits out the
+    // full deadline instead of failing in milliseconds.
     const spawnFailure = new Promise<never>((_resolve, reject) => {
       child.once('error', (error) => {
         reject(
           new Error(
             `external agent "${params.name}" failed to spawn ` +
               `${params.spec.command}: ${error.message}`,
+          ),
+        );
+      });
+      child.once('exit', (code, signal) => {
+        reject(
+          new Error(
+            `external agent "${params.name}" exited during handshake ` +
+              `(code ${String(code)}, signal ${String(signal)})`,
           ),
         );
       });
@@ -225,15 +251,22 @@ class AcpSubagentExecutor implements SubagentExecutor {
       ndJsonStream(stdin, stdout),
     );
 
-    child.stderr?.setEncoding('utf8');
-    child.stderr?.on('data', (chunk: string) => {
-      for (const line of chunk.split('\n')) {
-        const trimmed = line.trim();
-        if (trimmed) {
-          process.stderr.write(`[external-agent ${params.name}] ${trimmed}\n`);
-        }
-      }
-    });
+    // Reuse the bridge's forwarder rather than an inline split: it buffers
+    // across chunks (so a line spanning two chunks is not fragmented) and runs
+    // every line through `redactLogCredentials` before it reaches the terminal
+    // or a captured log.
+    if (child.stderr) {
+      const forwarder = createStderrForwarder({
+        prefix: `[external-agent ${params.name}] `,
+      });
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', forwarder.onData);
+      child.stderr.on('end', forwarder.onEnd);
+      child.stderr.on('error', () => {
+        // A broken stderr pipe must not crash the parent; the child is
+        // already gone or going.
+      });
+    }
 
     try {
       await executor.connect(spawnFailure);
@@ -241,6 +274,13 @@ class AcpSubagentExecutor implements SubagentExecutor {
       executor.dispose();
       throw error;
     }
+
+    // Post-handshake: a mid-turn crash must become a visible failure, and must
+    // release anything parked on an approval dialog — otherwise the dialog
+    // waits on a process that no longer exists and the parent turn hangs.
+    child.once('exit', (code, signal) => {
+      executor.onChildExit(code, signal);
+    });
     return executor;
   }
 
@@ -271,6 +311,22 @@ class AcpSubagentExecutor implements SubagentExecutor {
   }
 
   private async connect(spawnFailure: Promise<never>): Promise<void> {
+    // One deadline covers both handshake round-trips. Without it a child that
+    // spawns, stays alive and never speaks ACP hangs `create()` forever, which
+    // surfaces as an Agent tool call that never returns and never errors.
+    const deadline = new Promise<never>((_resolve, reject) => {
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `external agent "${this.params.name}" did not complete the ACP ` +
+                `handshake within ${INIT_TIMEOUT_MS}ms`,
+            ),
+          ),
+        INIT_TIMEOUT_MS,
+      ).unref();
+    });
+
     const initialized = (await Promise.race([
       this.requireConnection().initialize({
         protocolVersion: PROTOCOL_VERSION,
@@ -279,6 +335,7 @@ class AcpSubagentExecutor implements SubagentExecutor {
         },
       }),
       spawnFailure,
+      deadline,
     ])) as unknown;
 
     const meta = isRecord(initialized) ? initialized['_meta'] : undefined;
@@ -301,6 +358,7 @@ class AcpSubagentExecutor implements SubagentExecutor {
         },
       }),
       spawnFailure,
+      deadline,
     ])) as unknown;
 
     const sessionId = isRecord(session)
@@ -312,6 +370,32 @@ class AcpSubagentExecutor implements SubagentExecutor {
       );
     }
     this.sessionId = sessionId;
+  }
+
+  /**
+   * The external agent died on its own. Release anything parked on an approval
+   * dialog — the process that would have answered it is gone, so leaving it
+   * parked hangs the parent turn — and turn a mid-turn death into a visible
+   * ERROR event instead of silence.
+   */
+  private onChildExit(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    for (const pending of this.pendingPermissions.values()) {
+      pending.resolve(undefined);
+    }
+    this.pendingPermissions.clear();
+    if (this.executing) {
+      this.terminateMode = AgentTerminateMode.ERROR;
+      this.emitter.emit(AgentEventType.ERROR, {
+        subagentId: this.params.subagentId ?? this.params.name,
+        error:
+          `external agent "${this.params.name}" exited mid-turn ` +
+          `(code ${String(code)}, signal ${String(signal)})`,
+        timestamp: Date.now(),
+      });
+    }
   }
 
   // ─── SubagentExecutor ───────────────────────────────────────────────────
@@ -628,6 +712,17 @@ class AcpSubagentExecutor implements SubagentExecutor {
     const callId = asString(toolCall['toolCallId']) ?? `perm-${Date.now()}`;
     const title = asString(toolCall['title']) ?? 'External agent action';
     const subagentId = this.params.subagentId ?? this.params.name;
+    // Recover the real tool name the same way the tool_call branch does, so the
+    // approval dialog names the tool the agent actually asked about rather than
+    // a generic placeholder.
+    const toolMeta = isRecord(toolCall['_meta'])
+      ? toolCall['_meta']
+      : undefined;
+    const claudeMeta = isRecord(toolMeta) ? toolMeta['claudeCode'] : undefined;
+    const toolName =
+      (isRecord(claudeMeta) ? asString(claudeMeta['toolName']) : undefined) ??
+      asString(toolCall['kind']) ??
+      'external_tool';
 
     // The adapter validates that the answer selects an offered optionId, so
     // park the resolver and answer from the user's decision.
@@ -637,7 +732,7 @@ class AcpSubagentExecutor implements SubagentExecutor {
         subagentId,
         round: this.round,
         callId,
-        name: 'external_tool',
+        name: toolName,
         description: title,
         args: isRecord(toolCall['rawInput']) ? toolCall['rawInput'] : {},
         // `info` variant: the faithful `edit`/`exec` shapes need a rendered
@@ -648,16 +743,29 @@ class AcpSubagentExecutor implements SubagentExecutor {
           prompt: options.map((option) => option.name).join(' / '),
         },
         respond: async (outcome: ToolConfirmationOutcome) => {
-          const wantKind = optionKindForOutcome(outcome);
-          const match =
-            options.find((option) => option.kind === wantKind) ?? options[0];
           const pending = this.pendingPermissions.get(callId);
           this.pendingPermissions.delete(callId);
-          pending?.resolve(
-            outcome === ToolConfirmationOutcome.Cancel
-              ? undefined
-              : match?.optionId,
+          if (outcome === ToolConfirmationOutcome.Cancel) {
+            pending?.resolve(undefined);
+            return;
+          }
+          const wantKind = optionKindForOutcome(outcome);
+          const match = options.find((option) => option.kind === wantKind);
+          if (match) {
+            pending?.resolve(match.optionId);
+            return;
+          }
+          // The wanted kind is not on offer. Never fall back to `options[0]`:
+          // approving "proceed once" against an offered set of
+          // [allow_always, reject_once] would answer allow_always and silently
+          // widen a one-time approval to the whole session. Deny instead — the
+          // same fail-safe posture as `resolvePermissionMode` and
+          // `parseAgentExecutor`. Resolving undefined when no reject option
+          // exists yields a cancelled outcome, which also grants nothing.
+          const deny = options.find((option) =>
+            String(option.kind).startsWith('reject'),
           );
+          pending?.resolve(deny?.optionId);
         },
         timestamp: Date.now(),
       } as never);
