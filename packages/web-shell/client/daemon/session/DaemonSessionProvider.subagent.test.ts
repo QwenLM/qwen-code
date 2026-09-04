@@ -21,6 +21,7 @@ describe('on-demand subagent transcript projection', () => {
           subagentColor: 'red',
           status: 'completed',
           terminateReason: 'max_turns',
+          skills: ['repo-ops'],
           result: 'large result',
           toolCalls: [{ callId: 'read-1' }],
           executionSummary: {
@@ -63,6 +64,7 @@ describe('on-demand subagent transcript projection', () => {
         subagentColor: 'red',
         status: 'completed',
         terminateReason: 'max_turns',
+        skills: ['repo-ops'],
         executionSummary: {
           totalToolCalls: 1,
           inputTokens: 100,

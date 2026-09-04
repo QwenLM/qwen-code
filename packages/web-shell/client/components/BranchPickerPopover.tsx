@@ -121,13 +121,17 @@ type TranslateFn = ReturnType<typeof useI18n>['t'];
  * Derive the per-action hints shown beside Update / Commit / Push so the user
  * can judge before clicking.
  *
- * Disabling is reserved for what git itself refuses: `git pull` during a
- * merge/rebase/cherry-pick, with unmerged entries, on a detached HEAD, or
- * without a usable upstream; `git push --set-upstream` only on a detached
- * HEAD (a push does not consult the index, so conflicts and in-progress
- * operations are shown as warnings on an enabled row). Soft states (up to
- * date, nothing to push, clean tree) only dim the row since the action is
- * still harmless.
+ * Disabling is reserved for what is provable from the local repository
+ * alone: `git pull` during a merge/rebase/cherry-pick, with unmerged
+ * entries, on a detached HEAD, or without a usable upstream; `git push` only
+ * on a detached HEAD. Whether a remote will accept a push is *not* locally
+ * decidable — the destination depends on config git itself sometimes
+ * declines to resolve (`push.default=simple` in triangular shapes),
+ * `remote.<name>.push` refspecs and forcing refspecs change the answer, and
+ * every count is a snapshot of the last fetch — so a push the counts call
+ * doomed is warned about on an enabled row, and the click surfaces git's own
+ * authoritative message. Soft states (up to date, nothing to push, clean
+ * tree) only dim the row since the action is still harmless.
  *
  * The branch listing (fetched on open) provides ahead/behind/upstream; the
  * status provides the tree counters and the in-progress operation. When the
@@ -191,21 +195,63 @@ export function deriveActionHints(
   }
 
   let push: ActionHint | undefined;
-  // Only a detached HEAD makes the daemon's `git push --set-upstream` fail;
-  // an in-progress operation or conflicts are surfaced but left clickable.
+  // The push row's *information* comes from the push destination — git's own
+  // `%(push)` answer, which may differ from the tracking upstream in
+  // triangular workflows:
+  //  - `pushTarget` resolved: its counts rule; `pushGone` means the
+  //    destination's ref is missing, so a push would create it.
+  //  - A live upstream but no `pushTarget`: git declined to name a
+  //    destination (`push.default` the branch name does not satisfy, a
+  //    `remote.<name>.push` refspec, `nothing`) and refuses some of those
+  //    pushes outright, so the upstream counts are no stand-in — say nothing
+  //    rather than dress a pull-side number as a push-side one.
+  //  - No upstream: the push publishes the branch and sets one.
+  // With no listing at all the status counters are all there is.
+  const pushKnown = head?.pushTarget !== undefined && head.pushGone !== true;
+  const pushSideUnknown =
+    head !== undefined && head.pushTarget === undefined && hasUpstream === true;
+  const pushAhead = pushKnown ? (head.pushAhead ?? 0) : ahead;
+  const pushBehind = pushKnown ? (head.pushBehind ?? 0) : behind;
+  // Only a detached HEAD disables: it is the one push failure provable from
+  // local state alone (the daemon's `--set-upstream` path refuses it).
+  // Everything the counts suggest — behind, diverged — is a last-fetch
+  // snapshot about a remote whose acceptance also depends on refspecs and
+  // reconciliation config, so those states warn on an enabled row and let
+  // git give the authoritative answer on click.
   const pushDisabled = detached;
   if (blocker) {
     push = blocker;
-  } else if (hasUpstream === false) {
-    push = { text: t('branchPicker.hint.setsUpstream'), tone: 'info' };
-  } else if (ahead > 0 && behind > 0) {
+  } else if (head?.pushGone === true) {
+    // The destination is known and its ref is missing: a push publishes the
+    // branch. Named ahead of the count branches so this never reads as
+    // "Nothing to push".
     push = {
-      text: t('branchPicker.hint.aheadBehind', { ahead, behind }),
+      text: t('branchPicker.hint.createsPushBranch', {
+        target: head.pushTarget ?? '',
+      }),
+      tone: 'info',
+    };
+  } else if (pushSideUnknown) {
+    // Git declined to name the destination; any number here would be a
+    // pull-side count wearing a push-side label.
+    push = undefined;
+  } else if (hasUpstream === false && !pushKnown) {
+    push = { text: t('branchPicker.hint.setsUpstream'), tone: 'info' };
+  } else if (pushAhead > 0 && pushBehind > 0) {
+    push = {
+      text: t('branchPicker.hint.aheadBehind', {
+        ahead: pushAhead,
+        behind: pushBehind,
+      }),
       tone: 'warning',
     };
-  } else if (ahead > 0) {
-    push = { text: `↑${ahead}`, tone: 'info' };
-  } else if (hasUpstream) {
+  } else if (pushBehind > 0) {
+    // Nothing to push and the destination is ahead: a push would be
+    // rejected as it stands, so this is a warning rather than a dim row.
+    push = { text: `↓${pushBehind}`, tone: 'warning' };
+  } else if (pushAhead > 0) {
+    push = { text: `↑${pushAhead}`, tone: 'info' };
+  } else if (hasUpstream || pushKnown) {
     push = { text: t('branchPicker.hint.nothingToPush'), tone: 'muted' };
   }
 
@@ -300,8 +346,11 @@ export function BranchPickerPopover({
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [pullBlocked, setPullBlocked] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
-  // Daemon explanation shown in the panel instead of the fixed blocked line,
-  // when the refusal carried one worth reading (a discard the daemon refused).
+  // Daemon explanation shown in the panel instead of the fixed blocked line
+  // when the refusal carried one worth reading — a discard the daemon
+  // refused (force_unsupported). While set, the Discard action is hidden:
+  // the daemon has declared it impossible for this workspace, so offering
+  // it again could only loop the same refusal.
   const [pullBlockedDetail, setPullBlockedDetail] = useState<string | null>(
     null,
   );
@@ -332,24 +381,30 @@ export function BranchPickerPopover({
   const onStatusRefreshedRef = useRef(onStatusRefreshed);
   onStatusRefreshedRef.current = onStatusRefreshed;
 
-  const fetchBranches = useCallback(async () => {
-    const requestId = ++requestIdRef.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await ws.workspaceGitBranches(gitCwd);
-      if (requestId !== requestIdRef.current) return;
-      setData(result);
-      setListingFetchedAt(Date.now());
-    } catch (err) {
-      if (requestId !== requestIdRef.current) return;
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      if (requestId === requestIdRef.current) {
-        setLoading(false);
+  // `silent` is the post-action refresh: the listing on screen is stale but
+  // usable, so the refresh must neither raise the placeholder the render gate
+  // swaps those rows for nor replace them with its own error.
+  const fetchBranches = useCallback(
+    async (silent = false) => {
+      const requestId = ++requestIdRef.current;
+      if (!silent) setLoading(true);
+      setError(null);
+      try {
+        const result = await ws.workspaceGitBranches(gitCwd);
+        if (requestId !== requestIdRef.current) return;
+        setData(result);
+        setListingFetchedAt(Date.now());
+      } catch (err) {
+        if (requestId !== requestIdRef.current || silent) return;
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (requestId === requestIdRef.current) {
+          setLoading(false);
+        }
       }
-    }
-  }, [ws, gitCwd]);
+    },
+    [ws, gitCwd],
+  );
 
   const fetchStatus = useCallback(async () => {
     const requestId = ++statusRequestIdRef.current;
@@ -366,6 +421,13 @@ export function BranchPickerPopover({
       // Keep whatever the caller passed; the hints degrade to the listing.
     }
   }, [ws, gitCwd]);
+
+  // Re-read the listing and the status together so the hints never mix a
+  // fresh listing with a pre-action tree snapshot.
+  const refreshAfterAction = useCallback(async () => {
+    await fetchBranches(true);
+    void fetchStatus();
+  }, [fetchBranches, fetchStatus]);
 
   // A status fetched for a previous workspace must not seed the next one.
   useEffect(() => {
@@ -513,6 +575,10 @@ export function BranchPickerPopover({
       onBranchChanged?.();
     } catch (err) {
       showStatus(err instanceof Error ? err.message : String(err), 'error');
+      // A rejected push moves no local ref, so this re-read only picks up a
+      // fetch that landed elsewhere — git's message above is the authority on
+      // why. Awaited so the row spinner stays up until the re-read lands.
+      await refreshAfterAction();
     } finally {
       setBusyAction(null);
     }
@@ -520,6 +586,7 @@ export function BranchPickerPopover({
     ws,
     busyAction,
     gitCwd,
+    refreshAfterAction,
     fetchBranches,
     onBranchChanged,
     showStatus,
@@ -577,6 +644,12 @@ export function BranchPickerPopover({
           clearPullPanel();
           showStatus(pullErrorMessage(err), 'error');
         }
+        // A failed pull has usually still fetched (the force-reset shape
+        // self-heals here; a deleted upstream ref defeats the fetch itself
+        // and needs a prune). Not awaited: the resolution panel this catch
+        // just opened must not sit disabled for a listing round-trip it
+        // never needed.
+        void refreshAfterAction();
       } finally {
         setBusyAction(null);
       }
@@ -586,6 +659,7 @@ export function BranchPickerPopover({
       busyAction,
       gitCwd,
       fetchBranches,
+      refreshAfterAction,
       onBranchChanged,
       showStatus,
       clearPullPanel,
@@ -1007,14 +1081,16 @@ export function BranchPickerPopover({
                   )}
                   {t('branchPicker.pullStash')}
                 </button>
-                <button
-                  type="button"
-                  className={`${styles.pullBlockedButton} ${styles.pullBlockedButtonDanger}`}
-                  disabled={!!busyAction}
-                  onClick={() => setConfirmDiscard(true)}
-                >
-                  {t('branchPicker.pullDiscard')}
-                </button>
+                {pullBlockedDetail === null && (
+                  <button
+                    type="button"
+                    className={`${styles.pullBlockedButton} ${styles.pullBlockedButtonDanger}`}
+                    disabled={!!busyAction}
+                    onClick={() => setConfirmDiscard(true)}
+                  >
+                    {t('branchPicker.pullDiscard')}
+                  </button>
+                )}
                 <button
                   type="button"
                   className={styles.pullBlockedButton}

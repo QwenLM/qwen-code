@@ -18,6 +18,7 @@ export default defineConfig({
       process.platform === 'win32'
         ? [
             ...configDefaults.exclude,
+            'scripts/tests/e2e-shard-retry.test.js',
             'scripts/tests/pr-self-report-label.test.js',
             // Bash-driven workflow suites cannot run on Windows; pure
             // YAML-parse workflow suites still do.
@@ -32,7 +33,15 @@ export default defineConfig({
     // Windows CI: 4780ms / 1666ms / 1079ms — the 4.8s one is right at
     // vitest's 5s default and flakes. Bump the suite timeout so a single
     // slow subprocess startup doesn't fail an otherwise-healthy test run.
-    testTimeout: 30_000,
+    //
+    // 30s then proved to be the quiet-host figure. On the shared pool the
+    // same work runs about 5x slower, and release run 33725742855 lost its
+    // Quality Checks (Scripts) job to two files at once —
+    // qwen-autofix-workflow.test.js, whose heaviest case measures ~14s idle,
+    // and acp-serve-boundary-guard.test.js — neither of them slow, both past
+    // 30s under contention. Per-test `vi.setConfig` does not help: these
+    // cases register their timeout at collection, before it runs.
+    testTimeout: Number(process.env['QWEN_SCRIPTS_TEST_TIMEOUT_MS'] ?? 90_000),
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],

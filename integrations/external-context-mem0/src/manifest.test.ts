@@ -28,6 +28,14 @@ describe('Mem0 Extension package', () => {
     expect(packageJson.scripts?.['build']).toContain('--bundle');
     expect(packageJson.files).toContain('dist/main.js');
     expect(packageJson.dependencies).toBeUndefined();
+    expect(packageJson.private).not.toBe(true);
+    expect(packageJson.name).toBe('@qwen-code/external-context-mem0');
+    expect(packageJson.version).toBe(manifest.version);
+    expect(packageJson.repository).toEqual({
+      type: 'git',
+      url: 'git+https://github.com/QwenLM/qwen-code.git',
+      directory: 'integrations/external-context-mem0',
+    });
   });
 
   it('ships only the runtime, schemas, manifest, and documentation', async () => {
@@ -43,11 +51,20 @@ describe('Mem0 Extension package', () => {
 });
 
 interface Manifest {
+  version?: string;
   mcpServers?: Record<string, Record<string, unknown>>;
   settings?: unknown;
 }
 
 interface PackageJson {
+  name?: string;
+  version?: string;
+  private?: boolean;
+  repository?: {
+    type?: string;
+    url?: string;
+    directory?: string;
+  };
   dependencies?: Record<string, string>;
   scripts?: Record<string, string>;
   files?: string[];

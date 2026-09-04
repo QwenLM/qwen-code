@@ -35,6 +35,7 @@ import {
 } from './run-qwen-serve.js';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import * as nativeDirectoryPicker from './native-directory-picker.js';
+import * as localPathOpen from './local-path-open.js';
 import { loadServeFastPathEnvironment } from './fast-path-settings.js';
 import { loadEnvironment } from '../config/environment.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
@@ -4170,6 +4171,32 @@ describe('runQwenServe telemetry validation', () => {
     expect(primaryEpochSource).toBeDefined();
     expect(secondaryEpochSource).toBeDefined();
     expect(primaryEpochSource).not.toBe(secondaryEpochSource);
+    const primaryMcpAuthenticationAdmission = createBridge.mock.calls.find(
+      ([options]) => options.boundWorkspace === canonicalizeWorkspace(primary),
+    )?.[0].acquireMcpAuthentication;
+    const secondaryMcpAuthenticationAdmission = createBridge.mock.calls.find(
+      ([options]) =>
+        options.boundWorkspace === canonicalizeWorkspace(secondary),
+    )?.[0].acquireMcpAuthentication;
+    expect(primaryMcpAuthenticationAdmission).toBeDefined();
+    expect(secondaryMcpAuthenticationAdmission).toBe(
+      primaryMcpAuthenticationAdmission,
+    );
+    const releaseAuthentication = primaryMcpAuthenticationAdmission!(
+      primary,
+      'aone',
+    );
+    expect(releaseAuthentication).toBeTypeOf('function');
+    expect(secondaryMcpAuthenticationAdmission!(secondary, 'yuque')).toBe(
+      undefined,
+    );
+    releaseAuthentication!();
+    const releaseSecondaryAuthentication = secondaryMcpAuthenticationAdmission!(
+      secondary,
+      'yuque',
+    );
+    expect(releaseSecondaryAuthentication).toBeTypeOf('function');
+    releaseSecondaryAuthentication!();
     for (const [options] of createBridge.mock.calls) {
       expect(options).toMatchObject({
         delegateReadTextFileToClient: false,
@@ -11234,6 +11261,114 @@ describe('runQwenServe runtime startup failures', () => {
     },
   );
 
+  it.each([true, false])(
+    'mirrors the local path open probe on the bootstrap envelopes (available: %s)',
+    async (available) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-open-')),
+      );
+      // Keep the runtime from mounting so the bootstrap `/capabilities` and
+      // `/daemon/status` envelopes stay the ones being served.
+      vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+      const probe = vi
+        .spyOn(localPathOpen, 'isLocalPathOpenAvailable')
+        .mockReturnValue(available);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+        const probeCallsAfterBoot = probe.mock.calls.length;
+        const capabilities = (await (
+          await fetch(`${handle.url}/capabilities`)
+        ).json()) as { features: string[] };
+        const status = (await (
+          await fetch(`${handle.url}/daemon/status`)
+        ).json()) as { capabilities: { features: string[] } };
+        if (available) {
+          expect(capabilities.features).toContain('workspace_local_open');
+          expect(status.capabilities.features).toContain(
+            'workspace_local_open',
+          );
+        } else {
+          expect(capabilities.features).not.toContain('workspace_local_open');
+          expect(status.capabilities.features).not.toContain(
+            'workspace_local_open',
+          );
+        }
+        // Probed once while the bootstrap app was built, not per request.
+        expect(probe.mock.calls.length).toBe(probeCallsAfterBoot);
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
+  it.each([true, false])(
+    'mirrors the local terminal open probe on the bootstrap envelopes (available: %s)',
+    async (available) => {
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-terminal-')),
+      );
+      // Keep the runtime from mounting so the bootstrap `/capabilities` and
+      // `/daemon/status` envelopes stay the ones being served.
+      vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+        throw new Error('runtime boom');
+      });
+      const probe = vi
+        .spyOn(localPathOpen, 'isLocalTerminalAvailable')
+        .mockReturnValue(available);
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+        const probeCallsAfterBoot = probe.mock.calls.length;
+        const capabilities = (await (
+          await fetch(`${handle.url}/capabilities`)
+        ).json()) as { features: string[] };
+        const status = (await (
+          await fetch(`${handle.url}/daemon/status`)
+        ).json()) as { capabilities: { features: string[] } };
+        if (available) {
+          expect(capabilities.features).toContain('workspace_local_terminal');
+          expect(status.capabilities.features).toContain(
+            'workspace_local_terminal',
+          );
+        } else {
+          expect(capabilities.features).not.toContain(
+            'workspace_local_terminal',
+          );
+          expect(status.capabilities.features).not.toContain(
+            'workspace_local_terminal',
+          );
+        }
+        // Probed once while the bootstrap app was built, not per request.
+        expect(probe.mock.calls.length).toBe(probeCallsAfterBoot);
+      } finally {
+        await handle.close();
+      }
+    },
+  );
+
   it('shuts down a bridge when runtime mounting fails after bridge creation', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-partial-fail-')),
@@ -11523,7 +11658,10 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
         maxSessions: 1,
         ...extra,
       },
-      { bridge: makeFakeBridge() },
+      {
+        bridge: makeFakeBridge(),
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
     );
   }
 
@@ -12034,6 +12172,22 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     const handle = await bootHandle({ serveWebShell: false });
     try {
       await handle.runtimeReady;
+      const saturationInfo = {
+        requiredBytes: 200,
+        availableBytes: 20,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 220,
+        graceMs: 10_000,
+      };
+      for (const options of mockCreateSpawnChannelFactoryOptions) {
+        const hooks = options['pipeHooks'] as
+          | {
+              onQueueSaturated?: (info: typeof saturationInfo) => void;
+            }
+          | undefined;
+        expect(hooks?.onQueueSaturated).toEqual(expect.any(Function));
+        hooks?.onQueueSaturated?.(saturationInfo);
+      }
       const pipeHooks = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
         'pipeHooks'
       ] as
@@ -12080,6 +12234,17 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     } finally {
       await handle.close();
     }
+    const logPath = path.join(tmpDir, 'debug', 'daemon', 'daemon.log');
+    let logContent = '';
+    await vi.waitFor(() => {
+      logContent = fs.readFileSync(logPath, 'utf8');
+      expect(logContent).toContain('ACP NDJSON decoded queue saturated');
+    });
+    expect(logContent).toContain('requiredBytes=200');
+    expect(logContent).toContain('availableBytes=20');
+    expect(logContent).toContain('maxQueuedMessages=2');
+    expect(logContent).toContain('maxQueuedBytes=220');
+    expect(logContent).toContain('queueSaturationGraceMs=10000');
   });
 });
 
@@ -14075,8 +14240,21 @@ describe('runQwenServe channel worker supervisor', () => {
         body: JSON.stringify({ cwd: secondaryCwd }),
       });
       expect(readded.status).toBe(201);
-      expect(supervisorFactory).toHaveBeenCalledTimes(3);
+      expect(supervisorFactory).toHaveBeenCalledTimes(2);
       expect(createBridge).toHaveBeenCalledTimes(3);
+
+      const restarted = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer worker-remove-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['telegram', 'feishu'] },
+        }),
+      });
+      expect(restarted.status).toBe(200);
+      expect(supervisorFactory).toHaveBeenCalledTimes(3);
       const replacementSupervisor = workerSupervisors.get(secondaryCwd)!;
       expect(replacementSupervisor).not.toBe(removedSupervisor);
       expect(replacementSupervisor.start).toHaveBeenCalledOnce();

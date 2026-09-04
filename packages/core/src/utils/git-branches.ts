@@ -28,6 +28,22 @@ export interface GitBranchInfo {
   upstreamGone?: boolean;
   ahead: number;
   behind: number;
+  /**
+   * Where `git push` would push, by git's own resolution
+   * (`branch.<name>.pushRemote` / `remote.pushDefault` / the upstream via
+   * `push.default`). Absent when git cannot resolve a push destination.
+   * Differs from `upstream` in triangular (fork) workflows.
+   */
+  pushTarget?: string;
+  /** Commits ahead of the push target; absent when `pushTarget` is. */
+  pushAhead?: number;
+  /** Commits behind the push target; absent when `pushTarget` is. */
+  pushBehind?: number;
+  /**
+   * Push destination resolves but its ref does not exist yet (`git push`
+   * would create the remote branch). `pushAhead`/`pushBehind` are absent.
+   */
+  pushGone?: boolean;
   /** Unix epoch seconds of the branch tip commit. */
   commitDate: number;
   commitSubject: string;
@@ -127,7 +143,7 @@ export async function fetchGitBranches(
       cwd,
       [
         'for-each-ref',
-        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
+        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)%00%(push:short)%00%(push:track,nobracket)',
         'refs/heads/',
       ],
       env,
@@ -136,7 +152,7 @@ export async function fetchGitBranches(
       cwd,
       [
         'for-each-ref',
-        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
+        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)%00%(push:short)%00%(push:track,nobracket)',
         'refs/remotes/',
       ],
       env,
@@ -210,6 +226,22 @@ function parseBranchLines(raw: string): GitBranchInfo[] {
         // configured but its ref is missing; ahead/behind are meaningless then.
         const upstreamGone = upstream !== undefined && /\bgone\b/.test(track);
 
+        // Push-side counterpart: `%(push)` is git's own answer to "where
+        // would `git push` go", honoring pushRemote/pushDefault — the same
+        // resolution a plain `git push` uses, so no precedence is re-derived
+        // here. Empty when unresolvable (e.g. `push.default` cannot pick).
+        const pushTarget = parts[7] || undefined;
+        const pushTrack = parts[8] ?? '';
+        const pushGone = pushTarget !== undefined && /\bgone\b/.test(pushTrack);
+        let pushAhead: number | undefined;
+        let pushBehind: number | undefined;
+        if (pushTarget !== undefined && !pushGone) {
+          const pa = /ahead (\d+)/.exec(pushTrack);
+          const pb = /behind (\d+)/.exec(pushTrack);
+          pushAhead = pa ? parseInt(pa[1], 10) : 0;
+          pushBehind = pb ? parseInt(pb[1], 10) : 0;
+        }
+
         return {
           name,
           isHead,
@@ -217,6 +249,10 @@ function parseBranchLines(raw: string): GitBranchInfo[] {
           ...(upstreamGone ? { upstreamGone } : {}),
           ahead,
           behind,
+          ...(pushTarget !== undefined ? { pushTarget } : {}),
+          ...(pushAhead !== undefined ? { pushAhead } : {}),
+          ...(pushBehind !== undefined ? { pushBehind } : {}),
+          ...(pushGone ? { pushGone } : {}),
           commitDate,
           commitSubject,
         };
@@ -854,33 +890,13 @@ function pullArgs(opts?: GitPullOptions): string[] {
   return args;
 }
 
-/** The upstream ref configured for the checked-out branch, or ''. */
-async function configuredUpstream(
-  cwd: string,
-  env?: Readonly<Record<string, string | undefined>>,
-): Promise<string> {
-  try {
-    const branch = (
-      await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'], env)
-    ).trim();
-    return (
-      await runGit(
-        cwd,
-        ['for-each-ref', '--format=%(upstream)', `refs/heads/${branch}`],
-        env,
-      )
-    ).trim();
-  } catch {
-    return '';
-  }
-}
-
 /**
  * SHA of the upstream tip, resolved after the flow's own fetch (so a
  * tracking ref pruned earlier is back if the remote branch exists again).
- * A branch with no upstream configured fails with git's own message, as a
- * plain pull always has; a configured upstream whose remote branch is
- * gone is a typed refusal — nothing has been touched at this point.
+ * A detached HEAD and a configured upstream whose remote branch is gone
+ * are typed refusals — nothing has been touched at this point; a branch
+ * with no upstream configured fails with git's own message, as a plain
+ * pull always has.
  */
 async function validatedUpstream(
   cwd: string,
@@ -888,13 +904,35 @@ async function validatedUpstream(
 ): Promise<string> {
   const sha = await upstreamSha(cwd, env);
   if (sha) return sha;
-  if (await configuredUpstream(cwd, env)) {
+  let branch: string;
+  try {
+    branch = (
+      await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD'], env)
+    ).trim();
+  } catch {
+    throw new GitPullFailure(
+      'pull_failed',
+      'cannot update: HEAD is detached; check out a branch from a terminal first',
+    );
+  }
+  const configured = (
+    await runGit(
+      cwd,
+      ['for-each-ref', '--format=%(upstream)', `refs/heads/${branch}`],
+      env,
+    ).catch(() => '')
+  ).trim();
+  if (configured) {
     throw new GitPullFailure(
       'pull_failed',
       'cannot update: the upstream branch no longer exists on the remote; nothing was changed',
     );
   }
+  // No upstream is configured: surface git's own message so the route
+  // classifies it as it always has.
   await runGit(cwd, ['rev-parse', '--abbrev-ref', '@{upstream}'], env);
+  // Reachable only when the upstream appeared between the probes; refuse
+  // conservatively instead of proceeding on a tip that was never validated.
   throw new GitPullFailure(
     'pull_failed',
     'cannot update: the upstream branch could not be resolved; nothing was changed',
@@ -1080,6 +1118,12 @@ export async function gitPull(
 ): Promise<GitPullResult> {
   if (opts?.stash && opts?.force) {
     throw new Error('stash and force are mutually exclusive');
+  }
+  if (opts?.fetchOnly && (opts?.stash || opts?.force)) {
+    // A fetch-only request has nothing to stash around or discard for;
+    // refuse rather than silently dropping the resolution the caller
+    // asked for.
+    throw new Error('fetchOnly cannot be combined with stash or force');
   }
   if (opts?.fetchOnly) {
     const output = await runGit(cwd, ['fetch', '--all', '--prune'], env);

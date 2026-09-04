@@ -1897,6 +1897,32 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('keeps Session Workflow disabled by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionWorkflowEnabled: false,
+      }),
+    );
+  });
+
+  it('propagates the Session Workflow opt-in', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { sessionWorkflow: true } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionWorkflowEnabled: true,
+      }),
+    );
+  });
+
   it('should not enable the session writer lease for invalid truthy values', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

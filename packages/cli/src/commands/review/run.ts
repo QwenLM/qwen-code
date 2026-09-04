@@ -422,11 +422,22 @@ export function newestArtifactSince(
  * Exit code contract: 0 = the review completed (whatever it decided); 1 = it
  * never reached a verdict (child failed, timed out with no verdict captured,
  * or left no composed artifact); 3 = it completed AND the caller asked
- * --fail-on request-changes AND the event is REQUEST_CHANGES. A stop carries
- * no composed verdict and no synthesised one: the cache ledger a stop renders
- * is rewritten only by a round that writes the cache, so a blocker fixed and
- * committed stays `open` in it — an exit code keyed on that count is a
- * failure no action clears. 3, not 2 — yargs exits 1 on usage errors and
+ * --fail-on request-changes AND the event is REQUEST_CHANGES. A
+ * capture-stop round whose cache ledger holds open Criticals composes a REAL
+ * verdict now — the orchestrator's re-rule of those findings (deduced on the
+ * two incremental stops, judged on clean-tree; SKILL Step 1's capture-stop
+ * branches, machine-checked by compose-review's stopReRule gate) — and gates
+ * here exactly like a full round; a stop whose ledger holds nothing open
+ * composes a no-event Comment the same way, so a decided stop with NO
+ * composed artifact is a re-rule the compose gate refused — no verdict,
+ * never a silent completion. Known residual: the PR-target stops
+ * (up-to-date, empty-diff) write only the stop sidecar — they consume no
+ * plan, so the stopReRule grant is unreachable there and no verdict composes;
+ * a gate-only PR re-run exits 0 even when the PR cache still holds open
+ * Criticals. No verdict is ever synthesised from a ledger COUNT: that count is
+ * rewritten only by a cache-writing round, so a blocker fixed and committed
+ * stays `open` in it, and an exit code keyed on it is a failure no action
+ * clears (#9659's deleted blocker-dating chain). 3, not 2 — yargs exits 1 on usage errors and
  * some shells reserve 2, so a CI gate can tell "review is blocking" from
  * "the tool broke" without parsing anything.
  */
@@ -440,9 +451,20 @@ export function exitCodeFor(
   return 0;
 }
 
-function readComposed(path: string): ComposedVerdict | null {
+function readComposed(path: string, runId: string): ComposedVerdict | null {
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as ComposedVerdict;
+    const parsed = JSON.parse(readFileSync(path, 'utf8')) as ComposedVerdict & {
+      runId?: unknown;
+    };
+    // Stamped by THIS run, or it is not this run's verdict — the same fence
+    // the stop sidecar carries (`readStopSidecar`), because this artifact is
+    // MORE verdict-bearing than the sidecar, not less: it alone decides the
+    // event a `--fail-on` gate acts on, its name is the same non-injective
+    // flattened target token, and the mtime window alone admitted any file a
+    // concurrent same-stem run — or something that skipped `compose-review`
+    // entirely — wrote into it. compose-review stamps the id it inherited
+    // from this parent's `childEnv`.
+    if (parsed.runId !== runId) return null;
     // The one field everything downstream keys on. A file without it is not a
     // composed verdict, whatever its name says.
     return typeof parsed.event === 'string' ? parsed : null;
@@ -647,7 +669,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     const best = newestArtifactSince(REVIEW_TMP_DIR, composedPattern, cutoffMs);
     if (best === null || best.mtime <= capturedMtime) return;
     // A half-written file fails to parse; the next tick retries it.
-    const verdict = readComposed(best.path);
+    const verdict = readComposed(best.path, runId);
     if (verdict !== null) {
       capturedPath = best.path;
       capturedVerdict = verdict;
@@ -725,32 +747,53 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   if (composed === null) {
     const best = newestArtifactSince(REVIEW_TMP_DIR, composedPattern, cutoffMs);
     composedPath = best?.path ?? null;
-    composed = composedPath ? readComposed(composedPath) : null;
+    composed = composedPath ? readComposed(composedPath, runId) : null;
   }
   const reportPath =
     newestArtifactSince(REVIEWS_DIR, reportPatternFor(targetClass), cutoffMs)
       ?.path ?? null;
 
-  // A round the CAPTURE decided had nothing to review is complete, even
-  // though no composed verdict exists: `compose-review` is reached only from
-  // Step 6, and both stops fire in Step 1. Polling for the verdict alone
-  // reported "Review did not complete" over a round whose own output was
-  // decided — a cached second round on an unchanged tree, or a clean tree
-  // whose earlier blocker the ledger still renders as standing. The signal is
-  // a field the CLI wrote into its own plan, not a sentence the model chose.
-  // The in-run snapshot first: it holds the stamped verdict even if a
-  // concurrent run overwrote or swept the shared sidecar since. The
-  // post-close scan covers a child that wrote the sidecar and exited inside
-  // one poll tick.
+  // The capture's decided-stop signal, read so the completion check below
+  // can tell "the capture decided this round" from "the run wandered off".
+  // Every decided capture stop composes a verdict via Step 1's re-rule (a
+  // REQUEST_CHANGES over standing blockers, or a no-event Comment when the
+  // ledger holds no open Criticals) — the sidecar alone never completes one
+  // (see the exit-contract comment on `exitCodeFor`); only the two PR stops
+  // ride on the sidecar by itself. The signal is a file the CLI wrote, not
+  // a sentence the model chose. The in-run snapshot first: it holds the
+  // stamped verdict even if a concurrent run overwrote or swept the shared
+  // sidecar since. The post-close scan covers a child that wrote the
+  // sidecar and exited inside one poll tick.
   const stop =
     capturedStop ?? nothingToReviewFrom(targetClass, cutoffMs, runId);
-  const completed = composed !== null || stop !== null;
+  // The PR stops (up-to-date, empty-diff) consume no plan and compose no
+  // verdict — the sidecar alone completes the round. Every DECIDED capture
+  // stop composes one: the re-rule of the ledger's open Criticals, or a
+  // no-event Comment when nothing is open (SKILL Step 1's stop branches).
+  // A decided stop with no composed artifact is therefore a re-rule the
+  // compose gate REFUSED — no verdict was produced, and the round must not
+  // exit 0 over the ledger's still-open Criticals like a clean stop. The
+  // exemption is keyed on the TARGET CLASS beside the reason string: only
+  // the PR path ever writes these two reasons (capture-local stamps only
+  // the three decided ones), so a local/file sidecar wearing `up-to-date`
+  // is a forged or drifted stamp, not a PR stop, and completing on it
+  // would let the local cache's open Criticals slip an exit 0.
+  const completed =
+    composed !== null ||
+    (stop !== null &&
+      targetClass.kind === 'pr' &&
+      (stop.reason === 'up-to-date' || stop.reason === 'empty-diff'));
   // A stop carries no synthesised event, deliberately: the stop's rendered
   // blocker list comes from the cache ledger, which only a cache-writing
   // round rewrites — a stop never does — so a blocker fixed and committed
   // stays `open` there, and an exit code keyed on it is a failure no action
-  // clears. A composed verdict on the stop path — the model re-ruling the
-  // ledger — is the answer that can gate; until then a stop exits 0.
+  // clears. The gate on the capture-stop path is the composed verdict read
+  // above: Step 1's capture-stop branches re-rule the ledger's open
+  // Criticals and call compose-review (its stopReRule gate machine-checks
+  // the dispositions), so a standing blocker arrives here as a real
+  // REQUEST_CHANGES and a ledger with nothing open completes with no event.
+  // The PR stops (up-to-date, empty-diff) are the disclosed residual: they
+  // write only the sidecar and exit 0 over whatever the PR cache holds open.
 
   const result: RunReviewResult = {
     completed,

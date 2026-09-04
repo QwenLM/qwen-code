@@ -46,6 +46,15 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // it or override a user opt-in through settings.env or a project .env.
   'QWEN_CODE_ENABLE_WORKFLOWS',
   'QWEN_CODE_DISABLE_WORKFLOWS',
+  // The review prebuild (commands/review/lib/prebuild.ts) is an operator
+  // decision: CI welds it as real step env, a local operator exports it. A
+  // project `.env` must not opt its own review into the blocking
+  // install+build prefix — and the read-time provenance check there cannot
+  // see file-sourcing across a process boundary (a child inherits the value
+  // with an empty registry), so the key must never enter the environment
+  // from repository content at all. prebuild.test.ts pins the membership
+  // with both real symbols.
+  'QWEN_REVIEW_PREBUILD',
   // QWEN_TLS_INSECURE (and NODE_TLS_REJECT_UNAUTHORIZED, which it mirrors)
   // disable TLS certificate verification for all outbound API connections. A
   // project `.env` must never enable either — that would let an untrusted repo

@@ -43,7 +43,7 @@ type AssistantMessageWithReasoningFields =
     reasoning?: string | null;
   };
 
-function shouldMirrorReasoningContentForQwen3(model: string): boolean {
+function isQwen3Model(model: string): boolean {
   return model.toLowerCase().includes('qwen3');
 }
 
@@ -205,7 +205,7 @@ export class DefaultOpenAICompatibleProvider
     const requestWithTokenLimits = this.clampConfiguredReasoningEffort(
       this.applyOutputTokenLimit(request),
     );
-    const messages = shouldMirrorReasoningContentForQwen3(request.model)
+    const messages = isQwen3Model(request.model)
       ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
       : requestWithTokenLimits.messages;
 
@@ -220,13 +220,16 @@ export class DefaultOpenAICompatibleProvider
     return {};
   }
 
-  getResponseParsingOptions(): OpenAIResponseParsingOptions {
+  getResponseParsingOptions(model?: string): OpenAIResponseParsingOptions {
     // Hybrid-thinking models occasionally bypass the reasoning channel and
     // emit their thinking as literal <think>/<thinking> tags inside content
     // (observed in production on qwen3-class models, issue #6666).
-    // Honored on the streaming path only; non-streaming responses are
-    // not classified.
-    return { contentOnlyThinkingTagLeaks: true };
+    return {
+      contentOnlyThinkingTagLeaks: true,
+      ...(model && isQwen3Model(model)
+        ? { taggedThinkingTagsAfterReasoning: true }
+        : {}),
+    };
   }
 
   /**

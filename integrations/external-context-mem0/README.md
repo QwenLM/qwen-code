@@ -5,6 +5,27 @@ for administrator-configured Mem0-compatible HTTP services. It validates a
 closed dialect grammar and uses a bounded HTTP request engine; it does not ship
 provider presets or provider-specific configuration.
 
+## Installation
+
+Install the published Extension with Qwen Code:
+
+```bash
+qwen extensions install @qwen-code/external-context-mem0
+```
+
+This command becomes available after the package's first registry release.
+
+Use an explicit package version when the deployment must remain pinned:
+
+```bash
+qwen extensions install @qwen-code/external-context-mem0@x.y.z
+```
+
+The Extension version follows the Qwen Code release version. Installing the
+package does not configure a memory service or install provider data; an
+administrator must supply the two files and credential environment described
+below.
+
 ## Configuration
 
 Set `QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG` in the Extension process environment to

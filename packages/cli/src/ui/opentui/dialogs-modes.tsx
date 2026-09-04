@@ -17,13 +17,16 @@ import { useRenderer, useKeyboard } from '@opentui/react';
 import {
   applyReasoningEffort,
   APPROVAL_MODES,
+  BUILT_IN_OUTPUT_STYLES,
   REASONING_EFFORT_TIERS,
   type ApprovalMode,
+  type OutputStyleDefinition,
   type ReasoningEffort,
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { applyOutputStyleSelection } from '../commands/output-style-utils.js';
 import { toOriginalKey } from './key-map.js';
 import { C } from './theme.js';
 
@@ -214,6 +217,71 @@ export function OpenTuiEffortDialog(props: {
         selected={sel}
         onMove={(d) =>
           setSel((s) => Math.min(tiers.length - 1, Math.max(0, s + d)))
+        }
+        onPick={pick}
+      />
+    </Shell>
+  );
+}
+
+const DEFAULT_STYLE_DESC = 'The standard prompt, with no extra style';
+
+export function OpenTuiOutputStyleDialog(props: {
+  config: Config;
+  settings: LoadedSettings;
+  onClose: () => void;
+  notify: (text: string) => void;
+}) {
+  const { config, settings, onClose, notify } = props;
+  const items: Array<{
+    key: string;
+    label: string;
+    desc: string;
+    style: OutputStyleDefinition | undefined;
+  }> = [
+    {
+      key: 'default',
+      label: 'default',
+      desc: DEFAULT_STYLE_DESC,
+      style: undefined,
+    },
+    ...BUILT_IN_OUTPUT_STYLES.map((style) => ({
+      key: style.name,
+      label: style.name,
+      desc: style.description,
+      style,
+    })),
+  ];
+  // Unlike /effort, "no style configured" genuinely is the first entry
+  // (default), so pre-selecting index 0 in that case tells the truth (ink
+  // OutputStyleDialog parity).
+  const current = config.getOutputStyle()?.name;
+  const [sel, setSel] = useState(
+    Math.max(
+      0,
+      items.findIndex((item) => item.key === current),
+    ),
+  );
+  useEsc(onClose);
+  const pick = () => {
+    const item = items[sel];
+    if (!item) return;
+    // Close first, like ink's handleOutputStyleSelect: the apply rebuilds
+    // the system instruction, and the dialog should not sit open for it.
+    onClose();
+    void applyOutputStyleSelection(config, settings, item.style).then(
+      (message) => notify(message),
+      (error: unknown) =>
+        notify(error instanceof Error ? error.message : String(error)),
+    );
+  };
+  return (
+    <Shell title="Output Style">
+      <RadioList
+        items={items}
+        selected={sel}
+        onMove={(d) =>
+          setSel((s) => Math.min(items.length - 1, Math.max(0, s + d)))
         }
         onPick={pick}
       />

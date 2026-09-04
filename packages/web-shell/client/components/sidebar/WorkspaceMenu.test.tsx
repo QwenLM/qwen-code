@@ -144,6 +144,37 @@ describe('WorkspaceMenu', () => {
     expect(document.body.querySelectorAll('[role="separator"]').length).toBe(1);
   });
 
+  it('offers the local-open actions after Copy path and dispatches them', async () => {
+    const openFolder = vi.fn();
+    const openTerminal = vi.fn();
+    const actions = {
+      copyPath: vi.fn(),
+      openFolder,
+      openTerminal,
+      newSession: vi.fn(),
+    };
+    await render(<WorkspaceMenu workspace={workspace} actions={actions} />);
+    const items = await open();
+    expect(labels(items)).toEqual([
+      'Copy path',
+      'Open folder',
+      'Open terminal',
+      'New task',
+    ]);
+    await act(async () => {
+      click(items[1]!);
+      await Promise.resolve();
+    });
+    expect(openFolder).toHaveBeenCalledTimes(1);
+    // Selecting an item closes the menu; reopen for the next one.
+    const reopened = await open();
+    await act(async () => {
+      click(reopened[2]!);
+      await Promise.resolve();
+    });
+    expect(openTerminal).toHaveBeenCalledTimes(1);
+  });
+
   it('shows the management group with live counts and dispatches its target', async () => {
     const openManagement = vi.fn();
     await render(
@@ -242,6 +273,8 @@ describe('WorkspaceMenu', () => {
         actions={{
           rename: vi.fn(),
           copyPath: vi.fn(),
+          openFolder: vi.fn(),
+          openTerminal: vi.fn(),
           newSession: vi.fn(),
           newWorktreeSession: vi.fn(),
           openManagement: vi.fn(),
@@ -254,6 +287,8 @@ describe('WorkspaceMenu', () => {
     expect(labels(items)).toEqual([
       'Rename…',
       'Copy path',
+      'Open folder',
+      'Open terminal',
       'New task',
       'New worktree task',
       'MCP',

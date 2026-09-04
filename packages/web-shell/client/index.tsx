@@ -1,5 +1,8 @@
 import { type ReactNode } from 'react';
-import { DaemonWorkspaceProvider } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  DaemonWorkspaceProvider,
+  type DaemonProductSessionContext,
+} from '@qwen-code/web-shell/daemon-react-sdk';
 import { App, type WebShellProps } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
@@ -20,6 +23,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   workspaceId?: string;
   /** Registered daemon workspace path for the session. Takes precedence over workspaceId. */
   workspaceCwd?: string;
+  /** Explicit product context. Use standalone without workspaceId/workspaceCwd. */
+  sessionContext?: DaemonProductSessionContext;
   /**
    * Workspace path to lock this shell to. Missing paths are registered
    * persistently before rendering. Takes precedence over workspaceCwd and workspaceId.
@@ -96,6 +101,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     sessionId,
     workspaceId,
     workspaceCwd,
+    sessionContext,
     lockWorkspaceCwd,
     clientId,
     restartSseOnPrompt,
@@ -117,6 +123,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
           sessionId={sessionId}
           workspaceId={workspaceId}
           workspaceCwd={workspaceCwd}
+          sessionContext={sessionContext}
           lockWorkspaceCwd={lockWorkspaceCwd}
           clientId={clientId}
           restartSseOnPrompt={restartSseOnPrompt}
@@ -227,8 +234,11 @@ export type {
   WebShellAgentTask,
   WebShellShellTask,
   WebShellMonitorTask,
+  WebShellWorkflowTask,
   WebShellPreparedSubmit,
   WebShellSubmitSnapshot,
+  WebShellSessionArtifactsChange,
+  WebShellSessionArtifactsChangeReason,
   WebShellModelInfo,
   WebShellSkillInfo,
 } from './customization';
