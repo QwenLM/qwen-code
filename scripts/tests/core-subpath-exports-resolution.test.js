@@ -26,9 +26,10 @@
 //    two instances of barrel-exported, stateful modules in one process, the
 //    module-identity failure #10908's Known risks name. The esbuild guard
 //    below bundles every core subpath statically imported from
-//    packages/cli/src — including goalWire, which the bundle reaches through
-//    @qwen-code/acp-bridge — under the cli tsconfig and asserts every input
-//    lands under packages/core/src, never packages/core/dist.
+//    packages/cli/src — plus the subpaths the bundle reaches through
+//    @qwen-code/acp-bridge and @qwen-code/sdk — under the tsconfig each
+//    route's importing file discovers, and asserts every input lands under
+//    packages/core/src, never packages/core/dist.
 //
 // The pinned-target check makes a built core `dist` a prerequisite of the
 // plain-Node guard (`import.meta.resolve` alone deliberately does not need
@@ -218,6 +219,56 @@ describe('acp-bridge-routed core subpaths bundle from the core src tree', () => 
       inputs.filter((input) => input.includes('packages/core/dist/')),
     ).toEqual([]);
     for (const target of Object.values(expectedAcpBridgeSrcTargets)) {
+      expect(inputs).toContain(target);
+    }
+  });
+});
+
+// The core subpath specifiers the bundle reaches through @qwen-code/sdk —
+// transcriptRecords from daemon/ui/chat-record-transcript.ts, pulled in via
+// the cli tsconfig `@qwen-code/sdk/*` mapping (cli sources such as
+// ui/utils/export/export-transcript-document.ts import
+// `@qwen-code/sdk/daemon/transcript`). mainBuild passes no `tsconfig`
+// option, so the shipped bundle resolves these by discovering
+// packages/sdk-typescript/tsconfig.json per importing file — a guard arm
+// that only probes the cli and acp-bridge routes is blind to mutations of
+// the named entry there.
+const expectedSdkSrcTargets = {
+  '@qwen-code/qwen-code-core/transcriptRecords':
+    'packages/core/src/utils/transcript-records.ts',
+};
+
+describe('sdk-routed core subpaths bundle from the core src tree', () => {
+  it('resolves every sdk-routed subpath under packages/core/src', () => {
+    const result = buildSync({
+      absWorkingDir: root,
+      stdin: {
+        contents: Object.keys(expectedSdkSrcTargets)
+          .map((specifier) => `import ${JSON.stringify(specifier)};`)
+          .join('\n'),
+        resolveDir: join(root, 'packages', 'sdk-typescript', 'src'),
+        sourcefile: 'core-subpath-bundle-probe-sdk.ts',
+        loader: 'ts',
+      },
+      bundle: true,
+      write: false,
+      metafile: true,
+      platform: 'node',
+      format: 'esm',
+      logLevel: 'silent',
+      // Deliberately no `tsconfig` option: mainBuild carries none, so esbuild
+      // discovers packages/sdk-typescript/tsconfig.json per importing file —
+      // the resolution route the shipped bundle actually uses for these
+      // imports.
+    });
+    // Same backslash normalization as the cli-routed arm above.
+    const inputs = Object.keys(result.metafile.inputs).map((input) =>
+      input.replace(/\\/g, '/'),
+    );
+    expect(
+      inputs.filter((input) => input.includes('packages/core/dist/')),
+    ).toEqual([]);
+    for (const target of Object.values(expectedSdkSrcTargets)) {
       expect(inputs).toContain(target);
     }
   });
