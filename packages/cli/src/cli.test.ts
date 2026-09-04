@@ -28,6 +28,7 @@ import { AlreadyReportedError } from './utils/errors.js';
 import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
 import {
   BACKGROUND_FLAG,
+  INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
   INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
 } from './agent-view/entry-flags.js';
 import {
@@ -58,6 +59,7 @@ const mocks = vi.hoisted(() => ({
   installManagedNpmUpdate: vi.fn(),
   runAsAgentViewSupervisor: vi.fn(),
   runBackgroundDispatch: vi.fn(),
+  runAgentViewPtyHostProcess: vi.fn(),
 }));
 
 vi.mock('./llm.js', () => ({
@@ -101,6 +103,10 @@ vi.mock('./agent-view/background-entry.js', async (importOriginal) => {
     runBackgroundDispatch: mocks.runBackgroundDispatch,
   };
 });
+
+vi.mock('./agent-view/pty-host-process.js', () => ({
+  runAgentViewPtyHostProcess: mocks.runAgentViewPtyHostProcess,
+}));
 
 vi.mock('./commands/mcp.js', () => ({
   mcpCommand: {
@@ -1060,6 +1066,55 @@ describe('runCliEntry', () => {
 
       expect(mocks.runAsAgentViewSupervisor).toHaveBeenCalledTimes(1);
       expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('runs a process spawned with the internal flag as the pty host', async () => {
+      // The supervisor's dispatch RPC spawns each session's PTY host as
+      // `node <entry> --internal-agent-view-pty-host <launchPath>
+      // <socketPath>`. The flag is internal — the strict parser rejects
+      // it — so the entry must pick the spawn up exactly like the
+      // supervisor twin above, or the host dies on 'Unknown arguments'
+      // and every --bg launch fails to start a session.
+      await runCliEntry([
+        INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+        '/path/to/launch.json',
+        '/path/to/pty-host.sock',
+      ]);
+
+      expect(mocks.runAgentViewPtyHostProcess).toHaveBeenCalledWith({
+        launchPath: '/path/to/launch.json',
+        socketPath: '/path/to/pty-host.sock',
+      });
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('does not treat the pty-host flag as a value-taking flag’s value', async () => {
+      // Same shape class as the supervisor twin: `qwen -p
+      // --internal-agent-view-pty-host …` puts the flag in the prompt
+      // value slot, so it is data, not a spawn.
+      await runCliEntry([
+        '-p',
+        INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+        '/path/to/launch.json',
+        '/path/to/pty-host.sock',
+      ]);
+
+      expect(mocks.runAgentViewPtyHostProcess).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not treat a pty-host flag after `--` as a spawn', async () => {
+      await runCliEntry([
+        '-p',
+        'x',
+        '--',
+        INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+        '/path/to/launch.json',
+        '/path/to/pty-host.sock',
+      ]);
+
+      expect(mocks.runAgentViewPtyHostProcess).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
     it('scrubs the Guard token before either intercept can spawn a child', async () => {

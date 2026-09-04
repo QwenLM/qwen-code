@@ -24,6 +24,7 @@ import {
 } from './config/top-level-options.js';
 import {
   BACKGROUND_FLAG,
+  INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
   INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
 } from './agent-view/entry-flags.js';
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
@@ -221,15 +222,18 @@ function writeStdoutLine(line: string): void {
   process.stdout.write(line.endsWith('\n') ? line : `${line}\n`);
 }
 
-function hasFlag(
+// The index of a flag in argv, or -1. The scan is value-slot-aware: a
+// flag-shaped token sitting in a preceding value-taking flag's value slot
+// is that flag's data and never matches.
+function flagIndex(
   argv: readonly string[],
   long: string,
   short: string,
-): boolean {
+): number {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
-      return false;
+      return -1;
     }
     // Base parity (mirrors hasVersionToken): the pre-PR scan skipped the
     // token after the base's hardcoded value flags unconditionally, even
@@ -240,10 +244,18 @@ function hasFlag(
     }
     i = skipOptionValues(argv, i);
     if (arg === long || arg === short) {
-      return true;
+      return i;
     }
   }
-  return false;
+  return -1;
+}
+
+function hasFlag(
+  argv: readonly string[],
+  long: string,
+  short: string,
+): boolean {
+  return flagIndex(argv, long, short) !== -1;
 }
 
 // True when argv carries a `-v`/`--version` token before any `--`.
@@ -610,14 +622,14 @@ export async function runCliEntry(
     return;
   }
 
-  // Agent View's two entry intercepts run only on the default route, and
-  // therefore only after the guard-token scrub above: the serve-only
-  // credential never reaches the supervisor they can spawn, and the
-  // version/help/subcommand routes keep their established behavior. Both
-  // scans stop at `--`, where the tokens are the user's own data — a
-  // `--bg` or a supervisor flag passed as a prompt word must not hijack
-  // the launch. The dynamic import stays gated on the raw-argv scan so an
-  // ordinary launch pays nothing.
+  // Agent View's three entry intercepts run only on the default route,
+  // and therefore only after the guard-token scrub above: the serve-only
+  // credential never reaches the supervisor or the PTY host they can
+  // spawn, and the version/help/subcommand routes keep their established
+  // behavior. Every scan stops at `--`, where the tokens are the user's
+  // own data — a `--bg` or an internal flag passed as a prompt word must
+  // not hijack the launch. The dynamic imports stay gated on the raw-argv
+  // scans so an ordinary launch pays nothing.
   if (route === 'default') {
     const separator = rawArgv.indexOf('--');
     const routableArgv =
@@ -626,10 +638,10 @@ export async function runCliEntry(
     // This process may have been spawned to BE the Agent View supervisor.
     // The flag that says so is internal — the strict parser below would
     // reject it, which is why the supervisor never served. The scan is
-    // value-slot-aware (hasFlag's BASE_VALUE_FLAGS/skipOptionValues skips):
-    // the flag typed as a preceding value-taking flag's value — `qwen -p
-    // --internal-agent-view-supervisor` — is data, not a spawn. The
-    // sole-token argv the supervisor spawner actually produces still
+    // value-slot-aware (flagIndex's BASE_VALUE_FLAGS/skipOptionValues
+    // skips): the flag typed as a preceding value-taking flag's value —
+    // `qwen -p --internal-agent-view-supervisor` — is data, not a spawn.
+    // The sole-token argv the supervisor spawner actually produces still
     // routes here.
     if (
       hasFlag(
@@ -643,6 +655,35 @@ export async function runCliEntry(
       );
       await runAsAgentViewSupervisor();
       return;
+    }
+
+    // This process may have been spawned by the supervisor's dispatch RPC
+    // to BE a session's PTY host: `node <entry>
+    // --internal-agent-view-pty-host <launchPath> <socketPath>`, with the
+    // host's identity riding the environment (PTY_HOST_AUTH_TOKEN_ENV /
+    // PTY_HOST_ID_ENV), not the argv. Same shape of problem as the
+    // supervisor flag above — internal, rejected by the strict parser, so
+    // the spawn must be picked up here before parsing, or the host exits
+    // on 'Unknown arguments' and every --bg launch fails to start a
+    // session. The two tokens after the flag are the launch record and
+    // the socket to serve; a spawn that lacks them falls through to the
+    // parser, which rejects the flag. The scan is value-slot-aware like
+    // its twin above.
+    const ptyHostFlag = flagIndex(
+      routableArgv,
+      INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+      INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+    );
+    if (ptyHostFlag !== -1) {
+      const launchPath = routableArgv[ptyHostFlag + 1];
+      const socketPath = routableArgv[ptyHostFlag + 2];
+      if (launchPath !== undefined && socketPath !== undefined) {
+        const { runAgentViewPtyHostProcess } = await import(
+          './agent-view/pty-host-process.js'
+        );
+        await runAgentViewPtyHostProcess({ launchPath, socketPath });
+        return;
+      }
     }
 
     // `--bg` needs a prompt and a directory, nothing else the interactive
