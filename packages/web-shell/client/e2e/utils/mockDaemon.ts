@@ -59,6 +59,12 @@ export interface WebShellDaemonScenario {
   currentModel: string;
   currentMode: string;
   capabilities: DaemonCapabilities;
+  /** Extra fields merged into `GET /session/:id/supported-commands`. */
+  supportedCommands?: Record<string, unknown>;
+  /** Tasks returned by `GET /session/:id/tasks` (workflow snapshots included). */
+  workflowTasks?: unknown[];
+  /** Definitions served by `GET /session/:id/saved-workflows/:name`, keyed by name. */
+  savedWorkflowDetails?: Record<string, Record<string, unknown>>;
   providers: DaemonWorkspaceProvidersStatus;
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
@@ -428,6 +434,9 @@ export function createWebShellDaemonScenario(
     events: overrides.events ?? [],
     state,
     contextDelayMs: overrides.contextDelayMs,
+    supportedCommands: overrides.supportedCommands,
+    workflowTasks: overrides.workflowTasks,
+    savedWorkflowDetails: overrides.savedWorkflowDetails,
     providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
     workspaceFiles: overrides.workspaceFiles ?? {},
@@ -754,6 +763,8 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/goal\/?$/.test(path) ||
     /^\/session\/[^/]+\/status\/?$/.test(path) ||
+    /^\/session\/[^/]+\/tasks\/?$/.test(path) ||
+    /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-messages(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
@@ -990,8 +1001,10 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   return (
-    method === 'GET' &&
-    /^\/session\/[^/]+\/(context|supported-commands)\/?$/.test(path)
+    (method === 'GET' &&
+      /^\/session\/[^/]+\/(context|supported-commands|tasks)\/?$/.test(path)) ||
+    (method === 'GET' &&
+      /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path))
   );
 }
 
@@ -1934,6 +1947,26 @@ async function handleDaemonRoute(
         sessionId,
         availableCommands: [],
         availableSkills: [],
+        ...(scenario.supportedCommands ?? {}),
+      });
+      return;
+    }
+    if (action === 'tasks') {
+      await json(route, {
+        v: 1,
+        sessionId,
+        now: Date.now(),
+        tasks: scenario.workflowTasks ?? [],
+      });
+      return;
+    }
+    if (action === 'saved-workflows') {
+      const detail = scenario.savedWorkflowDetails?.[extra];
+      await json(route, {
+        v: 1,
+        sessionId,
+        name: extra,
+        workflow: detail ? { v: 1, sessionId, name: extra, ...detail } : null,
       });
       return;
     }

@@ -100,6 +100,7 @@ import {
   gradeActiveWorkCoverage,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
@@ -3411,6 +3412,25 @@ describe('createAcpSessionBridge', () => {
                 ],
               };
             }
+            if (method === 'qwen/status/session/resources') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                workspaceCwd: WS_A,
+                skills: {
+                  v: 1,
+                  workspaceCwd: WS_A,
+                  initialized: true,
+                  skills: [],
+                },
+                mcp: {
+                  v: 1,
+                  workspaceCwd: WS_A,
+                  initialized: true,
+                  servers: [],
+                },
+              };
+            }
             return {
               v: 1,
               sessionId: params['sessionId'],
@@ -3459,11 +3479,20 @@ describe('createAcpSessionBridge', () => {
         },
       ],
     });
+    await expect(
+      bridge.getSessionResourcesStatus(session.sessionId),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      workspaceCwd: WS_A,
+      skills: { initialized: true, skills: [] },
+      mcp: { initialized: true, servers: [] },
+    });
     expect(handles[0]?.agent.extMethodCalls.map((c) => c.method)).toEqual([
       'qwen/status/session/context',
       'qwen/status/session/supported_commands',
       'qwen/status/session/tasks',
       'qwen/status/session/lsp',
+      'qwen/status/session/resources',
     ]);
     expect(handles[0]?.agent.extMethodCalls[2]?.params).toMatchObject({
       sessionId: session.sessionId,
@@ -3841,6 +3870,80 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('gets turn-index pages through workspace status without creating a session', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                snapshot: 'snapshot-1',
+                totalTurns: 1,
+                start: 0,
+                turns: [
+                  {
+                    ordinal: 0,
+                    turnId: 'record-1',
+                    kind: 'prompt',
+                    label: 'hello',
+                  },
+                ],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.getSessionTurnIndexPage({
+      sessionId: 'session-1',
+      snapshot: 'snapshot-1',
+      start: 0,
+      limit: 2,
+    });
+
+    expect(result).toEqual({
+      v: 1,
+      sessionId: 'session-1',
+      snapshot: 'snapshot-1',
+      totalTurns: 1,
+      start: 0,
+      turns: [
+        {
+          ordinal: 0,
+          turnId: 'record-1',
+          kind: 'prompt',
+          label: 'hello',
+        },
+      ],
+    });
+    expect(handles[0]?.agent.extMethodCalls).toEqual([
+      {
+        method: SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+        params: {
+          cwd: WS_A,
+          sessionId: 'session-1',
+          snapshot: 'snapshot-1',
+          start: 0,
+          limit: 2,
+        },
+      },
+    ]);
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
+    expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
   it('times out transcript page status requests', async () => {
     vi.useFakeTimers();
     try {
@@ -3859,6 +3962,41 @@ describe('createAcpSessionBridge', () => {
       });
 
       const request = bridge.getSessionTranscriptPage({
+        sessionId: 'session-1',
+      });
+      const rejection =
+        // eslint-disable-next-line vitest/valid-expect -- awaited via `rejection` below, after the fake timers advance (handler attached early so the timeout rejection is not unhandled)
+        expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+      await callSeen.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await rejection;
+      expect(handle.agent.extMethodCalls).toHaveLength(1);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('times out turn-index page status requests', async () => {
+    vi.useFakeTimers();
+    try {
+      const callSeen = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+            callSeen.resolve();
+            return new Promise<never>(() => {});
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const request = bridge.getSessionTurnIndexPage({
         sessionId: 'session-1',
       });
       const rejection =
@@ -3917,6 +4055,27 @@ describe('createAcpSessionBridge', () => {
     ).rejects.toMatchObject({
       name: 'SessionNotFoundError',
       sessionId: 'missing-transcript',
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('maps a missing turn-index session (resourceNotFound) to SessionNotFoundError', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+          throw RequestError.resourceNotFound('session:missing-turn-index');
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await expect(
+      bridge.getSessionTurnIndexPage({ sessionId: 'missing-turn-index' }),
+    ).rejects.toMatchObject({
+      name: 'SessionNotFoundError',
+      sessionId: 'missing-turn-index',
     });
 
     await bridge.shutdown();
@@ -4609,6 +4768,12 @@ describe('createAcpSessionBridge', () => {
     await expect(bridge.getSessionLspStatus('missing')).rejects.toBeInstanceOf(
       SessionNotFoundError,
     );
+    await expect(
+      bridge.getSessionResourcesStatus('missing'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(
+      bridge.getSessionSavedWorkflow('missing', 'deep-review'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
   });
 
   it('reuses an echoed daemon-issued client id on attach', async () => {
@@ -4831,6 +4996,7 @@ describe('createAcpSessionBridge', () => {
     const loaded = await bridge.loadSession({
       sessionId: 'persisted-1',
       workspaceCwd: WS_A,
+      suppressWorktreeContextRestore: true,
     });
 
     expect(loaded).toEqual({
@@ -4848,7 +5014,9 @@ describe('createAcpSessionBridge', () => {
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
       {
-        _meta: {},
+        _meta: {
+          [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+        },
         sessionId: 'persisted-1',
         cwd: WS_A,
         mcpServers: [],
@@ -9132,6 +9300,7 @@ describe('createAcpSessionBridge', () => {
     const resumed = await bridge.resumeSession({
       sessionId: 'persisted-2',
       workspaceCwd: WS_A,
+      suppressWorktreeContextRestore: true,
     });
 
     expect(resumed).toEqual({
@@ -9147,7 +9316,14 @@ describe('createAcpSessionBridge', () => {
     });
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toEqual([
-      { _meta: {}, sessionId: 'persisted-2', cwd: WS_A, mcpServers: [] },
+      {
+        _meta: {
+          [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+        },
+        sessionId: 'persisted-2',
+        cwd: WS_A,
+        mcpServers: [],
+      },
     ]);
 
     await bridge.shutdown();
@@ -14213,6 +14389,148 @@ describe('createAcpSessionBridge', () => {
           'qwen.daemon.restoreAskUserQuestion'
         ],
       ).toBe(true);
+      await bridge.shutdown();
+    });
+
+    it('defers a tracked restore prompt until the daemon integrity gate admits it', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.loadSession({
+        sessionId: 'persisted-auq-deferred',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      expect(restored.hasActivePrompt).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(true);
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(false);
+      await bridge.shutdown();
+    });
+
+    it('discards a deferred restore prompt rejected by the daemon integrity gate', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.loadSession({
+        sessionId: 'persisted-auq-discarded',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      bridge.discardDeferredRestoreAskUserQuestionPrompt?.(
+        restored.sessionId,
+        restored.clientId,
+      );
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
+    it('defers a tracked resume prompt until the daemon integrity gate admits it', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        resumeSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: 'persisted-auq-resume-deferred',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      expect(restored.hasActivePrompt).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(true);
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      await bridge.shutdown();
+    });
+
+    it('discards a deferred resume prompt rejected by the daemon integrity gate', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        resumeSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: 'persisted-auq-resume-discarded',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      bridge.discardDeferredRestoreAskUserQuestionPrompt?.(
+        restored.sessionId,
+        restored.clientId,
+      );
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
       await bridge.shutdown();
     });
 
