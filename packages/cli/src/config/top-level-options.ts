@@ -203,7 +203,7 @@ export const DEFAULT_COMMAND_OPTIONS = {
   bg: {
     type: 'boolean' as const,
     description:
-      'Experimental. Run the prompt as a background session owned by a supervisor, and return immediately. List them with `qwen sessions ps`.',
+      'Experimental. Run the prompt as a background session owned by a supervisor, returning once the worker has started. List them with `qwen sessions ps`.',
   },
   'system-prompt': {
     type: 'string' as const,

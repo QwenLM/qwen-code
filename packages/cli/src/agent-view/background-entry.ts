@@ -8,9 +8,11 @@
  * The two entry points that make an Agent View session actually start.
  *
  * Everything below the entry already ships: `ensureAgentViewSupervisor`
- * starts or finds the supervisor, `dispatchAgentViewSession` records a
- * session for it to spawn, and the supervisor owns the worker from there.
- * What was missing is the pair of wires at the CLI entry:
+ * starts or finds the supervisor, and the supervisor's `dispatch` RPC is
+ * the one path that records a session AND spawns its worker — every spawn
+ * site lives inside the supervisor's RPC handlers, so writing the store
+ * directly would record a session nothing ever starts. What was missing
+ * is the pair of wires at the CLI entry:
  *
  * - the supervisor spawns itself as
  *   `qwen --internal-agent-view-supervisor`, and nothing parsed that
@@ -59,14 +61,16 @@ export type BackgroundPromptRead =
  *
  * `--bg` is a boolean and takes its prompt where the default command
  * takes it — as the trailing positional query — so `qwen --bg "audit the
- * release"` reads like the interactive form. Everything after `--` is the
- * user's own data and is never scanned, so a `--bg` passed as a prompt
- * word declines.
+ * release"` reads like the interactive form. Tokens after `--` are the
+ * user's own data: they are never scanned for flags — a `--bg` passed as
+ * a prompt word declines — but they are collected as prompt words,
+ * matching yargs' positional-after-`--` semantics. That collection is the
+ * only way to express a prompt that starts with `-`.
  *
- * Any other flag declines too, named: `--bg` forwards nothing to the
- * session (the worker argv carries only the session id and the prompt),
- * so silently dropping the flag would run the session without the
- * behavior it asks for — and a hand-rolled scan of which flags take
+ * Any other flag before `--` declines too, named: `--bg` forwards nothing
+ * to the session (the worker argv carries only the session id and the
+ * prompt), so silently dropping the flag would run the session without
+ * the behavior it asks for — and a hand-rolled scan of which flags take
  * values misreads the value slots of the ones it cannot model as prompt
  * words. A flag added later cannot silently start leaking into prompts.
  */
@@ -85,6 +89,11 @@ export function readBackgroundPrompt(
       return { unsupportedFlag: eq === -1 ? token : token.slice(0, eq) };
     }
     words.push(token);
+  }
+  // Data after `--`: collected verbatim, dash-led tokens included, so a
+  // prompt like `-repro` has a spelling.
+  if (separator !== -1) {
+    words.push(...rawArgv.slice(separator + 1));
   }
   return { prompt: words.join(' ').trim() };
 }
@@ -107,17 +116,20 @@ export async function runBackgroundDispatch(
     return 1;
   }
 
-  const [{ ensureAgentViewSupervisor }, { dispatchAgentViewSession }] =
-    await Promise.all([
-      import('./supervisor-runner.js'),
-      import('./supervisor-dispatch.js'),
-    ]);
+  const { ensureAgentViewSupervisor } = await import('./supervisor-runner.js');
 
   try {
-    // The supervisor is what spawns and then owns the worker. Dispatching
-    // without one would record a session nothing ever starts.
-    await ensureAgentViewSupervisor();
-    const { sessionId } = await dispatchAgentViewSession(prompt, cwd);
+    // Route through the supervisor's dispatch RPC: it is the one path that
+    // records the session AND spawns its worker — it writes the store with
+    // the supervisor's sideband endpoint, launches the pty host, waits for
+    // the worker to come up, and answers with the session id. Writing the
+    // store directly (dispatchAgentViewSession) would record a session
+    // nothing ever starts. The ready-wait means this can block while the
+    // worker starts; the returned session id is the output contract.
+    const supervisor = await ensureAgentViewSupervisor();
+    const { sessionId } = (await supervisor.dispatch(prompt, cwd)) as {
+      sessionId: string;
+    };
     writeStdoutLine(`Started background session ${sessionId}`);
     writeStdoutLine('See it with: qwen sessions ps');
     return 0;

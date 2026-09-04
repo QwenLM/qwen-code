@@ -1095,6 +1095,16 @@ describe('runCliEntry', () => {
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
+    it('does not treat the supervisor flag as a value-taking flag’s value', async () => {
+      // `qwen -p --internal-agent-view-supervisor`: the flag sits in the
+      // prompt value slot, so it is data, not a spawn — hijacking here
+      // bound the supervisor socket and served silently until killed.
+      await runCliEntry(['-p', INTERNAL_AGENT_VIEW_SUPERVISOR_ARG]);
+
+      expect(mocks.runAsAgentViewSupervisor).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
     it('dispatches a background session and reports its exit code', async () => {
       mocks.runBackgroundDispatch.mockResolvedValue(0);
 
@@ -1104,6 +1114,24 @@ describe('runCliEntry', () => {
         'audit the release',
       );
       expect(process.exitCode).toBe(0);
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('reads the --bg prompt from the normalized argv, not an entrypoint path token', async () => {
+      // A launch carrying the bundled entrypoint as its first token is
+      // normalized before the gate; the prompt reader must read the same
+      // array, or the path itself becomes the first prompt word.
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry([
+        '/repo/dist/cli.js',
+        BACKGROUND_FLAG,
+        'audit the release',
+      ]);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith(
+        'audit the release',
+      );
       expect(mocks.main).not.toHaveBeenCalled();
     });
 

@@ -556,8 +556,19 @@ export async function runCliEntry(
 
     // This process may have been spawned to BE the Agent View supervisor.
     // The flag that says so is internal — the strict parser below would
-    // reject it, which is why the supervisor never served.
-    if (routableArgv.includes(INTERNAL_AGENT_VIEW_SUPERVISOR_ARG)) {
+    // reject it, which is why the supervisor never served. The scan is
+    // value-slot-aware (hasFlag's BASE_VALUE_FLAGS/skipOptionValues skips):
+    // the flag typed as a preceding value-taking flag's value — `qwen -p
+    // --internal-agent-view-supervisor` — is data, not a spawn. The
+    // sole-token argv the supervisor spawner actually produces still
+    // routes here.
+    if (
+      hasFlag(
+        routableArgv,
+        INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+        INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+      )
+    ) {
       const { runAsAgentViewSupervisor } = await import(
         './agent-view/background-entry.js'
       );
@@ -579,7 +590,10 @@ export async function runCliEntry(
       const { readBackgroundPrompt, runBackgroundDispatch } = await import(
         './agent-view/background-entry.js'
       );
-      const read = readBackgroundPrompt(rawArgv);
+      // Read from the normalized argv, the same array the gate above
+      // trusts: a launch carrying the bundled entrypoint as its first
+      // token must not dispatch that path as the first prompt word.
+      const read = readBackgroundPrompt(argv);
       if (read !== undefined) {
         if ('prompt' in read) {
           process.exitCode = await runBackgroundDispatch(read.prompt);

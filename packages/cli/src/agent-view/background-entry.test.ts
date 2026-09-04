@@ -7,6 +7,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const ensureAgentViewSupervisor = vi.fn();
+const supervisorDispatch = vi.fn();
 const dispatchAgentViewSession = vi.fn();
 
 vi.mock('./supervisor-runner.js', () => ({
@@ -38,7 +39,13 @@ const { BACKGROUND_FLAG } = await import('./entry-flags.js');
 beforeEach(() => {
   stdout.length = 0;
   stderr = [];
-  ensureAgentViewSupervisor.mockReset().mockResolvedValue(undefined);
+  supervisorDispatch
+    .mockReset()
+    .mockResolvedValue({ sessionId: 'sess-abc', state: 'created' });
+  // The handle the entry gets back must carry the dispatch RPC.
+  ensureAgentViewSupervisor
+    .mockReset()
+    .mockResolvedValue({ dispatch: supervisorDispatch });
   dispatchAgentViewSession
     .mockReset()
     .mockResolvedValue({ sessionId: 'sess-abc', state: 'created' });
@@ -105,27 +112,49 @@ describe('readBackgroundPrompt', () => {
     ).toEqual({ unsupportedFlag: '--model' });
   });
 
-  it('never reads past `--`, where the tokens are the user’s own data', () => {
+  it('declines a --bg that appears only after `--`', () => {
     // `qwen -p x -- --bg` passes `--bg` as data. Scanning past the
-    // separator would hijack that launch into a dispatch.
+    // separator for the flag would hijack that launch into a dispatch.
     expect(readBackgroundPrompt(['-p', 'x', '--', BACKGROUND_FLAG])).toBe(
       undefined,
     );
   });
 
+  it('collects the tokens after `--` as prompt data, dash-led included', () => {
+    // The only way to express a prompt that starts with `-`: before `--`
+    // it would decline as a flag, and silently dropping it (or letting a
+    // value-taking flag swallow its neighbor) would dispatch a modified
+    // task under a normal-looking success line.
+    expect(readBackgroundPrompt([BACKGROUND_FLAG, '--', '-repro'])).toEqual({
+      prompt: '-repro',
+    });
+    expect(
+      readBackgroundPrompt([BACKGROUND_FLAG, 'explain', '--', '-O2', 'flag']),
+    ).toEqual({ prompt: 'explain -O2 flag' });
+    expect(
+      readBackgroundPrompt([BACKGROUND_FLAG, 'summarize', '--', '-p', 'x']),
+    ).toEqual({ prompt: 'summarize -p x' });
+  });
+
   it('reports an empty prompt rather than guessing one', () => {
     expect(readBackgroundPrompt([BACKGROUND_FLAG])).toEqual({ prompt: '' });
+    expect(readBackgroundPrompt([BACKGROUND_FLAG, '--'])).toEqual({
+      prompt: '',
+    });
   });
 });
 
 describe('runBackgroundDispatch', () => {
-  it('starts the supervisor before recording the session', async () => {
-    // Dispatching without a supervisor records a session nothing spawns.
+  it('starts the session through the supervisor dispatch RPC, not a raw store write', async () => {
+    // The dispatch RPC is the one path that records the session AND spawns
+    // its worker; a direct dispatchAgentViewSession write records a session
+    // nothing ever starts.
     const order: string[] = [];
     ensureAgentViewSupervisor.mockImplementation(async () => {
       order.push('ensure');
+      return { dispatch: supervisorDispatch };
     });
-    dispatchAgentViewSession.mockImplementation(async () => {
+    supervisorDispatch.mockImplementation(async () => {
       order.push('dispatch');
       return { sessionId: 'sess-abc', state: 'created' };
     });
@@ -134,15 +163,23 @@ describe('runBackgroundDispatch', () => {
 
     expect(code).toBe(0);
     expect(order).toEqual(['ensure', 'dispatch']);
-    expect(dispatchAgentViewSession).toHaveBeenCalledWith(
+    expect(supervisorDispatch).toHaveBeenCalledWith(
       'audit the release',
       '/w/app',
     );
+    expect(dispatchAgentViewSession).not.toHaveBeenCalled();
   });
 
-  it('prints the session id and where to see it', async () => {
+  it('prints the session id the dispatch RPC returns, and where to see it', async () => {
+    supervisorDispatch.mockResolvedValue({
+      sessionId: 'sess-rpc',
+      state: 'created',
+    });
+
     await runBackgroundDispatch('audit', '/w/app');
-    expect(stdout[0]).toContain('sess-abc');
+
+    expect(supervisorDispatch).toHaveBeenCalledWith('audit', '/w/app');
+    expect(stdout[0]).toContain('sess-rpc');
     expect(stdout.join('\n')).toContain('qwen sessions ps');
   });
 
@@ -151,6 +188,7 @@ describe('runBackgroundDispatch', () => {
     expect(code).toBe(1);
     expect(stderr.join('')).toContain('needs a prompt');
     expect(ensureAgentViewSupervisor).not.toHaveBeenCalled();
+    expect(supervisorDispatch).not.toHaveBeenCalled();
     expect(dispatchAgentViewSession).not.toHaveBeenCalled();
   });
 
@@ -167,13 +205,15 @@ describe('runBackgroundDispatch', () => {
     expect(stderr.join('')).toBe(
       'Could not start a background session: EADDRINUSE: supervisor socket in use\n',
     );
+    expect(supervisorDispatch).not.toHaveBeenCalled();
     expect(dispatchAgentViewSession).not.toHaveBeenCalled();
   });
 
   it('reports a failed dispatch the same way', async () => {
-    dispatchAgentViewSession.mockRejectedValue(new Error('prompt too large'));
+    supervisorDispatch.mockRejectedValue(new Error('prompt too large'));
     const code = await runBackgroundDispatch('audit', '/w/app');
     expect(code).toBe(1);
     expect(stderr.join('')).toContain('prompt too large');
+    expect(dispatchAgentViewSession).not.toHaveBeenCalled();
   });
 });
