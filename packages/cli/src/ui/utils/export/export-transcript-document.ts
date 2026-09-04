@@ -1105,7 +1105,7 @@ class ExportBudget {
       bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
       this.totalRasterBytes + bytes >
         EXPORT_TRANSCRIPT_LIMITS_V1.maxTotalRasterBytes ||
-      (image.mimeType === 'image/gif' && isAnimatedGif(image.data))
+      !hasRasterSignature(image.data, image.mimeType)
     ) {
       this.truncated = true;
       this.diagnostics.add('image_budget_or_animation_rejected', 'warning');
@@ -1614,7 +1614,8 @@ function assertResourceBudgets(value: unknown): void {
           bytes === undefined ||
           bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
           entry !== canonical ||
-          (image?.mimeType === 'image/gif' && isAnimatedGif(image.data))
+          !image ||
+          !hasRasterSignature(image.data, image.mimeType)
         ) {
           throw new ExportTranscriptDocumentError('invalid_thumbnail_image');
         }
@@ -1652,7 +1653,7 @@ function assertResourceBudgets(value: unknown): void {
               !image ||
               imageBytes === undefined ||
               imageBytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
-              (image.mimeType === 'image/gif' && isAnimatedGif(image.data))
+              !hasRasterSignature(image.data, image.mimeType)
             ) {
               throw new ExportTranscriptDocumentError('invalid_markdown_image');
             }
@@ -1681,7 +1682,7 @@ function assertResourceBudgets(value: unknown): void {
         bytes === undefined ||
         bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
         !SAFE_RASTER_MIME_TYPES.has(entry['mimeType']) ||
-        (entry['mimeType'] === 'image/gif' && isAnimatedGif(entry['data']))
+        !hasRasterSignature(entry['data'], entry['mimeType'])
       ) {
         throw new ExportTranscriptDocumentError('raster_budget_exceeded');
       }
@@ -1721,6 +1722,12 @@ function isMarkdownExportText(
 
 function normalizeNavigableUrl(value: string): string | undefined {
   if (value.startsWith('#')) return value;
+  // WHATWG URL repairs an empty authority by treating the first path segment
+  // as a host, which would erase evidence of a local home path.
+  const urlInput = value.trim().replace(/[\t\r\n]/g, '');
+  if (/^https?:/i.test(urlInput) && !/^https?:\/\/[^/?#\\]/i.test(urlInput)) {
+    return undefined;
+  }
   if (value.startsWith('/') && !value.startsWith('//')) {
     if (value.includes('\\')) return undefined;
     const queryIndex = value.search(/[?#]/);
@@ -1964,8 +1971,8 @@ const EXPORT_URL_PATTERN =
   /\b(?:https?:\/\/[^\s<>"\x60]+|data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/gi;
 const HOME_USERNAME_SEGMENT_SOURCE = String.raw`(?:[^/\\\t\r\n<>]+(?=[/\\])|[^/\\\s<>]+)`;
 const FILE_HOME_PATH_SOURCE = String.raw`file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*${HOME_USERNAME_SEGMENT_SOURCE}`;
-const LOCAL_HOME_PATH_SOURCE = String.raw`(?:[A-Za-z]:)?(?:[\\/](?:\.[\\/]|[\\/])*)+(?:home|Users)[\\/](?:\.[\\/]|[\\/])*${HOME_USERNAME_SEGMENT_SOURCE}`;
-const BARE_HOME_ROOT_SOURCE = String.raw`(?:[A-Za-z]:)?(?:[\\/](?:\.[\\/]|[\\/])*)+(?:home|Users)[\\/](?=$|\s|[<>"'\x60,;:|()](?=\s|$))`;
+const LOCAL_HOME_PATH_SOURCE = String.raw`(?:[A-Za-z]:)?[\\/](?:\.[\\/]|[\\/])*(?:home|Users)[\\/](?:\.[\\/]|[\\/])*${HOME_USERNAME_SEGMENT_SOURCE}`;
+const BARE_HOME_ROOT_SOURCE = String.raw`(?:[A-Za-z]:)?[\\/](?:\.[\\/]|[\\/])*(?:home|Users)[\\/](?=$|\s|[<>"'\x60,;:|()](?=\s|$))`;
 const RELATIVE_HOME_PATH_SOURCE = String.raw`(^|[\r\n])(?:home|Users)[\\/](?:\.[\\/]|[\\/])*${HOME_USERNAME_SEGMENT_SOURCE}`;
 const RELATIVE_HOME_ROOT_SOURCE = String.raw`(^|[\r\n])(?:home|Users)[\\/](?=$|\s|[<>"'\x60,;:|()](?=\s|$))`;
 const FILE_HOME_PATH_PATTERN = new RegExp(FILE_HOME_PATH_SOURCE, 'gi');
@@ -2014,12 +2021,22 @@ function redactHomePathStructures(value: string): HomeRedactionResult {
 
 function shouldOmitHttpUrlToken(value: string): boolean {
   const authority = /^https?:\/\/([^/?#]*)/i.exec(value)?.[1];
+  if (authority === undefined) return false;
+  const decoded = decodePercentText(value);
+  const decodedAuthority = decodePercentText(authority);
+  if (
+    decoded === undefined ||
+    decodedAuthority === undefined ||
+    containsRawHomePath(decodedAuthority)
+  ) {
+    return true;
+  }
   return (
-    authority !== undefined &&
-    (hasAmbiguousUrlHomePath(value) ||
-      ((normalizeNavigableUrl(value) === undefined ||
-        /[(),;|'\\]/.test(authority)) &&
-        containsNonHttpHomePath(value, true)))
+    hasAmbiguousUrlHomePath(decoded) ||
+    ((authority === '' ||
+      normalizeNavigableUrl(value) === undefined ||
+      /[(),;|'\\]/.test(authority)) &&
+      containsNonHttpHomePath(value, true))
   );
 }
 
@@ -2227,6 +2244,21 @@ function decodedBase64Bytes(value: string): number | undefined {
   }
   const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
   return (value.length / 4) * 3 - padding;
+}
+
+function hasRasterSignature(data: string, mimeType: string): boolean {
+  if (mimeType === 'image/gif') return !isAnimatedGif(data);
+  const header = atob(data.slice(0, 16));
+  switch (mimeType) {
+    case 'image/png':
+      return header.startsWith('\x89PNG\r\n\x1a\n');
+    case 'image/jpeg':
+      return header.startsWith('\xff\xd8\xff');
+    case 'image/webp':
+      return header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP';
+    default:
+      return false;
+  }
 }
 
 function isAnimatedGif(value: string): boolean {

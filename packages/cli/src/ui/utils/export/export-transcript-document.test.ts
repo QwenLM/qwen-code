@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
   assertExportTranscriptDocumentV1,
@@ -658,6 +659,9 @@ describe('ExportTranscriptDocumentV1', () => {
       'https://example.com./home/alice/notes.txt',
       'https://[::1]/home/alice/notes.txt',
       'https://example.com/report(2026)/home/alice/notes.txt',
+      'https://example.com/a%2Fhome%2Falice/notes',
+      'https://example.com/a%252Fhome%252Falice/notes',
+      'https://example.com/report%282026%29/home/alice/notes.txt',
     ];
     const document = createExportTranscriptDocumentV1(
       [
@@ -694,6 +698,247 @@ describe('ExportTranscriptDocumentV1', () => {
 
     expect(text).toBe(urls.join('\n'));
     expect(fetchUrls).toEqual(urls);
+  });
+
+  it.each([
+    'https://%2Fhome%2Falice@evil.com/x',
+    'https://%252Fhome%252Falice@evil.com/x',
+    'https://example.com/a%3Ffile=%2Fhome%2Falice/notes',
+    'http:///home/alice/secret.txt',
+    'https:///Users/alice/Desktop/key.pem',
+  ])('omits encoded or authority-less home URLs: %s', (url) => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('unsafe-url', null, {
+          message: { role: 'user', parts: [{ text: `See ${url}` }] },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+
+    expect(document.blocks[0]).toMatchObject({
+      kind: 'user',
+      text: 'See [link omitted]',
+    });
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'url_home_path_omitted',
+      severity: 'warning',
+      count: 1,
+    });
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        ...document,
+        blocks: [{ ...document.blocks[0], text: url }],
+      }),
+    ).toThrowError('home_path_forbidden');
+  });
+
+  it('marks undecidable URL encodings incomplete at the decode-pass limit', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('deep-url-encoding', null, {
+          message: {
+            role: 'user',
+            parts: [{ text: 'https://example.com/ordinary%25252520text' }],
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+
+    expect(document.blocks[0]).toMatchObject({ text: '[link omitted]' });
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'url_home_path_omitted',
+      severity: 'warning',
+      count: 1,
+    });
+  });
+
+  it('bounds repeated-separator checks in decoded URL authorities', () => {
+    const separators = '/'.repeat(40);
+    const input = record('repeated-separators', null, {
+      message: {
+        role: 'user',
+        parts: [
+          {
+            text: [
+              `https://${encodeURIComponent(separators)}@example.com/x`,
+              `${separators}home/alice/notes`,
+              `${separators}ordinary`,
+            ].join('\n'),
+          },
+        ],
+      },
+    });
+    const moduleUrl = new URL(
+      './export-transcript-document.ts',
+      import.meta.url,
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '--eval',
+        `import { createExportTranscriptDocumentV1 as create } from ${JSON.stringify(moduleUrl.href)};
+process.stdout.write(JSON.stringify(create(${JSON.stringify([input])}, ${JSON.stringify(sessionData)}, ${JSON.stringify(EXPORT_OPTIONS)})));`,
+      ],
+      { encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL' },
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain('alice');
+    expect(result.stdout).toContain('ordinary');
+  });
+
+  it.each(['image/png', 'image/jpeg', 'image/webp'])(
+    'rejects a base64 payload without its declared %s signature',
+    (mimeType) => {
+      const data = '/Users/alice';
+      const document = createExportTranscriptDocumentV1(
+        [
+          record('fake-image', null, {
+            message: {
+              role: 'user',
+              parts: [{ inlineData: { mimeType, data } }],
+            },
+          }),
+          record('fake-thumbnail', 'fake-image', {
+            type: 'assistant',
+            message: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'image-tool',
+                    name: 'dalle3_generate',
+                    args: {
+                      prompt: 'Image',
+                      thumbnailUrl: `data:${mimeType};base64,${data}`,
+                    },
+                  },
+                },
+              ],
+            },
+          }),
+        ],
+        sessionData,
+        EXPORT_OPTIONS,
+      );
+
+      expect(JSON.stringify(document)).not.toContain(data);
+      expect(document.blocks[0]).not.toHaveProperty('images');
+      expect(document.blocks[1]).not.toHaveProperty('preview.thumbnailUrl');
+      expect(document.metadata).toMatchObject({
+        complete: false,
+        truncated: true,
+      });
+      expect(document.diagnostics).toContainEqual(
+        expect.objectContaining({ code: 'image_budget_or_animation_rejected' }),
+      );
+      expect(() =>
+        assertExportTranscriptDocumentV1({
+          ...document,
+          blocks: [{ ...document.blocks[0], images: [{ mimeType, data }] }],
+        }),
+      ).toThrowError('raster_budget_exceeded');
+      expect(() =>
+        assertExportTranscriptDocumentV1({
+          ...document,
+          blocks: [
+            {
+              ...document.blocks[1],
+              preview: {
+                kind: 'image_generation',
+                prompt: 'Image',
+                thumbnailUrl: `data:${mimeType};base64,${data}`,
+              },
+            },
+          ],
+        }),
+      ).toThrowError('invalid_thumbnail_image');
+    },
+  );
+
+  it.each([
+    ['image/png', 'iVBORw0KGgo='],
+    ['image/jpeg', '/9j/'],
+    ['image/webp', 'UklGRgAAAABXRUJQ'],
+  ])(
+    'checks %s signatures without scanning binary data as text',
+    (mimeType, data) => {
+      const document = createExportTranscriptDocumentV1(
+        [
+          record('raster-signatures', null, {
+            message: {
+              role: 'user',
+              parts: [
+                { text: `![image](data:${mimeType};base64,${data})` },
+                { inlineData: { mimeType, data } },
+              ],
+            },
+          }),
+        ],
+        sessionData,
+        EXPORT_OPTIONS,
+      );
+      expect(document.blocks[0]).toMatchObject({
+        images: [{ mimeType, data }],
+      });
+      expect(document.metadata).toMatchObject({
+        complete: true,
+        truncated: false,
+      });
+      expect(() =>
+        assertExportTranscriptDocumentV1({
+          ...document,
+          blocks: [
+            {
+              ...document.blocks[0],
+              text: `![fake](data:${mimeType};base64,QUJD)`,
+            },
+          ],
+        }),
+      ).toThrowError('invalid_markdown_image');
+    },
+  );
+
+  it.each([
+    'http:///home/alice/secret.txt?download=1',
+    'http:/home/alice/secret.txt?download=1',
+    'https:\n///home/alice/secret.txt?download=1',
+  ])('rejects a missing authority before URL normalization: %s', (url) => {
+    const document = createExportTranscriptDocumentV1(
+      [record('empty-authority', null)],
+      {
+        ...sessionData,
+        metadata: { ...sessionData.metadata, gitRepo: url },
+      },
+      EXPORT_OPTIONS,
+    );
+
+    expect(document.metadata.repository).toBe('[link omitted]');
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual({
+      code: 'url_rejected',
+      severity: 'warning',
+      count: 1,
+    });
   });
 
   it('preserves parenthesized remote home paths in Markdown and repository URLs', () => {
@@ -933,9 +1178,11 @@ describe('ExportTranscriptDocumentV1', () => {
   });
 
   it('degrades instead of aborting when JSON escaping exceeds the envelope', () => {
-    const raster = 'A'.repeat(
-      Math.floor(EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes / 3) * 4,
-    );
+    const raster =
+      'iVBORw0KGgoA' +
+      'A'.repeat(
+        Math.floor(EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes / 3) * 4 - 12,
+      );
     const escapeDenseText = '<'.repeat(100_000);
     const records = Array.from({ length: 75 }, (_, index) =>
       record(
@@ -1772,7 +2019,7 @@ describe('ExportTranscriptDocumentV1', () => {
   });
 
   it('budgets image-generation thumbnails as raster data, not visible text', () => {
-    const thumbnailData = `/Users/alice${'A'.repeat(600 * 1024 - 12)}`;
+    const thumbnailData = `iVBORw0KGgoA/Users/alice${'A'.repeat(600 * 1024 - 24)}`;
     const thumbnailUrl = `data:IMAGE/PNG;base64,${thumbnailData}`;
     const document = createExportTranscriptDocumentV1(
       [
@@ -1907,7 +2154,7 @@ describe('ExportTranscriptDocumentV1', () => {
             updatedAt: 0,
             text: 'Safe image',
             streaming: false,
-            images: [{ data: '/home/AA', mimeType: 'image/png' }],
+            images: [{ data: 'iVBORw0KGgoA/home/AA', mimeType: 'image/png' }],
           },
         ],
       }),
