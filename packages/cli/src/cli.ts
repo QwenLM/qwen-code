@@ -710,7 +710,18 @@ export async function runCliEntry(
         firstPositionalIndex < backgroundFlag &&
         (TOP_LEVEL_COMMAND_NAMES.has(argv[firstPositionalIndex]!) ||
           lastPositionalArg(argv) === HELP_COMMAND);
-      if (!parserOwnsLaunch) {
+      // A `--help`/`-h` before `--` is parser-owned like a command
+      // entrance: base rendered help for every ordering of the pair
+      // (`--help --bg=x`, `--bg=x --help`), and the decline's advice —
+      // drop the flag, re-run — turned the help request into a
+      // dispatched session once followed. The scan is value-slot-aware
+      // like the gate's own, so a help token sitting in a value slot
+      // stays data. The fall-through lands on the FULL parser, not the
+      // help fast path: an attached `--bg=<prompt>` is outside the fast
+      // path's known-safe grammar (see argvSafeForFastPath), and the
+      // parser renders help even for the unregistered spelling.
+      const helpRequested = flagIndex(argv, '--help', '-h') !== -1;
+      if (!parserOwnsLaunch && !helpRequested) {
         const { readBackgroundPrompt, runBackgroundDispatch } = await import(
           './agent-view/background-entry.js'
         );

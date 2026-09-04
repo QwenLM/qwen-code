@@ -1327,6 +1327,26 @@ describe('runCliEntry', () => {
       expect(process.exitCode).toBe(1);
       expect(stderr.join('')).toContain('--yolo');
     });
+
+    it('leaves a --help launch with an attached --bg=<prompt> to the full parser', async () => {
+      // Base rendered help for every ordering of the pair. The attached
+      // spelling is outside the fast path's known-safe grammar, so the
+      // route stays `default` and the gate used to decline with exit 1 —
+      // advice that turns the help request into a dispatched session
+      // once followed. The launch must fall through to the FULL parser,
+      // never dispatch.
+      await runCliEntry(['--help', '--bg=audit']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves a -h launch with an attached --bg=<prompt> to the full parser', async () => {
+      await runCliEntry(['-h', '--bg=audit']);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('pins the --bg gate’s command surface to the registered command modules', async () => {
