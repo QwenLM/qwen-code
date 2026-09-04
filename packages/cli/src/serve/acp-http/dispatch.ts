@@ -283,6 +283,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
+  `${QWEN_METHOD_NS}session/tasks/output`,
   `${QWEN_METHOD_NS}session/tasks/cancel`,
   `${QWEN_METHOD_NS}session/tasks/workflow_action`,
   `${QWEN_METHOD_NS}session/lsp`,

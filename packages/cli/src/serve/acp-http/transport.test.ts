@@ -1556,6 +1556,18 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
   });
 
+  it('initialize advertises _qwen/session/tasks/output', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/session/tasks/output',
+    );
+  });
+
   it('session/new reply rides the connection-scoped stream', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);
