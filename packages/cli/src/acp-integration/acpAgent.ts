@@ -67,6 +67,7 @@ import {
   MCPOAuthProvider,
   MCPOAuthTokenStorage,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptReader,
@@ -412,6 +413,7 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_BYTES,
@@ -5081,6 +5083,10 @@ class QwenAgent implements Agent {
       (params._meta as Record<string, unknown> | null | undefined)?.[
         DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY
       ] === true;
+    const suppressWorktreeContextRestore =
+      (params._meta as Record<string, unknown> | null | undefined)?.[
+        DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY
+      ] === true;
     const withRestoreHint = <
       T extends { _meta?: Record<string, unknown> | null },
     >(
@@ -5470,7 +5476,7 @@ class QwenAgent implements Agent {
                 }
               }
               await profiler.time('post_replay_services', async () => {
-                if (!provisionalStandalone) {
+                if (!provisionalStandalone && !suppressWorktreeContextRestore) {
                   await this.#restoreWorktreeOnResume(config, createdSession);
                 }
                 await this.#restoreBackgroundAgentsOnResume(
@@ -5552,6 +5558,10 @@ class QwenAgent implements Agent {
     const suppressRestoreAskUserQuestion =
       (params._meta as Record<string, unknown> | null | undefined)?.[
         DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY
+      ] === true;
+    const suppressWorktreeContextRestore =
+      (params._meta as Record<string, unknown> | null | undefined)?.[
+        DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY
       ] === true;
     const withRestoreHint = <
       T extends { _meta?: Record<string, unknown> | null },
@@ -5689,7 +5699,7 @@ class QwenAgent implements Agent {
             },
             beforeStartPostReplayServices: async (createdSession) => {
               await profiler.time('post_replay_services', async () => {
-                if (!provisionalStandalone) {
+                if (!provisionalStandalone && !suppressWorktreeContextRestore) {
                   await this.#restoreWorktreeOnResume(config, createdSession);
                 }
                 await this.#restoreBackgroundAgentsOnResume(
@@ -8810,6 +8820,26 @@ class QwenAgent implements Agent {
             'Invalid transcript cursor',
           );
         }
+        const rawAtRecordId = params['atRecordId'];
+        if (
+          rawAtRecordId !== undefined &&
+          (typeof rawAtRecordId !== 'string' || rawAtRecordId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript turn anchor',
+          );
+        }
+        const rawSnapshot = params['snapshot'];
+        if (
+          rawSnapshot !== undefined &&
+          (typeof rawSnapshot !== 'string' || rawSnapshot.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript snapshot',
+          );
+        }
         const rawBeforeRecordId = params['beforeRecordId'];
         if (
           rawBeforeRecordId !== undefined &&
@@ -8821,7 +8851,12 @@ class QwenAgent implements Agent {
             'Invalid transcript record boundary',
           );
         }
-        if (rawCursor !== undefined && rawBeforeRecordId !== undefined) {
+        if (
+          rawCursor !== undefined &&
+          (rawBeforeRecordId !== undefined ||
+            rawAtRecordId !== undefined ||
+            rawSnapshot !== undefined)
+        ) {
           throw RequestError.invalidParams(
             undefined,
             'Transcript cursor and record boundary are mutually exclusive',
@@ -8844,6 +8879,27 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(
             undefined,
             'Transcript record boundary and direction are mutually exclusive',
+          );
+        }
+        if (
+          rawAtRecordId !== undefined &&
+          (rawBeforeRecordId !== undefined ||
+            rawDirection !== undefined ||
+            rawSnapshot === undefined)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Transcript turn anchor requires its snapshot and no other anchor',
+          );
+        }
+        if (
+          rawSnapshot !== undefined &&
+          rawAtRecordId === undefined &&
+          rawBeforeRecordId === undefined
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Transcript snapshot requires a record anchor',
           );
         }
         const rawLimit = params['limit'];
@@ -8876,6 +8932,12 @@ class QwenAgent implements Agent {
               ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
               ...(typeof rawBeforeRecordId === 'string'
                 ? { beforeRecordId: rawBeforeRecordId }
+                : {}),
+              ...(typeof rawAtRecordId === 'string'
+                ? { atRecordId: rawAtRecordId }
+                : {}),
+              ...(typeof rawSnapshot === 'string'
+                ? { snapshot: rawSnapshot }
                 : {}),
               ...(rawDirection === 'backward'
                 ? { direction: rawDirection }
@@ -8912,11 +8974,18 @@ class QwenAgent implements Agent {
               ...(replay.replayError !== undefined
                 ? { partial: true, replayError: replay.replayError }
                 : {}),
+              ...(page.targetRecordId
+                ? { targetRecordId: page.targetRecordId }
+                : {}),
+              ...(page.hasOlder !== undefined
+                ? { hasOlder: page.hasOlder }
+                : {}),
             } as Record<string, unknown>;
           });
         } catch (error) {
           if (
             error instanceof InvalidSessionTranscriptCursorError ||
+            error instanceof InvalidSessionTranscriptTurnAnchorError ||
             error instanceof RangeError
           ) {
             throw new RequestError(
@@ -8926,7 +8995,9 @@ class QwenAgent implements Agent {
                 errorKind:
                   error instanceof InvalidSessionTranscriptCursorError
                     ? 'invalid_transcript_cursor'
-                    : 'invalid_transcript_limit',
+                    : error instanceof InvalidSessionTranscriptTurnAnchorError
+                      ? 'invalid_turn_anchor'
+                      : 'invalid_transcript_limit',
               },
             );
           }
@@ -8953,7 +9024,116 @@ class QwenAgent implements Agent {
             });
           }
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-            if (typeof rawCursor === 'string') {
+            if (
+              typeof rawCursor === 'string' ||
+              typeof rawSnapshot === 'string'
+            ) {
+              throw new RequestError(
+                -32010,
+                `Transcript snapshot is unavailable for session ${sessionId}`,
+                {
+                  errorKind: 'transcript_snapshot_unavailable',
+                  sessionId,
+                },
+              );
+            }
+            throw RequestError.resourceNotFound(`session:${sessionId}`);
+          }
+          throw error;
+        }
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionTurnIndex: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const rawSnapshot = params['snapshot'];
+        if (
+          rawSnapshot !== undefined &&
+          (typeof rawSnapshot !== 'string' || rawSnapshot.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript snapshot',
+          );
+        }
+        const rawStart = params['start'];
+        if (
+          rawStart !== undefined &&
+          (!Number.isSafeInteger(rawStart) ||
+            (rawStart as number) < 0 ||
+            rawSnapshot === undefined)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript turn index start',
+          );
+        }
+        const rawLimit = params['limit'];
+        if (
+          rawLimit !== undefined &&
+          (!Number.isSafeInteger(rawLimit) ||
+            (rawLimit as number) < 1 ||
+            (rawLimit as number) > SESSION_TRANSCRIPT_MAX_LIMIT)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript limit',
+          );
+        }
+
+        try {
+          const settings = loadSettingsCached(cwd);
+          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+            if (rawSnapshot === undefined) {
+              await this.sessions
+                .get(sessionId)
+                ?.getConfig()
+                .getChatRecordingService()
+                ?.flush();
+            }
+            return (await new SessionTranscriptReader(cwd).readTurnIndexPage(
+              sessionId,
+              {
+                ...(typeof rawSnapshot === 'string'
+                  ? { snapshot: rawSnapshot }
+                  : {}),
+                ...(typeof rawStart === 'number' ? { start: rawStart } : {}),
+                ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+              },
+            )) as unknown as Record<string, unknown>;
+          });
+        } catch (error) {
+          if (
+            error instanceof InvalidSessionTranscriptCursorError ||
+            error instanceof RangeError
+          ) {
+            throw new RequestError(-32602, error.message, {
+              errorKind:
+                error instanceof InvalidSessionTranscriptCursorError
+                  ? 'invalid_transcript_cursor'
+                  : 'invalid_transcript_limit',
+            });
+          }
+          if (error instanceof SessionTranscriptSnapshotUnavailableError) {
+            throw new RequestError(-32010, error.message, {
+              errorKind: 'transcript_snapshot_unavailable',
+              sessionId,
+            });
+          }
+          if (error instanceof SessionTranscriptTooLargeError) {
+            throw new RequestError(-32011, error.message, {
+              errorKind: 'transcript_too_large',
+              sessionId,
+              snapshotSize: error.snapshotSize,
+              maxBytes: error.maxBytes,
+            });
+          }
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            if (typeof rawSnapshot === 'string') {
               throw new RequestError(
                 -32010,
                 `Transcript snapshot is unavailable for session ${sessionId}`,
