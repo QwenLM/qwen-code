@@ -257,16 +257,16 @@
   }
 }
 
-/* Status drives one accent, and the accent drives every edge treatment on the
-   node: the border, and the selection ring. Before this, status set
-   `border-color` while selection stacked an always-blue ring on top, so a
-   completed (green) or blocked (amber) node picked up a second border in a
-   clashing hue the moment it was selected. */
+/* Status now drives the left rule; the border stays neutral for every status
+   and the accent is left to mean selection. Tinting every border made a
+   healthy plan read as a wall of coloured boxes and left the one running node
+   with nothing to stand out against — the first thing a reader of an
+   execution trace looks for. The older hazard this replaces is still worth
+   knowing: status used to set `border-color` while selection stacked an
+   always-blue ring on top, so a completed or blocked node picked up a second
+   border in a clashing hue the moment it was selected. With status off the
+   border, the two can no longer collide. */
 .node {
-  /* The status tone is carried by the left rule below, not by the border.
-     Tinting every border made a healthy plan read as a wall of coloured
-     boxes and left the one running node with nothing to stand out against —
-     which is the first thing a reader of an execution trace looks for. */
   --node-accent: var(--border);
   --node-ring: var(--agent-blue-500);
   --node-rule: transparent;
@@ -478,6 +478,10 @@
   font-size: 11px;
 }
 
+/* `text-overflow` applies to a block container's own inline content, so
+   declaring it on the flex box did nothing — the title sat in an anonymous
+   flex item and was clipped without an ellipsis. The truncation belongs on
+   the title span, which is a real box. */
 .dependencyChip {
   display: inline-flex;
   max-width: 100%;
@@ -488,6 +492,13 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md, 6px);
   color: var(--foreground);
+  white-space: nowrap;
+}
+
+.dependencyChip .dependencyTitle,
+.dependencyLink .dependencyTitle {
+  overflow: hidden;
+  min-width: 0;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -513,7 +524,6 @@
   cursor: pointer;
   font-size: 11px;
   text-align: left;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

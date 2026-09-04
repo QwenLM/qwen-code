@@ -1364,7 +1364,9 @@ export function PlanExecutionView({
                                 <span>
                                   {(stepNumberByTodo.get(id) ?? 0) || '?'}
                                 </span>
-                                {todosById.get(id)?.content ?? id}
+                                <span className={styles.dependencyTitle}>
+                                  {todosById.get(id)?.content ?? id}
+                                </span>
                               </span>
                             ))}
                           </div>
@@ -1421,7 +1423,9 @@ export function PlanExecutionView({
                   type="button"
                 >
                   <span>{(stepNumberByTodo.get(id) ?? 0) || '?'}</span>
-                  {todosById.get(id)?.content ?? id}
+                  <span className={styles.dependencyTitle}>
+                    {todosById.get(id)?.content ?? id}
+                  </span>
                 </button>
               ))}
             </div>
@@ -1439,7 +1443,9 @@ export function PlanExecutionView({
                   type="button"
                 >
                   <span>{(stepNumberByTodo.get(id) ?? 0) || '?'}</span>
-                  {todosById.get(id)?.content ?? id}
+                  <span className={styles.dependencyTitle}>
+                    {todosById.get(id)?.content ?? id}
+                  </span>
                 </button>
               ))}
             </div>

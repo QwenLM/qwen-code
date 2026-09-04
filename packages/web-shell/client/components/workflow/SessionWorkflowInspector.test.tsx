@@ -193,6 +193,34 @@ describe('SessionWorkflowInspector', () => {
     act(() => upstream?.click());
     expect(onSelectedTodoIdChange).toHaveBeenCalledWith('prepare');
 
+    // Downstream too: the two directions render through the same helper but
+    // read from different sources (`blockedBy` vs the projection's
+    // `dependentsByTodo`), so covering one does not cover the other.
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={[]}
+            tasks={[]}
+            artifacts={[]}
+            selectedTodoId="prepare"
+            onSelectedTodoIdChange={onSelectedTodoIdChange}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    const downstream = container.querySelector<HTMLButtonElement>(
+      '[data-testid="workflow-dependency-ship"]',
+    );
+    expect(downstream?.textContent).toContain('2');
+    expect(downstream?.textContent).toContain('Ship result');
+    onSelectedTodoIdChange.mockClear();
+    act(() => downstream?.click());
+    expect(onSelectedTodoIdChange).toHaveBeenCalledWith('ship');
+
     act(() => root.unmount());
     container.remove();
   });

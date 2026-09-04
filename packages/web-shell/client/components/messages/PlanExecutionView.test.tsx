@@ -484,6 +484,13 @@ describe('PlanExecutionView', () => {
     expect(buildNode?.textContent).toContain('Build');
     expect(buildNode?.textContent).toContain('1 agent');
     expect(buildNode?.textContent).toContain('1m 5s');
+    // The singular branch above and the plural branch here are separate
+    // formatter paths; `1 agents` would ship green with only one of them.
+    const researchNode = container
+      .querySelector('[data-plan-node-id="research"]')
+      ?.closest('article');
+    expect(buildNode?.textContent).not.toContain('1 agents');
+    expect(researchNode?.textContent ?? '').not.toContain('1 agents');
     // Status is colour on the left rule, so it stays in the accessibility
     // tree as words rather than being dropped. Asserted on a node with no
     // linked agent, so the word can only come from the node's own status

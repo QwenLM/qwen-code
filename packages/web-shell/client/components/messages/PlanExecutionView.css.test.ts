@@ -54,6 +54,26 @@ describe('PlanExecutionView stylesheet', () => {
     );
   });
 
+  // `text-overflow` applies to a block container's own inline content, so
+  // declaring it on the inline-flex chip did nothing: the title sat in an
+  // anonymous flex item and was clipped with no ellipsis. jsdom computes no
+  // layout, so this is pinned at the source instead.
+  it('puts dependency truncation on the title, not the flex box', () => {
+    for (const name of ['dependencyChip', 'dependencyLink']) {
+      const rule = planCss.match(
+        new RegExp(`(^|\\n)\\.${name}\\s*\\{[^}]*\\}`),
+      )?.[0];
+      expect(rule).toBeTruthy();
+      expect(rule).toMatch(/display:\s*inline-flex/);
+      expect(rule).not.toMatch(/text-overflow/);
+    }
+    const title = planCss.match(
+      /\.dependencyChip\s+\.dependencyTitle,\s*\n\s*\.dependencyLink\s+\.dependencyTitle\s*\{[^}]*\}/,
+    )?.[0];
+    expect(title).toMatch(/text-overflow:\s*ellipsis/);
+    expect(title).toMatch(/min-width:\s*0/);
+  });
+
   it('narrows the DAG lane at two viewport steps', () => {
     // Three 240px lanes plus two 64px gutters exceed a phone viewport, so the
     // canvas scrolled in both axes at once and the horizontal scroll hid the
