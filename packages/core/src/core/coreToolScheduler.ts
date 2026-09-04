@@ -954,7 +954,7 @@ const createErrorResponse = (
 /**
  * Prefix of the model-visible error payload this scheduler produces for
  * cancelled tool calls (see createCancelledResponse and the auxiliary-cancel
- * path in `handleCancelToolCalls`). Exported so consumers that must
+ * path in the `'cancelled'` case of `setStatusInternal`). Exported so consumers that must
  * recognize cancellation payloads — the loop-detection error-repetition
  * guard (services/loopDetectionService.ts) — match the producer-owned
  * constant instead of re-declaring the literal (producer-owns-the-shape

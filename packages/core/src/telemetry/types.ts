@@ -523,8 +523,16 @@ export class LoopDetectedEvent implements BaseTelemetryEvent {
       this.error_signature = details.errorSignature;
     }
     if (details?.errorExcerpt !== undefined) {
-      // Truncate for telemetry (avoid shipping full tool payloads).
-      this.error_excerpt = details.errorExcerpt.slice(0, 200);
+      // Truncate for telemetry (avoid shipping full tool payloads). Drop a
+      // trailing lone high surrogate: the slice can split an astral
+      // character (emoji/CJK-extension text in tool output) straddling the
+      // 200-char cut, and strict UTF-8/JSON consumers reject an unpaired
+      // surrogate (same hazard fitText handles via its surrogate-safe
+      // slices, tools/tool-response-finalizer.ts).
+      const cut = details.errorExcerpt.slice(0, 200);
+      this.error_excerpt = /[\uD800-\uDBFF]$/.test(cut)
+        ? cut.slice(0, -1)
+        : cut;
     }
   }
 }
