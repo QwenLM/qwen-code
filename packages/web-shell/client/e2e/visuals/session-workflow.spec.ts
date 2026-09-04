@@ -5,7 +5,10 @@
  */
 
 import { expect, test } from '@playwright/test';
-import type { DaemonSettingDescriptor } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionAgentTaskStatus,
+  DaemonSettingDescriptor,
+} from '@qwen-code/sdk/daemon';
 import {
   assistantTextEvent,
   createWebShellDaemonScenario,
@@ -73,13 +76,16 @@ const todos = [
   ]),
 ];
 
-const agentTasks = [
+// Pinned to the SDK type so a reshape of the agent-task payload fails this
+// spec at compile time instead of silently degrading the capture (the graph
+// count assertions only guard the todo panel, not the task rendering).
+const agentTasks: DaemonSessionAgentTaskStatus[] = [
   {
-    kind: 'agent' as const,
+    kind: 'agent',
     id: 'task-readme',
     label: 'Explore',
     description: 'Reading README.md',
-    status: 'completed' as const,
+    status: 'completed',
     startTime: T0,
     endTime: T0 + s(18),
     runtimeMs: s(18),
@@ -92,11 +98,11 @@ const agentTasks = [
     ],
   },
   {
-    kind: 'agent' as const,
+    kind: 'agent',
     id: 'task-package',
     label: 'Explore',
     description: 'Reading package.json',
-    status: 'running' as const,
+    status: 'running',
     startTime: T0 + s(2),
     runtimeMs: s(74),
     isBackgrounded: true,
@@ -169,6 +175,12 @@ for (const theme of [
     // wrong nesting level render four nodes, zero edges and the flat layout,
     // which looks like a plausible graph until you count the lines.
     await expect(page.locator('[data-plan-edge]')).toHaveCount(3);
+    // Gate the capture on task-derived content: the counts above only guard
+    // the todo graph. A broken tool-call ↔ task linkage (e.g. a `toolUseId`
+    // drift) still renders the canvas but silently drops the runtime metric
+    // and the inspector's agent row. `1m 14s` is `formatRuntime(runtimeMs)`
+    // for the fixture's running task — locale-independent.
+    await expect(page.getByText('1m 14s')).toBeVisible();
     await captureScreenshot(page, `session-workflow-cockpit-${theme}`);
   });
 }
