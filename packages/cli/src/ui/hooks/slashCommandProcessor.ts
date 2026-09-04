@@ -129,6 +129,10 @@ const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
   'statusline',
 ]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+const QUIT_COMMAND_NAMES = [
+  quitCommand.name,
+  ...(quitCommand.altNames ?? []),
+];
 
 function shouldHideSlashCommandInvocation(
   command: SlashCommand | undefined,
@@ -898,16 +902,18 @@ export const useSlashCommandProcessor = (
         canonicalPath: resolvedCommandPath,
       } = parseSlashCommand(trimmed, commands);
 
-      if (
-        !commandToExecute &&
-        (trimmed === '/quit' || trimmed === '/exit') &&
-        !(config?.getDisabledSlashCommands() ?? []).some((name) =>
-          ['quit', 'exit'].includes(name.trim().toLowerCase()),
-        )
-      ) {
-        commandToExecute = quitCommand;
-        args = '';
-        resolvedCommandPath = ['quit'];
+      if (!commandToExecute) {
+        const fallback = parseSlashCommand(trimmed, [quitCommand]);
+        if (
+          fallback.commandToExecute &&
+          !(config?.getDisabledSlashCommands() ?? []).some((name) =>
+            QUIT_COMMAND_NAMES.includes(name.trim().toLowerCase()),
+          )
+        ) {
+          commandToExecute = fallback.commandToExecute;
+          args = fallback.args;
+          resolvedCommandPath = fallback.canonicalPath;
+        }
       }
 
       const recordedItems: HistoryItemWithoutId[] = [];

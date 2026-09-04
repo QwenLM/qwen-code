@@ -391,39 +391,42 @@ describe('useSlashCommandProcessor', () => {
   });
 
   describe('Command Execution Logic', () => {
-    it('should handle /quit while slash commands are still loading', async () => {
-      const commandsNeverLoad = new Promise<readonly SlashCommand[]>(
-        () => undefined,
-      );
-      const result = setupProcessorHook(
-        [],
-        [],
-        [],
-        vi.fn(),
-        mockSettings,
-        undefined,
-        { current: true },
-        commandsNeverLoad,
-      );
+    it.each(['/quit', '/exit'])(
+      'should handle %s while slash commands are still loading',
+      async (input) => {
+        const commandsNeverLoad = new Promise<readonly SlashCommand[]>(
+          () => undefined,
+        );
+        const result = setupProcessorHook(
+          [],
+          [],
+          [],
+          vi.fn(),
+          mockSettings,
+          undefined,
+          { current: true },
+          commandsNeverLoad,
+        );
 
-      await act(async () => {
-        await result.current.handleSlashCommand('/quit');
-      });
+        await act(async () => {
+          await result.current.handleSlashCommand(input);
+        });
 
-      expect(mockSetQuittingMessages).toHaveBeenCalledWith([
-        expect.objectContaining({ type: 'user', text: '/quit' }),
-        expect.objectContaining({ type: 'quit' }),
-      ]);
-      expect(mockAddItem).not.toHaveBeenCalledWith(
-        expect.objectContaining({ text: 'Unknown command: /quit' }),
-        expect.any(Number),
-      );
-    });
+        expect(mockSetQuittingMessages).toHaveBeenCalledWith([
+          expect.objectContaining({ type: 'user', text: '/quit' }),
+          expect.objectContaining({ type: 'quit' }),
+        ]);
+        expect(mockAddItem).not.toHaveBeenCalledWith(
+          expect.objectContaining({ text: `Unknown command: ${input}` }),
+          expect.any(Number),
+        );
+      },
+    );
 
     it('should respect disabled commands while slash commands are loading', async () => {
       mockConfig.getDisabledSlashCommands = vi
         .fn()
-        .mockReturnValue(['quit']);
+        .mockReturnValue(['exit']);
       const commandsNeverLoad = new Promise<readonly SlashCommand[]>(
         () => undefined,
       );
