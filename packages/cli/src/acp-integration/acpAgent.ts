@@ -4562,9 +4562,13 @@ class QwenAgent implements Agent {
    * is composed in exactly one place. Which settings to pin with is still the
    * caller's decision at this level: callers that already hold deliberately
    * scoped settings (workspace MCP discovery, live-session scope checks,
-   * session creation) pass them in. Handlers that serve a caller-supplied cwd
-   * must not make that decision themselves — they use
-   * `runWithPinnedRuntimeBaseDirForRequest` below.
+   * session creation) pass them in. Per-request session-management handlers
+   * (list, delete, rename, transcript page, settled turn status, and the
+   * non-live branch of loadUpdates) must not make that decision themselves —
+   * they use `runWithPinnedRuntimeBaseDirForRequest` below. Session load and
+   * resume resolve the request's settings at the call site deliberately,
+   * under profiler instrumentation, because they adopt those settings for
+   * the session afterwards.
    */
   private runWithPinnedRuntimeBaseDir<T>(
     settings: LoadedSettings,
@@ -12394,9 +12398,7 @@ class QwenAgent implements Agent {
             : await loadAuthoritative();
           replayConfig = config;
         } else {
-          const settings = loadSettingsCached(cwd);
-          sessionData = await this.runWithPinnedRuntimeBaseDir(
-            settings,
+          sessionData = await this.runWithPinnedRuntimeBaseDirForRequest(
             cwd,
             async () => {
               const sessionService = new SessionService(cwd);

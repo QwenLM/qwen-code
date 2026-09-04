@@ -20895,6 +20895,46 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     await agentPromise;
   });
 
+  it('resolves non-live qwen/session/loadUpdates settings per request, not from the this.settings cache', async () => {
+    const innerConfig = makeLiveSessionInnerConfig(null);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    // No newSession: the target is not live in this process, so loadUpdates
+    // takes the disk-only SessionService branch. `this.settings` holds the
+    // boot workspace's settings; the request names another cwd whose own
+    // settings must pin the read.
+    const perRequestSettings = makeAcpSettings();
+    vi.mocked(loadSettings).mockReturnValue(perRequestSettings);
+    const loadSession = vi.fn().mockResolvedValue(null);
+    vi.mocked(SessionService).mockImplementation(
+      () => ({ loadSession }) as unknown as InstanceType<typeof SessionService>,
+    );
+    vi.mocked(runWithAcpRuntimeOutputDir).mockClear();
+
+    await expect(
+      agent.extMethod('qwen/session/loadUpdates', {
+        cwd: '/tmp/workspace-a',
+        sessionId: '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+      }),
+    ).resolves.toEqual({ updates: [] });
+
+    expect(SessionService).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(loadSession).toHaveBeenCalledWith(
+      '6ba7b810-9dad-11d1-80b4-00c04fd430c8',
+    );
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(runWithAcpRuntimeOutputDir).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![0]).toBe(
+      perRequestSettings,
+    );
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
+      '/tmp/workspace-a',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('returns success=false when the live ChatRecordingService rejects the title (I/O error)', async () => {
     const recording = makeRecordingService();
     recording.recordCustomTitle.mockResolvedValue(false);
@@ -30049,8 +30089,9 @@ describe('QwenAgent runtime-root pinning choke point', () => {
     // shared helper. A handler naming `runWithAcpRuntimeOutputDir` directly —
     // as a call or via an alias — is exactly the shape that regressed, and
     // no behavioral test can see the difference (both spellings reach the
-    // same function), so pin the source: outside imports and comments the
-    // only mention left is the shared helper's own delegation. The per-request
+    // same function), so pin the source: outside the canonical import line
+    // and comments, the only mention left is the shared helper's own
+    // delegation (an aliased import would be a second mention). The per-request
     // handlers themselves are pinned behaviorally (settings/cwd reaching the
     // mock) by the routing tests above.
     const source = readFileSync('src/acp-integration/acpAgent.ts', 'utf8');
@@ -30060,7 +30101,9 @@ describe('QwenAgent runtime-root pinning choke point', () => {
       .filter(
         ({ text }) =>
           /\brunWithAcpRuntimeOutputDir\b/.test(text) &&
-          !text.startsWith('import ') &&
+          !text.startsWith(
+            "import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';",
+          ) &&
           !text.startsWith('//') &&
           !text.startsWith('*') &&
           !text.startsWith('/*'),
@@ -30068,7 +30111,7 @@ describe('QwenAgent runtime-root pinning choke point', () => {
     const located = directCalls.map(({ line, text }) => `${line}: ${text}`);
     expect(
       located,
-      `acpAgent.ts must not call runWithAcpRuntimeOutputDir directly; route the operation through this.runWithPinnedRuntimeBaseDir (see #10095). Direct calls at:\n${located.join('\n')}`,
+      `acpAgent.ts must not name runWithAcpRuntimeOutputDir directly. Handlers serving a caller-supplied cwd route through this.runWithPinnedRuntimeBaseDirForRequest; only callers holding deliberately scoped settings may use this.runWithPinnedRuntimeBaseDir (see #10095). Direct mentions at:\n${located.join('\n')}`,
     ).toEqual([
       expect.stringMatching(
         /^\d+: return runWithAcpRuntimeOutputDir\(settings, cwd, operation\);$/,
