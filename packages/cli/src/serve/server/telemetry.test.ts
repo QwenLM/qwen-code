@@ -454,6 +454,28 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('attributes workspace turn-index reads to the target workspace and session', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
+    const res = mockRes(200);
+
+    mw(
+      mockReq('GET', '/workspaces/ws-secondary/session/session%2F1/turn-index'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        route: 'GET /workspaces/:workspace/session/:id/turn-index',
+        sessionId: 'session/1',
+        workspaceHash: 'hash:/workspace/secondary',
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('attributes workspace session-info reads to the shared session-info route', () => {
     const mw = daemonTelemetryMiddleware(() => '/ws');
     const res = mockRes(200);

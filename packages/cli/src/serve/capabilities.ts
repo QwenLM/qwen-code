@@ -139,6 +139,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   standalone_session_options_v1: { since: 'v1' },
   session_transcript: { since: 'v1' },
   session_transcript_pagination: { since: 'v1' },
+  session_turn_navigation: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
   // flag with `--mcp-budget-mode={enforce, warn, off}`, and a
@@ -444,6 +445,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Workspace-qualified metadata updates for active, inactive, and archived
   // persisted sessions.
   workspace_session_metadata: { since: 'v1' },
+  // Worktree-backed session create/load responses are durably persisted and
+  // carry per-response `persisted-v1` attestation.
+  session_worktree_persistence_v1: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and

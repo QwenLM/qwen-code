@@ -229,6 +229,8 @@ export interface BridgeSession {
   modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Set by the daemon route after durable worktree ownership is verified. */
+  worktreeState?: 'persisted-v1';
   /** Present when the session was created with a new branch. */
   branch?: { name: string; baseBranch: string };
 }
@@ -261,6 +263,10 @@ export interface BridgeRestoreSessionRequest {
   sourceType?: string;
   /** Optional persisted identifier paired with `sourceType`. */
   sourceId?: string;
+  /** Internal daemon route owns strict worktree sidecar validation. */
+  suppressWorktreeContextRestore?: boolean;
+  /** Delay ask_user_question recovery until daemon route validation finishes. */
+  deferRestoreAskUserQuestionPrompt?: boolean;
 }
 
 /** Internal daemon-only restore surface for a managed standalone session. */
@@ -516,6 +522,8 @@ export interface BridgeRestoredSession extends BridgeSession {
 export interface BridgeSessionTranscriptPageRequest {
   sessionId: string;
   cursor?: string;
+  atRecordId?: string;
+  snapshot?: string;
   beforeRecordId?: string;
   /** Internal newest-page read used to refresh an attached session's UI. */
   direction?: 'backward';
@@ -532,6 +540,36 @@ export interface BridgeSessionTranscriptPage {
   lastUpdated?: string;
   partial?: true;
   replayError?: string;
+  targetRecordId?: string;
+  hasOlder?: boolean;
+}
+
+export interface BridgeSessionTurnIndexPageRequest {
+  sessionId: string;
+  snapshot?: string;
+  start?: number;
+  limit?: number;
+}
+
+export interface BridgeSessionTurnIndexEntry {
+  ordinal: number;
+  turnId: string;
+  kind: 'prompt' | 'realtime' | 'scheduled';
+  promptId?: string;
+  timestamp?: string;
+  label: string;
+  detail?: string;
+}
+
+export interface BridgeSessionTurnIndexPage {
+  v: 1;
+  sessionId: string;
+  snapshot: string;
+  totalTurns: number;
+  start: number;
+  turns: BridgeSessionTurnIndexEntry[];
+  startTime?: string;
+  lastUpdated?: string;
 }
 
 export interface BridgeBranchSessionRequest {
@@ -948,6 +986,8 @@ export const DAEMON_PERMISSION_CANCEL_REASON_META_KEY =
  */
 export const DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.suppressRestoreAskUserQuestion';
+export const DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY =
+  'qwen.daemon.suppressWorktreeContextRestore';
 export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
   'qwen.daemon.attachmentReferences';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
@@ -1480,6 +1520,18 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     worktree: { slug: string; path: string; branch: string },
   ): void;
 
+  /** Admit a restore question deferred by the daemon's integrity gate. */
+  fireDeferredRestoreAskUserQuestionPrompt?(
+    sessionId: string,
+    clientId: string | undefined,
+  ): boolean;
+
+  /** Drop a restore question rejected by the daemon's integrity gate. */
+  discardDeferredRestoreAskUserQuestionPrompt?(
+    sessionId: string,
+    clientId: string | undefined,
+  ): void;
+
   /**
    * Forward a prompt to the agent. Concurrent prompts against the same
    * session FIFO-serialize through a per-session queue.
@@ -1859,6 +1911,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getSessionTranscriptPage(
     req: BridgeSessionTranscriptPageRequest,
   ): Promise<BridgeSessionTranscriptPage>;
+
+  /** Read a sparse page of persisted navigation turns through the ACP child. */
+  getSessionTurnIndexPage(
+    req: BridgeSessionTurnIndexPageRequest,
+  ): Promise<BridgeSessionTurnIndexPage>;
 
   /** Cancel a background task in a live session. */
   cancelSessionTask(
