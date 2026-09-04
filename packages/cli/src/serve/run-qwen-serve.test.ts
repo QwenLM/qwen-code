@@ -482,6 +482,9 @@ describe('createBoundChannelDeliveryHandler', () => {
 
 function makeRuntimeBridge(): HttpAcpBridge {
   return {
+    // The fake stands in for production bridges built through
+    // `createSpawnChannelFactory`, which carry the forwarding attestation.
+    mandatoryLeaseAttested: true,
     spawnOrAttach: vi.fn(),
     shutdown: vi.fn().mockResolvedValue(undefined),
     killAllSync: vi.fn(),
@@ -606,6 +609,123 @@ it('restores the Conversations runtime for a persisted scheduled task', async ()
         }),
       );
     });
+  } finally {
+    await handle?.close();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  }
+});
+
+it('marks only the live-conversation bridge with the Conversations provenance env', async () => {
+  delete process.env['QWEN_RUNTIME_DIR'];
+  const tempRoot = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qws-conversations-marker-')),
+  );
+  const workspace = path.join(tempRoot, 'workspace');
+  const physicalHome = path.join(tempRoot, 'home');
+  const linkedHome = path.join(tempRoot, 'home-link');
+  const runtimeDir = path.join(tempRoot, 'runtime');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(physicalHome);
+  fs.symlinkSync(
+    physicalHome,
+    linkedHome,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  const liveConversationWorkspace = new ConversationWorkspace({
+    homeDir: linkedHome,
+  });
+  const { canonicalRoot } = await liveConversationWorkspace.getRoot();
+  fs.mkdirSync(path.join(canonicalRoot, '.qwen'));
+  fs.writeFileSync(
+    path.join(canonicalRoot, '.qwen', 'settings.json'),
+    JSON.stringify({ advanced: { runtimeOutputDir: runtimeDir } }),
+  );
+  await qwenCore.Storage.runWithResolvedRuntimeBaseDir(runtimeDir, () =>
+    qwenCore.updateCronTasks(canonicalRoot, () => [
+      {
+        id: 'live-task',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId: 'live-session',
+        sessionOwnedByTask: false,
+      },
+    ]),
+  );
+  vi.spyOn(
+    scheduledTaskKeepalive,
+    'startScheduledTaskKeepalive',
+  ).mockReturnValue({
+    stop: vi.fn(),
+    tick: vi.fn().mockResolvedValue(undefined),
+  });
+  const createBridge = vi
+    .spyOn(acpBridge, 'createAcpSessionBridge')
+    .mockImplementation(
+      () =>
+        ({
+          ...makeRuntimeBridge(),
+          recordHeartbeat: vi.fn(),
+          resumeSession: vi.fn().mockResolvedValue({}),
+          setLiveScreenContextCaptureHandler: vi.fn(),
+          setLiveTaskToolRequestHandler: vi.fn(),
+          setLiveSpeakToUserHandler: vi.fn(),
+        }) as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+  const overridesOf = (
+    call: Parameters<typeof acpBridge.createAcpSessionBridge>,
+  ): Record<string, string | undefined> | undefined =>
+    (call[0] as { childEnvOverrides?: Record<string, string | undefined> })
+      .childEnvOverrides;
+  const MARKER = 'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME';
+  let handle: RunHandle | undefined;
+
+  try {
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        liveConversationWorkspace,
+        liveDiscoveryStableBaseDir: path.join(tempRoot, 'stable'),
+        resolveOnListen: true,
+      },
+    );
+    await handle.runtimeReady;
+
+    // The Conversations runtime is the only runtime this boot creates through
+    // the bridge factory (the primary uses the injected bridge). Replacing the
+    // provenance ternary with the plain shared overrides leaves it unmarked,
+    // which would make the publication gate quarantine the runtime.
+    await vi.waitFor(() => {
+      expect(
+        createBridge.mock.calls.filter(
+          (call) => overridesOf(call)?.[MARKER] === '1',
+        ),
+      ).toHaveLength(1);
+    });
+    const marked = createBridge.mock.calls.find(
+      (call) => overridesOf(call)?.[MARKER] === '1',
+    );
+    expect((marked?.[0] as { boundWorkspace?: string }).boundWorkspace).toBe(
+      canonicalRoot,
+    );
+    for (const call of createBridge.mock.calls) {
+      const overrides = overridesOf(call);
+      if (overrides?.[MARKER] === '1') continue;
+      // Any other runtime keeps the shared overrides' explicit removal, so its
+      // children cannot inherit a marker from the daemon environment.
+      expect(overrides).toHaveProperty(MARKER, undefined);
+    }
   } finally {
     await handle?.close();
     fs.rmSync(tempRoot, { recursive: true, force: true });
@@ -4171,6 +4291,32 @@ describe('runQwenServe telemetry validation', () => {
     expect(primaryEpochSource).toBeDefined();
     expect(secondaryEpochSource).toBeDefined();
     expect(primaryEpochSource).not.toBe(secondaryEpochSource);
+    const primaryMcpAuthenticationAdmission = createBridge.mock.calls.find(
+      ([options]) => options.boundWorkspace === canonicalizeWorkspace(primary),
+    )?.[0].acquireMcpAuthentication;
+    const secondaryMcpAuthenticationAdmission = createBridge.mock.calls.find(
+      ([options]) =>
+        options.boundWorkspace === canonicalizeWorkspace(secondary),
+    )?.[0].acquireMcpAuthentication;
+    expect(primaryMcpAuthenticationAdmission).toBeDefined();
+    expect(secondaryMcpAuthenticationAdmission).toBe(
+      primaryMcpAuthenticationAdmission,
+    );
+    const releaseAuthentication = primaryMcpAuthenticationAdmission!(
+      primary,
+      'aone',
+    );
+    expect(releaseAuthentication).toBeTypeOf('function');
+    expect(secondaryMcpAuthenticationAdmission!(secondary, 'yuque')).toBe(
+      undefined,
+    );
+    releaseAuthentication!();
+    const releaseSecondaryAuthentication = secondaryMcpAuthenticationAdmission!(
+      secondary,
+      'yuque',
+    );
+    expect(releaseSecondaryAuthentication).toBeTypeOf('function');
+    releaseSecondaryAuthentication!();
     for (const [options] of createBridge.mock.calls) {
       expect(options).toMatchObject({
         delegateReadTextFileToClient: false,
@@ -7263,6 +7409,13 @@ describe('runQwenServe runtime startup failures', () => {
       // the guard plumbing marker but NOT the provider-attached marker.
       expect(bridgeOptions?.childEnvOverrides).toHaveProperty(
         'QWEN_CODE_PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER',
+        undefined,
+      );
+      // The Conversations provenance marker stays explicitly removed for an
+      // ordinary workspace child; only the live-conversation runtime replaces
+      // it with the enable value.
+      expect(bridgeOptions?.childEnvOverrides).toHaveProperty(
+        'QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME',
         undefined,
       );
       expect(createBridge.mock.calls.length).toBeGreaterThan(0);
@@ -14214,8 +14367,21 @@ describe('runQwenServe channel worker supervisor', () => {
         body: JSON.stringify({ cwd: secondaryCwd }),
       });
       expect(readded.status).toBe(201);
-      expect(supervisorFactory).toHaveBeenCalledTimes(3);
+      expect(supervisorFactory).toHaveBeenCalledTimes(2);
       expect(createBridge).toHaveBeenCalledTimes(3);
+
+      const restarted = await fetch(`${handle.url}/workspace/channel`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer worker-remove-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          selection: { mode: 'names', names: ['telegram', 'feishu'] },
+        }),
+      });
+      expect(restarted.status).toBe(200);
+      expect(supervisorFactory).toHaveBeenCalledTimes(3);
       const replacementSupervisor = workerSupervisors.get(secondaryCwd)!;
       expect(replacementSupervisor).not.toBe(removedSupervisor);
       expect(replacementSupervisor.start).toHaveBeenCalledOnce();

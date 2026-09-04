@@ -34,6 +34,8 @@ import {
   DAEMON_TRACESTATE_META_KEY,
   INVOCATION_CONTEXT_META_KEY,
   PRIVATE_ACP_CAPABILITY_ENV,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   SESSION_PR_LIST_LIMIT,
@@ -52,6 +54,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
 import type { AcpChannel, AcpChannelTransportGuard } from './channel.js';
+import { channelFactoryForwardsChildEnv } from './child-env-forwarding.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
@@ -77,9 +80,13 @@ import {
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
+  type ServeSessionAgentsStatus,
+  type ServeSessionAgentTrace,
   type ServeSessionStatsStatus,
   type ServeSessionContextStatus,
   type ServeSessionLspStatus,
+  type ServeSessionResourcesStatus,
+  type ServeSessionSavedWorkflowStatus,
   type ServeSessionTasksStatus,
   type ServeSessionWorkflowTaskStatus,
   type ServeWorkspaceMcpResourcesStatus,
@@ -115,6 +122,7 @@ import {
   InvalidRewindTargetError,
   PromptDeadlineExceededError,
   BridgeChannelQuarantinedError,
+  McpAuthenticationInProgressError,
   StandaloneSessionSpawnError,
 } from './bridgeErrors.js';
 import type { BridgeChannelUnavailableReason } from './bridgeErrors.js';
@@ -158,6 +166,7 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_UPDATES,
@@ -211,6 +220,8 @@ import type {
   BridgeWorkspaceMemoryRememberResult,
   BridgeSessionTranscriptPage,
   BridgeSessionTranscriptPageRequest,
+  BridgeSessionTurnIndexPage,
+  BridgeSessionTurnIndexPageRequest,
   BridgeGenerationStreamEvent,
   BridgeWorkspaceGenerationStreamEvent,
   BridgePromptContentBlock,
@@ -941,14 +952,13 @@ interface ChannelInfo {
   sessionSpawnsInFlight: number;
   /** Workspace-level control calls that use the shared channel without a session. */
   workspaceControlInFlight: number;
-  /** A plain preheat keeps the channel through its first status read. */
-  preserveForFirstStatusRead: boolean;
   /** Background MCP discovery started by the workspace initialize control. */
   workspaceMcpDiscoveryInFlight: boolean;
   workspaceMcpDiscoveryTimer?: NodeJS.Timeout;
   workspaceMcpDiscoveryRequested: boolean;
   workspaceMcpAuthenticationServerNames: Set<string>;
   workspaceMcpAuthenticationTimers: Map<string, NodeJS.Timeout>;
+  workspaceMcpAuthenticationReleases: Map<string, () => void>;
   /** A timed-out workspace operation will retire this channel after Sessions drain. */
   retireWhenSessionsDrain: boolean;
   /**
@@ -1126,6 +1136,7 @@ interface SessionEntry {
   promptQueue: Promise<void>;
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
+  deferredRestoreAskUserQuestionPrompts?: Map<string, string>;
   pendingAgentNotificationCount: number;
   /**
    * Optional prompt terminal ledger sink (injected via BridgeOptions).
@@ -2858,6 +2869,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     opts.childEnvOverrides
       ? Object.freeze({ ...opts.childEnvOverrides })
       : Object.freeze({});
+  // The mandatory-lease attestation is conjunctive: the frozen overrides must
+  // offer the exact Conversations marker AND the configured factory must be
+  // attested to forward overrides into the spawned child's environment. A
+  // marker-shaped override map paired with a factory that ignores its second
+  // argument does not attest, because the child would run unleased while the
+  // daemon believes the transcripts are fenced.
+  const mandatoryLeaseAttested =
+    childEnvOverrides[PRIVATE_CONVERSATIONS_RUNTIME_ENV] ===
+      PRIVATE_CONVERSATIONS_RUNTIME_ENABLE &&
+    channelFactoryForwardsChildEnv(channelFactory);
   const initTimeoutMs = opts.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
   if (!Number.isInteger(initTimeoutMs) || initTimeoutMs <= 0) {
     throw new TypeError(
@@ -3839,13 +3860,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   async function withWorkspaceControl<T>(
     ci: ChannelInfo,
     fn: () => Promise<T>,
-    statusRead = false,
   ): Promise<T> {
-    const preservePreheat =
-      statusRead &&
-      ci.preserveForFirstStatusRead &&
-      resolvedChannelIdleTimeoutMs() <= 0;
-    ci.preserveForFirstStatusRead = false;
     if (liveChannelInfo() === ci) cancelIdleTimer();
     ci.workspaceControlInFlight++;
     try {
@@ -3859,12 +3874,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ci.workspaceControlInFlight - 1,
       );
       await reapPendingEmptyChannel(ci);
-      if (
-        !preservePreheat &&
-        !ci.isDying &&
-        liveChannelInfo() === ci &&
-        hasNoChannelWork(ci)
-      ) {
+      if (!ci.isDying && liveChannelInfo() === ci && hasNoChannelWork(ci)) {
         await startIdleTimer(ci, 'workspace control');
       }
     }
@@ -3886,7 +3896,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     ci: ChannelInfo,
     fn: () => Promise<T>,
   ): Promise<T> {
-    return withWorkspaceControl(ci, fn, true);
+    return withWorkspaceControl(ci, fn);
   }
 
   function startSessionReaper(): void {
@@ -4606,11 +4616,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         pendingRestoreIds: new Set(),
         sessionSpawnsInFlight: 0,
         workspaceControlInFlight: 0,
-        preserveForFirstStatusRead: false,
         workspaceMcpDiscoveryInFlight: false,
         workspaceMcpDiscoveryRequested: false,
         workspaceMcpAuthenticationServerNames: new Set(),
         workspaceMcpAuthenticationTimers: new Map(),
+        workspaceMcpAuthenticationReleases: new Map(),
         retireWhenSessionsDrain: false,
         emptyReapPending: false,
         unsettledAbandonedRestores: new Set(),
@@ -4693,6 +4703,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         info.workspaceMcpAuthenticationTimers.clear();
         info.workspaceMcpAuthenticationServerNames.clear();
+        for (const release of info.workspaceMcpAuthenticationReleases.values()) {
+          release();
+        }
+        info.workspaceMcpAuthenticationReleases.clear();
         for (const timer of info.restoreSettlementTimers.values()) {
           clearTimeout(timer);
         }
@@ -5244,7 +5258,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (ci.isDying) {
       throw new BridgeChannelClosedError('before newSession');
     }
-    ci.preserveForFirstStatusRead = false;
     ci.sessionSpawnsInFlight++;
     if (requestedSessionId !== undefined) {
       // A caller-supplied id can legitimately reuse an id after an abandoned
@@ -6112,9 +6125,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (
       Array.isArray(current.servers) &&
       previous?.discoveryState === 'completed' &&
+      previous.runtimeEpoch === current.runtimeEpoch &&
       current.discoveryState === 'not_started'
     ) {
-      if (current.servers.length === 0) return previous;
+      if (current.servers.length === 0) {
+        return {
+          ...previous,
+          runtimeEpoch: current.runtimeEpoch,
+          source: current.source,
+        };
+      }
       const currentServers = new Map(
         current.servers.map((server) => [server.name, server]),
       );
@@ -6133,6 +6153,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       return {
         ...previous,
+        runtimeEpoch: current.runtimeEpoch,
+        source: current.source,
         discoveryState: 'completed',
         servers,
       };
@@ -6152,7 +6174,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         method === SERVE_STATUS_EXT_METHODS.workspaceMcp &&
         workspaceMcpStatusCache
       ) {
-        return workspaceMcpStatusCache as T;
+        return {
+          ...workspaceMcpStatusCache,
+          source: 'cache',
+        } as T;
       }
       return idle();
     }
@@ -6168,6 +6193,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         initTimeoutMs,
         method,
       );
+      if (
+        isRecord(response) &&
+        (method === SERVE_STATUS_EXT_METHODS.workspaceMcp ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpTools ||
+          method === SERVE_STATUS_EXT_METHODS.workspaceMcpResources)
+      ) {
+        response = {
+          ...response,
+          runtimeEpoch,
+          ...(method === SERVE_STATUS_EXT_METHODS.workspaceMcp
+            ? { source: 'live' }
+            : {}),
+        };
+      }
       if (method === SERVE_STATUS_EXT_METHODS.workspaceMcp) {
         const rawStatus = response as unknown as ServeWorkspaceMcpStatus;
         if (!Array.isArray(rawStatus.servers)) {
@@ -6178,12 +6217,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ...info.workspaceMcpAuthenticationServerNames,
           ...(managedServerNames ?? []),
         ]);
-        if (
-          effectiveManagedServerNames.size > 0 ||
-          (workspaceMcpStatusCache?.discoveryState === 'completed' &&
-            rawStatus.discoveryState === 'not_started' &&
-            rawServers.length === 0)
-        ) {
+        if (effectiveManagedServerNames.size > 0) {
           response = mergeManagedWorkspaceMcpStatus(
             effectiveManagedServerNames,
             workspaceMcpStatusCache,
@@ -6233,6 +6267,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             const timer = info.workspaceMcpAuthenticationTimers.get(serverName);
             if (timer) clearTimeout(timer);
             info.workspaceMcpAuthenticationTimers.delete(serverName);
+            info.workspaceMcpAuthenticationReleases.get(serverName)?.();
+            info.workspaceMcpAuthenticationReleases.delete(serverName);
           }
         }
         workspaceMcpStatusCache =
@@ -7343,6 +7379,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   }
 
+  async function requestSessionTurnIndexPage(
+    req: BridgeSessionTurnIndexPageRequest,
+  ): Promise<BridgeSessionTurnIndexPage> {
+    try {
+      const response = await withEnsuredWorkspaceControl((info) =>
+        withTimeout(
+          Promise.race([
+            info.connection.extMethod(
+              SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+              { ...req, cwd: boundWorkspace },
+            ),
+            getChannelClosedReject(info),
+          ]),
+          Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
+          SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+        ),
+      );
+      return response as unknown as BridgeSessionTurnIndexPage;
+    } catch (err) {
+      if (isAcpSessionResourceNotFound(err, req.sessionId)) {
+        throw new SessionNotFoundError(req.sessionId);
+      }
+      throw err;
+    }
+  }
+
   async function refreshedReplayFieldsFor(
     entry: SessionEntry,
     historyPageSize: number,
@@ -7584,12 +7646,45 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return true;
   };
 
+  const deferOrFireRestoreAskUserQuestionPrompt = (
+    entry: SessionEntry,
+    restoreAskUserQuestionHint: boolean,
+    requestedClientId: string | undefined,
+    registeredClientId: string,
+    options: {
+      suppressRestorePrompt?: boolean;
+      deferRestorePrompt?: boolean;
+    },
+  ): boolean => {
+    if (
+      options.deferRestorePrompt === true &&
+      restoreAskUserQuestionHint &&
+      requestedClientId !== undefined &&
+      options.suppressRestorePrompt !== true
+    ) {
+      entry.deferredRestoreAskUserQuestionPrompts ??= new Map();
+      entry.deferredRestoreAskUserQuestionPrompts.set(
+        registeredClientId,
+        requestedClientId,
+      );
+      return false;
+    }
+    return maybeFireRestoreAskUserQuestionPrompt(
+      entry,
+      restoreAskUserQuestionHint,
+      requestedClientId,
+      registeredClientId,
+      options,
+    );
+  };
+
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
     options: {
       skipFreshSessionAdmission?: boolean;
       suppressRestorePrompt?: boolean;
+      deferRestorePrompt?: boolean;
       daemonOwnedStandaloneRestore?: boolean;
     } = {},
   ): Promise<BridgeRestoredSession> {
@@ -8094,7 +8189,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw new BridgeChannelClosedError(`before session/${action}`);
       }
       ci = restoreChannel;
-      restoreChannel.preserveForFirstStatusRead = false;
       restoreChannel.pendingRestoreIds.add(req.sessionId);
       // Mark this id as in-flight restore BEFORE the ACP
       // `loadSession`/`unstable_resumeSession` call. Restore-time
@@ -8182,6 +8276,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   ...(hideInheritedHistory
                     ? { [LOAD_REPLAY_HIDE_INHERITED_META_KEY]: true }
                     : {}),
+                  ...(req.suppressWorktreeContextRestore
+                    ? {
+                        [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+                      }
+                    : {}),
                 },
               });
               return await restoreChannel.connection.loadSession(request);
@@ -8201,6 +8300,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   options.suppressRestorePrompt === true)
                   ? {
                       [DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
+                    }
+                  : {}),
+                ...(req.suppressWorktreeContextRestore
+                  ? {
+                      [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
                     }
                   : {}),
               },
@@ -8367,13 +8471,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             throw error;
           }
         }
-        const restorePromptAdmitted = maybeFireRestoreAskUserQuestionPrompt(
-          racedEntry,
-          restoreAskUserQuestionHint,
-          req.clientId,
-          clientId,
-          options,
-        );
+        let restorePromptAdmitted = false;
+        if (options.deferRestorePrompt !== true) {
+          restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
+            racedEntry,
+            restoreAskUserQuestionHint,
+            req.clientId,
+            clientId,
+            options,
+          );
+        }
         const sourcePersisted = await applyRestoreSourceIfMissing(
           racedEntry,
           req,
@@ -8394,6 +8501,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             1 + coalesceState.count,
           );
           throw error;
+        }
+        if (options.deferRestorePrompt === true) {
+          restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
+            racedEntry,
+            restoreAskUserQuestionHint,
+            req.clientId,
+            clientId,
+            options,
+          );
         }
         return {
           sessionId: racedEntry.sessionId,
@@ -8527,13 +8643,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // directly.
       entry.attachCount = coalesceState.count;
       registeredEntry = entry;
-      const restorePromptAdmitted = maybeFireRestoreAskUserQuestionPrompt(
-        entry,
-        restoreAskUserQuestionHint,
-        req.clientId,
-        clientId,
-        options,
-      );
+      let restorePromptAdmitted = false;
+      if (options.deferRestorePrompt !== true) {
+        restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
+          entry,
+          restoreAskUserQuestionHint,
+          req.clientId,
+          clientId,
+          options,
+        );
+      }
       const sourcePersisted = entry.sourceType
         ? await persistSessionSource(
             entry,
@@ -8553,6 +8672,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         await rollbackAttachRegistration(entry, clientId);
         throw error;
+      }
+      if (options.deferRestorePrompt === true) {
+        restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
+          entry,
+          restoreAskUserQuestionHint,
+          req.clientId,
+          clientId,
+          options,
+        );
       }
       // Explicit `session/load` / `session/resume` is "give me THIS
       // id"; it must NOT become the implicit attach target for
@@ -9025,6 +9153,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     { dispatched: boolean }
   >();
   const bridgeApi: AcpSessionBridge = {
+    // Derived once from the frozen overrides and the configured channel
+    // factory; immutable for the bridge's lifetime.
+    mandatoryLeaseAttested,
     setLiveScreenContextCaptureHandler(handler) {
       liveScreenContextCaptureHandler = handler;
     },
@@ -9244,11 +9375,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     async loadSession(req) {
-      return restoreSession('load', req);
+      return restoreSession('load', req, {
+        ...(req.deferRestoreAskUserQuestionPrompt
+          ? { deferRestorePrompt: true }
+          : {}),
+      });
     },
 
     async resumeSession(req) {
-      return restoreSession('resume', req);
+      return restoreSession('resume', req, {
+        ...(req.deferRestoreAskUserQuestionPrompt
+          ? { deferRestorePrompt: true }
+          : {}),
+      });
     },
 
     async spawnStandaloneSession(req) {
@@ -11297,6 +11436,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
+    fireDeferredRestoreAskUserQuestionPrompt(sessionId, clientId) {
+      if (clientId === undefined) return false;
+      const entry = byId.get(sessionId);
+      const requestedClientId =
+        entry?.deferredRestoreAskUserQuestionPrompts?.get(clientId);
+      if (!entry || requestedClientId === undefined) return false;
+      entry.deferredRestoreAskUserQuestionPrompts?.delete(clientId);
+      return maybeFireRestoreAskUserQuestionPrompt(
+        entry,
+        true,
+        requestedClientId,
+        clientId,
+        {},
+      );
+    },
+
+    discardDeferredRestoreAskUserQuestionPrompt(sessionId, clientId) {
+      if (clientId === undefined) return;
+      const entry = byId.get(sessionId);
+      entry?.deferredRestoreAskUserQuestionPrompts?.delete(clientId);
+    },
+
     async closeSession(sessionId, context, closeOpts) {
       return closeSessionImpl(sessionId, context, closeOpts);
     },
@@ -11364,6 +11525,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       if (metadata.displayName !== undefined) {
         if (
+          metadata.titleSource !== undefined &&
+          metadata.titleSource !== 'manual' &&
+          metadata.titleSource !== 'auto'
+        ) {
+          throw new InvalidSessionMetadataError(
+            'titleSource',
+            'must be either `manual` or `auto`',
+          );
+        }
+        if (
           typeof metadata.displayName !== 'string' ||
           metadata.displayName.length > MAX_DISPLAY_NAME_LENGTH
         ) {
@@ -11378,7 +11549,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             'must not contain control characters',
           );
         }
+        // An empty name would only clear the live entry: the `sessionTitle`
+        // persist below runs for truthy names, so no tombstone reaches the
+        // transcript. The persisted manual record would then resurface
+        // through the session-list merge (`live.displayName ??
+        // existing.displayName`) and be carried into a `/clear` successor as
+        // if the clear never happened. Reject the clear instead of serving a
+        // name the catalog no longer backs. Mirrors the workspace-scoped
+        // metadata route, which rejects empty names for the same reason.
+        if (metadata.displayName.trim() === '') {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must not be empty',
+          );
+        }
         const nextDisplayName = metadata.displayName || undefined;
+        const titleSource = metadata.titleSource ?? 'manual';
         if (entry.displayName !== nextDisplayName) {
           entry.displayName = nextDisplayName;
           // The catalog exposes display names; an actual rename is a
@@ -11397,7 +11583,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
                 sessionId,
                 displayName: nextDisplayName,
-                titleSource: 'manual',
+                titleSource,
               })
               .then((res: unknown) => {
                 const r = res as { persisted?: boolean } | undefined;
@@ -11418,7 +11604,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           try {
             entry.events.publish({
               type: 'session_metadata_updated',
-              data: { sessionId, displayName: entry.displayName },
+              data: {
+                sessionId,
+                displayName: entry.displayName,
+                ...(entry.displayName ? { titleSource } : {}),
+              },
               ...(metadataOriginatorClientId
                 ? { originatorClientId: metadataOriginatorClientId }
                 : {}),
@@ -11993,6 +12183,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async getSessionAgentsStatus(sessionId) {
+      return requestSessionStatus<ServeSessionAgentsStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionAgents,
+      );
+    },
+
+    async getSessionAgentTrace(sessionId, rootAgentId) {
+      return requestSessionStatus<ServeSessionAgentTrace>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionAgentTrace,
+        rootAgentId === undefined ? undefined : { rootAgentId },
+      );
+    },
+
     async getSessionLspStatus(sessionId) {
       return requestSessionStatus<ServeSessionLspStatus>(
         sessionId,
@@ -12000,8 +12205,37 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async getSessionResourcesStatus(sessionId) {
+      return requestSessionStatus<ServeSessionResourcesStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionResources,
+      );
+    },
+
+    async getSessionSavedWorkflow(sessionId, name) {
+      return requestSessionStatus<ServeSessionSavedWorkflowStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionSavedWorkflow,
+        { name },
+      );
+    },
+
     async getSessionTranscriptPage(req) {
       return requestSessionTranscriptPage(req);
+    },
+
+    async flushSessionTranscript(sessionId) {
+      // The child flushes before every backward page; a one-record page is the
+      // existing read-only barrier without adding another ACP extension.
+      await requestSessionTranscriptPage({
+        sessionId,
+        direction: 'backward',
+        limit: 1,
+      });
+    },
+
+    async getSessionTurnIndexPage(req) {
+      return requestSessionTurnIndexPage(req);
     },
 
     async cancelSessionTask(sessionId, taskId, taskKind, context) {
@@ -12814,6 +13048,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
       return await entry.attachments.read(attachmentId);
+    },
+
+    async listSessionAttachments(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return await entry.attachments.list();
     },
 
     async removeSessionAttachment(sessionId, attachmentId, context) {
@@ -13641,68 +13882,106 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     async manageMcpServer(serverName, action, originatorClientId) {
-      return await withEnsuredWorkspaceControl(async (info) => {
-        const timeout =
-          action === 'authenticate'
-            ? MCP_OAUTH_TIMEOUT_MS
-            : MCP_RESTART_TIMEOUT_MS;
-        const response = (await Promise.race([
-          withTimeout(
-            info.connection.extMethod(
-              SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
-              { serverName, action, originatorClientId },
-            ),
-            timeout,
-            SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
-          ),
-          getChannelClosedReject(info),
-        ])) as {
-          serverName: string;
-          action:
-            | 'approve'
-            | 'enable'
-            | 'disable'
-            | 'authenticate'
-            | 'clear-auth';
-          ok: true;
-          changed?: boolean;
-          messages?: string[];
-          authUrl?: string;
-          pending?: boolean;
-        };
-        if (action === 'authenticate' && response.pending) {
-          info.workspaceMcpAuthenticationServerNames.add(serverName);
-          const previousTimer =
-            info.workspaceMcpAuthenticationTimers.get(serverName);
-          if (previousTimer) clearTimeout(previousTimer);
-          const timer = setTimeout(() => {
-            void expireWorkspaceMcpAuthentication(info, serverName, timer);
-          }, MCP_OAUTH_TIMEOUT_MS);
-          timer.unref();
-          info.workspaceMcpAuthenticationTimers.set(serverName, timer);
-        }
-        invalidateWorkspaceMcpDetailCache(serverName);
-        await requestWorkspaceStatus<ServeWorkspaceMcpStatus>(
-          SERVE_STATUS_EXT_METHODS.workspaceMcp,
-          () => {
-            throw new BridgeChannelClosedError(
-              'workspace MCP management status refresh',
+      let releaseAuthentication =
+        action === 'authenticate'
+          ? opts.acquireMcpAuthentication?.(boundWorkspace, serverName)
+          : undefined;
+      if (
+        action === 'authenticate' &&
+        opts.acquireMcpAuthentication &&
+        !releaseAuthentication
+      ) {
+        throw new McpAuthenticationInProgressError();
+      }
+      try {
+        return await withEnsuredWorkspaceControl(async (info) => {
+          if (releaseAuthentication) {
+            info.workspaceMcpAuthenticationReleases.set(
+              serverName,
+              releaseAuthentication,
             );
-          },
-          {},
-          new Set([serverName]),
-        );
-        broadcastWorkspaceEvent({
-          type: 'mcp_server_changed',
-          data: {
-            serverName: response.serverName,
-            action: response.action,
-            originatorClientId,
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
+            releaseAuthentication = undefined;
+          }
+          const timeout =
+            action === 'authenticate'
+              ? MCP_OAUTH_TIMEOUT_MS
+              : MCP_RESTART_TIMEOUT_MS;
+          let response: {
+            serverName: string;
+            action:
+              | 'approve'
+              | 'enable'
+              | 'disable'
+              | 'authenticate'
+              | 'clear-auth';
+            ok: true;
+            changed?: boolean;
+            messages?: string[];
+            authUrl?: string;
+            pending?: boolean;
+          };
+          try {
+            response = (await Promise.race([
+              withTimeout(
+                info.connection.extMethod(
+                  SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+                  { serverName, action, originatorClientId },
+                ),
+                timeout,
+                SERVE_CONTROL_EXT_METHODS.workspaceMcpManage,
+              ),
+              getChannelClosedReject(info),
+            ])) as typeof response;
+          } catch (error) {
+            if (
+              action === 'authenticate' &&
+              !(error instanceof BridgeTimeoutError) &&
+              !(error instanceof BridgeChannelClosedError)
+            ) {
+              info.workspaceMcpAuthenticationReleases.get(serverName)?.();
+              info.workspaceMcpAuthenticationReleases.delete(serverName);
+            }
+            throw error;
+          }
+          if (action === 'authenticate' && response.pending) {
+            info.workspaceMcpAuthenticationServerNames.add(serverName);
+            const previousTimer =
+              info.workspaceMcpAuthenticationTimers.get(serverName);
+            if (previousTimer) clearTimeout(previousTimer);
+            const timer = setTimeout(() => {
+              void expireWorkspaceMcpAuthentication(info, serverName, timer);
+            }, MCP_OAUTH_TIMEOUT_MS);
+            timer.unref();
+            info.workspaceMcpAuthenticationTimers.set(serverName, timer);
+          } else if (action === 'authenticate') {
+            info.workspaceMcpAuthenticationReleases.get(serverName)?.();
+            info.workspaceMcpAuthenticationReleases.delete(serverName);
+          }
+          invalidateWorkspaceMcpDetailCache(serverName);
+          await requestWorkspaceStatus<ServeWorkspaceMcpStatus>(
+            SERVE_STATUS_EXT_METHODS.workspaceMcp,
+            () => {
+              throw new BridgeChannelClosedError(
+                'workspace MCP management status refresh',
+              );
+            },
+            {},
+            new Set([serverName]),
+          );
+          broadcastWorkspaceEvent({
+            type: 'mcp_server_changed',
+            data: {
+              serverName: response.serverName,
+              action: response.action,
+              originatorClientId,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+          return response;
         });
-        return response;
-      });
+      } finally {
+        releaseAuthentication?.();
+      }
     },
 
     async initializeWorkspaceMcp() {
@@ -14398,19 +14677,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'channel.preheat',
           { 'qwen-code.daemon.bridge.operation': 'channel.preheat' },
           async () => {
-            const existing = liveChannelInfo();
-            const info = await ensureChannel();
+            await ensureChannel();
             if (keepAliveMs !== undefined) {
               keepAliveUntil = Math.max(
                 keepAliveUntil,
                 Date.now() + keepAliveMs,
               );
-            } else if (
-              !existing &&
-              configuredChannelIdleTimeoutMs() === 0 &&
-              hasNoSessionWork(info)
-            ) {
-              info.preserveForFirstStatusRead = true;
             }
           },
         );

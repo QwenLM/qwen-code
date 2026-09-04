@@ -159,7 +159,7 @@ async function main() {
   fs.mkdirSync(outDir, { recursive: true });
 
   const targetConfig = TARGETS.get(target);
-  const outputName = `qwen-code-${target}.${targetConfig.outputExtension}`;
+  const outputName = standaloneArchiveName(target, args.runtime);
   const outputPath = path.join(outDir, outputName);
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-standalone-'));
 
@@ -213,6 +213,21 @@ async function main() {
 
 function isMainModule() {
   return process.argv[1] && path.resolve(process.argv[1]) === __filename;
+}
+
+// Canonical standalone archive name for a target and runtime flavor. The bun
+// runtime is the temporary OpenTUI preview flavor, so its archives carry a
+// -opentui-preview suffix and sit alongside the classic Node.js archives in
+// gated releases. build-standalone-release.js and
+// verify-installation-release.js derive their expected names from this
+// function, so the suffix stays consistent across the release pipeline.
+function standaloneArchiveName(target, runtime = 'node') {
+  const targetConfig = TARGETS.get(target);
+  if (!targetConfig) {
+    fail(`Unknown target: ${target}`);
+  }
+  const flavorSuffix = runtime === 'bun' ? '-opentui-preview' : '';
+  return `qwen-code-${target}${flavorSuffix}.${targetConfig.outputExtension}`;
 }
 
 function parseArgs(argv) {
@@ -520,6 +535,7 @@ function copyOpenTuiAddon(packageRoot, target, opentuiModulesDir) {
     dereference: true,
     verbatimSymlinks: false,
   };
+  let copiedAnyPackage = false;
 
   for (const packageName of packageNames) {
     const packageSrc = path.join(modulesSrc, packageName);
@@ -538,6 +554,7 @@ function copyOpenTuiAddon(packageRoot, target, opentuiModulesDir) {
       continue;
     }
 
+    copiedAnyPackage = true;
     fs.cpSync(packageSrc, path.join(modulesDest, packageName), copyOpts);
 
     for (const library of nativeLibraries) {
@@ -569,10 +586,14 @@ function copyOpenTuiAddon(packageRoot, target, opentuiModulesDir) {
     }
   }
 
-  assertNoSymlinks(
-    modulesDest,
-    'Bundled OpenTUI addon still contains symlinks.',
-  );
+  // The warn-only degradation path copies nothing, so lib/node_modules may
+  // not exist here.
+  if (copiedAnyPackage) {
+    assertNoSymlinks(
+      modulesDest,
+      'Bundled OpenTUI addon still contains symlinks.',
+    );
+  }
 }
 
 function hasNativePrebuild(prebuildDir) {
@@ -885,10 +906,18 @@ function writeShims(packageRoot, runtime) {
 
   const unixRuntime =
     runtime === 'bun' ? '$ROOT/bun/bin/bun' : '$ROOT/node/bin/node';
+  // The bun flavor is the OpenTUI preview: default the renderer to opentui so
+  // the archive launches what it was built to preview. An explicit user
+  // QWEN_TUI_RENDERER still wins. No STRICT default: probe failures keep
+  // falling back to ink.
+  const unixRendererDefault =
+    runtime === 'bun'
+      ? 'export QWEN_TUI_RENDERER="${QWEN_TUI_RENDERER:-opentui}"\n'
+      : '';
   const unixShim = `#!/usr/bin/env sh
 set -e
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-QWEN_CODE_LAUNCHER_PATH="$ROOT/bin/qwen" exec "${unixRuntime}" "$ROOT/lib/cli-entry.js" "$@"
+${unixRendererDefault}QWEN_CODE_LAUNCHER_PATH="$ROOT/bin/qwen" exec "${unixRuntime}" "$ROOT/lib/cli-entry.js" "$@"
 `;
   const unixShimPath = path.join(binDir, 'qwen');
   fs.writeFileSync(unixShimPath, unixShim);
@@ -896,10 +925,14 @@ QWEN_CODE_LAUNCHER_PATH="$ROOT/bin/qwen" exec "${unixRuntime}" "$ROOT/lib/cli-en
 
   const windowsRuntime =
     runtime === 'bun' ? '%ROOT%\\bun\\bun.exe' : '%ROOT%\\node\\node.exe';
+  const windowsRendererDefault =
+    runtime === 'bun'
+      ? 'if not defined QWEN_TUI_RENDERER set "QWEN_TUI_RENDERER=opentui"\n'
+      : '';
   const windowsShim = `@echo off
 setlocal
 set "ROOT=%~dp0.."
-set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"
+${windowsRendererDefault}set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"
 "${windowsRuntime}" "%ROOT%\\lib\\cli-entry.js" %*
 exit /b %ERRORLEVEL%
 `;
@@ -1013,6 +1046,7 @@ function fail(message) {
 export {
   TARGET_CLIPBOARD_PACKAGE,
   TARGETS,
+  standaloneArchiveName,
   writeSha256Sums,
   // Exported so a test can hold the allowlist and the build's stamp together:
   // the packager aborts on any dist entry it does not know, and nothing else
