@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const LIVE_HOST_PROTOCOL_VERSION = 6 as const;
+export const LIVE_HOST_PROTOCOL_VERSION = 7 as const;
 export const LIVE_HOST_BUNDLE_ID = 'com.alibaba.qwen-code.live-host' as const;
 export const LIVE_INPUT_AUDIO_EPOCH_BYTES = 8;
 
@@ -149,12 +149,24 @@ export type LiveHostScreenContextResult =
       error: string;
     };
 
+export interface LiveHostPlaybackStarted {
+  type: 'host.playback_started';
+  epoch: number;
+}
+
+export interface LiveHostPlaybackCompleted {
+  type: 'host.playback_completed';
+  epoch: number;
+}
+
 export type LiveHostMessage =
   | LiveHostHello
   | LiveHostAction
   | LiveHostPong
   | LiveHostShortcutResult
-  | LiveHostScreenContextResult;
+  | LiveHostScreenContextResult
+  | LiveHostPlaybackStarted
+  | LiveHostPlaybackCompleted;
 
 export type LiveDaemonMessage =
   | {

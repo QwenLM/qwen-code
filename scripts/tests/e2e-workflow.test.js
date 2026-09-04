@@ -53,6 +53,10 @@ describe('e2e workflow', () => {
       );
       expect(runStep.run).toContain('flock --shared --wait 1800 9');
       expect(runStep.run).toContain(
+        'exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"',
+      );
+      expect(runStep.run).toContain('flock --wait 1800 7');
+      expect(runStep.run).toContain(
         'if [ "$RUNNER_ENVIRONMENT" = \'self-hosted\' ]',
       );
     });
@@ -86,17 +90,42 @@ describe('e2e workflow', () => {
       expect(runStep.env.VERBOSE).toBe('true');
     });
 
-    it('keeps the shared lock continuously through concurrent tests', () => {
-      const imageIdIndex = runStep.run.indexOf('sandbox_image_id=');
-      const downgradeIndex = runStep.run.indexOf('flock --shared 9');
+    it('never waits on a lock another run holds through its tests', () => {
+      // Run 33637097713 lost two Docker shards to the #10605 protocol on one
+      // host: shard 1/3 held the per-commit coordinator lock and polled 30
+      // minutes for an exclusive daemon lock that a shard of run 33638984513
+      // kept shared through its whole test phase, then shard 2/3 timed out
+      // behind the coordinator lock shard 1/3 was still holding. Image
+      // preparation may only ever wait on locks bounded by a build.
+      const sharedIndex = runStep.run.indexOf('flock --shared --wait 1800 9');
+      const buildLockIndex = runStep.run.indexOf('flock --wait 1800 7');
+      const releaseIndex = runStep.run.indexOf('flock --unlock 7');
       const testIndex = runStep.run.indexOf('vitest run');
-      expect(imageIdIndex).toBeGreaterThanOrEqual(0);
-      expect(downgradeIndex).toBeGreaterThan(imageIdIndex);
-      expect(testIndex).toBeGreaterThan(downgradeIndex);
-      expect(runStep.run).toContain('until flock --nonblock 9');
+      expect(sharedIndex).toBeGreaterThanOrEqual(0);
+      expect(buildLockIndex).toBeGreaterThan(sharedIndex);
+      expect(releaseIndex).toBeGreaterThan(buildLockIndex);
+      expect(testIndex).toBeGreaterThan(releaseIndex);
+      expect(runStep.run).not.toContain('acquire_daemon_write_lock');
+      expect(runStep.run).not.toContain('flock --unlock 9');
+      expect(runStep.run).not.toContain('flock --nonblock 9');
       expect(
         yml.jobs['e2e-test-linux'].strategy['max-parallel'],
       ).toBeUndefined();
+    });
+
+    it('closes the lock descriptors in every child process', () => {
+      // A flock lives on the open file description, so a descendant that
+      // inherits the descriptor and outlives its job keeps holding the lock
+      // on the host. This shell keeps its own copy of the descriptor, so
+      // closing it in children costs nothing.
+      expect(runStep.run).toContain('-i "$sandbox_image" 7>&- 8>&- 9>&-');
+      expect(runStep.run).toContain("--shard='${{ matrix.shard }}' 9>&-");
+      expect(runStep.run).toContain('exec 7>&-');
+      expect(runStep.run).toContain('exec 8>&-');
+      const cleanupStep = steps.find(
+        (step) => step.name === 'Prune dangling docker images',
+      );
+      expect(cleanupStep.run).toContain("--filter 'until=24h' 9>&-");
     });
   });
 
@@ -216,6 +245,110 @@ describe('e2e workflow', () => {
         if (ch === '}') depth -= 1;
       }
       expect(depth).toBe(0);
+    });
+  });
+
+  describe('one build for every leg', () => {
+    // Each leg used to build and bundle on its own runner — 4–8 minutes on a
+    // hosted VM, 10–17 on a busy pool host, eleven times per run. The `build`
+    // job does it once on a hosted VM and the legs unpack its archive; these
+    // pins keep a leg from quietly growing its own build back.
+    const build = yml.jobs.build;
+    const legs = [
+      'e2e-test-linux',
+      'e2e-test-macos',
+      'e2e-interactive-opentui',
+      'isolated-nightly',
+    ];
+
+    it('builds once, on a hosted runner, off the shared pool', () => {
+      expect(build.needs).toBeUndefined();
+      expect(build['runs-on']).toBe('ubuntu-latest');
+      const names = build.steps.map((step) => step.name);
+      expect(names).toContain('Build project');
+      expect(names).toContain('Bundle CLI for E2E tests');
+      const pack = build.steps.find(
+        (step) => step.name === 'Pack build outputs',
+      );
+      expect(pack.run).toContain('.github/scripts/e2e-build-pack.sh');
+      // The same "the install must not build" premise as on the legs: without
+      // it npm ci runs prepare (a full build and bundle) and the explicit
+      // build steps below then do it a second time on the critical path.
+      const install = build.steps.find(
+        (step) => step.name === 'Install dependencies',
+      );
+      expect(install.env.QWEN_SKIP_PREPARE).toBe('1');
+      const upload = build.steps.find(
+        (step) => step.name === 'Upload build artifact',
+      );
+      expect(upload.uses).toMatch(/^actions\/upload-artifact@/);
+      expect(upload.with.name).toBe('e2e-build');
+      expect(upload.with['retention-days']).toBe(1);
+    });
+
+    it('gates the build like the legs, so a skipped build skips them', () => {
+      // The three fork-gated legs carry the build's exact gate; the nightly
+      // legs are narrower (schedule/dispatch only), which is a subset.
+      for (const job of [
+        'e2e-test-linux',
+        'e2e-test-macos',
+        'e2e-interactive-opentui',
+      ]) {
+        expect(yml.jobs[job].if, job).toBe(build.if);
+      }
+      // The whole expression, not a substring: the workflow declares no
+      // pull_request trigger, so the `event_name != 'pull_request' ||`
+      // prefix is the only clause that is ever true. Dropping it would skip
+      // the build — and every leg behind it — on every real event, green.
+      expect(build.if).toBe(
+        "${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}",
+      );
+    });
+
+    it('keeps the web-shell regression job building during its install', () => {
+      // That job has no build step of its own: its tree comes solely from
+      // the prepare script that npm ci runs, so it must not carry the skip
+      // the artifact-fed legs carry.
+      const install = yml.jobs['web-shell-browser-regression'].steps.find(
+        (step) => step.name === 'Install dependencies',
+      );
+      expect(install.env?.QWEN_SKIP_PREPARE).toBeUndefined();
+    });
+
+    it.each(legs)('%s unpacks the shared build instead of building', (job) => {
+      const { needs, steps } = yml.jobs[job];
+      expect(needs).toEqual(['build']);
+      const names = steps.map((step) => step.name);
+      expect(names).not.toContain('Build project');
+      expect(names).not.toContain('Bundle CLI for E2E tests');
+      const download = steps.find(
+        (step) => step.name === 'Download build artifact',
+      );
+      expect(download.with.name).toBe('e2e-build');
+      const unpack = steps.find(
+        (step) => step.name === 'Unpack build artifact',
+      );
+      expect(unpack.run).toContain('.github/scripts/e2e-build-unpack.sh');
+      // Unpack before anything runs the CLI, after node_modules exist.
+      expect(names.indexOf('Install dependencies')).toBeLessThan(
+        names.indexOf('Unpack build artifact'),
+      );
+      expect(names.indexOf('Unpack build artifact')).toBeLessThan(
+        names.findIndex((name) => name.startsWith('Run ')),
+      );
+      const install = steps.find(
+        (step) => step.name === 'Install dependencies',
+      );
+      expect(install.env.QWEN_SKIP_PREPARE).toBe('1');
+    });
+
+    it('keeps the docker sandbox image build on the leg', () => {
+      // The image builds inside Docker from the checkout, so it is not part
+      // of the archive; the leg still prepares it under the host locks.
+      const runStep = yml.jobs['e2e-test-linux'].steps.find(
+        (step) => step.name === 'Run E2E tests',
+      );
+      expect(runStep.run).toContain('npm run build:sandbox');
     });
   });
 

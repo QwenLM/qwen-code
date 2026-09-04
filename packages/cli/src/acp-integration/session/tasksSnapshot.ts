@@ -133,9 +133,14 @@ function serializeWorkflowTask(
     kind: 'workflow',
     id: entry.runId,
     ...optionalField('toolUseId', entry.toolUseId),
+    ...optionalField('workflowName', entry.workflowName),
     ...optionalField('sourceRunId', entry.sourceRunId),
     ...optionalField('startMode', entry.startMode),
-    label: entry.meta?.name ?? entry.description ?? entry.runId,
+    label:
+      entry.meta?.name ??
+      entry.workflowName ??
+      entry.description ??
+      entry.runId,
     description: entry.meta?.description ?? entry.description,
     status: entry.status,
     startTime: entry.startTime,
@@ -174,9 +179,15 @@ function serializeWorkflowSnapshot(
     kind: 'workflow',
     id: snapshot.runId,
     isHistorical: true,
+    ...optionalField('toolUseId', snapshot.toolUseId),
+    ...optionalField('workflowName', snapshot.workflowName),
     ...optionalField('sourceRunId', snapshot.sourceRunId),
     ...optionalField('startMode', snapshot.startMode),
-    label: snapshot.meta?.name ?? snapshot.description ?? snapshot.runId,
+    label:
+      snapshot.meta?.name ??
+      snapshot.workflowName ??
+      snapshot.description ??
+      snapshot.runId,
     description:
       snapshot.meta?.description ?? snapshot.description ?? snapshot.runId,
     status: snapshot.status,

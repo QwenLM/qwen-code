@@ -29,13 +29,23 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  clampInlineMediaPart,
   compactToolResultDisplayForHistory,
   CoreToolScheduler,
   didWriteProjectContextFile,
+  formatFullTurnVisionNotice,
+  formatVisionBridgeNotice,
+  getErrorMessage,
+  getFullTurnVisionModelSelector,
+  hasImageParts,
   isShellProgressData,
+  normalizeParts,
   parseAndFormatApiError,
   refreshMemoryInstruction,
+  runVisionBridge,
   SendMessageType,
+  shouldRunVisionBridge,
+  splitImageParts,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
@@ -45,6 +55,9 @@ import {
   renderResultDisplay,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
+import { isAtCommand } from '../utils/commandUtils.js';
+import { handleAtCommand } from '../hooks/atCommandProcessor.js';
+import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
 
 interface LooseCompletedCall {
   request: { callId: string; name?: string; args?: unknown };
@@ -62,12 +75,21 @@ export interface LivePromptOptions {
   modelOverride?: string;
   /**
    * "Enter to steer" parity: called at each tool boundary (after tools ran,
-   * before their results go back to the model). Returned texts are appended
-   * after the functionResponse parts as genuine user content, exactly like
-   * the original's drainSteerAtBoundary sampling-boundary drain. Skipped
-   * when the turn is aborted (messages then stay queued).
+   * before their results go back to the model). Returned texts are resolved
+   * the way ink resolves a steered message — `@path` expansion, then the
+   * prompt-side vision bridge — and appended after the functionResponse parts
+   * as genuine user content (the original's drainSteerAtBoundary sampling-
+   * boundary drain). Skipped when the turn is aborted (messages then stay
+   * queued).
    */
   drainSteering?: () => string[];
+  /**
+   * Puts drained steering texts back at the front of the queue (ink's
+   * `midTurnRestoreRef`). Resolution is all-or-nothing — an abort anywhere in
+   * it sends nothing to the model, so every text that left `drainSteering`
+   * comes back here rather than vanishing with the turn.
+   */
+  restoreSteering?: (texts: readonly string[]) => void;
   /**
    * Scheduler-level confirmation requests the permission flow did not
    * auto-approve (ask_user_question in every mode; edit/exec in DEFAULT).
@@ -87,6 +109,13 @@ export interface LivePromptOptions {
    * refresh the memory instruction so the model sees the new content.
    */
   refreshContextFilesOnWrite?: boolean;
+  /**
+   * Raw composer text for `UserPromptSubmit` provenance (`submitted_prompt`).
+   * Core only honours it on a UserQuery, so it rides the first turn and the
+   * tool-result continuations below omit it by construction — matching the
+   * documented rule that continuations carry no provenance.
+   */
+  submittedPrompt?: string;
   /**
    * PromptId minted by the backend (`nextLivePromptId`) at submit time so
    * the user item and this request share the checkpoint key. Omitted → one
@@ -213,6 +242,254 @@ function createEventQueue<T>() {
 }
 
 /**
+ * One `@path` read as the tool card ink renders through `handleAtCommand`'s
+ * `addItem` (a `tool_group` history item): start → result → end, so the card
+ * is already settled when it lands and a failed read explains itself.
+ */
+function atMentionCardEvents(
+  display: IndividualToolCallDisplay,
+): OpenTuiStreamEvent[] {
+  const events: OpenTuiStreamEvent[] = [
+    {
+      type: 'tool-start',
+      id: display.callId,
+      tool: display.name,
+      title: display.description,
+    },
+  ];
+  const text = renderResultDisplay(display.resultDisplay);
+  if (text)
+    events.push({ type: 'tool-result', id: display.callId, display: text });
+  const failed = display.status === ToolCallStatus.Error;
+  events.push({
+    type: 'tool-end',
+    id: display.callId,
+    success: !failed,
+    summary: failed ? 'error' : 'ok',
+  });
+  return events;
+}
+
+/**
+ * ink parity (use-llm-stream `processQuery` for a fresh turn): `@path`
+ * mentions are expanded where the prompt enters the stream, never at the
+ * composer, so the transcript keeps what the user typed and queued text that
+ * survives to become the next turn is expanded by the time it reaches the
+ * model. Text drained mid-turn goes through the same expansion —
+ * {@link resolveSteeredPromptParts} adds the read deadline ink puts on that
+ * hop ({@link expandAtMentions}'s caller waits indefinitely).
+ *
+ * `events` carries the read cards even when the expansion declines — the one
+ * decline is a failed read, and ink reports it instead of sending the
+ * unexpanded text.
+ */
+async function expandAtMentions(
+  config: Config,
+  query: string,
+  signal: AbortSignal,
+): Promise<{
+  parts: PartListUnion;
+  events: OpenTuiStreamEvent[];
+  declined: boolean;
+}> {
+  const result = await handleAtCommand({
+    query,
+    config,
+    onDebugMessage: (message) => config.getDebugLogger().debug(message),
+    messageId: Date.now(),
+    signal,
+  });
+  const events = (result.toolDisplays ?? []).flatMap(atMentionCardEvents);
+  if (!result.shouldProceed || result.processedQuery === null) {
+    return { parts: query, events, declined: true };
+  }
+  return { parts: result.processedQuery, events, declined: false };
+}
+
+/**
+ * The per-turn model override as the vision bridge sees it — ink's two coupled
+ * refs. A trailing NUL on `current` marks the bridge's own full-turn pick;
+ * `inline` means the override came from `submit_prompt` and wins over the
+ * bridge for the whole turn.
+ */
+interface TurnModelOverride {
+  current: string | undefined;
+  inline: boolean;
+}
+
+/**
+ * ink parity (`applyVisionBridgeIfNeeded`): with a vision bridge configured and
+ * a primary model that cannot read images, an image must be converted before it
+ * reaches the model — never forwarded as raw `inlineData`. The shape follows the
+ * other non-ink port of this hop (acp-integration
+ * `Session.#applyBridgeConversionsIfNeeded`) rather than ink's React hook.
+ *
+ * `null` parts mean "do not send this": the turn stops (fresh hop) or the
+ * message is dropped (steering hop), exactly as ink declines.
+ */
+async function applyPromptVisionBridge(
+  config: Config,
+  parts: PartListUnion,
+  signal: AbortSignal,
+  turnModel: TurnModelOverride,
+): Promise<{ parts: PartListUnion | null; events: OpenTuiStreamEvent[] }> {
+  const events: OpenTuiStreamEvent[] = [];
+  // Every skip path hands back the caller's own parts, untouched and
+  // unnormalized — ink does, so a plain text prompt keeps its shape.
+  if (!hasImageParts(parts)) return { parts, events };
+  if (turnModel.current?.endsWith('\0') || turnModel.inline) {
+    return { parts, events };
+  }
+  if (!shouldRunVisionBridge(config)) return { parts, events };
+  if (signal.aborted) return { parts: null, events };
+
+  const fullTurnModel = config.getDefaultVisionBridgeModel();
+  if (fullTurnModel?.agentCapable) {
+    // The whole turn moves to the image-capable model, so the images stay.
+    const fullTurnParts = normalizeParts(parts).map((part) =>
+      clampInlineMediaPart(part),
+    );
+    if (!hasImageParts(fullTurnParts)) return { parts: fullTurnParts, events };
+    turnModel.current = getFullTurnVisionModelSelector(fullTurnModel);
+    // ink shows this as a `vision_notice` row; OpenTUI has no separate notice
+    // kind, so it rides the info row the bridge's own text already fills.
+    events.push({
+      type: 'info',
+      text: formatFullTurnVisionNotice(fullTurnModel),
+    });
+    return { parts: fullTurnParts, events };
+  }
+
+  const bridgeResult = await runVisionBridge({ config, parts, signal });
+  // One notice either way: the egress disclosure on success, the reason when
+  // the attempt failed or cancelled after images had already been sent.
+  if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
+    events.push({
+      type: bridgeResult.status === 'failed' ? 'error' : 'info',
+      text: formatVisionBridgeNotice(bridgeResult),
+    });
+  }
+  if (signal.aborted) return { parts: null, events };
+  if (bridgeResult.applied && bridgeResult.parts != null) {
+    return { parts: normalizeParts(bridgeResult.parts), events };
+  }
+  // No usable replacement: drop the images and proceed on the remaining text.
+  const textOnly = splitImageParts(parts).nonImageParts;
+  return { parts: textOnly.length > 0 ? textOnly : null, events };
+}
+
+/** Rejects as soon as `signal` fires, so a read that ignores it cannot park the boundary. */
+function abortRejection(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    const rejectWithAbort = () =>
+      reject(
+        signal.reason ?? new Error('Mid-turn @ command resolution aborted'),
+      );
+    if (signal.aborted) rejectWithAbort();
+    else signal.addEventListener('abort', rejectWithAbort, { once: true });
+  });
+}
+
+// ink's MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS: a hung read must not hold the
+// sampling boundary open indefinitely.
+const MID_TURN_STEER_READ_TIMEOUT_MS = 10_000;
+
+interface SteeredPromptResolution {
+  /** User content for the model, segments joined by a blank line as ink joins them. */
+  parts: Part[];
+  /** Read cards and bridge notices — discarded when the hop is restored. */
+  events: OpenTuiStreamEvent[];
+  /**
+   * Texts to put back at the front of the queue. All of them or none: ink
+   * discards the resolved parts when an abort lands, so nothing can go out
+   * twice.
+   */
+  restore: string[];
+}
+
+/**
+ * ink parity (`resolveSteeredMessages`): what the composer queued mid-turn is
+ * resolved the same way an idle submission is — `@path` expansion, then the
+ * prompt-side vision bridge — before it rides to the model as steering.
+ *
+ * Not ported, on purpose: ink's slash interception at this boundary (its goal
+ * command has no OpenTUI counterpart) and its two-phase recording, which
+ * defers the read cards until the messages are committed. Here the cards go out
+ * as they are produced, and an abort drops the whole hop instead.
+ */
+async function resolveSteeredPromptParts(
+  config: Config,
+  texts: readonly string[],
+  signal: AbortSignal,
+  turnModel: TurnModelOverride,
+): Promise<SteeredPromptResolution> {
+  const restore = (): SteeredPromptResolution => ({
+    parts: [],
+    events: [],
+    restore: [...texts],
+  });
+  const events: OpenTuiStreamEvent[] = [];
+  const segments: Part[][] = [];
+
+  for (const message of texts) {
+    if (signal.aborted) return restore();
+    let resolved: PartListUnion = [{ text: message }];
+    if (isAtCommand(message)) {
+      const deadline = new AbortController();
+      const readSignal = AbortSignal.any([signal, deadline.signal]);
+      const timer = setTimeout(() => {
+        deadline.abort(new Error('Mid-turn @ command resolution timed out'));
+      }, MID_TURN_STEER_READ_TIMEOUT_MS);
+      let expanded: Awaited<ReturnType<typeof expandAtMentions>>;
+      try {
+        expanded = await Promise.race([
+          expandAtMentions(config, message, readSignal),
+          abortRejection(readSignal),
+        ]);
+      } catch (error) {
+        const reason = getErrorMessage(error);
+        config.getDebugLogger().debug(`Mid-turn @ command failed: ${reason}`);
+        if (signal.aborted) return restore();
+        events.push({
+          type: 'warning',
+          text: `Could not attach file: ${reason}`,
+        });
+        continue;
+      } finally {
+        clearTimeout(timer);
+      }
+      events.push(...expanded.events);
+      if (expanded.declined) {
+        if (signal.aborted) return restore();
+        continue;
+      }
+      resolved = expanded.parts;
+    }
+
+    const bridged = await applyPromptVisionBridge(
+      config,
+      resolved,
+      signal,
+      turnModel,
+    );
+    events.push(...bridged.events);
+    if (bridged.parts === null) {
+      if (signal.aborted) return restore();
+      continue;
+    }
+    const messageParts = normalizeParts(bridged.parts);
+    if (messageParts.length > 0) segments.push(messageParts);
+  }
+
+  const parts: Part[] = [];
+  for (const segment of segments) {
+    if (parts.length > 0) parts.push({ text: '\n\n' });
+    parts.push(...segment);
+  }
+  return { parts, events, restore: [] };
+}
+
+/**
  * Sends one user prompt through the real client and yields neutral events.
  * The caller (backend) drains this into the streaming model.
  *
@@ -234,6 +511,13 @@ export async function* livePromptEvents(
   }
   const client = config.getGeminiClient();
   const promptId = options?.promptId ?? nextLivePromptId(config);
+  const abort = signal ?? new AbortController().signal;
+  // Read per boundary rather than once: the vision bridge can pick a full-turn
+  // model mid-turn, and the rest of the turn then stays on it (ink parity).
+  const turnModel: TurnModelOverride = {
+    current: options?.modelOverride,
+    inline: options?.modelOverride !== undefined,
+  };
   const map = createEventMapper({
     // ink handleErrorEvent parity: auth-aware formatting. The Ctrl+Y retry
     // hint travels on the error event's `hint` field (ErrorMessage renders
@@ -248,10 +532,9 @@ export async function* livePromptEvents(
         return error instanceof Error ? error.message : String(error);
       }
     },
-    getModelName: () => options?.modelOverride ?? config.getModel(),
+    getModelName: () => turnModel.current ?? config.getModel(),
     getMaxSessionTurns: () => config.getMaxSessionTurns(),
   });
-  const abort = signal ?? new AbortController().signal;
   const dbg = process.env['QWEN_OPENTUI_DEBUG'];
 
   // The ink app drives tool EXECUTION via useReactToolScheduler: the client
@@ -260,21 +543,47 @@ export async function* livePromptEvents(
   // loop here so tools actually run under OpenTUI (drain -> schedule ->
   // submit results -> drain again).
   let nextPrompt: PartListUnion = prompt;
+  // Provenance marks user-typed text: the composer submit and the follow-on
+  // turn built from the mid-turn queue both carry it. A slash command's
+  // generated `submit_prompt` payload does not, and ink never expands that
+  // one (processQuery returns it before its own isAtCommand check).
+  if (
+    typeof prompt === 'string' &&
+    options?.submittedPrompt !== undefined &&
+    isAtCommand(prompt)
+  ) {
+    const expanded = await expandAtMentions(config, prompt, abort);
+    for (const ev of expanded.events) yield ev;
+    // A failed read reports itself on the card above; ink drops the
+    // submission rather than sending the unexpanded text to the model.
+    if (expanded.declined) return;
+    nextPrompt = expanded.parts;
+  }
+  // ink runs the bridge on every query it hands the model
+  // (`prepareQueryForLlm`), so an image attached at the composer converts here.
+  const bridged = await applyPromptVisionBridge(
+    config,
+    nextPrompt,
+    abort,
+    turnModel,
+  );
+  for (const ev of bridged.events) yield ev;
+  if (bridged.parts === null) return;
+  nextPrompt = bridged.parts;
   let first = true;
   const waitingSeen = new Set<string>();
   for (;;) {
     const sendOptions = first
-      ? options?.modelOverride
-        ? {
-            type: SendMessageType.UserQuery,
-            modelOverride: options.modelOverride,
-          }
-        : undefined
+      ? {
+          type: SendMessageType.UserQuery,
+          ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
+          ...(options?.submittedPrompt
+            ? { submittedPrompt: options.submittedPrompt }
+            : {}),
+        }
       : {
           type: SendMessageType.ToolResult,
-          ...(options?.modelOverride
-            ? { modelOverride: options.modelOverride }
-            : {}),
+          ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
         };
     first = false;
     const pending: Array<{ callId: string; name: string; args?: unknown }> = [];
@@ -467,8 +776,19 @@ export async function* livePromptEvents(
     // Sampling boundary: drained steering rides after the tool responses as
     // genuine user content (original useGeminiStream mid-turn drain).
     if (!abort.aborted) {
-      for (const text of options?.drainSteering?.() ?? []) {
-        if (text) responseParts.push({ text });
+      const texts = (options?.drainSteering?.() ?? []).filter((text) => text);
+      if (texts.length > 0) {
+        const steered = await resolveSteeredPromptParts(
+          config,
+          texts,
+          abort,
+          turnModel,
+        );
+        if (steered.restore.length > 0) {
+          options?.restoreSteering?.(steered.restore);
+        }
+        for (const ev of steered.events) yield ev;
+        responseParts.push(...steered.parts);
       }
     }
     // Context-file write check (ink useGeminiStream parity): a slash command
