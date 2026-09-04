@@ -33,6 +33,11 @@ import type {
   SkillLevel,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItemWithoutId } from '../types.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
+import {
+  formatStopHookLoopText,
+  formatUserPromptSubmitBlocked,
+} from './event-adapter.js';
 import { flattenModelsBySource } from '../utils/modelsBySource.js';
 import { calculateCost } from '../../utils/costCalculator.js';
 import { computeSessionStats } from '../utils/computeStats.js';
@@ -1082,5 +1087,114 @@ export function projectSpecialItemText(
     }
     default:
       return null;
+  }
+}
+
+/** Decides every history kind a command can record: an event, or null. */
+export function projectItemToStreamEvent(
+  item: HistoryItemWithoutId,
+  ctx: ItemProjectionContext,
+): OpenTuiStreamEvent | null {
+  const viaSpecialText = (): OpenTuiStreamEvent | null => {
+    const text = projectSpecialItemText(item, ctx);
+    return text === null ? null : { type: 'info', text };
+  };
+  switch (item.type) {
+    case 'user':
+      return {
+        type: 'user',
+        text: item.text,
+        sentToModel: item.sentToModel ?? false,
+        ...(item.promptId ? { promptId: item.promptId } : {}),
+      };
+    case 'info':
+      return viaSpecialText();
+    case 'warning':
+      return { type: 'warning', text: item.text };
+    // No success row in the live model yet; ink's green SuccessMessage
+    // renders as the info row. Reachable here only through /arena.
+    case 'success':
+      return { type: 'info', text: item.text };
+    case 'error':
+      return {
+        type: 'error',
+        text: item.text,
+        ...(item.hint ? { hint: item.hint } : {}),
+      };
+    case 'goal_state':
+      return { type: 'goal', snapshot: item.snapshot, cause: item.cause };
+    case 'goal_status':
+      return {
+        type: 'goal-legacy',
+        kind: item.kind,
+        condition: item.condition,
+        iterations: item.iterations,
+        durationMs: item.durationMs,
+        lastReason: item.lastReason,
+      };
+    case 'stop_hook_system_message':
+      return { type: 'stop-hook-message', message: item.message };
+    case 'stop_hook_loop':
+      return {
+        type: 'info',
+        text: formatStopHookLoopText(item.stopHookCount, item.reasons),
+      };
+    case 'user_prompt_submit_blocked':
+      return {
+        type: 'warning',
+        text: formatUserPromptSubmitBlocked(item.reason, item.originalPrompt),
+      };
+    case 'about':
+    case 'tools_list':
+    case 'model_stats':
+    case 'tool_stats':
+    case 'skill_stats':
+    case 'summary':
+    case 'insight_progress':
+    case 'context_usage':
+    case 'doctor':
+    case 'mcp_status':
+    case 'extensions_list':
+    case 'skills_list':
+    case 'memory_saved':
+    case 'quit':
+    case 'compression':
+    case 'stats':
+    case 'btw':
+      return viaSpecialText();
+    // Explicit no-ops, each a decision rather than an accident:
+    //  - `tool_group`: tool cards come from the live stream's own events; a
+    //    dispatcher-written group would duplicate them.
+    //  - `retry_countdown`, `vision_notice`, `gemini*`: the live stream folds
+    //    these from events already; a history copy would render the row twice.
+    //  - `help`: `/help` resolves to a dialog and the overlay renders from
+    //    help-content.ts; no command returns a HELP message, so nothing writes
+    //    this item in either renderer.
+    //  - the rest: ink renders these through dedicated components and this
+    //    renderer has no row shape for them yet. `/advisor`, `/arena` and
+    //    `/recap` are registered here and do write four of these kinds, so
+    //    their output stays invisible — a registered gap (U-34), not an
+    //    accident of the switch.
+    case 'tool_group':
+    case 'retry_countdown':
+    case 'vision_notice':
+    case 'gemini':
+    case 'gemini_content':
+    case 'gemini_thought':
+    case 'gemini_thought_content':
+    case 'help':
+    case 'notification':
+    case 'user_shell':
+    case 'advisor':
+    case 'arena_agent_complete':
+    case 'arena_session_complete':
+    case 'away_recap':
+    case 'tool_use_summary':
+    case 'diff_stats':
+      return null;
+    default: {
+      const exhaustive: never = item;
+      return exhaustive;
+    }
   }
 }

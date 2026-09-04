@@ -44,6 +44,7 @@ import {
   describeDeliveryStatus,
   parseHeldExpiry,
   describeHoldCause,
+  describePeerInboxFailure,
   getErrorMessage,
   getAllMemoryFilenames,
   ShellExecutionService,
@@ -225,6 +226,7 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import { ContextMenuProvider } from './context-menu/ContextMenuContext.js';
 import {
   RenderModeProvider,
   type RenderMode,
@@ -256,7 +258,10 @@ import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
-import { usePeerMessaging } from '../peerMessaging/PeerMessagingContext.js';
+import {
+  usePeerInboxFailure,
+  usePeerMessaging,
+} from '../peerMessaging/PeerMessagingContext.js';
 import {
   MAX_ACCEPTED_BACKLOG,
   type PeerMessaging,
@@ -1656,6 +1661,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const {
     isOutputStyleDialogOpen,
+    outputStyleChoices,
     openOutputStyleDialog,
     handleOutputStyleSelect,
   } = useOutputStyleCommand(settings, config, historyManager.addItem);
@@ -2707,6 +2713,24 @@ export const AppContainer = (props: AppContainerProps) => {
     });
   }, [historyManager, peerMessaging]);
 
+  // Say so when the inbox could not bind. With the feature on, a session
+  // without an inbox is unreachable, and its only other symptom is peers
+  // reporting it absent — a problem the user would otherwise discover
+  // from the wrong side. One line, once, with the cause and what to do.
+  const peerInboxFailure = usePeerInboxFailure();
+  const announcedInboxFailureRef = useRef(false);
+  useEffect(() => {
+    if (!peerInboxFailure || announcedInboxFailureRef.current) return;
+    announcedInboxFailureRef.current = true;
+    historyManager.addItem(
+      {
+        type: MessageType.ERROR,
+        text: `Cross-session messaging is OFF for this session — the inbox could not bind: ${describePeerInboxFailure(peerInboxFailure)}`,
+      },
+      Date.now(),
+    );
+  }, [historyManager, peerInboxFailure]);
+
   // A held message may only be waiting on a mode mismatch, so re-run the
   // gate whenever the approval mode changes rather than making the user
   // approve something the new mode would have accepted outright.
@@ -3570,9 +3594,9 @@ export const AppContainer = (props: AppContainerProps) => {
         // On by default: the schema declares `default: true`, but
         // `mergeSettings` doesn't apply schema defaults, so an unset value is
         // `undefined` and a `=== true` gate left the cache-aware fork as dead
-        // code unless the flag was explicitly set (#9230). Same treatment as
-        // `enableFollowupSuggestions` above — only an explicit `false` opts
-        // out.
+        // code unless the flag was explicitly set (#9230). Only an explicit
+        // `false` opts out of cache sharing. This flag does not inherit the
+        // follow-up suggestion runtime gate.
         enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
       })
         .then((result) => {
@@ -3699,6 +3723,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const ctrlDTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [escapePressedOnce, setEscapePressedOnce] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Mirror of the context-menu open state: the provider wraps the app below
+  // this component's own always-active keypress handler, so the handler
+  // cannot call useContextMenu() — the provider reports changes here instead.
+  const contextMenuOpenRef = useRef(false);
+  const handleContextMenuChange = useCallback((open: boolean) => {
+    contextMenuOpenRef.current = open;
+  }, []);
   const dialogsVisibleRef = useRef(false);
   const [isRewindSelectorOpen, setIsRewindSelectorOpen] = useState(false);
   const [rewindEscPending, setRewindEscPending] = useState(false);
@@ -4490,6 +4522,12 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
+        // While the context menu is open its overlay owns Esc (closing the
+        // menu); the global branches below must not also fire on the same
+        // key — cancelling the stream, arming double-Esc, or cancelling btw.
+        if (contextMenuOpenRef.current) {
+          return;
+        }
         // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
         // the Esc to switch to NORMAL mode. Without this guard, both handlers
         // fire on the same keypress — vim switches mode AND AppContainer
@@ -4572,6 +4610,7 @@ export const AppContainer = (props: AppContainerProps) => {
         btwItem &&
         !btwItem.btw.isPending &&
         !dialogsVisibleRef.current &&
+        !contextMenuOpenRef.current &&
         buffer.text.length === 0
       ) {
         if (key.name === 'return' || key.sequence === ' ') {
@@ -4817,6 +4856,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
       isOutputStyleDialogOpen,
+      outputStyleChoices,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -4964,6 +5004,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isApprovalModeDialogOpen,
       isEffortDialogOpen,
       isOutputStyleDialogOpen,
+      outputStyleChoices,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -5300,7 +5341,11 @@ export const AppContainer = (props: AppContainerProps) => {
                 <RenderModeProvider value={renderModeValue}>
                   <TerminalOutputProvider value={writeRaw}>
                     <ShellFocusContext.Provider value={isFocused}>
-                      <App />
+                      <ContextMenuProvider
+                        onMenuChange={handleContextMenuChange}
+                      >
+                        <App />
+                      </ContextMenuProvider>
                     </ShellFocusContext.Provider>
                   </TerminalOutputProvider>
                 </RenderModeProvider>
