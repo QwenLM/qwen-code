@@ -634,14 +634,15 @@ export const useLlmStream = (
               expectedRevision: binding.permit.revision,
               // `reason` is the abort cause, which sibling hosts compare
               // against sentinel constants and which the debug log wants
-              // verbatim. A caller that has already framed a user-facing
-              // sentence passes it as `pauseReason` instead of having this
-              // one framed a second time.
+              // verbatim. It is a scheduler diagnostic, so it never reaches
+              // the durable user-facing reason: a caller that has a sentence
+              // for the reader passes it as `pauseReason`, and everything
+              // else falls back to the builder's detail-free wording.
               reason:
                 options?.pauseReason ??
                 (options?.userCancelled
                   ? GOAL_PAUSE_REASON_USER_INTERRUPT
-                  : goalPauseReasonForFailure(reason)),
+                  : goalPauseReasonForFailure('')),
             });
           } catch (error) {
             debugLogger.warn('Failed to pause invalid Goal tool batch', error);
@@ -5815,10 +5816,18 @@ export const useLlmStream = (
             }
           : undefined;
 
+      // Both exits below leave a batch whose callIds are already marked
+      // submitted, so the responses have to reach history here or the
+      // model's function calls stay unanswered and the next `/goal resume`
+      // sends an unpaired call -- the same pairing the cancellation check
+      // above owes its own batch.
       if (continuationWasCancelled()) {
         drainedSteer?.restore();
         settleDrainedTeammates(false);
         if (toolGoalBinding) {
+          if (llmClient) {
+            llmClient.addHistory({ role: 'user', parts: responsesToSend });
+          }
           await failClosedGoalTurn(
             toolGoalBinding,
             'Goal tool continuation was cancelled',
@@ -5831,6 +5840,9 @@ export const useLlmStream = (
       if (toolGoalBinding?.controller.signal.aborted) {
         drainedSteer?.restore();
         settleDrainedTeammates(false);
+        if (llmClient) {
+          llmClient.addHistory({ role: 'user', parts: responsesToSend });
+        }
         await failClosedGoalTurn(
           toolGoalBinding,
           'Goal tool continuation was preempted',

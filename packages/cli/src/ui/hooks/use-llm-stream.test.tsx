@@ -5083,6 +5083,711 @@ describe('useLlmStream', () => {
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
   });
 
+  it('pairs a preempted Goal tool batch into history before it stops', async () => {
+    // A preempted batch has already been marked submitted, so its responses
+    // reach the model only if they are written here -- otherwise the next
+    // `/goal resume` sends a history with unanswered function calls.
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-preempt-pairing',
+      revision: 2,
+      turnId: 'turn-preempt-pairing',
+    };
+    let currentPermit: GoalTurnPermit | undefined = permit;
+    const dispatch = vi.fn(async () => {
+      currentPermit = undefined;
+    });
+    const finishTurn = vi.fn().mockResolvedValue(undefined);
+    const flush = vi.fn().mockResolvedValue(undefined);
+    const activeSnapshot = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: permit.goalId,
+        revision: permit.revision,
+        objective: 'keep going',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-goal-preempt-pairing' },
+        turnCount: 1,
+        activeTimeMs: 5,
+        tokensUsed: 0,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    };
+    const runtime = {
+      permitForTurn: vi.fn(() => currentPermit),
+      dispatch,
+      finishTurn,
+      getSnapshot: vi.fn(() => activeSnapshot),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntime = vi.fn(() => runtime);
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
+
+    const completedTool = (callId: string): TrackedCompletedToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-goal-preempt-pairing',
+          goalContext: permit,
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId,
+          responseParts: [{ text: `${callId} response` }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCompletedToolCall;
+
+    const cancelledTool = (callId: string): TrackedCancelledToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-goal-preempt-pairing',
+          goalContext: permit,
+        },
+        status: 'cancelled',
+        responseSubmittedToLlm: false,
+        response: {
+          callId,
+          responseParts: [{ text: '[Operation Cancelled]' }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCancelledToolCall;
+    void cancelledTool;
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    const currentToolCalls: TrackedToolCall[] = [];
+    void currentToolCalls;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [
+        currentToolCalls,
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ];
+    });
+    const client = new MockedLlmClientClass(mockConfig);
+    const { result, rerender } = renderHook(() =>
+      useLlmStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+    void result;
+    void rerender;
+
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: { callId: 'done-tool', name: 'testTool', args: {} },
+        };
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: { callId: 'cont-tool', name: 'testTool', args: {} },
+        };
+      })(),
+    );
+    await act(async () => {
+      await capturedOnComplete?.([completedTool('setup-tool')]);
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    // Hang the batch just past the point where the responses are collected,
+    // preempt the Goal turn, then let it run into the preemption exit.
+    let releaseRefresh: (() => void) | undefined;
+    mockRefreshMemoryAfterManagedWrite.mockImplementationOnce(
+      () =>
+        new Promise<boolean>((resolve) => {
+          releaseRefresh = () => resolve(false);
+        }),
+    );
+    client.addHistory.mockClear();
+    const batch = act(async () => {
+      await capturedOnComplete?.([
+        completedTool('done-tool'),
+        completedTool('cont-tool'),
+      ]);
+    });
+    await waitFor(() => {
+      expect(releaseRefresh).toBeDefined();
+    });
+    act(() => {
+      result.current.preemptGoalTurn('preempted by test');
+    });
+    releaseRefresh?.();
+    await batch;
+
+    expect(client.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [{ text: 'done-tool response' }, { text: 'cont-tool response' }],
+    });
+    // The preempted batch never reached the model.
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('names a Goal turn that ended without a continuation as a failure, not as its own diagnostic', async () => {
+    // The abort cause at this site is a scheduler diagnostic. It must not
+    // become the sentence a user reads, and a turn nobody cancelled must not
+    // be labelled a user interrupt.
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-no-continuation',
+      revision: 2,
+      turnId: 'turn-no-continuation',
+    };
+    let currentPermit: GoalTurnPermit | undefined = permit;
+    const dispatch = vi.fn(async () => {
+      currentPermit = undefined;
+    });
+    const finishTurn = vi.fn().mockResolvedValue(undefined);
+    const flush = vi.fn().mockResolvedValue(undefined);
+    const activeSnapshot = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: permit.goalId,
+        revision: permit.revision,
+        objective: 'keep going',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-goal-no-continuation' },
+        turnCount: 1,
+        activeTimeMs: 5,
+        tokensUsed: 0,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    };
+    const runtime = {
+      permitForTurn: vi.fn(() => currentPermit),
+      dispatch,
+      finishTurn,
+      getSnapshot: vi.fn(() => activeSnapshot),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntime = vi.fn(() => runtime);
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
+
+    const completedTool = (callId: string): TrackedCompletedToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-goal-no-continuation',
+          goalContext: permit,
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId,
+          responseParts: [{ text: `${callId} response` }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCompletedToolCall;
+
+    const cancelledTool = (callId: string): TrackedCancelledToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-goal-no-continuation',
+          goalContext: permit,
+        },
+        status: 'cancelled',
+        responseSubmittedToLlm: false,
+        response: {
+          callId,
+          responseParts: [{ text: '[Operation Cancelled]' }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCancelledToolCall;
+    void cancelledTool;
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    const currentToolCalls: TrackedToolCall[] = [];
+    void currentToolCalls;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [
+        currentToolCalls,
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ];
+    });
+    const client = new MockedLlmClientClass(mockConfig);
+    const { result, rerender } = renderHook(() =>
+      useLlmStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+    void result;
+    void rerender;
+
+    // A stream that schedules no continuation leaves the binding with
+    // nothing to retain, so the turn fails closed.
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.Finished,
+          value: { reason: 'STOP', usageMetadata: undefined },
+        };
+      })(),
+    );
+    await act(async () => {
+      await capturedOnComplete?.([completedTool('setup-tool')]);
+    });
+
+    await waitFor(() => {
+      expect(dispatch).toHaveBeenCalledWith({
+        action: 'pause',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+        reason: goalPauseReasonForFailure(''),
+      });
+    });
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: expect.stringContaining('valid continuation'),
+      }),
+    );
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ reason: GOAL_PAUSE_REASON_USER_INTERRUPT }),
+    );
+  });
+
+  it('sends a partly declined Goal tool batch back to the model without pausing', async () => {
+    // Declining one tool of a batch whose siblings succeeded is not a stop:
+    // the batch goes back to the model exactly as it does outside a Goal.
+    // The design doc records this as the chosen behaviour, so it needs a
+    // test of its own -- the all-declined batch is the one that pauses.
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-partial-decline',
+      revision: 2,
+      turnId: 'turn-partial-decline',
+    };
+    let currentPermit: GoalTurnPermit | undefined = permit;
+    const dispatch = vi.fn(async () => {
+      currentPermit = undefined;
+    });
+    const finishTurn = vi.fn().mockResolvedValue(undefined);
+    const flush = vi.fn().mockResolvedValue(undefined);
+    const activeSnapshot = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: permit.goalId,
+        revision: permit.revision,
+        objective: 'keep going',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-goal-partial-decline' },
+        turnCount: 1,
+        activeTimeMs: 5,
+        tokensUsed: 0,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    };
+    const runtime = {
+      permitForTurn: vi.fn(() => currentPermit),
+      dispatch,
+      finishTurn,
+      getSnapshot: vi.fn(() => activeSnapshot),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntime = vi.fn(() => runtime);
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
+
+    const completedTool = (callId: string): TrackedCompletedToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-goal-partial-decline',
+          goalContext: permit,
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId,
+          responseParts: [{ text: `${callId} response` }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCompletedToolCall;
+
+    const cancelledTool = (callId: string): TrackedCancelledToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-goal-partial-decline',
+          goalContext: permit,
+        },
+        status: 'cancelled',
+        responseSubmittedToLlm: false,
+        response: {
+          callId,
+          responseParts: [{ text: '[Operation Cancelled]' }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCancelledToolCall;
+    void cancelledTool;
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    const currentToolCalls: TrackedToolCall[] = [];
+    void currentToolCalls;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [
+        currentToolCalls,
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ];
+    });
+    const client = new MockedLlmClientClass(mockConfig);
+    const { result, rerender } = renderHook(() =>
+      useLlmStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+    void result;
+    void rerender;
+
+    // The follow-up turn schedules another tool, so the Goal binding stays
+    // live and the only pause that could appear is one this batch caused.
+    mockSendMessageStream.mockImplementation(() =>
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: { callId: 'next-tool', name: 'testTool', args: {} },
+        };
+      })(),
+    );
+    mockSendMessageStream.mockImplementationOnce(() =>
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: { callId: 'done-tool', name: 'testTool', args: {} },
+        };
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: { callId: 'cont-tool', name: 'testTool', args: {} },
+        };
+      })(),
+    );
+    await act(async () => {
+      await capturedOnComplete?.([completedTool('setup-tool')]);
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    // No `cancelOngoingRequest()`: a declined confirmation is consumed by the
+    // dialog, so nothing cancels the turn itself.
+    await act(async () => {
+      await capturedOnComplete?.([
+        completedTool('done-tool'),
+        cancelledTool('cont-tool'),
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    expect(dispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'pause' }),
+    );
+  });
+
+  it('pairs a Goal tool batch into history when the turn is cancelled during the boundary drain', async () => {
+    // A batch that passes the first cancellation check is already marked
+    // submitted by the time the boundary drain awaits. An Esc landing in that
+    // await takes the later exit, which owes the same pairing -- otherwise
+    // the next `/goal resume` sends unanswered function calls.
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-drain-cancel',
+      revision: 4,
+      turnId: 'turn-drain-cancel',
+    };
+    let currentPermit: GoalTurnPermit | undefined = permit;
+    const dispatch = vi.fn(async () => {
+      currentPermit = undefined;
+    });
+    const finishTurn = vi.fn().mockResolvedValue(undefined);
+    const flush = vi.fn().mockResolvedValue(undefined);
+    const activeSnapshot = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: permit.goalId,
+        revision: permit.revision,
+        objective: 'keep going',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-drain-cancel' },
+        turnCount: 1,
+        activeTimeMs: 5,
+        tokensUsed: 0,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    };
+    const runtime = {
+      permitForTurn: vi.fn(() => currentPermit),
+      dispatch,
+      finishTurn,
+      getSnapshot: vi.fn(() => activeSnapshot),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntime = vi.fn(() => runtime);
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({ flush });
+
+    const completedTool = (callId: string): TrackedCompletedToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-drain-cancel',
+          goalContext: permit,
+        },
+        status: 'success',
+        responseSubmittedToLlm: false,
+        response: {
+          callId,
+          responseParts: [{ text: `${callId} response` }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCompletedToolCall;
+
+    // One queued `/goal` message is enough to make the boundary drain await:
+    // the hook hands it to the slash-command handler, which is held open
+    // below so the Esc lands inside that await.
+    let queuedSteerMessages: string[] = [];
+    const midTurnDrainRef = {
+      current: vi.fn<() => string[]>(() => {
+        const drained = queuedSteerMessages;
+        queuedSteerMessages = [];
+        return drained;
+      }),
+    };
+    let releaseSlashCommand: (() => void) | undefined;
+    mockHandleSlashCommand.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseSlashCommand = () => resolve(false);
+        }),
+    );
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    let currentToolCalls: TrackedToolCall[] = [];
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [
+        currentToolCalls,
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ];
+    });
+    const client = new MockedLlmClientClass(mockConfig);
+    const { result, rerender } = renderHook(() =>
+      useLlmStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    mockSendMessageStream.mockImplementationOnce(() =>
+      (async function* () {
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: { callId: 'done-tool', name: 'testTool', args: {} },
+        };
+        yield {
+          type: ServerLlmEventType.ToolCallRequest,
+          value: { callId: 'cont-tool', name: 'testTool', args: {} },
+        };
+      })(),
+    );
+    await act(async () => {
+      await capturedOnComplete?.([completedTool('setup-tool')]);
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    // Keep the hook in `Responding` so the Esc below has a turn to cancel.
+    currentToolCalls = ['done-tool', 'cont-tool'].map(
+      (callId) =>
+        ({
+          request: {
+            callId,
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-drain-cancel',
+            goalContext: permit,
+          },
+          status: 'executing',
+          tool: { displayName: 'MockTool' },
+          invocation: {
+            getDescription: () => callId,
+          } as unknown as AnyToolInvocation,
+          startTime: Date.now(),
+        }) as unknown as TrackedExecutingToolCall,
+    );
+    rerender();
+    client.addHistory.mockClear();
+    queuedSteerMessages = ['/goal status'];
+    const batch = act(async () => {
+      await capturedOnComplete?.([
+        completedTool('done-tool'),
+        completedTool('cont-tool'),
+      ]);
+    });
+    await waitFor(() => {
+      expect(releaseSlashCommand).toBeDefined();
+    });
+    act(() => {
+      result.current.cancelOngoingRequest();
+    });
+    releaseSlashCommand?.();
+    await batch;
+
+    expect(client.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: [{ text: 'done-tool response' }, { text: 'cont-tool response' }],
+    });
+    // The cancelled batch never reached the model.
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
   it('finishes a Goal turn without another model call after update_goal', async () => {
     const permit: GoalTurnPermit = {
       goalId: 'goal-complete',

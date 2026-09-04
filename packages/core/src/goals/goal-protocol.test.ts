@@ -14,6 +14,7 @@ import {
   GOAL_PAUSE_REASON_STOP_HOOK_CAP,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
   goalPauseReasonForFailure,
+  goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
   validateGoalPauseReason,
 } from './goal-protocol.js';
@@ -70,6 +71,7 @@ describe('goal pause reasons', () => {
   it('builds reasons the validator accepts, however long the detail', () => {
     for (const built of [
       goalPauseReasonForFailure('x'.repeat(5_000)),
+      goalPauseReasonForHeadlessFailure('x'.repeat(5_000)),
       goalPauseReasonForRunBudget('x'.repeat(5_000)),
     ]) {
       expect(codePoints(built)).toBe(GOAL_PAUSE_REASON_MAX_CHARACTERS);
@@ -84,6 +86,24 @@ describe('goal pause reasons', () => {
     expect(goalPauseReasonForRunBudget('   ')).toBe(
       'The headless run stopped at a budget. Resume the Goal in a later run.',
     );
+    expect(goalPauseReasonForHeadlessFailure('   ')).toBe(
+      'The headless run stopped before the Goal turn finished. Resume the Goal in a later run.',
+    );
+  });
+
+  it('keeps the headless register free of slash commands', () => {
+    // A headless process has already exited by the time a user reads these,
+    // so none of them may point at a slash command.
+    for (const reason of [
+      GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+      goalPauseReasonForRunBudget('wall-time'),
+      goalPauseReasonForHeadlessFailure('the model stream broke'),
+    ]) {
+      expect(reason).not.toContain('/goal resume');
+    }
+    expect(
+      goalPauseReasonForHeadlessFailure('the model stream broke'),
+    ).toContain('the model stream broke');
   });
 
   it('names the budget that tripped', () => {

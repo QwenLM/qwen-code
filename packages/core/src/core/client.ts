@@ -239,8 +239,14 @@ export interface SendMessageOptions {
   goalSignal?: AbortSignal;
   /** Whether this permit belongs to runtime work or a real-user turn. */
   goalOrigin?: 'runtime' | 'user';
-  /** Host-specific reason when this send has to pause an interrupted Goal. */
-  getInterruptedGoalPauseReason?: () => string;
+  /**
+   * Host-specific reason when this send has to pause an interrupted Goal.
+   * `interruption.failure` carries the error that ended the turn when there
+   * was one, so a host can tell a run that died apart from one that stopped.
+   */
+  getInterruptedGoalPauseReason?: (interruption?: {
+    failure?: string;
+  }) => string;
   /** Peeks a queued real-user key immediately before a Goal true Stop. */
   getQueuedGoalTurnKey?: () => string | undefined;
 }
@@ -2935,7 +2941,10 @@ export class LlmClient {
       }
       return goalRuntime;
     };
-    const releaseGoalPermitOnInterruptedExit = async (pauseReason?: string) => {
+    const releaseGoalPermitOnInterruptedExit = async (
+      pauseReason?: string,
+      failure?: string,
+    ) => {
       if (
         goalPermitReleased ||
         !goalPermit ||
@@ -2969,7 +2978,7 @@ export class LlmClient {
               expectedRevision: goalPermit.revision,
               reason:
                 pauseReason ??
-                options?.getInterruptedGoalPauseReason?.() ??
+                options?.getInterruptedGoalPauseReason?.({ failure }) ??
                 (callerSignal.aborted
                   ? GOAL_PAUSE_REASON_USER_INTERRUPT
                   : goalPauseReasonForFailure('the turn was interrupted')),
@@ -2993,8 +3002,11 @@ export class LlmClient {
         debugLogger.warn('Failed to release interrupted Goal turn', error);
       }
     };
-    const finalizeInterruptedGoalTurn = async (pauseReason?: string) => {
-      await releaseGoalPermitOnInterruptedExit(pauseReason);
+    const finalizeInterruptedGoalTurn = async (
+      pauseReason?: string,
+      failure?: string,
+    ) => {
+      await releaseGoalPermitOnInterruptedExit(pauseReason, failure);
       closeGoalStateEvents();
       return takePendingGoalEvents();
     };
@@ -4189,7 +4201,12 @@ export class LlmClient {
             (event.type === LlmEventType.UserCancelled && signal.aborted) ||
             event.type === LlmEventType.Error
           ) {
-            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn(
+              undefined,
+              event.type === LlmEventType.Error
+                ? event.value.error?.message
+                : undefined,
+            )) {
               yield goalEvent;
             }
           }
@@ -4830,7 +4847,10 @@ export class LlmClient {
       normalCompletion = true;
       return turn;
     } catch (error) {
-      for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+      for (const goalEvent of await finalizeInterruptedGoalTurn(
+        undefined,
+        getErrorMessage(error),
+      )) {
         yield goalEvent;
       }
       if (

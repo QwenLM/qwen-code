@@ -1588,6 +1588,11 @@ describe('LlmClient Goal admission', () => {
 
     expect(error).toBe(setupError);
     expect(getInterruptedGoalPauseReason).toHaveBeenCalledOnce();
+    // The host needs the error to tell a turn that died from one that merely
+    // stopped; without it every failure reads as a clean stop.
+    expect(getInterruptedGoalPauseReason).toHaveBeenCalledWith({
+      failure: 'model setup exploded',
+    });
     expect(runtime.dispatch).toHaveBeenCalledWith({
       action: 'pause',
       expectedGoalId: permit.goalId,

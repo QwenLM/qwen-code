@@ -72,6 +72,7 @@ import {
   GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
   GOAL_PAUSE_REASON_USER_INTERRUPT,
   goalPauseReasonForFailure,
+  goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
   addAgentOutputMessageAttributes,
   endInteractionSpan,
@@ -747,9 +748,14 @@ export async function runNonInteractive(
             action: 'pause',
             expectedGoalId: turn.permit.goalId,
             expectedRevision: turn.permit.revision,
+            // The only thing that aborts this controller without tripping a
+            // budget is a signal or the embedder cancelling the run, which
+            // `routeAbort` names a user interrupt. Naming it anything else
+            // here would make the recorded reason depend on which side of
+            // `finishTurn`'s persistence window the same Ctrl+C landed on.
             reason: exceeded
               ? goalPauseReasonForRunBudget(exceeded.kind)
-              : GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED,
+              : GOAL_PAUSE_REASON_USER_INTERRUPT,
           })
           .then(() => undefined)
           .catch((error) => {
@@ -2394,13 +2400,21 @@ export async function runNonInteractive(
                   goalTurnKey: goalTurn.turnKey,
                   goalSignal: goalTurn.controller.signal,
                   goalOrigin: goalTurn.origin,
-                  getInterruptedGoalPauseReason: () => {
+                  getInterruptedGoalPauseReason: (interruption) => {
                     const exceeded = budgetEnforcer.getExceeded();
-                    return exceeded
-                      ? goalPauseReasonForRunBudget(exceeded.kind)
-                      : abortController.signal.aborted
-                        ? GOAL_PAUSE_REASON_USER_INTERRUPT
-                        : GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED;
+                    if (exceeded) {
+                      return goalPauseReasonForRunBudget(exceeded.kind);
+                    }
+                    if (abortController.signal.aborted) {
+                      return GOAL_PAUSE_REASON_USER_INTERRUPT;
+                    }
+                    // A turn that died with an error did not end cleanly, so
+                    // it must not read as the run simply finishing first --
+                    // but it stays in the headless register, which never
+                    // tells the reader to run a slash command.
+                    return interruption?.failure
+                      ? goalPauseReasonForHeadlessFailure(interruption.failure)
+                      : GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED;
                   },
                 }
               : {}),

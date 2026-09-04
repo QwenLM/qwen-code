@@ -94,19 +94,28 @@ subject of #10170 and PR #10180.
   every host's own reasoned pause and a second pause on a non-active Goal
   throws, so this is the dispatch that decides what the record says -- a
   caller-aborted exit is a user interrupt, an exit that merely failed to
-  complete is a failed turn, and the Stop-hook cap names itself.
+  complete is a failed turn, and the Stop-hook cap names itself. A host may
+  supply its own wording for an interrupted exit, and is handed the error
+  that ended the turn when there was one, so a headless run's stop reads in
+  the headless register rather than in the interactive one.
 - `use-llm-stream.ts`: `failClosedGoalTurn` takes a `userCancelled` flag and
   picks the matching reason; the cancelled-continuation branch pairs the
   batch's responses into history before it stops.
 - `goalCommand.ts`: `/goal pause` names itself.
 - `Session.ts`: four ACP pause sites choose among user interrupt, output
-  limit, session disposal, turn failure, and the Stop-hook cap.
+  limit, session disposal, turn failure, and the Stop-hook cap. A close or a
+  managed shutdown aborts with the dispose sentinel so it is not recorded as
+  the user's own cancel, and the disposal wording says the session _started_
+  closing -- a close that is later abandoned must not leave a record claiming
+  something that did not happen.
 - `nonInteractiveCli.ts`: the headless helper takes an explicit pause reason;
   the two writers that actually settle a budget stop -- the outer catch and
   the abort listener inside `finishGoalTurn` -- name the budget that tripped;
-  a successful structured-output exit no longer reads as a failed turn; and
-  TEXT output prints the reason for every non-active status, not just
-  `blocked` and `usage_limited`.
+  a non-budget abort in the settle window is a user interrupt, the same as
+  the identical abort a moment earlier or later; a successful
+  structured-output exit no longer reads as a failed turn; and TEXT output
+  prints the reason for every non-active status, not just `blocked` and
+  `usage_limited`.
 - `docs/users/features/goals.md`: a section on interrupting a Goal.
 
 ## Verification
@@ -122,7 +131,11 @@ subject of #10170 and PR #10180.
   and a `releaseTurn` arriving after the pause schedules no continuation.
 - `use-llm-stream.test.tsx`: a partly cancelled Goal tool batch pauses with
   the user-interrupt reason, pairs both responses into history, and never
-  reaches the model.
+  reaches the model; a preempted batch and a batch cancelled inside the
+  boundary drain pair their responses too; a partly _declined_ batch goes
+  back to the model without pausing; and a turn that ends with no valid
+  continuation records the failure sentence rather than the scheduler's own
+  diagnostic.
 - `goalCommand.test.ts` and `Session.test.ts` pin the reason each pause site
   sends.
 - `goal-protocol.test.ts`: the shared constants validate, the bound is

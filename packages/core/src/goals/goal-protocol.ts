@@ -373,8 +373,14 @@ export const GOAL_PAUSE_REASON_MODEL_OUTPUT_LIMIT =
   'The model hit its output limit before the turn finished. Run /goal resume to continue.';
 export const GOAL_PAUSE_REASON_STOP_HOOK_CAP =
   'A Stop hook blocked this session too many times in a row. Run /goal resume to continue.';
+/**
+ * A session that began closing while its Goal turn was in flight. The close
+ * can still be abandoned -- a drain timeout or a failed flush releases the
+ * gate and the session keeps serving -- so this states what is durably true
+ * at the moment of the stop rather than asserting the session is gone.
+ */
 export const GOAL_PAUSE_REASON_SESSION_DISPOSED =
-  'The session closed before the turn finished. Run /goal resume to continue.';
+  'The session started closing before the turn finished. Run /goal resume to continue.';
 /**
  * A headless run that ended while its Goal was still going. It is not a
  * failure, and it must not tell the reader to run a slash command in a
@@ -397,6 +403,21 @@ export function goalPauseReasonForFailure(message: string): string {
     detail
       ? `The Goal turn could not finish: ${detail}. Run /goal resume to continue.`
       : 'The Goal turn could not finish. Run /goal resume to continue.',
+  );
+}
+
+/**
+ * The pause reason for a headless Goal turn that died with an error. Same
+ * register as `GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED` -- it names the failure
+ * without claiming the run ended cleanly, and without pointing at a slash
+ * command in a process that has already exited.
+ */
+export function goalPauseReasonForHeadlessFailure(message: string): string {
+  const detail = message.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The headless run stopped: ${detail}. Resume the Goal in a later run.`
+      : 'The headless run stopped before the Goal turn finished. Resume the Goal in a later run.',
   );
 }
 
