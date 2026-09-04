@@ -13,6 +13,7 @@ import {
   layerPlanTodos,
   nestedAgentToolsForTool,
   nestedTasksForTool,
+  PLAN_STATUS_GLYPH,
   PlanExecutionView,
 } from './PlanExecutionView';
 
@@ -491,8 +492,22 @@ describe('PlanExecutionView', () => {
       .querySelector('[data-plan-node-id="verify"]')
       ?.closest('article');
     // `verify` has no linked tool call in this fixture, so its whole text is
-    // the status word, the number and the content.
-    expect(verifyNode?.textContent).toBe('Blocked3Verify');
+    // the status word, the number, the content and the status glyph.
+    expect(verifyNode?.textContent).toBe(
+      `Blocked3Verify${PLAN_STATUS_GLYPH.blocked}`,
+    );
+    // The glyph is the non-colour status channel: the left rule that carries
+    // status visually is colour only, so without a shape beside it the graph
+    // would lose status entirely under colour-blindness, high-contrast mode
+    // or a greyscale screenshot. Pinned per status, not just as "a glyph".
+    expect(buildNode?.textContent).toContain(PLAN_STATUS_GLYPH.running);
+    expect(
+      container
+        .querySelector('[data-plan-node-id="research"]')
+        ?.closest('article')?.textContent,
+    ).toContain(PLAN_STATUS_GLYPH.completed);
+    expect(PLAN_STATUS_GLYPH.blocked).not.toBe(PLAN_STATUS_GLYPH.running);
+    expect(PLAN_STATUS_GLYPH.running).not.toBe(PLAN_STATUS_GLYPH.completed);
     expect(container.textContent).toContain('33%');
     expect(container.textContent).toContain('1 / 3');
     // 3, not 2: the strip now derives from the same source as the node

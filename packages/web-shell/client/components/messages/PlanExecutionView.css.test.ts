@@ -38,6 +38,22 @@ describe('PlanExecutionView stylesheet', () => {
     );
   });
 
+  // The output port is positioned at `right: -4px`, deliberately outside the
+  // node's box, so the node must not clip its overflow — and the status rule
+  // must therefore be a border, which border-radius clips natively, rather
+  // than a pseudo-element that would need `overflow: hidden` to be rounded.
+  // Neither half of that is visible to jsdom or to a green unit run.
+  it('keeps the node unclipped so its outgoing port survives', () => {
+    const node = planCss.match(/(^|\n)\.node\s*\{[^}]*\}/)?.[0];
+    expect(node).toBeTruthy();
+    expect(node).not.toMatch(/overflow:\s*hidden/);
+    expect(node).toMatch(/border-left:\s*3px solid var\(--node-rule\)/);
+    expect(planCss).not.toMatch(/\.node::before\s*\{/);
+    expect(planCss).toMatch(
+      /\.dagCanvas\s+\.node\[data-plan-output='true'\]::after\s*\{[^}]*right:\s*-4px/,
+    );
+  });
+
   it('narrows the DAG lane at two viewport steps', () => {
     // Three 240px lanes plus two 64px gutters exceed a phone viewport, so the
     // canvas scrolled in both axes at once and the horizontal scroll hid the

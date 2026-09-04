@@ -1329,20 +1329,28 @@ export function PlanExecutionView({
                           {todo.content}
                         </span>
                       </div>
-                      {(executions.length > 0 || nodeRuntimeMs > 0) && (
-                        <div className={styles.nodeMeta}>
-                          {executions.length > 0 && (
-                            <span>
-                              {t('planExecution.agentCount', {
-                                count: executions.length,
-                              })}
-                            </span>
-                          )}
-                          {nodeRuntimeMs > 0 && (
-                            <span>{formatRuntime(nodeRuntimeMs)}</span>
-                          )}
-                        </div>
-                      )}
+                      <div className={styles.nodeMeta}>
+                        {/* The glyph is the non-colour status channel, kept
+                            for every status so the graph still survives
+                            colour-blindness, high-contrast mode and a
+                            greyscale screenshot. It moved off the first line
+                            so the step's content leads, and it is muted so
+                            the left rule remains the only carrier of the
+                            status *colour*. */}
+                        <i aria-hidden="true" className={styles.nodeGlyph}>
+                          {PLAN_STATUS_GLYPH[state.status]}
+                        </i>
+                        {executions.length > 0 && (
+                          <span>
+                            {t('planExecution.agentCount', {
+                              count: executions.length,
+                            })}
+                          </span>
+                        )}
+                        {nodeRuntimeMs > 0 && (
+                          <span>{formatRuntime(nodeRuntimeMs)}</span>
+                        )}
+                      </div>
                       {/* Only when no edge states it. Above
                           MAX_RENDERED_PLAN_EDGES the graph draws no edges at
                           all, and then this row is the dependency's only

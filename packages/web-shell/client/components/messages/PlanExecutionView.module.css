@@ -272,12 +272,19 @@
   --node-rule: transparent;
   position: relative;
   display: flex;
-  overflow: hidden;
   flex-direction: column;
   gap: 5px;
   min-width: 0;
-  padding: 9px 10px 9px 13px;
+  padding: 9px 10px;
   border: 1px solid var(--node-accent);
+  /* Status, stated once. A border rather than a pseudo-element so the node's
+     own border-radius clips it natively: clipping a ::before would have
+     needed `overflow: hidden`, which also cuts the output port dot in half —
+     it sits at `right: -4px`, deliberately outside the box. Transparent when
+     resting, and the node's background paints under it (background-clip is
+     border-box), so a resting node reads as 3px of extra left padding with
+     no width difference between states. */
+  border-left: 3px solid var(--node-rule);
   border-radius: 8px;
   background: var(--background);
   transition:
@@ -285,22 +292,12 @@
     box-shadow 160ms ease;
 }
 
-/* Status, stated once. Absent for the resting states, which are most of any
-   real plan. */
-.node::before {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 3px;
-  background: var(--node-rule);
-  content: '';
-}
-
-/* The status rule owns ::before now, so the ports use ::after plus an inner
-   marker. They also drop the accent: every node with an edge had one, so a
-   permanently blue dot on most of the graph left selection nothing of its
-   own. They are structure, so they take the hairline. */
+/* Only the outgoing port is drawn; an incoming edge already terminates in an
+   arrowhead, which is the input marker. It also drops the accent: every node
+   with an edge had one, so a permanently blue dot across most of the graph
+   left selection no colour of its own. It is structure, so it takes the
+   hairline. Note this sits outside the node's box, so the node must not clip
+   its overflow. */
 .dagCanvas .node::after {
   display: none;
   position: absolute;
@@ -726,10 +723,12 @@ button.nestedExecution:not(:disabled):focus-visible {
 
 /* The status glyph. Sized and aligned to the mono ID beside it so the two read
    as one identifier block rather than an icon bolted onto a label. */
+/* Muted, not `--node-ring`: the left rule is the single carrier of the
+   status colour, and this is the redundant *shape* channel beside it. */
 .nodeGlyph {
   flex: 0 0 auto;
   width: 13px;
-  color: var(--node-ring);
+  color: var(--muted-foreground);
   font-family: var(--font-mono, monospace);
   font-size: 12px;
   font-style: normal;

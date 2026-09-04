@@ -176,6 +176,31 @@ states, not two:
 So the row is kept and gated on `!drawsDependencyEdges`, rendered as the same
 number-and-title chips the inspector uses rather than as raw ids.
 
+## Corrections found after the plan, during implementation
+
+Recorded rather than folded in, because both are places the plan's own rule
+was wrong and a later reader should see why.
+
+1. **"One status, one place" was too strong — it deleted an accessibility
+   channel.** The plan replaced the status glyph with a colour-only left rule.
+   But the glyph carried a documented purpose the plan never checked
+   (`PlanExecutionView.tsx`: "Status is carried by a glyph as well as a colour
+   so the graph survives colour-blindness, high-contrast mode, and a greyscale
+   screenshot"). Colour plus a screen-reader-only word leaves a sighted
+   colour-blind reader, high-contrast mode, and any greyscale capture with no
+   way to tell running from completed. The rule is corrected to: one carrier
+   of the status *colour*, plus a redundant non-colour channel. The glyph
+   returns for every status, in the meta line so the content still leads, and
+   muted so the rule stays the only thing carrying the tone.
+
+2. **A pseudo-element rule needed clipping, and clipping cut the port.**
+   Drawing the rule as `.node::before` required `overflow: hidden` for the 8px
+   radius to apply — which also clips the outgoing port dot, deliberately
+   positioned at `right: -4px` outside the box. The rule is a `border-left`
+   instead, which border-radius clips natively and needs no overflow. Both
+   halves are now pinned by the stylesheet guard, since neither is visible to
+   jsdom or to a passing unit run.
+
 ## Open questions
 
 1. Does the elapsed count on a running node belong on the node face, or only
