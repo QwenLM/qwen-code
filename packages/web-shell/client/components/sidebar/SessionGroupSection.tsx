@@ -22,6 +22,7 @@ export interface SessionGroupSectionProps {
   count: number;
   expanded: boolean;
   color?: DaemonSessionGroupColor;
+  icon?: ReactNode;
   children: ReactNode;
   onToggle: () => void;
   onRename?: () => void;
@@ -37,6 +38,7 @@ export function SessionGroupSection({
   count,
   expanded,
   color,
+  icon,
   children,
   onToggle,
   onRename,
@@ -71,11 +73,17 @@ export function SessionGroupSection({
           aria-expanded={expanded}
           onClick={onToggle}
         >
-          <span
-            className={`${styles.sessionGroupDot} ${colorClass}`}
-            style={dotStyle}
-            aria-hidden="true"
-          />
+          {icon ? (
+            <span className={styles.sessionGroupIcon} aria-hidden="true">
+              {icon}
+            </span>
+          ) : (
+            <span
+              className={`${styles.sessionGroupDot} ${colorClass}`}
+              style={dotStyle}
+              aria-hidden="true"
+            />
+          )}
           <span className={styles.sessionGroupTitle}>{label}</span>
           <span className={styles.sessionGroupCount}>· {count}</span>
           <span className={styles.sessionGroupChevron} aria-hidden="true">

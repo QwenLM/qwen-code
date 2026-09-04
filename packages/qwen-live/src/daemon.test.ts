@@ -12,8 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import WebSocket from 'ws';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { QwenCodeAdaptor } from './adaptor/qwen-code-adaptor.js';
-import type { LiveHostInstaller } from './host/live-host-installer.js';
+import { BackendRegistry } from './adaptor/registry.js';
 import type { LiveConfig } from './config.js';
 import { LiveDaemon } from './daemon.js';
 import {
@@ -32,17 +31,12 @@ async function temporaryDirectory(): Promise<string> {
   return directory;
 }
 
-function fakeAdaptor(): QwenCodeAdaptor {
-  return { preflight: async () => undefined } as unknown as QwenCodeAdaptor;
-}
-
-function fakeInstaller(): LiveHostInstaller {
+// A structural BackendAdaptor whose name matches the registry default.
+function fakeAdaptor(): import('./adaptor/types.js').BackendAdaptor {
   return {
-    refresh: async () => ({ state: 'installed', version: '0.1.0' }),
-    ensureInstalled: async () => ({ state: 'installed', version: '0.1.0' }),
-    launch: async () => ({ state: 'installed', version: '0.1.0' }),
-    getStatus: () => ({ state: 'installed', version: '0.1.0' }),
-  } as unknown as LiveHostInstaller;
+    name: 'qwen-code',
+    preflight: async () => undefined,
+  } as unknown as import('./adaptor/types.js').BackendAdaptor;
 }
 
 async function testConfig(): Promise<LiveConfig> {
@@ -53,20 +47,25 @@ async function testConfig(): Promise<LiveConfig> {
       apiKey: 'test-api-key',
       model: 'test-model',
     },
-    serve: { baseUrl: 'http://127.0.0.1:1' },
+    backends: [
+      {
+        name: 'qwen-code',
+        kind: 'qwen-code',
+        baseUrl: 'http://127.0.0.1:1',
+        isDefault: true,
+      },
+    ],
     dataDir: join(base, 'data'),
     discoveryDir: join(base, 'discovery'),
     port: 0,
   };
 }
 
-function startedDaemon(
-  config: LiveConfig,
-  deps: { installer?: LiveHostInstaller } = {},
-): LiveDaemon {
+function startedDaemon(config: LiveConfig): LiveDaemon {
   const daemon = new LiveDaemon(config, {
-    adaptor: fakeAdaptor(),
-    ...(deps.installer ? { installer: deps.installer } : {}),
+    registry: new BackendRegistry([
+      { adaptor: fakeAdaptor(), isDefault: true },
+    ]),
     // 'error' level keeps expected warnings (discovery cleanup) off stderr.
     logger: new LiveLogger('error'),
   });
@@ -305,53 +304,5 @@ describe('LiveDaemon', () => {
     await expect(readDiscoveryRecord(config.discoveryDir)).resolves.toEqual(
       planted,
     );
-  });
-
-  it('serves the installer status behind the bearer wall', async () => {
-    const config = await testConfig();
-    const daemon = startedDaemon(config, { installer: fakeInstaller() });
-    const { port } = await daemon.start();
-    const record = await readDiscoveryRecord(config.discoveryDir);
-
-    const get = (path: string, headers: Record<string, string>) =>
-      new Promise<{ status: number; body: string }>((resolve, reject) => {
-        const req = request(
-          { host: '127.0.0.1', port, path, headers },
-          (res) => {
-            let body = '';
-            res.on('data', (chunk: Buffer) => {
-              body += chunk.toString();
-            });
-            res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
-          },
-        );
-        req.on('error', reject);
-        req.end();
-      });
-
-    // Authorized: status JSON comes back.
-    const ok = await get('/live/setup', hostHeaders(record));
-    expect(ok.status).toBe(200);
-    expect(JSON.parse(ok.body)).toMatchObject({
-      state: 'installed',
-      version: '0.1.0',
-    });
-
-    // Wrong token: 401, no body leakage.
-    const denied = await get('/live/setup', {
-      authorization: 'Bearer wrong-token',
-    });
-    expect(denied.status).toBe(401);
-
-    // A browser context (Origin) is refused even with the right token.
-    const browser = await get('/live/setup', {
-      ...hostHeaders(record),
-      origin: 'https://evil.example',
-    });
-    expect(browser.status).toBe(401);
-
-    // Unknown paths stay 404.
-    const missing = await get('/nope', hostHeaders(record));
-    expect(missing.status).toBe(404);
   });
 });

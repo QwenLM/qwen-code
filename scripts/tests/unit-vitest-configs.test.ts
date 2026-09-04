@@ -105,10 +105,11 @@ describe('autofix gate load clamps', () => {
     vi.resetModules();
     // Re-imported under the stub: the configs read the env at import time,
     // and the static imports above already resolved the non-ECS branch.
-    const [core, cli, acpBridge] = await Promise.all([
+    const [core, cli, acpBridge, webShell] = await Promise.all([
       import('../../packages/core/vitest.config.js'),
       import('../../packages/cli/vitest.config.js'),
       import('../../packages/acp-bridge/vitest.config.js'),
+      import('../../packages/web-shell/vitest.config.js'),
     ]);
     vi.unstubAllEnvs();
 
@@ -135,8 +136,13 @@ describe('autofix gate load clamps', () => {
     );
 
     // 60_000 / 60_000 / '25%' on the ECS branch of core and cli;
-    // acp-bridge sets the two timeouts but defines no maxWorkers.
-    for (const config of [core.default, cli.default, acpBridge.default]) {
+    // acp-bridge and web-shell set the two timeouts but define no maxWorkers.
+    for (const config of [
+      core.default,
+      cli.default,
+      acpBridge.default,
+      webShell.default,
+    ]) {
       expect(String(config.test?.testTimeout)).toBe(clamps['testTimeout']);
       expect(String(config.test?.hookTimeout)).toBe(clamps['hookTimeout']);
     }
@@ -191,6 +197,52 @@ describe('autofix gate load clamps', () => {
         typeof config.test?.poolOptions?.threads?.maxThreads,
         workspace,
       ).toBe('number');
+    }
+  });
+});
+
+describe('bundle-guard timeout ceiling', () => {
+  it('keeps the bundle-guard timeout ceiling in packages/vscode-ide-companion', async () => {
+    // The config reads RUNNER_NAME at import time, so re-import it under
+    // each stub to pin both branches, not only the ambient one.
+    for (const [runnerName, expected] of [
+      ['ecs-qwen-parity', 60_000],
+      ['ubuntu-latest-runner', 15_000],
+    ] as const) {
+      vi.stubEnv('RUNNER_NAME', runnerName);
+      vi.resetModules();
+      const mod = await import(
+        '../../packages/vscode-ide-companion/vitest.config.js'
+      );
+      expect(mod.default.test?.testTimeout, `RUNNER_NAME=${runnerName}`).toBe(
+        expected,
+      );
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe('scripts suite timeout', () => {
+  it('gives the scripts suite room for a contended host, and a knob', async () => {
+    // 30s was the quiet-host figure. Release run 33725742855 lost its Quality
+    // Checks (Scripts) job to two files at once — qwen-autofix-workflow, whose
+    // heaviest case measures ~14s idle, and acp-serve-boundary-guard — neither
+    // slow, both past 30s under contention. A per-file `vi.setConfig` cannot
+    // fix it: these cases register their timeout at collection.
+    for (const [stub, expected] of [
+      [undefined, 90_000],
+      ['5000', 5_000],
+    ] as const) {
+      if (stub === undefined) {
+        vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', '');
+        vi.unstubAllEnvs();
+      } else {
+        vi.stubEnv('QWEN_SCRIPTS_TEST_TIMEOUT_MS', stub);
+      }
+      vi.resetModules();
+      const mod = await import('./vitest.config.js');
+      expect(mod.default.test?.testTimeout, `stub=${stub}`).toBe(expected);
+      vi.unstubAllEnvs();
     }
   });
 });

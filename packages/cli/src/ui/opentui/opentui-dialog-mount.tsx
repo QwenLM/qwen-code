@@ -88,6 +88,7 @@ import {
 import {
   OpenTuiApprovalModeDialog,
   OpenTuiEffortDialog,
+  OpenTuiOutputStyleDialog,
 } from './dialogs-modes.js';
 import {
   OpenTuiStatsDialog,
@@ -402,6 +403,16 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           onClose={onClose}
+        />
+      );
+
+    case 'output-style':
+      return (
+        <OpenTuiOutputStyleDialog
+          config={config}
+          settings={settings}
+          onClose={onClose}
+          notify={notify}
         />
       );
 

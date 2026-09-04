@@ -760,4 +760,32 @@ describe('GitWorktreeService', () => {
       await expect(service.getRepoTopLevel()).resolves.toBe('/srv/proj\r');
     });
   });
+
+  describe('validateUserWorktreeSlug', () => {
+    it('reserves pr-<number> slugs for PR-backed worktrees', () => {
+      expect(GitWorktreeService.validateUserWorktreeSlug('pr-42')).toMatch(
+        /reserved/,
+      );
+      // `pr-0` is not the reserved shape and stays a legal user slug; the
+      // backfill's [1-9] pattern simply never binds it.
+      expect(GitWorktreeService.validateUserWorktreeSlug('pr-0')).toBeNull();
+      expect(
+        GitWorktreeService.validateUserWorktreeSlug('my-pr-42'),
+      ).toBeNull();
+    });
+
+    it('allows the pr-<number> shape for PR-backed creators only', () => {
+      expect(
+        GitWorktreeService.validateUserWorktreeSlug('pr-42', {
+          allowPrBackedShape: true,
+        }),
+      ).toBeNull();
+      // The other slug rules still apply.
+      expect(
+        GitWorktreeService.validateUserWorktreeSlug('pr-42/..', {
+          allowPrBackedShape: true,
+        }),
+      ).toMatch(/may only contain/);
+    });
+  });
 });
