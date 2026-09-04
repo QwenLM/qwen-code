@@ -107,14 +107,13 @@ If you want to inspect the complete reasoning path before deciding, each agent's
 Arena settings are nested under `agents.arena` in
 [settings.json](../configuration/settings.md).
 `maxRoundsPerAgent` and `timeoutSeconds` are unset by default, so Arena runs
-have no default round or timeout limit. The CLI does not currently apply these
-two settings to Arena runs, so configuring them does not enforce a limit.
+have no default round or timeout limit.
 
-| Setting                          | Description                                                                           | Default                         |
-| :------------------------------- | :------------------------------------------------------------------------------------ | :------------------------------ |
-| `agents.arena.worktreeBaseDir`   | Custom base directory for Arena worktrees. Use an absolute path; `~` is not expanded. | The Qwen home `arena` directory |
-| `agents.arena.maxRoundsPerAgent` | Declared round limit; currently not applied by the CLI                                | Unset; no limit                 |
-| `agents.arena.timeoutSeconds`    | Declared timeout; currently not applied by the CLI                                    | Unset; no limit                 |
+| Setting                          | Description                                                                             | Default                         |
+| :------------------------------- | :-------------------------------------------------------------------------------------- | :------------------------------ |
+| `agents.arena.worktreeBaseDir`   | Custom base directory for Arena worktrees. Use an absolute path; `~` is not expanded.   | The Qwen home `arena` directory |
+| `agents.arena.maxRoundsPerAgent` | Maximum turns passed to each in-process agent task                                      | Unset; no limit                 |
+| `agents.arena.timeoutSeconds`    | Timeout for agent tasks and for waiting until all initially spawned agents have settled | Unset; no limit                 |
 
 ## Best practices
 
@@ -173,9 +172,10 @@ For routine changes like renaming a variable or updating a config file, a single
 
 ### Agent takes too long
 
-- Arena does not currently apply `agents.arena.maxRoundsPerAgent` or
-  `agents.arena.timeoutSeconds` from settings, so changing them will not bound
-  a run
+- Set `agents.arena.timeoutSeconds` to bound agent tasks and the initial settle
+  wait
+- For in-process agents, lower `agents.arena.maxRoundsPerAgent` to reduce the
+  maximum turns per task
 - Reduce task complexity — Arena tasks should be focused and well-defined
 
 ### Applying winner fails
