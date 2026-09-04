@@ -80,6 +80,7 @@ import {
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
+import { quitCommand } from '../commands/quitCommand.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
@@ -891,11 +892,23 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
-      const {
+      let {
         commandToExecute,
         args,
         canonicalPath: resolvedCommandPath,
       } = parseSlashCommand(trimmed, commands);
+
+      if (
+        !commandToExecute &&
+        (trimmed === '/quit' || trimmed === '/exit') &&
+        !(config?.getDisabledSlashCommands() ?? []).some((name) =>
+          ['quit', 'exit'].includes(name.trim().toLowerCase()),
+        )
+      ) {
+        commandToExecute = quitCommand;
+        args = '';
+        resolvedCommandPath = ['quit'];
+      }
 
       const recordedItems: HistoryItemWithoutId[] = [];
       const recordItem = (item: HistoryItemWithoutId) => {
