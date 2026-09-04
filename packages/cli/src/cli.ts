@@ -690,21 +690,26 @@ export async function runCliEntry(
     // startup path would load. The intercept fires only on flag-led
     // launches: every positional after the flag is a prompt word, so
     // `qwen --bg sessions cleanup` dispatches the prompt `sessions
-    // cleanup`. A positional BEFORE the flag that the parser honors as a
+    // cleanup` — and a prompt that ENDS in the word `help` dispatches
+    // too, because a flag-led launch has no command entrance the parser
+    // could own. A positional BEFORE the flag that the parser honors as a
     // command entrance means the subcommand launch is the intent: let it
     // fall through to the parser instead of collecting the subcommand
     // tokens as a prompt. Those entrances are wider than the canonical
     // first words — the command modules' aliases (`hook`) and yargs'
     // builtin `help`, which yargs matches on the LAST positional — so the
-    // bounce reads both positions.
+    // bounce reads both positions. The help-word bounce lives INSIDE the
+    // positional-led condition: it exists to serve launches the parser
+    // owns, and a bare term would bounce flag-led prompts ending in
+    // `help` (`qwen --bg write help`) to top-level help with no session.
     const backgroundFlag = backgroundFlagIndex(argv);
     if (backgroundFlag !== -1) {
       const firstPositionalIndex = firstPositionalArgIndex(argv);
       const parserOwnsLaunch =
-        lastPositionalArg(argv) === HELP_COMMAND ||
-        (firstPositionalIndex !== -1 &&
-          firstPositionalIndex < backgroundFlag &&
-          TOP_LEVEL_COMMAND_NAMES.has(argv[firstPositionalIndex]!));
+        firstPositionalIndex !== -1 &&
+        firstPositionalIndex < backgroundFlag &&
+        (TOP_LEVEL_COMMAND_NAMES.has(argv[firstPositionalIndex]!) ||
+          lastPositionalArg(argv) === HELP_COMMAND);
       if (!parserOwnsLaunch) {
         const { readBackgroundPrompt, runBackgroundDispatch } = await import(
           './agent-view/background-entry.js'

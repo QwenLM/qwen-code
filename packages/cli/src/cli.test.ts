@@ -1238,6 +1238,32 @@ describe('runCliEntry', () => {
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
+    it('dispatches a flag-led prompt ending in the word help', async () => {
+      // The help-word bounce serves positional-led launches, where yargs
+      // matches `help` as a command entrance. A flag-led launch has no
+      // entrance to defer to — every word after the flag is prompt data,
+      // so bouncing it left `qwen --bg write help` printing top-level
+      // help with no session and `qwen --bg help` dying in the strict
+      // parser on 'Unknown argument: bg'.
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry([BACKGROUND_FLAG, 'write', 'help']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith('write help');
+      expect(process.exitCode).toBe(0);
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
+    it('dispatches the bare prompt help on a flag-led launch', async () => {
+      mocks.runBackgroundDispatch.mockResolvedValue(0);
+
+      await runCliEntry([BACKGROUND_FLAG, 'help']);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith('help');
+      expect(process.exitCode).toBe(0);
+      expect(mocks.main).not.toHaveBeenCalled();
+    });
+
     it('dispatches a flag-led prompt whose words name commands', async () => {
       // The bounce is positional-order aware: a launch LED by `--bg`
       // passes its words to the session even when they name top-level
