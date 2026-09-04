@@ -110,6 +110,8 @@ Both:
 1. Use a per-session `pendingRestoreIds` set on the channel so concurrent restore calls coalesce (`RestoreInProgressError`).
 2. Cache `restoreState` on the entry so a late attacher gets the same payload the original restorer did.
 
+For a persisted Part 4A worktree session, restore is an integrity-gated extension of this lifecycle. The sidecar identifies the requested workspace root explicitly, the checkout must be canonically contained below the corresponding `.qwen/worktrees/` directory, and its marker must be a single-link regular file containing the exact restored session ID. The daemon relocates an idle restored child only after those checks; an active child is accepted only when its reported cwd already equals the worktree. Those responses return canonical worktree metadata with `worktreeState: "persisted-v1"`. A cold restore that reports an active prompt without a current cwd returns unverified worktree metadata without that attestation, so isolation-aware clients reject it and may retry after the prompt settles. Invalid Part 4A state detaches an existing attachment or kills a cold restore with `requireZeroAttaches`; a missing sidecar likewise yields no attestation. Whenever the effective restore source is Channel-owned, the route suppresses the ACP agent's best-effort cleanup for Part 4A or unclassifiable sidecar state, so validation failure preserves the uncertain checkout evidence. Persisted source metadata takes precedence; when it is absent, the load/resume request supplies the effective source. A structurally valid legacy sidecar without `workspaceCwd` instead retains the existing best-effort agent restore: it must identify either the requested workspace root or its Git repository top-level, is containment-checked without marker attestation, may be cleaned up by the agent, and may return `worktree` without `worktreeState`. Apart from that explicit legacy compatibility case, only sessions whose effective restore source is not Channel-owned retain the existing best-effort cleanup before route validation.
+
 ### Heartbeat
 
 `POST /session/:id/heartbeat` updates `sessionLastSeenAt` regardless of `clientId`. If the request carries a registered `X-Qwen-Client-Id`, `clientLastSeenAt.set(clientId, Date.now())` also updates. Per-client eviction is **not** implemented in v1; revocation is planned for F-series Wave 5. Today, heartbeats provide observability for dashboards and for the upcoming revocation policy in PR 24.
@@ -320,20 +322,28 @@ normally; it must not trigger a resync loop.
 
 ### ACP Child Preheat
 
-`bridge.preheat()` warms the ACP child process before the first session so that
-the first real session avoids cold-start latency. It pairs with
-`channelIdleTimeoutMs`, which keeps the ACP child alive after the last session
-closes, and skip-relaunch behavior, which reuses an already idle child when a
-new session arrives.
+`bridge.preheat()` remains available to explicit embedders, but `qwen serve`
+also attempts to preheat the trusted primary child after startup for
+compatibility. A failed preheat is non-fatal and the next runtime command or
+Session retries; trusted secondaries start on first use. The Workspace Runtime
+owns the child while work is active. After all Session and management leases
+drain, an omitted or zero `channelIdleTimeoutMs` reaps the child immediately;
+plain preheat itself is preserved for first use and does not arm that reaper.
+A positive configured delay or active keepalive keeps the child reusable for
+the longer remaining window. The public Workspace Runtime `ensure`
+command adds a renewable ten-minute workspace lease; each successful call
+resets that window, including when the channel was already live.
 
 ## Configuration
 
 - `BridgeOptions.maxSessions` (default 32) — cap.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
-- `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP `initialize` handshake.
+- `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP child startup
+  deadline (Channel factory + `initialize` handshake) and default request
+  timeout.
 - `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — ACP `loadSession` / `unstable_resumeSession` deadline. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it.
-- `BridgeOptions.channelIdleTimeoutMs` (default 0; reap the ACP child immediately).
-- Capability tags: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_status`, `non_blocking_prompt`.
+- `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps after runtime work drains, except that plain preheat is preserved for first use; a positive value or active keepalive delays reaping, and the longer delay wins).
+- Capability tags: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
 
 ### Stateless generation (`session_generation` capability tag)
 

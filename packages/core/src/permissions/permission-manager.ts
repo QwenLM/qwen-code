@@ -89,6 +89,12 @@ export interface PermissionManagerConfig {
   /** Current working directory (for resolving path patterns). */
   getCwd?(): string;
   /**
+   * Live folder trust. Read on every permission decision for the session
+   * allow rules a project skill granted (`trustGated`): those apply only
+   * while the folder is trusted. Absent means trusted.
+   */
+  isTrustedFolder?(): boolean;
+  /**
    * Returns the current approval mode (plan/default/auto-edit/yolo).
    * Used by `getDefaultMode()` to determine the fallback when no rule matches.
    */
@@ -426,7 +432,7 @@ export class PermissionManager {
       }
       // Priority 3: allow rules
       for (const rule of [
-        ...this.sessionRules.allow,
+        ...this.activeSessionAllowRules(),
         ...this.persistentRules.allow,
       ]) {
         if (matchesRule(rule, ...matchArgs)) return 'allow';
@@ -1003,7 +1009,7 @@ export class PermissionManager {
         : undefined;
 
     const allowRules = [
-      ...this.sessionRules.allow,
+      ...this.activeSessionAllowRules(),
       ...this.persistentRules.allow,
     ];
     const restrictiveRules = [
@@ -1194,6 +1200,22 @@ export class PermissionManager {
   // ---------------------------------------------------------------------------
 
   /**
+   * The session allow rules in force right now: every rule the user granted,
+   * plus the repository-granted (`trustGated`) ones only while the folder is
+   * trusted. Trust is re-read on every call — `Config.isTrustedFolder()` is
+   * live under an IDE connection — so a revocation mid-session suspends a
+   * project skill's grants at the next decision, and a later grant of trust
+   * restores them, the second side of the gate `applySideEffects` enforces
+   * on the way in.
+   */
+  private activeSessionAllowRules(): PermissionRule[] {
+    const trusted = this.config.isTrustedFolder?.() ?? true;
+    return trusted
+      ? this.sessionRules.allow
+      : this.sessionRules.allow.filter((rule) => !rule.trustGated);
+  }
+
+  /**
    * Add a session-level allow rule (in-memory, cleared when the session ends).
    * Used when the user clicks "Always allow for this session".
    *
@@ -1201,10 +1223,14 @@ export class PermissionManager {
    * this can neither reveal nor hide a tool (#10075).
    *
    * @param raw - The raw rule string, e.g. "Bash(git status)".
+   * @param options - `trustGated`: the grant came from repository-controlled
+   *   configuration (a project skill's `allowedTools`) and applies only
+   *   while the folder is trusted — see `PermissionRule.trustGated`.
    */
-  addSessionAllowRule(raw: string): void {
+  addSessionAllowRule(raw: string, options?: { trustGated?: boolean }): void {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
+      if (options?.trustGated) rule.trustGated = true;
       if (rule.invalid) {
         debugLogger.warn(
           `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
@@ -1237,7 +1263,15 @@ export class PermissionManager {
       // dangerous-stash branch above. Reload cycles (e.g. /unskill +
       // re-invoke) re-run applySkillAllowedTools; without this guard the
       // skill's allowedTools list would accumulate on every cycle.
-      if (this.sessionRules.allow.some((r) => r.raw === rule.raw)) {
+      // The kept entry's trust gating takes the WIDER of the two grants: a
+      // user grant of the same raw outranks a repo grant, so an ungated
+      // arrival clears the flag on the kept entry — otherwise the user's
+      // grant would inherit the repo grant's suspension when folder trust
+      // is revoked. A gated re-arrival (a skill reload) stays an
+      // idempotent skip and never re-gates a rule the user holds.
+      const existing = this.sessionRules.allow.find((r) => r.raw === rule.raw);
+      if (existing) {
+        if (!options?.trustGated) existing.trustGated = false;
         return;
       }
       this.sessionRules.allow.push(rule);
@@ -1400,7 +1434,7 @@ export class PermissionManager {
     addRules(this.persistentRules.deny, 'deny', 'user');
     addRules(this.sessionRules.ask, 'ask', 'session');
     addRules(this.persistentRules.ask, 'ask', 'user');
-    addRules(this.sessionRules.allow, 'allow', 'session');
+    addRules(this.activeSessionAllowRules(), 'allow', 'session');
     addRules(this.persistentRules.allow, 'allow', 'user');
 
     return result;

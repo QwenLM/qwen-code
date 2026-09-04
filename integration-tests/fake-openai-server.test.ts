@@ -126,6 +126,83 @@ describe('fake OpenAI server', () => {
     );
   });
 
+  it('holds a streamed response until the caller releases it', async () => {
+    let release!: () => void;
+    server = await startFakeOpenAIServer(() => ({
+      contentChunks: ['HELD_FIRST_DELTA', 'HELD_SECOND_DELTA'],
+      holdAfterChunks: 1,
+      holdUntil: new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+
+    const first = decoder.decode((await reader.read()).value);
+    expect(first).toContain('HELD_FIRST_DELTA');
+    // The unresolved read is the assertion — and it has to survive the timeout,
+    // since a read the race abandons still consumes the chunk when it lands.
+    const pending = reader.read();
+    const arrived = await Promise.race([
+      pending.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+    expect(
+      arrived,
+      'Nothing may reach the client while the stream is held',
+    ).toBe(false);
+
+    release();
+    let rest = '';
+    let result = await pending;
+    while (!result.done) {
+      rest += decoder.decode(result.value, { stream: true });
+      result = await reader.read();
+    }
+    expect(rest).toContain('HELD_SECOND_DELTA');
+    expect(rest).toContain('data: [DONE]');
+  });
+
+  it('closes while a held response stays unreleased', async () => {
+    server = await startFakeOpenAIServer(() => ({
+      contentChunks: ['UNRELEASED_DELTA'],
+      holdAfterChunks: 1,
+      holdUntil: new Promise<void>(() => {}),
+    }));
+
+    const response = await fetch(`${server.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'fake-model',
+        stream: true,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    expect(decoder.decode((await reader.read()).value)).toContain(
+      'UNRELEASED_DELTA',
+    );
+
+    // A case that forgets to release must not be able to keep the server (and
+    // so the run) open: close() tears the held connection down under it.
+    await expect(server.close()).resolves.toBeUndefined();
+    server = undefined;
+    const torn = await reader.read().catch(() => ({ done: true as const }));
+    expect(torn.done).toBe(true);
+  });
+
   it('can close response connections for isolated latency measurements', async () => {
     server = await startFakeOpenAIServer(
       () => ({ content: 'no connection reuse' }),

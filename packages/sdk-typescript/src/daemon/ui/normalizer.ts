@@ -805,12 +805,18 @@ function normalizeSessionUpdate(
             else if (prefix.startsWith('UklGR')) mimeType = 'image/webp';
           }
           if (data) {
+            const contentRecord = isRecord(content) ? content : undefined;
+            const attachmentId =
+              typeof contentRecord?.['attachmentId'] === 'string'
+                ? (contentRecord['attachmentId'] as string)
+                : undefined;
             return [
               {
                 ...base,
                 type: 'user.image.delta',
                 data,
                 mimeType,
+                ...(attachmentId ? { attachmentId } : {}),
                 ...(meta ? { meta } : {}),
               },
             ];
@@ -1171,6 +1177,7 @@ function normalizePlanUpdate(
   const todoPlan =
     meta && isRecord(meta['qwenTodoPlan']) ? meta['qwenTodoPlan'] : undefined;
   const planId = getString(todoPlan, 'id');
+  const sessionWorkflow = meta?.['qwenSessionWorkflow'] === true;
   return {
     ...base,
     type: 'tool.update',
@@ -1189,6 +1196,7 @@ function normalizePlanUpdate(
       entries,
       ...(stats ? { stats } : {}),
       ...(planId ? { plan: { id: planId, sourceCallId: planCallId } } : {}),
+      ...(sessionWorkflow ? { sessionWorkflow: true } : {}),
     },
   };
 }

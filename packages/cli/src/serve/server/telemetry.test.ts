@@ -426,6 +426,12 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     ).toEqual({ route: 'GET /workspaces/:workspace/sessions/live-state' });
   });
 
+  it('maps the sessionless language route', () => {
+    expect(resolveDaemonTelemetryRoute(mockReq('POST', '/language'))).toEqual({
+      route: 'POST /language',
+    });
+  });
+
   it('attributes workspace transcript reads to the target workspace and session', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
     const res = mockRes(200);
@@ -441,6 +447,28 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       expect.objectContaining({
         method: 'GET',
         route: 'GET /workspaces/:workspace/session/:id/transcript',
+        sessionId: 'session/1',
+        workspaceHash: 'hash:/workspace/secondary',
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it('attributes workspace turn-index reads to the target workspace and session', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
+    const res = mockRes(200);
+
+    mw(
+      mockReq('GET', '/workspaces/ws-secondary/session/session%2F1/turn-index'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        route: 'GET /workspaces/:workspace/session/:id/turn-index',
         sessionId: 'session/1',
         workspaceHash: 'hash:/workspace/secondary',
       }),
@@ -1062,17 +1090,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  it('contains 62 unique routes with the audited 60/2 attribution split', () => {
+  it('contains 68 unique routes with the audited 66/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(62);
-    expect(new Set(keys).size).toBe(62);
+    expect(keys).toHaveLength(68);
+    expect(new Set(keys).size).toBe(68);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(60);
+    ).toHaveLength(66);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',

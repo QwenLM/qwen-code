@@ -457,6 +457,9 @@ export class LiveHostInstaller {
   }
 
   async launch(): Promise<LiveHostInstallStatus> {
+    if (this.platform !== 'darwin') {
+      return this.setError('Qwen Live Host is available only on macOS.', false);
+    }
     if (this.operation) return await this.operation;
     try {
       const installed = await this.inspectInstalled();

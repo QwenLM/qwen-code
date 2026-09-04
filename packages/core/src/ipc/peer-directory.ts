@@ -37,6 +37,12 @@ export interface PeerSessionInfo {
   cwd: string;
   pid: number;
   ipcPath: string;
+  /**
+   * Inbox auth token from the peer's record. Absent for a peer written by
+   * a build without tokens. Never printed: `list_agents` projects
+   * explicit fields, and this must stay out of any model-visible output.
+   */
+  ipcToken?: string;
   startedAt: number;
 }
 
@@ -74,6 +80,7 @@ export function toPeerSessionInfo(
     cwd: flattenPeerLabel(record.cwd),
     pid: record.pid,
     ipcPath: record.ipcPath,
+    ...(record.ipcToken !== undefined ? { ipcToken: record.ipcToken } : {}),
     startedAt: record.startedAt,
   };
 }

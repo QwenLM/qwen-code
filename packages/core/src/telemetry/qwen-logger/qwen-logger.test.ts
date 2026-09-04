@@ -27,6 +27,7 @@ import {
   SkillLaunchEvent,
   ProtocolTagSanitizedEvent,
   RipgrepRuntimeRecoveryEvent,
+  SubagentExecutionEvent,
   type ToolCallEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
@@ -391,6 +392,50 @@ describe('QwenLogger', () => {
       );
       expect(JSON.stringify(enqueueSpy.mock.calls[0][0])).not.toMatch(
         /pattern|path|stdout|stderr|needle/,
+      );
+    });
+
+    it('journals the loop detector attribution on subagent loop stops', () => {
+      // A loop stop must stay attributable in the journal (issue #9450
+      // requirement #7): dropping the loop_type spread would record the
+      // stop as an unattributable failure.
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = new SubagentExecutionEvent('worker-a', 'failed', {
+        terminate_reason: 'loop_detected',
+        loop_type: 'consecutive_identical_tool_calls',
+      });
+
+      logger.logSubagentExecutionEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event_type: 'action',
+          type: 'tool',
+          name: 'subagent_execution',
+          properties: expect.objectContaining({
+            subagent_name: 'worker-a',
+            status: 'failed',
+            terminate_reason: 'loop_detected',
+            loop_type: 'consecutive_identical_tool_calls',
+          }),
+        }),
+      );
+    });
+
+    it('omits loop_type from subagent journals when no loop fired', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = new SubagentExecutionEvent('worker-b', 'completed');
+
+      logger.logSubagentExecutionEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          properties: expect.not.objectContaining({
+            loop_type: expect.anything(),
+          }),
+        }),
       );
     });
 

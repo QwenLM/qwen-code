@@ -523,7 +523,7 @@ done
 # asset — see the recovery at the download step below.
 #
 # ~~~ BAKED_VERSION: must match the release version in this change ~~~
-CUA_DRIVER_RS_BAKED_VERSION="0.20.2"
+CUA_DRIVER_RS_BAKED_VERSION="0.20.3"
 # ~~~ END_BAKED_VERSION ~~~
 
 # Run API requests with an optional token. Keep the header construction here
