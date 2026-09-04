@@ -8,6 +8,25 @@ import {
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 
 const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
+const MAX_CACHED_SESSIONS = 20;
+
+function cacheArtifacts<Owner>(
+  cache: Map<
+    string,
+    { artifacts: DaemonSessionArtifact[]; hydratedOwner?: Owner }
+  >,
+  sessionKey: string,
+  artifacts: DaemonSessionArtifact[],
+  hydratedOwner?: Owner,
+): void {
+  cache.delete(sessionKey);
+  cache.set(sessionKey, { artifacts, hydratedOwner });
+  while (cache.size > MAX_CACHED_SESSIONS) {
+    const oldest = cache.keys().next().value;
+    if (!oldest) break;
+    cache.delete(oldest);
+  }
+}
 
 // A stable empty array for sessions whose artifact list cannot load (e.g. a
 // subagent session without an artifacts endpoint). Returning a fresh literal
@@ -38,58 +57,60 @@ export function useSessionArtifacts(): SessionArtifactsState {
     connection.capabilities?.features?.includes(SESSION_ARTIFACTS_FEATURE) ??
     false;
   const sessionId = connection.sessionId;
-  const [artifacts, setArtifacts] = useState<DaemonSessionArtifact[]>([]);
-  const [loading, setLoading] = useState(false);
+  const sessionKey = sessionId
+    ? `${connection.workspaceCwd ?? ''}\0${sessionId}`
+    : undefined;
+  const [, setArtifacts] = useState<DaemonSessionArtifact[]>([]);
   const requestIdRef = useRef(0);
-  const loadedOwnerRef = useRef<typeof owner | undefined>(undefined);
-  const loadedSessionIdRef = useRef<string | undefined>(undefined);
-  const loadingOwnerRef = useRef<typeof owner | undefined>(undefined);
-  const loadingSessionIdRef = useRef<string | undefined>(undefined);
+  const artifactsBySessionRef = useRef(
+    new Map<
+      string,
+      { artifacts: DaemonSessionArtifact[]; hydratedOwner?: typeof owner }
+    >(),
+  );
   const previousArtifactsVersionRef = useRef(artifactsVersion);
 
   const refresh = useCallback(async () => {
     const requestId = ++requestIdRef.current;
-    if (!sessionId) {
-      loadedOwnerRef.current = undefined;
-      loadedSessionIdRef.current = undefined;
-      loadingOwnerRef.current = undefined;
-      loadingSessionIdRef.current = undefined;
+    if (!sessionKey) {
       setArtifacts([]);
-      setLoading(false);
       return;
     }
     if (!isConnected || connection.catchingUp || !supportsArtifacts) {
-      loadingOwnerRef.current = undefined;
-      loadingSessionIdRef.current = undefined;
-      setLoading(false);
       return;
     }
-    if (
-      loadedOwnerRef.current !== owner ||
-      loadedSessionIdRef.current !== sessionId
-    ) {
-      setArtifacts([]);
-    }
-    loadingOwnerRef.current = owner;
-    loadingSessionIdRef.current = sessionId;
-    setLoading(true);
     try {
       const result = await actions.loadArtifacts();
       if (requestIdRef.current !== requestId || !owner.isCurrent()) return;
-      loadedOwnerRef.current = owner;
-      loadedSessionIdRef.current = sessionId;
-      setArtifacts(result.artifacts);
+      cacheArtifacts(
+        artifactsBySessionRef.current,
+        sessionKey,
+        result.artifacts,
+        owner,
+      );
     } catch {
       // The artifacts panel treats a failed refresh as an empty error state.
+      if (
+        requestIdRef.current === requestId &&
+        owner.isCurrent() &&
+        !artifactsBySessionRef.current.has(sessionKey)
+      ) {
+        cacheArtifacts(artifactsBySessionRef.current, sessionKey, []);
+      }
     } finally {
-      if (requestIdRef.current === requestId) setLoading(false);
+      if (requestIdRef.current === requestId) {
+        setArtifacts(
+          artifactsBySessionRef.current.get(sessionKey)?.artifacts ??
+            EMPTY_ARTIFACTS,
+        );
+      }
     }
   }, [
     actions,
     connection.catchingUp,
     isConnected,
     owner,
-    sessionId,
+    sessionKey,
     supportsArtifacts,
   ]);
 
@@ -109,37 +130,27 @@ export function useSessionArtifacts(): SessionArtifactsState {
     }
   }, [artifactsVersion, refresh]);
 
-  const artifactById = useMemo(
-    () =>
-      new Map(
-        (sessionId &&
-        loadedOwnerRef.current === owner &&
-        loadedSessionIdRef.current === sessionId
-          ? artifacts
-          : []
-        ).map((artifact) => [artifact.id, artifact]),
-      ),
-    [artifacts, owner, sessionId],
-  );
-
   const visibleArtifacts =
-    sessionId &&
-    loadedOwnerRef.current === owner &&
-    loadedSessionIdRef.current === sessionId
-      ? artifacts
+    sessionKey && isConnected && supportsArtifacts
+      ? (artifactsBySessionRef.current.get(sessionKey)?.artifacts ??
+        EMPTY_ARTIFACTS)
       : EMPTY_ARTIFACTS;
+  const artifactById = useMemo(
+    () => new Map(visibleArtifacts.map((artifact) => [artifact.id, artifact])),
+    [visibleArtifacts],
+  );
   return {
     artifacts: visibleArtifacts,
     artifactById,
     loading:
-      loading &&
-      loadingOwnerRef.current === owner &&
-      loadingSessionIdRef.current === sessionId,
+      Boolean(
+        sessionId && isConnected && !connection.catchingUp && supportsArtifacts,
+      ) &&
+      Boolean(sessionKey && !artifactsBySessionRef.current.has(sessionKey)),
     error: null,
     hydrated: Boolean(
-      sessionId &&
-        loadedOwnerRef.current === owner &&
-        loadedSessionIdRef.current === sessionId,
+      sessionKey &&
+        artifactsBySessionRef.current.get(sessionKey)?.hydratedOwner === owner,
     ),
     refresh,
   };

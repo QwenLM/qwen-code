@@ -79,7 +79,7 @@ env:
   # BOTH the github_ci_only helper step and the full-profile helper step,
   # both in `lint_and_static`, so a new helper test can't be added to one
   # path and silently dropped from the other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/ci-disk-pressure.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -1390,18 +1390,31 @@ jobs:
 
       - name: 'Install Playwright Chromium (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
-        run: 'npx playwright install --with-deps chromium'
+        run: |-
+          node node_modules/playwright/cli.js install --with-deps chromium
+          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+          if [ -f "${nested_cli}" ]; then
+            node "${nested_cli}" install chromium
+          fi
 
       - name: 'Install Playwright Chromium (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         # Self-hosted ECS runners already include system deps; --with-deps can race apt locks.
-        run: 'npx playwright install chromium'
+        run: |-
+          node node_modules/playwright/cli.js install chromium
+          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+          if [ -f "${nested_cli}" ]; then
+            node "${nested_cli}" install chromium
+          fi
 
       - name: 'Choose web-shell Playwright port'
         run: |-
           port="$(node -e "const net=require('node:net');const server=net.createServer();server.listen(0,'127.0.0.1',()=>{console.log(server.address().port);server.close();});")"
           echo "PLAYWRIGHT_PORT=${port}" >> "${GITHUB_ENV}"
           echo "Using web-shell Playwright port ${port}"
+
+      - name: 'Run transcript document browser gate'
+        run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
 
       - name: 'Run web-shell browser smoke'
         run: 'npm run test:e2e:smoke --workspace=packages/web-shell'
