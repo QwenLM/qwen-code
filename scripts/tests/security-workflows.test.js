@@ -18,6 +18,9 @@ const repoRoot = path.resolve(
 const readWorkflow = (name) =>
   readFileSync(path.join(repoRoot, `.github/workflows/${name}`), 'utf8');
 
+const readScript = (name) =>
+  readFileSync(path.join(repoRoot, `.github/scripts/${name}`), 'utf8');
+
 describe('security workflows', () => {
   it('keeps Scorecard monthly and reporting-only', () => {
     const workflow = readWorkflow('scorecard-monthly.yml');
@@ -49,6 +52,7 @@ describe('security workflows', () => {
       'Audit production dependencies',
     );
     const trackingJob = getWorkflowJob(workflow, 'track-dependency-cve');
+    const trackingScript = readScript('update-dependency-audit-issue.cjs');
 
     expect(workflow).not.toContain('pull_request:');
     expect(workflow).not.toContain('\n  push:');
@@ -63,11 +67,19 @@ describe('security workflows', () => {
     expect(trackingJob).toContain(
       'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3',
     );
-    expect(trackingJob).toContain('<!-- qwen-dependency-cve-audit-failure -->');
-    expect(trackingJob).toContain("labels: 'scope/ci-cd'");
-    expect(trackingJob).toContain('github.rest.issues.createComment');
-    expect(trackingJob).toContain('github.rest.issues.create');
-    expect(trackingJob).toContain("state: 'closed'");
+    expect(trackingJob).toContain(
+      "AUDIT_RESULT: '${{ needs.dependency-cve.result }}'",
+    );
+    expect(trackingJob).toContain(
+      "require('./.github/scripts/update-dependency-audit-issue.cjs')",
+    );
+    expect(trackingScript).toContain(
+      '<!-- qwen-dependency-cve-audit-failure -->',
+    );
+    expect(trackingScript).toContain("labels: 'scope/ci-cd'");
+    expect(trackingScript).toContain('github.rest.issues.createComment');
+    expect(trackingScript).toContain('github.rest.issues.create');
+    expect(trackingScript).toContain("state: 'closed'");
     expect(workflow).toContain(
       "group: '${{ github.workflow }}-${{ github.ref }}'",
     );
