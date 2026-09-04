@@ -37,6 +37,7 @@ import {
   SessionWriterUnavailableError,
   SESSION_TITLE_MAX_LENGTH,
   Storage,
+  readAgentTrace,
   tokenLimit,
   getMCPDiscoveryState,
   getMCPServerStatus,
@@ -298,7 +299,10 @@ import {
   installManagedSkill,
   setManagedSkillEnabled,
 } from './skill-management.js';
-import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
+import {
+  buildSessionAgentsStatus,
+  buildSessionTasksStatus,
+} from './session/tasksSnapshot.js';
 import {
   collectHistoryReplayUpdates,
   copyCumulativeUsage,
@@ -355,6 +359,8 @@ import {
   type ServeSessionContextStatus,
   type ServeSessionSupportedCommandsStatus,
   type ServeSessionLspStatus,
+  type ServeSessionAgentsStatus,
+  type ServeSessionAgentTrace,
   type ServeSessionResourcesStatus,
   type ServeSessionSavedWorkflowDetail,
   type ServeSessionSavedWorkflowStatus,
@@ -7914,6 +7920,31 @@ class QwenAgent implements Agent {
     );
   }
 
+  private async buildSessionAgentsStatus(
+    sessionId: string,
+  ): Promise<ServeSessionAgentsStatus> {
+    const session = this.sessionOrThrow(sessionId);
+    const status = await buildSessionAgentsStatus(
+      session.getConfig().getSessionId(),
+      session.getConfig(),
+    );
+    return { ...status, sessionId };
+  }
+
+  private async buildSessionAgentTrace(
+    sessionId: string,
+    rootAgentId?: string,
+  ): Promise<ServeSessionAgentTrace> {
+    const session = this.sessionOrThrow(sessionId);
+    const persistedSessionId = session.getConfig().getSessionId();
+    const trace = await readAgentTrace(
+      session.getConfig().storage.getProjectDir(),
+      persistedSessionId,
+      rootAgentId,
+    );
+    return { v: STATUS_SCHEMA_VERSION, sessionId, ...trace };
+  }
+
   /**
    * Resolve one saved workflow for display. Fails closed to `workflow: null`
    * on every miss — unknown name, illegal name, unreadable file, or Workflow
@@ -8772,6 +8803,39 @@ class QwenAgent implements Agent {
           sessionId,
           params['includeWorkflows'] === true &&
             this.canUseWorkflowControls(session.getConfig()),
+        )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionAgents: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return (await this.buildSessionAgentsStatus(
+          sessionId,
+        )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionAgentTrace: {
+        const sessionId = params['sessionId'];
+        const rootAgentId = params['rootAgentId'];
+        if (
+          typeof sessionId !== 'string' ||
+          sessionId.length === 0 ||
+          (rootAgentId !== undefined &&
+            (typeof rootAgentId !== 'string' ||
+              rootAgentId.length === 0 ||
+              rootAgentId.length > 500))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid sessionId or rootAgentId',
+          );
+        }
+        return (await this.buildSessionAgentTrace(
+          sessionId,
+          rootAgentId,
         )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionLspStatus: {
