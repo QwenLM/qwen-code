@@ -76,6 +76,15 @@ import {
   restoreSessionContextMatches,
   sessionContextKey,
 } from './session-context.js';
+import {
+  clipLedgerToRetainedBlocks,
+  createLedgerPageEntry,
+  createTranscriptPageLedger,
+  ledgerForWindow,
+  recordLedgerLoadPage,
+  recordLedgerPrependPage,
+  type TranscriptPageLedger,
+} from './transcriptPageLedger.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
@@ -865,6 +874,21 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   // moved mid-fetch, so a stale page can never advance the anchor below the
   // evicted band.
   const paginationGenerationRef = useRef(0);
+  // Page ledger over the flat transcript store: which slice of it each
+  // admitted fetch produced. The store stays the single render source, so the
+  // ledger is bookkeeping only — it is what lets eviction drop whole pages and
+  // unloaded ranges stay explicit instead of implied contiguous.
+  const transcriptLedgerRef = useRef<TranscriptPageLedger>(
+    createTranscriptPageLedger(),
+  );
+  const ledgerEntrySeqRef = useRef(0);
+  // Wipes the ledger wherever the store itself is wiped without a replay
+  // commit to rebuild it (fresh session, resync reload, ring eviction). The
+  // next load commit records a new first page.
+  const clearTranscriptLedger = useCallback((sessionId?: string) => {
+    ledgerEntrySeqRef.current = 0;
+    transcriptLedgerRef.current = createTranscriptPageLedger(sessionId);
+  }, []);
   const store = useMemo(
     () =>
       createDaemonTranscriptStore({
@@ -878,6 +902,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           if (!activeSession || history.sessionId !== activeSession.sessionId) {
             return;
           }
+          // Reconcile the page ledger first: the store swaps its state only
+          // after the reduce completes, so this snapshot is still pre-trim and
+          // `detail.blockCount` names how many of its blocks survive — the
+          // tail of them for an oldest-first trim, the head for a rewind.
+          const preEviction = store.getSnapshot();
+          transcriptLedgerRef.current = clipLedgerToRetainedBlocks(
+            transcriptLedgerRef.current,
+            preEviction.blocks,
+            detail.blockCount ?? preEviction.blocks.length,
+            detail.evictedOldest !== false,
+          );
           // Trimming evicts oldest-first, so it can remove the very record
           // the exclusive `beforeRecordId` anchor points at; the daemon
           // never returns the anchor itself, so the evicted stretch would
@@ -2164,6 +2199,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // Reset needed but no replay data (e.g. fresh session) — reset
             // immediately since there is no dispatch to batch with.
             store.reset();
+            clearTranscriptLedger(activeSession.sessionId);
           }
           if (replayInjected) {
             const replayOpts = {
@@ -2381,6 +2417,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ...replayState,
                 maxBlocks: committedMaxBlocks,
               });
+              // The replay is the window's first page and replaced everything,
+              // so the ledger restarts from the committed blocks. Whatever the
+              // rebuild already trimmed is not part of it, and the entry id
+              // counter restarts with it.
+              ledgerEntrySeqRef.current = 0;
+              const loadPageEntry = createLedgerPageEntry(
+                {
+                  id: `page-${(ledgerEntrySeqRef.current += 1)}`,
+                  source: 'load',
+                },
+                store.getSnapshot().blocks,
+              );
+              transcriptLedgerRef.current = loadPageEntry
+                ? recordLedgerLoadPage(
+                    createTranscriptPageLedger(activeSession.sessionId),
+                    loadPageEntry,
+                  )
+                : createTranscriptPageLedger(activeSession.sessionId);
               if (replayTarget && nextCheckpoint) {
                 const markerBlock = store
                   .getSnapshot()
@@ -2853,6 +2907,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             setPromptStatus('idle');
             clearPendingTranscriptEvents();
             store.reset();
+            clearTranscriptLedger(activeSession.sessionId);
             activeSession.setLastEventId(0);
             reconnectSessionId = activeSession.sessionId;
             resyncRequested = true;
@@ -3169,6 +3224,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   }
                   clearPendingTranscriptEvents();
                   store.reset();
+                  clearTranscriptLedger(activeSession.sessionId);
                   // Ring eviction means the SSE replay window has a real gap.
                   // Resetting and continuing on the same stream can only replay
                   // the surviving tail; reload the session snapshot instead so
@@ -3750,6 +3806,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     maxBlocks,
     maxRetainedBytes,
     store,
+    clearTranscriptLedger,
     restoreSessionId,
     restoreSessionContext,
     restoreMode,
@@ -4227,9 +4284,32 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           : undefined;
         if (historyMaterialization) {
           history.rejectedPage = undefined;
+          const preCommit = store.getSnapshot();
           store.reset(
-            applyTranscriptHistory(store.getSnapshot(), historyMaterialization),
+            applyTranscriptHistory(preCommit, historyMaterialization),
           );
+          // Prepend admission puts the page's blocks ahead of every retained
+          // block, so the span goes at the head of the ledger. A backward read
+          // mints no forward cursor, so the entry carries none. The window is
+          // checked against the pre-commit blocks: a store wiped behind the
+          // ledger's back must not contribute stale boundaries.
+          const prependEntry = createLedgerPageEntry(
+            {
+              id: `page-${(ledgerEntrySeqRef.current += 1)}`,
+              source: 'prepend',
+            },
+            historyMaterialization.blocks,
+          );
+          if (prependEntry) {
+            transcriptLedgerRef.current = recordLedgerPrependPage(
+              ledgerForWindow(
+                transcriptLedgerRef.current,
+                activeSession.sessionId,
+                preCommit.blocks,
+              ),
+              prependEntry,
+            );
+          }
           const repair = liveJournalRepairRef.current;
           if (repair?.sessionId === activeSession.sessionId) {
             repair.checkpoint = applyTranscriptHistory(
