@@ -439,6 +439,10 @@ export function ExtensionsManagerPage({
   const workspace = useWorkspace();
   const actions = useWorkspaceActions();
   const signals = useWorkspaceEventSignals();
+  const activationRequiresExplicitRefresh =
+    workspace.capabilities?.features.includes(
+      'extension_activation_explicit_refresh',
+    ) === true;
   const [extensions, setExtensions] = useState<ManagedExtensionEntry[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -1122,6 +1126,19 @@ export function ExtensionsManagerPage({
             ? t('extensions.manage.inherited', { name: extension.name })
             : mutationSuccessMessage(operation, extension.name, t),
         );
+        if (activationRequiresExplicitRefresh) {
+          void workspace.client
+            .workspaceByCwd(workspace.workspaceCwd)
+            .refreshExtensionRuntime(connection.clientId)
+            .catch((error: unknown) => {
+              setMessageTone('error');
+              setMessage(
+                t('extensions.manage.refreshFailed', {
+                  error: error instanceof Error ? error.message : String(error),
+                }),
+              );
+            });
+        }
       } catch (error) {
         setMessageTone('error');
         setMessage(error instanceof Error ? error.message : String(error));
@@ -1130,8 +1147,10 @@ export function ExtensionsManagerPage({
       }
     },
     [
+      activationRequiresExplicitRefresh,
       busyName,
       checkingName,
+      connection.clientId,
       load,
       pendingInstall,
       pendingMutation,
