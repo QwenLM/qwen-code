@@ -10,6 +10,7 @@ export type RuntimeErrorCode =
   | 'DIALOG_OPEN'
   | 'INVALID_ARGUMENT'
   | 'INVALID_LOCATOR'
+  | 'INPUT_BLOCKED'
   | 'LOCATOR_NOT_UNIQUE'
   | 'NOT_FOUND'
   | 'NOT_RUNNING'

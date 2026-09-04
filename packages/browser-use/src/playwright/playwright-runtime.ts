@@ -58,6 +58,18 @@ import { snapshotTab } from './snapshot.js';
 const BROWSER_ID = 'chrome';
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_PENDING_TAB_RESOURCES = 100;
+const LOCATOR_INPUT_METHODS: ReadonlySet<SupportedCommand> = new Set([
+  'locator.click',
+  'locator.dblclick',
+  'locator.downloadMedia',
+  'locator.fill',
+  'locator.type',
+  'locator.press',
+  'locator.selectOption',
+  'locator.check',
+  'locator.uncheck',
+  'locator.setChecked',
+]);
 
 export interface PlaywrightRuntimeOptions
   extends ChromeExtensionTransportOptions {
@@ -267,19 +279,48 @@ export class PlaywrightRuntime {
       default:
         if (method.startsWith('locator.')) {
           const tab = this.tab(args);
-          return await executeLocatorOperation(method, args, tab);
+          return LOCATOR_INPUT_METHODS.has(method)
+            ? await this.executeInput(tab, async () =>
+                executeLocatorOperation(method, args, tab),
+              )
+            : await executeLocatorOperation(method, args, tab);
         }
         if (method.startsWith('dom_cua.')) {
           const tab = this.tab(args);
-          return await executeDomCuaOperation(method, args, tab);
+          return method === 'dom_cua.get_visible_dom'
+            ? await executeDomCuaOperation(method, args, tab)
+            : await this.executeInput(tab, async () =>
+                executeDomCuaOperation(method, args, tab),
+              );
         }
-        if (method.startsWith('cua.'))
-          return await executeCuaOperation(method, args, this.tab(args));
+        if (method.startsWith('cua.')) {
+          const tab = this.tab(args);
+          return await this.executeInput(tab, async () =>
+            executeCuaOperation(method, args, tab),
+          );
+        }
         throw new BrowserRuntimeError(
           'UNKNOWN_METHOD',
           `Unknown browser method: ${method}`,
         );
     }
+  }
+
+  private async executeInput(
+    tab: TabState,
+    action: () => Promise<DispatchResult>,
+  ): Promise<DispatchResult> {
+    await tab.page.bringToFront();
+    const result = await action();
+    if (tab.dialog !== undefined || tab.page.isClosed()) return result;
+    try {
+      await tab.page.evaluate(
+        () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      );
+    } catch (error) {
+      if (tab.dialog === undefined && !tab.page.isClosed()) throw error;
+    }
+    return result;
   }
 
   private async history(value: unknown): Promise<BrowserHistoryEntry[]> {

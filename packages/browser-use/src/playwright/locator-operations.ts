@@ -110,10 +110,10 @@ export async function executeLocatorOperation(
       );
       return null;
     case 'locator.fill':
-      await locator.fill(stringArg(args, 'value'), options);
+      await fillLocator(locator, stringArg(args, 'value'), options);
       return null;
     case 'locator.type':
-      await locator.pressSequentially(stringArg(args, 'value'), options);
+      await typeIntoLocator(locator, stringArg(args, 'value'), options);
       return null;
     case 'locator.press':
       await locator.press(stringArg(args, 'value'), options);
@@ -151,6 +151,55 @@ export async function executeLocatorOperation(
         `Unknown locator method: ${method}`,
       );
   }
+}
+
+async function fillLocator(
+  locator: Locator,
+  value: string,
+  options: { timeout: number },
+): Promise<void> {
+  await locator.fill(value, options);
+  await locator.dispatchEvent('change', { bubbles: true }, options);
+}
+
+async function typeIntoLocator(
+  locator: Locator,
+  value: string,
+  options: { timeout: number },
+): Promise<void> {
+  const before =
+    value === '' ? undefined : await editableValue(locator, options);
+  await locator.pressSequentially(value, options);
+  if (value === '') return;
+  const after = await editableValue(locator, options);
+  if (after === before)
+    throw new BrowserRuntimeError(
+      'INPUT_BLOCKED',
+      'Typing produced no observable change; inspect the target state before continuing',
+    );
+}
+
+async function editableValue(
+  locator: Locator,
+  options: { timeout: number },
+): Promise<string> {
+  return await locator.evaluate(
+    (element) => {
+      if (
+        element instanceof HTMLInputElement ||
+        element instanceof HTMLTextAreaElement ||
+        element instanceof HTMLSelectElement
+      )
+        return element.value;
+      if (element instanceof HTMLElement && element.isContentEditable)
+        return element.textContent ?? '';
+      throw new Error(
+        'type requires an input, textarea, select, or contenteditable element',
+      );
+    },
+    undefined,
+    options,
+  );
 }
 
 type LocatorScope = Page | Locator | FrameLocator;

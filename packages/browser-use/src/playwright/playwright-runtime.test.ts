@@ -77,6 +77,9 @@ describe('PlaywrightRuntime command contracts', () => {
 
   it('builds locator plans and delegates read and input operations', async () => {
     const fixture = await runtimeFixture();
+    fixture.locator.evaluate
+      .mockResolvedValueOnce('')
+      .mockResolvedValueOnce('hello');
     const tab = await createTab(fixture.runtime);
     const steps = [
       {
@@ -124,6 +127,42 @@ describe('PlaywrightRuntime command contracts', () => {
       timeout: 789,
     });
     expect(fixture.locator.press).not.toHaveBeenCalled();
+    expect(fixture.page.bringToFront).toHaveBeenCalledTimes(2);
+    expect(fixture.page.evaluate).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports when Chrome browser UI swallows locator typing', async () => {
+    const fixture = await runtimeFixture();
+    fixture.locator.evaluate.mockResolvedValue('');
+    const tab = await createTab(fixture.runtime);
+
+    await expect(
+      fixture.runtime.dispatch('locator.type', {
+        tabId: tab.id,
+        steps: [{ kind: 'locator', selector: '#field' }],
+        value: 'hello',
+      }),
+    ).rejects.toMatchObject({ code: 'INPUT_BLOCKED' });
+  });
+
+  it('brings the target page forward and drains renderer input tasks', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+
+    await fixture.runtime.dispatch('locator.click', {
+      tabId: tab.id,
+      steps: [{ kind: 'locator', selector: '#button' }],
+    });
+
+    expect(fixture.page.bringToFront).toHaveBeenCalledOnce();
+    expect(fixture.locator.click).toHaveBeenCalledOnce();
+    expect(fixture.page.evaluate).toHaveBeenCalledOnce();
+    expect(fixture.page.bringToFront.mock.invocationCallOrder[0]).toBeLessThan(
+      fixture.locator.click.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(fixture.locator.click.mock.invocationCallOrder[0]).toBeLessThan(
+      fixture.page.evaluate.mock.invocationCallOrder[0] ?? 0,
+    );
   });
 
   it('delegates coordinate input and snapshot capture', async () => {
@@ -149,6 +188,7 @@ describe('PlaywrightRuntime command contracts', () => {
     });
     expect(fixture.page.keyboard.up).toHaveBeenCalledWith('Alt');
     expect(fixture.page.ariaSnapshot).toHaveBeenCalledWith({ mode: 'ai' });
+    expect(fixture.page.bringToFront).toHaveBeenCalledTimes(1);
   });
 
   it('delegates snapshot ref actions to Playwright aria-ref locators', async () => {
@@ -195,6 +235,7 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.page.mouse.wheel).toHaveBeenCalledWith(0, 200);
     expect(fixture.locator.pressSequentially).not.toHaveBeenCalled();
     expect(fixture.locator.press).not.toHaveBeenCalled();
+    expect(fixture.page.bringToFront).toHaveBeenCalledTimes(4);
   });
 
   it('dispatches the browser back mouse button through CDP', async () => {
@@ -327,6 +368,11 @@ describe('PlaywrightRuntime command contracts', () => {
       timeout: 11,
     });
     expect(fixture.locator.fill).toHaveBeenCalledWith('value', { timeout: 12 });
+    expect(fixture.locator.dispatchEvent).toHaveBeenCalledWith(
+      'change',
+      { bubbles: true },
+      { timeout: 12 },
+    );
     expect(fixture.locator.evaluate).toHaveBeenCalledWith(
       expect.any(Function),
       undefined,
@@ -765,6 +811,7 @@ function fakeLocator(): {
     evaluate: ReturnType<typeof vi.fn>;
     getAttribute: ReturnType<typeof vi.fn>;
     fill: ReturnType<typeof vi.fn>;
+    dispatchEvent: ReturnType<typeof vi.fn>;
     selectOption: ReturnType<typeof vi.fn>;
     setChecked: ReturnType<typeof vi.fn>;
     waitFor: ReturnType<typeof vi.fn>;
@@ -788,6 +835,7 @@ function fakeLocator(): {
     evaluate: vi.fn(async () => undefined),
     getAttribute: vi.fn(async () => 'Field'),
     fill: vi.fn(async () => undefined),
+    dispatchEvent: vi.fn(async () => undefined),
     selectOption: vi.fn(async () => ['choice']),
     setChecked: vi.fn(async () => undefined),
     waitFor: vi.fn(async () => undefined),
@@ -810,6 +858,7 @@ function fakePage(
   value: Page;
   methods: {
     on: ReturnType<typeof vi.fn>;
+    bringToFront: ReturnType<typeof vi.fn>;
     evaluate: ReturnType<typeof vi.fn>;
     title: ReturnType<typeof vi.fn>;
     goto: ReturnType<typeof vi.fn>;
