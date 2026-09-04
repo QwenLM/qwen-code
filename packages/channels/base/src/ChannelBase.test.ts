@@ -357,24 +357,65 @@ class UnsafeProcessChannel extends TestChannel {
 function createBridge(): ChannelAgentBridge {
   const emitter = new EventEmitter();
   let sessionCounter = 0;
+  const sessions = new Map<
+    string,
+    {
+      sessionId: string;
+      workspaceCwd: string;
+      hasActivePrompt: boolean;
+      worktree?: { slug: string; path: string; branch: string };
+      worktreeState?: 'persisted-v1';
+    }
+  >();
   let channelLoopToolHandler: ChannelLoopToolHandler | undefined;
   const bridge = Object.assign(emitter, {
-    newSession: vi.fn().mockImplementation(() => `s-${++sessionCounter}`),
-    loadSession: vi.fn(async (sessionId: string) => sessionId),
+    newSession: vi.fn().mockImplementation((workspaceCwd: string, options) => {
+      const sessionId = `s-${++sessionCounter}`;
+      sessions.set(
+        sessionId,
+        options?.worktree
+          ? {
+              sessionId,
+              workspaceCwd,
+              hasActivePrompt: false,
+              worktree: {
+                slug: sessionId,
+                path: `/worktrees/${sessionId}`,
+                branch: sessionId,
+              },
+              worktreeState: 'persisted-v1',
+            }
+          : { sessionId, workspaceCwd, hasActivePrompt: false },
+      );
+      return sessionId;
+    }),
+    loadSession: vi.fn(async (sessionId: string, workspaceCwd: string) => {
+      sessions.set(
+        sessionId,
+        sessions.get(sessionId) ?? {
+          sessionId,
+          workspaceCwd,
+          hasActivePrompt: false,
+        },
+      );
+      return sessionId;
+    }),
     prompt: vi.fn().mockResolvedValue('agent response'),
     btw: vi.fn().mockResolvedValue({
       sessionId: 's-1',
       answer: 'side answer',
     }),
     cancelSession: vi.fn().mockResolvedValue(undefined),
-    discardSession: vi.fn().mockResolvedValue(undefined),
+    discardSession: vi.fn().mockImplementation(async (sessionId: string) => {
+      sessions.delete(sessionId);
+    }),
     stop: vi.fn(),
     start: vi.fn(),
     isConnected: true,
     availableCommands: [],
     setBridge: vi.fn(),
     respondToPermission: vi.fn().mockResolvedValue(true),
-    listSessions: vi.fn(() => []),
+    listSessions: vi.fn(() => [...sessions.values()]),
     registerChannelLoopToolHandler: vi.fn((handler: ChannelLoopToolHandler) => {
       channelLoopToolHandler = handler;
     }),
@@ -3771,6 +3812,29 @@ describe('ChannelBase', () => {
   });
 
   describe('slash commands', () => {
+    it('keeps task creation details out of chat while logging the sanitized cause', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      vi.mocked(bridge.newSession).mockRejectedValueOnce(
+        new Error('session secret-session-id\nfailed'),
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await ch.handleInbound(envelope({ text: '/session new review' }));
+
+        expect(ch.sent.at(-1)?.text).toBe('Could not create task "review".');
+        expect(ch.sent.at(-1)?.text).not.toContain('secret-session-id');
+        expect(stderrSpy).toHaveBeenCalledWith(
+          '[test-chan] named-session operation failed: Could not create task "review". | cause: session secret-session-id\\nfailed\n',
+        );
+      } finally {
+        stderrSpy.mockRestore();
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it('keeps named task catalogs isolated by sender without exposing session IDs', async () => {
       const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
       const ch = createChannel(
@@ -4294,6 +4358,57 @@ describe('ChannelBase', () => {
         finishPrompt('done');
         await running;
         expect(ch.sent.at(-1)!.text).toBe('[default] done');
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('accepts only the exact worktree task syntax and reports isolation', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        expect(ch.sent.at(-1)?.text).toBe(
+          'Created and selected task "feature" (worktree workspace).',
+        );
+        expect(bridge.newSession).toHaveBeenCalledWith(
+          '/tmp',
+          expect.objectContaining({ worktree: {} }),
+          expect.anything(),
+        );
+
+        vi.mocked(bridge.newSession).mockClear();
+        await ch.handleInbound(
+          envelope({ text: '/session new --worktree invalid' }),
+        );
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Usage: /session current | /session new <name> [--worktree]',
+        );
+        expect(bridge.newSession).not.toHaveBeenCalled();
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects clearing a selected worktree task before clear side effects', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(
+          envelope({ text: '/session new feature --worktree' }),
+        );
+        vi.mocked(bridge.newSession).mockClear();
+        vi.mocked(bridge.cancelSession).mockClear();
+        vi.mocked(bridge.discardSession!).mockClear();
+
+        await ch.handleInbound(envelope({ text: '/clear' }));
+
+        expect(ch.sent.at(-1)?.text).toContain('cannot be cleared or reset');
+        expect(bridge.newSession).not.toHaveBeenCalled();
+        expect(bridge.cancelSession).not.toHaveBeenCalled();
+        expect(bridge.discardSession).not.toHaveBeenCalled();
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }

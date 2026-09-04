@@ -42,6 +42,7 @@ import {
   ideContextStore,
   createDebugLogger,
   describeDeliveryStatus,
+  parseHeldExpiry,
   describeHoldCause,
   getErrorMessage,
   getAllMemoryFilenames,
@@ -224,6 +225,7 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import { ContextMenuProvider } from './context-menu/ContextMenuContext.js';
 import {
   RenderModeProvider,
   type RenderMode,
@@ -2714,6 +2716,24 @@ export const AppContainer = (props: AppContainerProps) => {
     peerMessaging?.reevaluate('approval-mode-changed');
   }, [approvalModeForPeers, peerMessaging]);
 
+  // Both settings reload live (`requiresRestart: false`), and both change
+  // what the gate would decide for messages already parked. Nothing else
+  // re-runs it: parking under `never` arms no timer at all, so a later
+  // edit to `1m` would otherwise leave the backlog held until session
+  // exit while `/peers` counted down from the new value.
+  //
+  // Keyed on the parsed lifetime and the policy rather than on any
+  // settings edit, because `reevaluate` also settles a parked backlog as
+  // `denied` under a refuse policy -- an unrelated key edit must not
+  // discard the user's backlog.
+  const heldExpiryForPeers = parseHeldExpiry(
+    settings.merged.agents?.crossSessionHeldExpiry,
+  );
+  const inboundPolicyForPeers = settings.merged.agents?.crossSessionInbound;
+  useEffect(() => {
+    peerMessaging?.reevaluate('held-expiry-changed');
+  }, [heldExpiryForPeers, inboundPolicyForPeers, peerMessaging]);
+
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.
   useEffect(() => {
@@ -3551,9 +3571,9 @@ export const AppContainer = (props: AppContainerProps) => {
         // On by default: the schema declares `default: true`, but
         // `mergeSettings` doesn't apply schema defaults, so an unset value is
         // `undefined` and a `=== true` gate left the cache-aware fork as dead
-        // code unless the flag was explicitly set (#9230). Same treatment as
-        // `enableFollowupSuggestions` above — only an explicit `false` opts
-        // out.
+        // code unless the flag was explicitly set (#9230). Only an explicit
+        // `false` opts out of cache sharing. This flag does not inherit the
+        // follow-up suggestion runtime gate.
         enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
       })
         .then((result) => {
@@ -3680,6 +3700,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const ctrlDTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [escapePressedOnce, setEscapePressedOnce] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Mirror of the context-menu open state: the provider wraps the app below
+  // this component's own always-active keypress handler, so the handler
+  // cannot call useContextMenu() — the provider reports changes here instead.
+  const contextMenuOpenRef = useRef(false);
+  const handleContextMenuChange = useCallback((open: boolean) => {
+    contextMenuOpenRef.current = open;
+  }, []);
   const dialogsVisibleRef = useRef(false);
   const [isRewindSelectorOpen, setIsRewindSelectorOpen] = useState(false);
   const [rewindEscPending, setRewindEscPending] = useState(false);
@@ -4471,6 +4499,12 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlDPressedOnce, setCtrlDPressedOnce, ctrlDTimerRef);
         return;
       } else if (keyMatchers[Command.ESCAPE](key)) {
+        // While the context menu is open its overlay owns Esc (closing the
+        // menu); the global branches below must not also fire on the same
+        // key — cancelling the stream, arming double-Esc, or cancelling btw.
+        if (contextMenuOpenRef.current) {
+          return;
+        }
         // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
         // the Esc to switch to NORMAL mode. Without this guard, both handlers
         // fire on the same keypress — vim switches mode AND AppContainer
@@ -4553,6 +4587,7 @@ export const AppContainer = (props: AppContainerProps) => {
         btwItem &&
         !btwItem.btw.isPending &&
         !dialogsVisibleRef.current &&
+        !contextMenuOpenRef.current &&
         buffer.text.length === 0
       ) {
         if (key.name === 'return' || key.sequence === ' ') {
@@ -5281,7 +5316,11 @@ export const AppContainer = (props: AppContainerProps) => {
                 <RenderModeProvider value={renderModeValue}>
                   <TerminalOutputProvider value={writeRaw}>
                     <ShellFocusContext.Provider value={isFocused}>
-                      <App />
+                      <ContextMenuProvider
+                        onMenuChange={handleContextMenuChange}
+                      >
+                        <App />
+                      </ContextMenuProvider>
                     </ShellFocusContext.Provider>
                   </TerminalOutputProvider>
                 </RenderModeProvider>

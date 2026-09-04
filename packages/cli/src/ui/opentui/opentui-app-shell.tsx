@@ -53,7 +53,10 @@ import type { ShellConfirmationResolution } from './commands-context.js';
 import type { WaitingCallInfo } from './live-session.js';
 import type { OpenTuiSubmitOptions } from './live-turn.js';
 import { OpenTuiAppHost } from './opentui-host.js';
-import { OpenTuiSlashGateway } from './slash-gateway.js';
+import {
+  normalizeQuitSubmission,
+  OpenTuiSlashGateway,
+} from './slash-gateway.js';
 import {
   OpenTuiSlashDispatcher,
   type OpenTuiDispatchOutcome,
@@ -99,6 +102,11 @@ export interface OpenTuiAppProps {
   onQuit?: (messages: readonly HistoryItem[]) => void;
   /** Replays a transcript batch (session switch / resume). */
   onTranscriptReset?: (events: OpenTuiStreamEvent[]) => void;
+  /**
+   * Folds one projected host-history event into the live transcript
+   * (U-28 project-on-write); wired to the live turn's `applyEvent`.
+   */
+  onTranscriptEvent?: (event: OpenTuiStreamEvent) => void;
   /**
    * Re-keys UI-side session state (chat id + stats) after core rotates the
    * session. `/resume` and `/branch` treat this call as their commit point, so
@@ -169,6 +177,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     onSubmitPrompt,
     onQuit,
     onTranscriptReset,
+    onTranscriptEvent,
     onStartNewSession,
     onToggleVim,
     updateNotice,
@@ -244,8 +253,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const transcript = useMemo(
     () => ({
       reset: (events: OpenTuiStreamEvent[]) => onTranscriptReset?.(events),
+      // /clear semantics: a fresh transcript — the live turn's reset with an
+      // empty batch (it also drops a stray steering queue).
+      clear: () => onTranscriptReset?.([]),
+      append: (event: OpenTuiStreamEvent) => onTranscriptEvent?.(event),
     }),
-    [onTranscriptReset],
+    [onTranscriptReset, onTranscriptEvent],
   );
 
   const host = useMemo(
@@ -352,6 +365,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               modelOverride: outcome.modelOverride,
               refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
               onComplete: outcome.onComplete,
+              invocationEchoed: true,
             });
           else notify('The live prompt turn is not wired in this shell.');
           return;
@@ -385,11 +399,15 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const onSubmit = useCallback(
     async (text: string, imagePaths?: string[]) => {
       setNoticeText(null);
+      // Ahead of the gate and the dispatch, exactly where ink's
+      // handleFinalSubmit puts it: a quit has to be able to stop the stream, so
+      // it must not be deferred behind the turn or reach the model as text.
+      const submission = normalizeQuitSubmission(text);
       // ink parity (AppContainer.handleFinalSubmit): while a turn responds,
       // only a command that opted into canRunDuringStreaming runs now — the
       // rest wait for idle instead of racing the stream.
-      if (streaming && (await gateway.mustDeferDuringStreaming(text))) {
-        const command = text.trim();
+      if (streaming && (await gateway.mustDeferDuringStreaming(submission))) {
+        const command = submission.trim();
         deferredCommandsRef.current.push(command);
         setDeferredRevision((revision) => revision + 1);
         notify(
@@ -397,7 +415,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         );
         return;
       }
-      const settlement = await gateway.dispatch(text);
+      const settlement = await gateway.dispatch(submission);
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
         return;
