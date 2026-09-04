@@ -1197,7 +1197,57 @@ describe('presubmitCommand', () => {
       }
     });
 
-    it('a reply carries nothing from another account, at a stale SHA, or without a wanted id (#9940 review, round 24)', async () => {
+    it('an own carry-reply keeps carrying after new commits — the root is stale, the reply is not SHA-gated (#9940 review, round 25)', async () => {
+      // A reply inherits its ROOT's commit id. Gated on the current SHA,
+      // the carry-reply stopped carrying the moment any commit landed
+      // while its root bucketed `stale`; a sibling own root posted at the
+      // current SHA then made the still-standing R1-2 re-post a duplicate
+      // of the sibling — the finding left the ledger, its thread stayed
+      // open forever.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            id: 1,
+            commit_id: 'old-sha',
+            body: '**[Critical]** R1-2: the guard drops a valid case _— model via Qwen Code /review (v0.21.3)_',
+          },
+          {
+            ...CARRIED_COMMENT,
+            id: 2,
+            commit_id: 'old-sha',
+            in_reply_to_id: 1,
+            body: '**[Critical]** R1-2: still stands at HEAD _— model via Qwen Code /review (v0.21.3)_',
+          },
+          {
+            ...CARRIED_COMMENT,
+            id: 3,
+            body: '**[Critical]** R1-3: the parser trusts unbounded input _— model via Qwen Code /review (v0.21.3)_',
+          },
+        ],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R1-2' },
+          { path: 'src/parse-args.ts', line: 44, id: 'R1-3' },
+        ],
+      );
+      expect(result.existingComments.byBucket).toMatchObject({
+        stale: 1,
+        resolved: 0,
+        overlap: 1,
+        repost: 2,
+      });
+      const matched = (
+        result.existingComments.repost as Array<{ matchedIds: string[] }>
+      ).flatMap((r) => r.matchedIds);
+      expect(matched.sort()).toEqual(['R1-2', 'R1-3']);
+      expect(
+        (result.existingComments.overlap as Array<{ id: number }>).map(
+          (o) => o.id,
+        ),
+      ).toEqual([3]);
+    });
+
+    it('a reply carries nothing from another account, or without a wanted id (#9940 review, round 24)', async () => {
       const root = {
         ...CARRIED_COMMENT,
         id: 1,
@@ -1222,14 +1272,6 @@ describe('presubmitCommand', () => {
           body: carry,
           in_reply_to_id: 1,
           user: { login: 'someone-else' },
-        },
-        // A stale reply (its root's commit): not this SHA's carrier.
-        {
-          ...CARRIED_COMMENT,
-          id: 2,
-          body: carry,
-          in_reply_to_id: 1,
-          commit_id: 'old-sha',
         },
         // A fixed-ruling reply: no marker, retired id — inert.
         {

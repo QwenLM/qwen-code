@@ -506,6 +506,32 @@ describe('stampCarriedId — the write side of the readback', () => {
     ).toBe('**[Suggestion]** R3-2: the claim\n```diff\n-old\n+new\n```');
   });
 
+  it('stamps a backtick run whose info string carries a backtick — no fence opens there (#9940 review, round 25)', () => {
+    // CommonMark never opens a BACKTICK fence whose info string contains a
+    // backtick, and the pipeline's line model (`scanLines`) agrees: the
+    // line is ordinary text a line-1 stamp cannot break. The delimiter-only
+    // test over-skipped it, and the root posted id-less behind a disclosure
+    // naming a fence that did not exist.
+    const stamped = stampCarriedId(
+      '**[Critical]** ```ts `X` is banned\nthe claim',
+      'R3-1',
+    );
+    expect(stamped).toBe('**[Critical]** R3-1: ```ts `X` is banned\nthe claim');
+    expect(carriedFindingOf(stamped)).toEqual({
+      id: 'R3-1',
+      fixInduced: false,
+    });
+    // A TILDE fence may carry a backtick in its info string — still a
+    // fence, still skipped; and a backtick fence with a plain info string
+    // keeps its skip.
+    for (const draft of [
+      '**[Critical]** ~~~ts `X`\ncode\n~~~\nthe claim',
+      '**[Critical]** ```ts\ncode\n```\nthe claim',
+    ]) {
+      expect(stampCarriedId(draft, 'R3-1')).toBe(draft);
+    }
+  });
+
   it('leaves a quoted fence-opening body un-stamped — the stamp must not break the quote (#9940 review)', () => {
     // pr-context quotes every earlier comment containing code as
     // `> ``` …`; the skip classifies the marker's projected first line

@@ -57,12 +57,12 @@ import {
   severityOf,
   stripSeverityPrefix,
 } from './inline-counts.js';
+import { ledgerClaimLine, type FixedFinding } from '../compose-review.js';
 import {
-  ENTRY_FENCE_DELIMITER_RE,
-  ledgerClaimLine,
-  type FixedFinding,
-} from '../compose-review.js';
-import { HTML_BLOCK_OPEN_RE, QUOTE_PREFIX_RE } from './review-footer.js';
+  HTML_BLOCK_OPEN_RE,
+  QUOTE_PREFIX_RE,
+  fenceOpener,
+} from './review-footer.js';
 
 /** One review thread, reduced to what the lifecycle decisions read. */
 export interface ReviewThread {
@@ -326,7 +326,13 @@ export function stampCarriedId(body: string, id: string): string {
     .split(/\r\n?|\n/)[0]
     .replace(QUOTE_PREFIX_RE, '')
     .replace(LEADING_INVISIBLE_RE, '');
-  const opensFence = ENTRY_FENCE_DELIMITER_RE.test(unquoted);
+  // Through the line model's OWN opener rule (`fenceOpener`, the one
+  // `scanLines` applies), not a delimiter-only test: a backtick run whose
+  // info string carries a backtick opens no fence — the line is prose the
+  // stamp cannot break, and skipping it posted an id-less root behind a
+  // disclosure naming a fence that never existed (#9940 review, round
+  // 25).
+  const opensFence = fenceOpener(unquoted) !== null;
   const opensHtmlBlock = HTML_BLOCK_OPEN_RE.test(unquoted.trimStart());
   if (
     (opensFence || opensHtmlBlock) &&

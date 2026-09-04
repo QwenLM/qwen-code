@@ -810,15 +810,21 @@ function classifyExistingComments(
   // a `repost` entry keyed on the ids it carries — and nothing else: not
   // the overlap bucket (a reply is not a finding at the location), not
   // the id-less ambiguity count (it is not an original), not the id-less
-  // fallback (a reply carrying no id names nothing). Same gates as the
-  // root match: this account only (ledger ids are per-account), the
-  // current SHA only (a reply inherits its root's commit), an id the
-  // findings actually carry. A fixed-ruling reply stays inert either
-  // way: it carries no marker, and its id is retired — no finding wants
-  // it.
+  // fallback (a reply carrying no id names nothing). Two gates from the
+  // root match — this account only (ledger ids are per-account) and an
+  // id the findings actually carry — and deliberately NOT the SHA gate:
+  // a reply inherits its ROOT's commit id, so after any new commit the
+  // carry-reply would fail a current-SHA test forever while its root
+  // buckets `stale`, and a still-standing carried finding would be
+  // dedup-dropped whenever any current-SHA own comment overlapped its
+  // location (#9940 review, round 25). The wanted-id match is the
+  // evidence that matters: the current round still carries the finding
+  // at that location, and the lifecycle answers it inside the same
+  // thread whatever commit the root was posted at. A fixed-ruling reply
+  // stays inert either way: it carries no marker, and its id is retired
+  // — no finding wants it.
   if (currentUserLogin !== '') {
     for (const c of ownReplies) {
-      if (c.commit_id !== commitSha) continue;
       if (
         (c.user?.login ?? '').toLowerCase() !== currentUserLogin.toLowerCase()
       )

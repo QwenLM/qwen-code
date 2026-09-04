@@ -3625,9 +3625,18 @@ export function ingestFixedFindings(value: unknown): FixedFinding[] {
     // entry no ledger ever held: the ruling would resolve nothing while
     // the unbounded token rides the receipt, the artifact, and (when a
     // forged thread matches) the reply body verbatim. A refusal, not a
-    // slice — a cut id is a different id (#9940 review, round 14).
+    // slice — a cut id is a different id (#9940 review, round 14). The
+    // spelling must be CANONICAL too: the shape tolerates leading zeros
+    // (`R01-2`, `Number('01')` is 1) that no minted entry or posted root
+    // ever carries, and every downstream join — the gate's fixedIds set,
+    // the dedup below, the thread matcher's map — is raw-string
+    // equality, so such a ruling passed every gate, retired nothing, and
+    // defeated the two-way refusal beside a still-standing `R1-2`
+    // re-post. Tightened HERE, not in the shared token (#9940 review,
+    // round 25).
     const idRound = Number(id.slice(1).split('-')[0]);
     if (
+      !/^R[1-9]\d*-[1-9]\d*$/.test(id) ||
       id.length > LEDGER_MAX_ID ||
       !Number.isSafeInteger(idRound) ||
       idRound < 1 ||

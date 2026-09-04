@@ -6269,6 +6269,13 @@ describe('composeReview — fixedFindings', () => {
       'R1-' + '9'.repeat(30),
       'R0-1',
       'R999999-1',
+      // Non-canonical spellings the shape tolerates but no entry carries:
+      // every join is raw-string equality, so `R01-2` retires nothing and
+      // slips past the two-way refusal beside a still-standing `R1-2`
+      // (#9940 review, round 25).
+      'R01-2',
+      'R1-02',
+      'R1-0',
     ] as const) {
       expect(() =>
         composeReview(base({ fixedFindings: [{ id } as never] })),

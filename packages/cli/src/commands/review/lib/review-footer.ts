@@ -449,6 +449,29 @@ export const QUOTE_PREFIX_RE = /^[ \t]{0,3}(?:>[ \t]*)+/;
 /** Fence delimiter runs (``` or ~~~), openers and closers alike. */
 const FENCE_RUN_RE = /^[ \t]{0,3}(`{3,}|~{3,})/;
 
+/**
+ * The fence OPENER rule — the ONE statement `scanLines` and the stamp skip
+ * (`stampCarriedId`) both apply: a delimiter run of ``` or ~~~ opens a
+ * fence, EXCEPT a backtick run whose info string carries a backtick —
+ * CommonMark forbids that spelling, so the line is ordinary paragraph
+ * text (tilde fences may carry one). A delimiter-only test over-skipped
+ * exactly that line out of its id stamp, posting an id-less root behind
+ * a disclosure naming a fence that does not exist (#9940 review, round
+ * 25). Returns the opener's character and run length — the state a
+ * closer must match — or null.
+ */
+export function fenceOpener(
+  content: string,
+): { char: string; len: number } | null {
+  const open = FENCE_RUN_RE.exec(content);
+  if (open === null) return null;
+  const run = open[1]!;
+  if (run[0] === '`' && content.slice(open[0].length).includes('`')) {
+    return null;
+  }
+  return { char: run[0]!, len: run.length };
+}
+
 /** A fence CLOSER: same shape, nothing but trailing whitespace after it. */
 const FENCE_CLOSE_RE = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/;
 
@@ -575,17 +598,11 @@ function scanLines(body: string): ScannedLine[] {
       out.push({ line, kind: 'htmlOpen', depth, content });
       continue;
     }
-    const open = FENCE_RUN_RE.exec(content);
-    if (open !== null) {
-      // A backtick in a BACKTICK fence's info string is no fence at all —
-      // the line is ordinary text; tilde fences may carry one.
-      if (
-        !(open[1]![0] === '`' && content.slice(open[0].length).includes('`'))
-      ) {
-        fence = { char: open[1]![0]!, len: open[1]!.length, depth };
-        out.push({ line, kind: 'fenceEdge', depth, content });
-        continue;
-      }
+    const opener = fenceOpener(content);
+    if (opener !== null) {
+      fence = { ...opener, depth };
+      out.push({ line, kind: 'fenceEdge', depth, content });
+      continue;
     }
     if (/^[ \t]{4}/.test(content)) {
       out.push({ line, kind: 'code', depth, content });
