@@ -15,6 +15,7 @@ import {
   HOME_ENV_BOOTSTRAP_KEYS,
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
+  isPrivateProvenanceEnvKey,
   reportRejectedLoaderKeys,
 } from '../config/shared-env-keys.js';
 import {
@@ -283,6 +284,11 @@ export function loadServeFastPathEnvironment(
       for (const key in parsedEnv) {
         if (!Object.hasOwn(parsedEnv, key)) continue;
         if (isLoaderEnvKey(key)) continue;
+        // Home-scoped files are exempt from the hardcoded exclusions below,
+        // so the private Conversations provenance marker — which the daemon
+        // would otherwise freeze into daemonRuntimeBaseEnv and hand to every
+        // spawned session — needs its own every-scope rejection here.
+        if (isPrivateProvenanceEnvKey(key)) continue;
         if (!isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
           continue;
         }
