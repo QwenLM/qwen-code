@@ -498,12 +498,34 @@ export class LoopDetectedEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   loop_type: LoopType;
   prompt_id: string;
+  /**
+   * sha256 fingerprint of the repeated tool-error payload that tripped the
+   * guard. REPEATED_TOOL_ERROR only (issue #10887): pages arrive with the
+   * identity of the failing payload instead of a bare loop type.
+   */
+  error_signature?: string;
+  /**
+   * Leading excerpt of the repeated tool-error payload, truncated for
+   * telemetry. REPEATED_TOOL_ERROR only (issue #10887).
+   */
+  error_excerpt?: string;
 
-  constructor(loop_type: LoopType, prompt_id: string) {
+  constructor(
+    loop_type: LoopType,
+    prompt_id: string,
+    details?: { errorSignature?: string; errorExcerpt?: string },
+  ) {
     this['event.name'] = 'loop_detected';
     this['event.timestamp'] = new Date().toISOString();
     this.loop_type = loop_type;
     this.prompt_id = prompt_id;
+    if (details?.errorSignature !== undefined) {
+      this.error_signature = details.errorSignature;
+    }
+    if (details?.errorExcerpt !== undefined) {
+      // Truncate for telemetry (avoid shipping full tool payloads).
+      this.error_excerpt = details.errorExcerpt.slice(0, 200);
+    }
   }
 }
 

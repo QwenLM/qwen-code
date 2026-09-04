@@ -441,10 +441,11 @@ export class LoopDetectionService {
 
   // Short excerpt of the repeated region captured when the chanting
   // detector fires, for debug logging only. Deliberately NOT part of the
-  // LoopDetected event payload: the event contract stays loop_type-only and
-  // the excerpt rides the debug log instead, so a headless reasoning-channel
-  // halt (empty stdout, label-only stderr) leaves an artifact that tells a
-  // true repetition from a misfire.
+  // LoopDetected event payload — the chanting excerpt rides the debug log
+  // instead, so a headless reasoning-channel halt (empty stdout, label-only
+  // stderr) leaves an artifact that tells a true repetition from a misfire.
+  // (REPEATED_TOOL_ERROR is the exception: its guard carries the error
+  // signature + excerpt on the event itself, see checkRepeatedToolError.)
   private lastChantExcerpt = '';
 
   constructor(config: Config) {
@@ -741,19 +742,24 @@ export class LoopDetectionService {
    * (orphan repairs, user cancellations) are skipped; each remaining error
    * is reduced to its stable fingerprint text (normalizeToolErrorText) —
    * identical underlying errors fingerprint identically no matter how they
-   * were produced (issue #10887).
+   * were produced (issue #10887). The raw payload is retained alongside for
+   * the telemetry excerpt: the signature identifies the failure, the raw
+   * text tells oncall what it is.
    */
-  private static extractToolErrorTexts(
+  private static extractToolErrors(
     responseParts: readonly Part[],
-  ): string[] {
-    const errors: string[] = [];
+  ): Array<{ raw: string; normalized: string }> {
+    const errors: Array<{ raw: string; normalized: string }> = [];
     for (const part of responseParts) {
       const response = part.functionResponse?.response;
       if (!response) continue;
       const error = response['error'];
       if (typeof error !== 'string' || error.trim().length === 0) continue;
       if (LoopDetectionService.isSyntheticToolError(error)) continue;
-      errors.push(LoopDetectionService.normalizeToolErrorText(error));
+      errors.push({
+        raw: error,
+        normalized: LoopDetectionService.normalizeToolErrorText(error),
+      });
     }
     return errors;
   }
@@ -780,11 +786,10 @@ export class LoopDetectionService {
    * callers halt the turn exactly as for an event-detected loop.
    */
   private checkRepeatedToolError(responseParts: readonly Part[]): boolean {
-    const errorTexts =
-      LoopDetectionService.extractToolErrorTexts(responseParts);
+    const errors = LoopDetectionService.extractToolErrors(responseParts);
     const seen = new Set<string>();
-    for (const errorText of errorTexts) {
-      const signature = createHash('sha256').update(errorText).digest('hex');
+    for (const { raw, normalized } of errors) {
+      const signature = createHash('sha256').update(normalized).digest('hex');
       // Collapse sibling calls of this round into one piece of evidence.
       if (seen.has(signature)) continue;
       seen.add(signature);
@@ -796,9 +801,14 @@ export class LoopDetectionService {
       }
       if (this.toolErrorStreakCount >= REPEATED_TOOL_ERROR_THRESHOLD) {
         this.lastLoopType = LoopType.REPEATED_TOOL_ERROR;
+        // Carry the failure evidence: the signature identifies the repeated
+        // payload and the (truncated) raw excerpt tells oncall what it is.
         logLoopDetected(
           this.config,
-          new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, this.promptId),
+          new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, this.promptId, {
+            errorSignature: signature,
+            errorExcerpt: raw,
+          }),
         );
         this.loopDetected = true;
         return true;
