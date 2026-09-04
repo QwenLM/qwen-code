@@ -363,33 +363,28 @@ export function assess(prs, options = {}) {
 // not the count: during a never-ran outage one request gets answered by a
 // skip while another ages past the stale window, the count holds and the
 // roster the issue shows would otherwise freeze on week one.
-// `newestUnanswered` is the newest unanswered-request timestamp seen since
-// the issue opened — carried forward, never lowered: a request answered by
-// its PR closing or by ageing out of the window leaves no trace in a later
-// assessment, yet the recovery gate must keep postdating it (see decide()).
 // Kept single-line (STATE_RE) — JSON.stringify of a flat object never emits
 // a newline.
 function stateOf(assessment, previous = null) {
-  const newest = assessment.unanswered.at(-1)?.at ?? null;
-  const carried = previous?.newestUnanswered ?? null;
-  // The live request floor is carried the same way, and for a stronger
-  // reason: a request the watch can read today may be deleted tomorrow, and
-  // the recovery gate must not read that deletion as a recovery. Recording it
-  // means any tick that SAW the request keeps it.
-  const request = previous?.newestRequest ?? null;
+  // The request floor is carried forward, never lowered: a request the watch
+  // can read today may be deleted tomorrow, and the recovery gate must not
+  // read that deletion as a recovery. Recording it means any tick that SAW
+  // the request keeps it. It needs no sibling for the newest UNANSWERED
+  // request — the scan that feeds it reads every request the roster reads,
+  // plus answered ones and ones on closed PRs, so it is never older.
+  const carried = previous?.newestRequest ?? null;
   const seen = assessment.newestRequest ?? null;
   return {
     streak: assessment.streak,
     unanswered: assessment.unanswered.map((u) => u.id),
-    newestUnanswered:
-      carried && (!newest || carried > newest) ? carried : newest,
-    newestRequest: request && (!seen || request > seen) ? request : seen,
+    newestRequest: carried && (!seen || carried > seen) ? carried : seen,
     latest: assessment.latestAttempt?.id ?? null,
   };
 }
 
-// `newestUnanswered` is deliberately not compared: the carried maximum can
-// legitimately differ from the current roster's without the picture moving.
+// `newestRequest` is deliberately not compared: the carried floor rises when a
+// request appears, which is not by itself a move in the picture, and decide()
+// keys that write separately.
 function sameState(previous, current) {
   return (
     previous !== null &&
@@ -402,11 +397,12 @@ function sameState(previous, current) {
 // The shape the watch writes, and the only shape it will read back. A marker
 // is text on a GitHub issue, so a payload of the wrong TYPE is as reachable as
 // one of the wrong value — and type confusion defeats the close gate's checks
-// all at once: `newestUnanswered: []` is truthy (so the "no barrier recorded"
-// refusal misses it) and compares greater-than against every timestamp (so the
-// postdating gate passes), closing on any push at all. Validate rather than
-// trust: anything malformed reads as no state, which the gate already treats
-// as "cannot close".
+// all at once: `newestRequest: []` is truthy (so a floor that was never
+// recorded reads as one) and compares greater-than against every timestamp (so
+// the postdating gate refuses forever). Validate rather than trust: anything
+// malformed reads as no state, which the gate already handles. Fields this
+// version stopped writing are not checked — an old marker carrying one still
+// reads.
 function validState(state) {
   if (!state || typeof state !== 'object' || Array.isArray(state)) {
     return null;
@@ -414,18 +410,8 @@ function validState(state) {
   // A field that is absent reads as "not recorded", which every gate already
   // handles; a field that is PRESENT must have the type the watch writes.
   const ok = (v, type) => v === undefined || v === null || typeof v === type;
-  const {
-    streak,
-    unanswered,
-    newestUnanswered,
-    newestRequest,
-    latest,
-    recovered,
-  } = state;
-  if (!ok(streak, 'number') || !ok(newestUnanswered, 'string')) {
-    return null;
-  }
-  if (!ok(newestRequest, 'string')) {
+  const { streak, unanswered, newestRequest, latest, recovered } = state;
+  if (!ok(streak, 'number') || !ok(newestRequest, 'string')) {
     return null;
   }
   if (!ok(latest, 'number') || !ok(recovered, 'number')) {
@@ -641,45 +627,28 @@ export function decide(assessment, existing, options = {}) {
     // would hide a lane that is still broken.
     const previous = readState(existing.texts);
     const latest = assessment.latestAttempt;
-    // ...and the attempt must postdate every unanswered request the watch has
-    // seen since the issue opened: a result that landed before those requests
-    // cannot be evidence that anything ran after them. Read on the result
-    // COMMENT's time, which is the only time the watch can see; the guard
-    // below covers what that proxy cannot. Requests answered by
-    // a closed PR or by ageing out of the window leave no trace in the
-    // current assessment, so their newest timestamp is carried in the state
-    // markers the watch writes on the issue.
-    //
-    // Those markers live on GitHub, where a triage user can edit or delete
-    // them, so the barrier is floored at the issue's OWN creation time — a
-    // field GitHub maintains and nobody can edit. The floor is sound on its
-    // own terms: the issue exists because the lane was failing at that
-    // moment, so a push from before it cannot show the lane recovered. What
-    // the floor buys is that tampering with the markers can no longer
-    // manufacture a false close — the worst a forged, junked, wrong-typed or
-    // deleted marker can do is drop the barrier back to this floor — while a
-    // record the watch can still read keeps the stronger, later barrier.
-    // The barrier is the latest of three, so losing any one of them cannot
-    // certify a recovery that did not happen:
-    //   - what the watch REMEMBERS (the newest request it saw go unanswered,
-    //     carried in its own comments) — the strongest, and the only one that
-    //     outlives the window, but it lives on GitHub where a triage user can
-    //     delete the comments carrying it;
-    //   - what it can still SEE (the newest request in this window, answered
-    //     or not, open PR or closed) — needs no record of its own, so it
-    //     covers a request whose PR closed before any tick observed it stale,
-    //     which never reached a marker in the first place. It is carried into
-    //     every marker the watch writes, so it also survives the request
-    //     comment itself being deleted, once any tick has seen it. A request
-    //     deleted before the FIRST tick that could record it reaches neither
-    //     source; nothing can read a comment that is gone, and that residue is
-    //     bounded by one tick interval;
-    //   - and the issue's own creation time — unforgeable, always available,
-    //     and sound on its own terms: the issue exists because the lane was
+    // ...and the attempt must postdate every request the watch has seen since
+    // the issue opened: a result that landed before those requests cannot be
+    // evidence that anything ran after them. Read on the result COMMENT's
+    // time, which is the only time the watch can see; the guard below covers
+    // what that proxy cannot. The barrier is the latest of two, so losing
+    // either one cannot certify a recovery that did not happen:
+    //   - the newest request the watch can SEE, or REMEMBERS seeing — this
+    //     window, answered or not, open PR or closed — carried into every
+    //     marker it writes and never lowered, so it survives the request
+    //     comment being deleted and its PR closing. A request deleted before
+    //     the FIRST tick that could record it reaches neither reading;
+    //     nothing can read a comment that is gone, and that residue is
+    //     bounded by one tick interval. The record lives on GitHub, where a
+    //     triage user can delete the comments carrying it, which is what the
+    //     second source is for;
+    //   - and the issue's own creation time — a field GitHub maintains and
+    //     nobody can edit, so the worst a forged, junked, wrong-typed or
+    //     deleted marker can do is drop the barrier back to this floor. It is
+    //     sound on its own terms: the issue exists because the lane was
     //     failing then, so an earlier push cannot show it recovered.
     const carried = stateOf(assessment, previous);
-    const recorded = carried.newestUnanswered;
-    const barrier = [recorded, carried.newestRequest, existing.createdAt]
+    const barrier = [carried.newestRequest, existing.createdAt]
       .filter((t) => typeof t === 'string' && t)
       .reduce((a, b) => (a > b ? a : b), '');
     // The barrier compares comment times, and the producer pushes BEFORE it
@@ -717,18 +686,16 @@ export function decide(assessment, existing, options = {}) {
       actions.push({ type: 'close', number: existing.number });
     } else if (
       !previous ||
-      (recorded ?? '') > (previous.newestUnanswered ?? '') ||
       (carried.newestRequest ?? '') > (previous.newestRequest ?? '')
     ) {
-      // Persist the barrier while the alarm is quiet. A request that goes
-      // unanswered below the threshold reaches no marker otherwise, and once
-      // its PR closes assess() drops it by design: the gate above would fall
-      // back to the creation-time floor and close on a push that predates the
-      // request. Keyed on the two barriers that RISE — the recorded one and
-      // the request floor — never on the creation-time floor, which is
-      // constant and would say nothing; each key rises only when a new
-      // request appears, so a quiet lane gets one comment per request and
-      // never chatters.
+      // Persist the barrier while the alarm is quiet. The live scan only
+      // reads requests still in the window whose comments still exist, so a
+      // request recorded nowhere is a request the gate above will later
+      // lose — falling back to the creation-time floor and closing on a push
+      // that predates it. Keyed on the barrier that RISES, never on the
+      // creation-time floor, which is constant and would say nothing; it
+      // rises only when a new request appears, so a quiet lane gets one
+      // comment per request and never chatters.
       actions.push({
         type: 'comment',
         number: existing.number,

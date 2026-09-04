@@ -916,7 +916,6 @@ describe('resolve-health: decisions', () => {
     assert.deepEqual(readState([actions[0].body]), {
       streak: 5,
       unanswered: [],
-      newestUnanswered: null,
       newestRequest: null,
       latest: failing.latestAttempt.id,
     });
@@ -946,14 +945,12 @@ describe('resolve-health: decisions', () => {
     assert.match(actions[0].title, /0 consecutive failures, 3 unanswered/);
     assert.ok(actions[0].body.includes('Requests with no result comment:'));
     assert.ok(actions[0].body.includes('#12 by @writer2'));
-    // The state records WHICH requests are unanswered, not how many, and
-    // the newest of them — the barrier decide() postdates recovery pushes by.
+    // The state records WHICH requests are unanswered, not how many, plus the
+    // newest request the watch saw — the barrier decide() postdates recovery
+    // pushes by, recorded so it survives the request comments being deleted.
     assert.deepEqual(readState([actions[0].body]), {
       streak: 0,
       unanswered: stale.unanswered.map((u) => u.id),
-      newestUnanswered: stale.unanswered.at(-1).at,
-      // The live request floor is recorded too, so the barrier survives the
-      // request comments themselves being deleted.
       newestRequest: stale.unanswered.at(-1).at,
       latest: null,
     });
@@ -1348,111 +1345,94 @@ describe('resolve-health: decisions', () => {
     );
   });
 
-  it('keeps the newest unanswered request on record through alarm updates', () => {
-    // The recovery barrier is the newest unanswered request seen since the
-    // issue opened, so an alarm update whose roster SHRINKS must not lower
-    // it: if the update's marker recorded only the current roster, a push
-    // between that and a dropped request would close the issue although the
-    // dropped request never got an attempt.
+  it('keeps a deleted request on record through alarm updates', () => {
+    // An alarm update rewrites the marker, so it must carry the request floor
+    // forward rather than re-derive it from what this tick can still see: a
+    // request whose comment is deleted while the alarm holds leaves the live
+    // scan, and an update that recorded only the scan would lower the barrier
+    // to the newest request still readable — letting a push older than the
+    // deleted request close the issue, although that request never got an
+    // attempt.
     const failures = [1, 2, 3, 4, 5].map((d) =>
       result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 30),
     );
+    // Hoisted, so the roster membership `sameState` compares is made of the
+    // same comment ids on every tick.
+    const askOldest = request('2026-08-25T01:00:00Z', 31);
+    const skipOldest = result('2026-08-25T02:00:00Z', SKIPPED, 31);
+    const askMiddle = request('2026-08-26T01:00:00Z', 32);
+    const pushMiddle = result('2026-08-26T02:00:00Z', PUSHED, 32);
+    const askNewest = request('2026-08-27T01:00:00Z', 33);
+    const issue = (texts) => ({ number: 46, createdAt: FILED_AT, texts });
+
     const tick1 = assess(
       [
         { number: 30, state: 'open', comments: [...failures] },
-        {
-          number: 31,
-          state: 'open',
-          comments: [request('2026-08-25T01:00:00Z', 31)],
-        },
-        {
-          number: 32,
-          state: 'open',
-          comments: [request('2026-08-26T01:00:00Z', 32)],
-        },
-        {
-          number: 33,
-          state: 'open',
-          comments: [request('2026-08-27T01:00:00Z', 33)],
-        },
+        { number: 31, state: 'open', comments: [askOldest] },
+        { number: 32, state: 'open', comments: [askMiddle] },
+        { number: 33, state: 'open', comments: [askNewest] },
       ],
       { now },
     );
+    assert.equal(tick1.unanswered.length, 3);
     const texts = [decide(tick1, null)[0].body];
+    assert.equal(readState(texts).newestRequest, '2026-08-27T01:00:00Z');
 
-    // The newest request's PR closes unanswered while the oldest gets a
-    // skip; the streak still alarms, so the watch posts an update — which
-    // must carry the dropped request's timestamp forward.
+    // The newest request's comment is deleted and the oldest is answered by a
+    // skip: the roster moved, so the alarm still fires and the watch posts an
+    // update — which has to carry the deleted request's timestamp.
     const tick2 = assess(
       [
         { number: 30, state: 'open', comments: [...failures] },
-        {
-          number: 31,
-          state: 'open',
-          comments: [
-            request('2026-08-25T01:00:00Z', 31),
-            result('2026-08-25T02:00:00Z', SKIPPED, 31),
-          ],
-        },
-        {
-          number: 32,
-          state: 'open',
-          comments: [request('2026-08-26T01:00:00Z', 32)],
-        },
-        {
-          number: 33,
-          state: 'closed',
-          comments: [request('2026-08-27T01:00:00Z', 33)],
-        },
+        { number: 31, state: 'open', comments: [askOldest, skipOldest] },
+        { number: 32, state: 'open', comments: [askMiddle] },
+        { number: 33, state: 'open', comments: [] },
       ],
       { now },
     );
     assert.equal(tick2.alarm, true);
-    const update = decide(tick2, { number: 46, texts })[0];
+    assert.equal(
+      tick2.newestRequest,
+      '2026-08-26T01:00:00Z',
+      'the deleted request left the live scan',
+    );
+    const update = decide(tick2, issue(texts))[0];
     assert.equal(update.type, 'comment');
     texts.push(update.body);
+    assert.equal(
+      readState(texts).newestRequest,
+      '2026-08-27T01:00:00Z',
+      'the update carried the floor the scan can no longer see',
+    );
 
-    // The last request is answered by a push that postdates it but PREDATES
-    // the dropped one: the alarm clears, yet the issue must stay open.
+    // The last request is answered by a push that postdates every request
+    // still readable, yet PREDATES the deleted one: the alarm clears and the
+    // live scan would clear the push, so only the carried floor holds.
     const tick3 = assess(
       [
         { number: 30, state: 'open', comments: [...failures] },
-        {
-          number: 31,
-          state: 'open',
-          comments: [
-            request('2026-08-25T01:00:00Z', 31),
-            result('2026-08-25T02:00:00Z', SKIPPED, 31),
-          ],
-        },
-        {
-          number: 32,
-          state: 'open',
-          comments: [
-            request('2026-08-26T01:00:00Z', 32),
-            result('2026-08-26T02:00:00Z', PUSHED, 32),
-          ],
-        },
-        {
-          number: 33,
-          state: 'closed',
-          comments: [request('2026-08-27T01:00:00Z', 33)],
-        },
+        { number: 31, state: 'open', comments: [askOldest, skipOldest] },
+        { number: 32, state: 'open', comments: [askMiddle, pushMiddle] },
+        { number: 33, state: 'open', comments: [] },
       ],
       { now },
     );
     assert.equal(tick3.alarm, false);
     assert.equal(tick3.latestAttempt.kind, 'pushed');
-    assert.deepEqual(decide(tick3, { number: 46, texts }), []);
+    assert.equal(tick3.unserved, null, 'every readable request has a result');
+    assert.equal(tick3.newestRequest, '2026-08-26T01:00:00Z');
+    assert.deepEqual(decide(tick3, issue(texts)), []);
   });
 
   it('records a barrier that rose while the alarm stayed below threshold', () => {
-    // The barrier only ever reached a marker on an alarm or a recovery tick,
-    // so a request that went unanswered BELOW the threshold was never
-    // recorded. Once its PR closes, assess() drops it by design, the barrier
-    // falls back to the one the streak-only issue filed (null), and the
-    // recovery gate closes on a push OLDER than that request — a false
-    // recovery that needs no adversary and no tampered marker.
+    // The barrier only reaches a marker on a tick that WRITES one, so a
+    // request that goes unanswered BELOW the threshold — moving neither the
+    // streak nor the roster membership — is recorded nowhere while the lane
+    // is quiet. Once its comment is deleted or it ages out of the window the
+    // live scan loses it too, the barrier falls back to the one the
+    // streak-only issue filed (null), and the recovery gate closes on a push
+    // OLDER than that request — a false recovery needing no adversary and no
+    // tampered marker.
     const failures = [1, 2, 3, 4, 5].map((d) =>
       result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 30),
     );
@@ -1461,7 +1441,7 @@ describe('resolve-health: decisions', () => {
       { now },
     );
     const texts = [decide(opened, null)[0].body];
-    assert.equal(readState(texts).newestUnanswered, null);
+    assert.equal(readState(texts).newestRequest, null);
 
     // The lane pushes, then breaks never-ran: one request, unanswered, below
     // the threshold of three.
@@ -1482,7 +1462,7 @@ describe('resolve-health: decisions', () => {
       ['comment'],
     );
     assert.equal(
-      readState([...texts, refresh[0].body]).newestUnanswered,
+      readState([...texts, refresh[0].body]).newestRequest,
       '2026-08-26T19:30:00Z',
     );
     texts.push(refresh[0].body);
@@ -1492,8 +1472,8 @@ describe('resolve-health: decisions', () => {
     assert.equal(tick3.alarm, false);
     assert.equal(tick3.unanswered.length, 0);
     assert.equal(tick3.latestAttempt.kind, 'pushed');
-    // Not closed — and not refreshed again either: the barrier recorded above
-    // now holds, so the write does not repeat every tick.
+    // Not closed — and not refreshed again either: the floor recorded above
+    // no longer rises, so the write does not repeat every tick.
     assert.deepEqual(decide(tick3, { number: 47, texts }), []);
   });
 
@@ -1581,7 +1561,7 @@ describe('resolve-health: decisions', () => {
     // the evidence the clocks cannot give — one the lane never answered is
     // refused whatever the timestamps say.
     const seeded =
-      '<!-- qwen-resolve-health-state {"streak":5,"unanswered":[],"newestUnanswered":null,"latest":null} -->';
+      '<!-- qwen-resolve-health-state {"streak":5,"unanswered":[],"newestRequest":null,"latest":null} -->';
     const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
     const lane = (served) => [
       {
@@ -1726,7 +1706,7 @@ describe('resolve-health: decisions', () => {
     // SAW the request keeps it: only a deletion before the first tick — at
     // most one tick interval — reaches neither source.
     const filedOnStreak =
-      '<!-- qwen-resolve-health-state {"streak":5,"unanswered":[],"newestUnanswered":null,"latest":null} -->';
+      '<!-- qwen-resolve-health-state {"streak":5,"unanswered":[],"newestRequest":null,"latest":null} -->';
     const failures = [1, 2, 3, 4].map((d) =>
       result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 72),
     );
@@ -1853,10 +1833,7 @@ describe('resolve-health: decisions', () => {
       createdAt: filed,
       texts: [],
     })[0].body;
-    assert.equal(
-      readState([recorded]).newestUnanswered,
-      '2026-08-26T11:00:00Z',
-    );
+    assert.equal(readState([recorded]).newestRequest, '2026-08-26T11:00:00Z');
     const intact = { number: 62, createdAt: filed, texts: [recorded] };
     assert.deepEqual(decide(quiet, intact), []);
     // ...and with every watch comment deleted it still holds, because the
@@ -2019,19 +1996,19 @@ describe('resolve-health: reading state back', () => {
   it('reads back only the shape the watch writes', () => {
     // A marker is text on a GitHub issue, so a payload of the wrong TYPE is
     // as reachable as one of the wrong value — and type confusion defeats
-    // several gates at once: `newestUnanswered: []` is truthy, so a "no
-    // barrier recorded" refusal misses it, and it compares greater-than
-    // against every timestamp, so a postdating gate passes. Anything
+    // several gates at once: `newestRequest: []` is truthy, so a floor that
+    // was never recorded reads as one, and it compares greater-than against
+    // every timestamp, so the postdating gate refuses forever. Anything
     // malformed must read as no state, which the gates already handle.
     const wrap = (payload) =>
       `${HEALTH_MARKER}\n<!-- qwen-resolve-health-state ${payload} -->`;
     for (const payload of [
-      '{"streak":0,"unanswered":[],"newestUnanswered":[],"latest":null}',
-      '{"streak":0,"unanswered":[],"newestUnanswered":{},"latest":null}',
-      '{"streak":0,"unanswered":[],"newestUnanswered":9,"latest":null}',
-      '{"streak":"5","unanswered":[],"newestUnanswered":null}',
-      '{"streak":0,"unanswered":"all","newestUnanswered":null}',
-      '{"streak":0,"unanswered":["a"],"newestUnanswered":null}',
+      '{"streak":0,"unanswered":[],"newestRequest":[],"latest":null}',
+      '{"streak":0,"unanswered":[],"newestRequest":{},"latest":null}',
+      '{"streak":0,"unanswered":[],"newestRequest":9,"latest":null}',
+      '{"streak":"5","unanswered":[],"newestRequest":null}',
+      '{"streak":0,"unanswered":"all","newestRequest":null}',
+      '{"streak":0,"unanswered":["a"],"newestRequest":null}',
       '{"streak":0,"unanswered":[],"latest":"7"}',
       '{"streak":0,"unanswered":[],"recovered":"7"}',
       '[]',
@@ -2041,10 +2018,20 @@ describe('resolve-health: reading state back', () => {
       assert.equal(readState([wrap(payload)]), null, payload);
     }
     // The shapes the watch really writes still read back, including a marker
-    // from before a field existed (absent reads as "not recorded").
+    // written before a field existed (absent reads as "not recorded") and one
+    // still carrying a field this version stopped writing, whatever its type:
+    // a dropped field feeds no gate, so it is ignored rather than rejected.
     const good =
-      '{"streak":2,"unanswered":[1,2],"newestUnanswered":"2026-08-27T00:00:00Z","latest":9,"recovered":9}';
+      '{"streak":2,"unanswered":[1,2],"newestRequest":"2026-08-27T00:00:00Z","latest":9,"recovered":9}';
     assert.equal(readState([wrap(good)]).streak, 2);
+    assert.equal(
+      readState([
+        wrap(
+          '{"streak":2,"unanswered":[1,2],"newestUnanswered":[],"newestRequest":"2026-08-27T00:00:00Z","latest":9}',
+        ),
+      ]).newestRequest,
+      '2026-08-27T00:00:00Z',
+    );
     assert.equal(
       readState([wrap('{"streak":1,"unanswered":[],"latest":7}')]).streak,
       1,
@@ -2125,7 +2112,7 @@ describe('resolve-health: the tracking issue feed', () => {
     // that too and a triage user deletes the marker by editing, so every
     // later tick files a duplicate.
     const forgedState =
-      '<!-- qwen-resolve-health-state {"streak":0,"unanswered":[],"newestUnanswered":null,"latest":null} -->';
+      '<!-- qwen-resolve-health-state {"streak":0,"unanswered":[],"newestRequest":null,"latest":null} -->';
     const calls = [];
     const gh = (args) => {
       calls.push(args);
@@ -2203,7 +2190,7 @@ describe('resolve-health: the tracking issue feed', () => {
       asked(barrier, 43),
     ];
     const body = decide(assess(lane, { now }), null)[0].body;
-    assert.equal(readState([body]).newestUnanswered, barrier);
+    assert.equal(readState([body]).newestRequest, barrier);
 
     // The issue as the API returns it, with an attacker-chosen barrier edited
     // into the body and no watch comment yet.
@@ -2256,8 +2243,8 @@ describe('resolve-health: the tracking issue feed', () => {
     // next: with no trusted comment there is no state, so the watch refuses
     // to close and refreshes from the live assessment instead.
     for (const payload of [
-      `{"streak":0,"unanswered":[],"newestUnanswered":"${stale}","latest":null}`,
-      '{"streak":0,"unanswered":[],"newestUnanswered":[],"latest":null}',
+      `{"streak":0,"unanswered":[],"newestRequest":"${stale}","latest":null}`,
+      '{"streak":0,"unanswered":[],"newestRequest":[],"latest":null}',
       'not json at all',
     ]) {
       const edited = issueWith(forge(payload));
@@ -2270,7 +2257,7 @@ describe('resolve-health: the tracking issue feed', () => {
       );
       assert.match(first[0].body, /State refresh:/);
       // Nothing from the body survived into the refresh...
-      assert.notEqual(readState([first[0].body]).newestUnanswered, stale);
+      assert.notEqual(readState([first[0].body]).newestRequest, stale);
       // ...and the next tick, reading that refresh, still refuses to close on
       // the stale push.
       const next = issueWith(forge(payload), [first[0].body]);
@@ -2294,7 +2281,7 @@ describe('resolve-health: the tracking issue feed', () => {
     assert.equal(alarming.alarm, true);
     const recordedBy = decide(alarming, issueWith(body))[0].body;
     assert.equal(
-      readState([recordedBy]).newestUnanswered,
+      readState([recordedBy]).newestRequest,
       afterFiling.replace('T00', 'T02'),
     );
     const honest = issueWith(body, [recordedBy]);
