@@ -58,12 +58,14 @@ describe('security workflows', () => {
     expect(workflow).not.toContain('\n  push:');
     expect(workflow).toContain("- cron: '30 2 * * *'");
     expect(dependencyJob).toContain('if: "github.event_name == \'schedule\'"');
+    expect(dependencyJob).toContain('timeout-minutes: 30');
     expect(dependencyJob).not.toContain('continue-on-error');
     expect(trackingJob).toContain("needs: 'dependency-cve'");
     expect(trackingJob).toContain(
       "always() && github.event_name == 'schedule' && (needs.dependency-cve.result == 'success' || needs.dependency-cve.result == 'failure')",
     );
     expect(trackingJob).toContain("issues: 'write'");
+    expect(trackingJob).toContain("contents: 'read'");
     expect(trackingJob).toContain(
       'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3',
     );

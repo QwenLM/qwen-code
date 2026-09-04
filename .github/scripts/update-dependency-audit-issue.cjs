@@ -13,7 +13,6 @@ module.exports = async ({ github, context }) => {
     owner,
     repo,
     state: 'open',
-    labels: 'scope/ci-cd',
     per_page: 100,
   });
   const issue = issues.find(
