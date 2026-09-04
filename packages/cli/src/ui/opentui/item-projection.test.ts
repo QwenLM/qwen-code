@@ -777,7 +777,7 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
     });
   });
 
-  it('maps the stop-hook pair and the blocked prompt onto their kinds', () => {
+  it('maps the stop-hook pair and redacts the blocked prompt', () => {
     expect(
       projectItemToStreamEvent(
         { type: 'stop_hook_system_message', message: 'Stop says: no' },
@@ -798,16 +798,20 @@ describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
       type: 'info',
       text: 'Ran 2 stop hooks\n  ⎿  Stop hook error: b',
     });
-    expect(
-      projectItemToStreamEvent(
-        {
-          type: 'user_prompt_submit_blocked',
-          reason: 'denied',
-          originalPrompt: 'p@ss',
-        },
-        ctx,
-      )?.type,
-    ).toBe('warning');
+    const blocked = projectItemToStreamEvent(
+      {
+        type: 'user_prompt_submit_blocked',
+        reason: 'denied',
+        originalPrompt: 'sk-abcdefghijklmnopqrstuvw run',
+      },
+      ctx,
+    );
+    expect(blocked?.type).toBe('warning');
+    const blockedText = (blocked as { text: string }).text;
+    expect(blockedText).toContain(
+      '✕ UserPromptSubmit operation blocked by hook:\ndenied',
+    );
+    expect(blockedText).not.toContain('sk-abcdefghijklmnopqrstuvw');
   });
 
   it('routes the special kinds through projectSpecialItemText as info rows', () => {

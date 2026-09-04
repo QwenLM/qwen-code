@@ -38,7 +38,11 @@ interface Harness {
   reduceExtensionState: ReturnType<typeof vi.fn>;
 }
 
-function makeHost(): Harness {
+function makeHost(
+  sessionStats: SessionStatsState = {
+    sessionId: 'sess-1',
+  } as SessionStatsState,
+): Harness {
   const onChange = vi.fn();
   const transcriptReset = vi.fn();
   const transcriptClear = vi.fn();
@@ -69,7 +73,7 @@ function makeHost(): Harness {
     toggleVimEnabled: toggleVim,
     reloadCommands,
     startNewSession,
-    getSessionStats: () => ({ sessionId: 'sess-1' }) as SessionStatsState,
+    getSessionStats: () => sessionStats,
     reduceExtensionState:
       reduceExtensionState as OpenTuiAppHostDeps['reduceExtensionState'],
   };
@@ -324,6 +328,31 @@ describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
     ]);
     expect(transcriptAppend).not.toHaveBeenCalled();
     expect(transcriptReset).not.toHaveBeenCalled();
+  });
+
+  it('forwards host state into the projector context', () => {
+    const statsSnapshot = {
+      sessionId: 'stats-sess-7',
+      metrics: {
+        models: {},
+        tools: {
+          totalCalls: 3,
+          totalSuccess: 2,
+          totalFail: 1,
+          totalDurationMs: 0,
+          totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+        },
+        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      },
+    } as unknown as SessionStatsState;
+    const { host, transcriptAppend } = makeHost(statsSnapshot);
+    host.addItem({ type: 'stats', duration: '9m' } as never, 1);
+    // The context-free fallback renders only `Session duration: 9m`; these
+    // lines exist solely because addItem forwarded deps.getSessionStats.
+    const text = transcriptAppend.mock.calls[0][0].text as string;
+    expect(text).toContain('Session ID: stats-sess-7');
+    expect(text).toContain('Tool Calls: 3');
+    expect(text).toContain('Wall Time: 9m');
   });
 
   it('clearItems empties the visible transcript too (U-29)', () => {

@@ -58,6 +58,9 @@ const mocks = vi.hoisted(() => {
     deferGate: null as null | ((text: string) => boolean | Promise<boolean>),
     handledTexts: [] as string[],
     host: null as unknown,
+    /** One entry per dispatcher construction: churn means the host was rebuilt. */
+    hosts: [] as unknown[],
+    dispatcherConstructions: 0,
     inputProps: null as Record<string, unknown> | null,
     dialogProps: null as Record<string, unknown> | null,
     toolConfirmProps: null as Record<string, unknown> | null,
@@ -123,6 +126,8 @@ vi.mock('./commands-dispatch.js', () => ({
       commands: readonly unknown[],
     ) {
       mocks.state.host = host;
+      mocks.state.hosts.push(host);
+      mocks.state.dispatcherConstructions += 1;
       this._commands = commands;
     }
     _commands: readonly unknown[];
@@ -223,6 +228,8 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.deferGate = null;
     mocks.state.handledTexts.length = 0;
     mocks.state.host = null;
+    mocks.state.hosts.length = 0;
+    mocks.state.dispatcherConstructions = 0;
     mocks.state.inputProps = null;
     mocks.state.dialogProps = null;
     mocks.state.toolConfirmProps = null;
@@ -237,6 +244,34 @@ describe('OpenTuiApp shell wiring', () => {
     renderApp();
     await settle();
     expect(screen.getByText('input-prompt')).toBeTruthy();
+  });
+
+  it('builds one host, and one dispatcher, across re-renders', async () => {
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      onTranscriptEvent: vi.fn(),
+      onTranscriptReset: vi.fn(),
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    // A turn re-renders this component repeatedly. Every transcript seam prop
+    // above is a stable identity (the live turn memoizes them with empty-dep
+    // useCallbacks), so rebuilding the host here would mean the shell's own
+    // memo broke — and a churning host loses `host.history` per render.
+    for (const streaming of [true, false, true, false]) {
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={streaming} />);
+        await Promise.resolve();
+      });
+    }
+
+    expect(mocks.state.dispatcherConstructions).toBe(1);
+    expect(new Set(mocks.state.hosts).size).toBe(1);
   });
 
   it('reserves the update-notification slot, hidden while a dialog is open', async () => {
@@ -296,6 +331,9 @@ describe('OpenTuiApp shell wiring', () => {
         modelOverride: undefined,
         onComplete: undefined,
         refreshContextFilesOnWrite: undefined,
+        // The recorded invocation is already on the transcript, so the live
+        // turn must not echo the generated content as a second user row.
+        invocationEchoed: true,
       },
     );
   });
@@ -318,6 +356,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      invocationEchoed: true,
     });
   });
 

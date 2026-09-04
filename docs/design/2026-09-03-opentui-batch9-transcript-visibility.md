@@ -29,6 +29,10 @@ repro):
   transcript" (session-switch.ts:55), but the implementation clears only the
   history. After `/clear`, `renderMain` keeps every live row on screen. The
   contract's second half was never implemented.
+- **U-30** — found by this batch's own smoke, on the way to U-29's case: `/clear`
+  threw before it cleared anything, so the only visible effect was an error row.
+  Pre-existing, and in scope for the same reason as U-29. Decision 7 disposes of
+  it.
 
 ## Decision 1 — one ordered model: project-on-write at `addItem`
 
@@ -197,7 +201,7 @@ found while writing this doc:
    names the formats the pipeline **supports**. The sentence is corrected so
    this batch's port is not "fixing" a claim that was never true.
 
-## Decision 7 — `/clear`'s detached host method (found by the smoke)
+## Decision 7 — `/clear`'s detached host method (U-30, found by the smoke)
 
 The first OpenTUI smoke of this batch threw before it cleared anything:
 
@@ -231,6 +235,32 @@ Worth recording that the row was readable at all only because U-28 now projects
 dispatcher writes; before this batch the failure would have been silent, with
 `/clear` simply appearing to do nothing.
 
+## Decision 8 — one user row per command submit
+
+Project-on-write made the recorded invocation echo visible, which exposed a
+second row behind every `submit_prompt` outcome: the live turn echoed the
+_expanded_ content — a skill prompt the user never typed. ink adds only the
+invocation row: its `submit_prompt` case returns before the USER `addItem`
+(use-llm-stream.ts:1607 vs :1683). Suppressed at the seam rather than in the
+projection, because the seam is where "this submit came from a command" is
+known: `submit()` takes `invocationEchoed`, the shell sets it for
+`submit_prompt` outcomes only, and a typed prompt keeps its echo. Measured —
+dropping the guard adds the row back and reddens the live-turn case, and the
+shell cases pin that the flag travels with the per-turn options.
+
+## Decision 9 — duplicate steers collapse at the fold
+
+Steering the same text twice in a row rendered two rows where ink renders one.
+ink suppresses a user item identical to its predecessor inside `addItem`
+(useHistoryManager.ts:84-95), and this renderer's host copies that condition —
+but stream echoes never pass through either `addItem`: they reach the
+transcript through `foldLiveEvent`. The collapse therefore goes in the fold's
+user arm, the one chokepoint the projected echo and the live echo share, keyed
+on consecutive-identical text only. A no-op fold returns `prev`, so a dropped
+echo does not even re-render the transcript. Measured — deleting the condition
+folds two rows (`expected [ …(2) ] to have a length of 1 but got 2`) while the
+`['first', 'second']` cases stay green, so the key is not over-broad.
+
 ## Coverage boundary
 
 - **Unit (projection)**: the total table is the compile-time guard; tests pin
@@ -248,6 +278,25 @@ dispatcher writes; before this batch the failure would have been silent, with
   `client.sendMessageStream(...)` turns exactly that test red
   (`expected false to be true`) and leaves the other 41 in the file green; the
   presence-only assertion it replaces did not catch that move.
+- **Unit (U-27, second round)**: a `fileData` image is disclosed like an
+  `inlineData` one — deleting that branch reddens exactly the new case
+  (`expected [] to deeply equal [ { type: 'info', …(1) } ]`) and had left the
+  first round's 42 green. The steering disclosure is attributed per message:
+  one warning between the two echoes, and hoisting the check above the loop
+  moves it after both (`expected 8 to be greater than 9`).
+- **Unit (projection content)**: the blocked-prompt row asserts ink's text and
+  the redaction rather than its kind alone — dropping the reason at the
+  projection site reddens that case while the formatter's own redaction test
+  stays green, which is the distinction the assertion buys. The stats row is
+  pinned to the context the host forwards: with `stats` unset it collapses to
+  the context-free fallback, and the case fails on the missing `Session ID`.
+- **Unit (host identity)**: the shell builds one host, and one dispatcher,
+  across five renders, and the live turn's transcript seam callbacks keep their
+  identity across turn state. Removing the transcript memo produces 5 dispatcher
+  constructions (`expected 5 to be 1`); giving `apply` a dependency reddens the
+  seam case. Before the identity case existed, the same memo removal passed 30
+  of the shell's 32 tests: the only other failure was the composer-history case,
+  which trips over the lost history rather than the churn itself.
 - **E2E**: the harness does have a screen-text channel —
   `InteractiveSession.screen()`/`waitForScreen()` reconstruct the rendered
   screen through `@xterm/headless` (interactive-session.ts:182-217), and the

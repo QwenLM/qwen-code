@@ -365,6 +365,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               modelOverride: outcome.modelOverride,
               refreshContextFilesOnWrite: outcome.refreshContextFilesOnWrite,
               onComplete: outcome.onComplete,
+              invocationEchoed: true,
             });
           else notify('The live prompt turn is not wired in this shell.');
           return;

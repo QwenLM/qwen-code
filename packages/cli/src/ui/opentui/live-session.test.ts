@@ -1109,6 +1109,25 @@ describe('livePromptEvents', () => {
     expect(events.filter((e) => e.type === 'info')).toEqual([]);
   });
 
+  it('discloses an unsupported format carried as fileData', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+    const avif = {
+      fileData: { mimeType: 'image/avif', fileUri: 'gs://bucket/shot.avif' },
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, [{ text: 'look' }, avif]),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.filter((e) => e.type === 'info')).toEqual([
+      { type: 'info', text: getUnsupportedImageFormatWarning() },
+    ]);
+    // ink forwards the part anyway — the disclosure is the only addition.
+    const [prompt] = sendMessageStream.mock.calls[0] as unknown[];
+    expect(prompt).toEqual([{ text: 'look' }, avif]);
+  });
+
   it('discloses the format warning on the steering hop before the echo', async () => {
     const sendMessageStream = oneToolBatchStream({
       callId: 't1',
@@ -1137,6 +1156,46 @@ describe('livePromptEvents', () => {
     );
     expect(warnIndex).toBeGreaterThan(-1);
     expect(echoIndex).toBeGreaterThan(warnIndex);
+  });
+
+  it('attributes the steering disclosure to the message that carries the image', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 't1',
+      name: 'test_tool',
+      args: {},
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const avif = { inlineData: { mimeType: 'image/avif', data: 'aGk=' } };
+    atMocks.result = {
+      processedQuery: [{ text: 'see @shot.avif' }, avif],
+      shouldProceed: true,
+      toolDisplays: [readDisplay()],
+    };
+
+    const events = (await drain(
+      livePromptEvents(config, 'start', undefined, {
+        drainSteering: () => ['plain steer', 'see @shot.avif'],
+      }),
+    )) as OpenTuiStreamEvent[];
+
+    const indexOf = (match: (e: OpenTuiStreamEvent) => boolean): number =>
+      events.findIndex(match);
+    const firstEcho = indexOf(
+      (e) => e.type === 'user' && e.text === 'plain steer',
+    );
+    const warn = indexOf(
+      (e) => e.type === 'info' && e.text === getUnsupportedImageFormatWarning(),
+    );
+    const secondEcho = indexOf(
+      (e) => e.type === 'user' && e.text === 'see @shot.avif',
+    );
+
+    // One warning for the drain, and it sits inside the second message's
+    // window: a check hoisted above the loop lands after both echoes.
+    expect(events.filter((e) => e.type === 'info')).toHaveLength(1);
+    expect(firstEcho).toBeGreaterThan(-1);
+    expect(warn).toBeGreaterThan(firstEcho);
+    expect(secondEcho).toBeGreaterThan(warn);
   });
 
   it('forwards awaiting_approval calls to onWaitingCall exactly once per callId', async () => {
