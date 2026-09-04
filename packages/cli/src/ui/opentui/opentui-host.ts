@@ -46,6 +46,7 @@ import {
   coalesceFindingsHistoryItems,
   isFindingsListDisplay,
 } from '../utils/findings-coalescing.js';
+import { projectItemToStreamEvent } from './item-projection.js';
 import type {
   OpenTuiCommandHost,
   ShellConfirmationResolution,
@@ -64,6 +65,13 @@ const debugLogger = createDebugLogger('OPEN_TUI_HOST');
 export interface OpenTuiTranscriptController {
   /** Replaces the visible transcript from a replay batch (single commit). */
   reset(events: OpenTuiStreamEvent[]): void;
+  /**
+   * Empties the visible transcript (/clear — the contract half of
+   * SessionSwitchHost.clearItems that says "AND the visible transcript").
+   */
+  clear(): void;
+  /** Appends one projected host-history item (U-28 project-on-write). */
+  append(event: OpenTuiStreamEvent): void;
 }
 
 /** Modal-confirmation seam the shell owns (renders + awaits a dialog). */
@@ -203,6 +211,17 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
         newItem.tools.some((tool) => isFindingsListDisplay(tool.resultDisplay))
           ? coalesceFindingsHistoryItems(next)
           : next;
+      // U-28 project-on-write: the recorded item becomes a transcript row so
+      // command output is visible. updateItem/loadHistory do not project —
+      // one is a flag flip the live row ignores, the other is followed by a
+      // wholesale transcript reset.
+      const event = projectItemToStreamEvent(newItem, {
+        config: this.config,
+        stats: this.sessionStats,
+        settings: this.settings,
+        extensionsUpdateState: this.extensionsUpdateState,
+      });
+      if (event) this.transcript.append(event);
     }
     this.notify();
     return id;
@@ -223,6 +242,9 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
   clearItems: UseHistoryManagerReturn['clearItems'] = () => {
     this.history = [];
     this.messageIdCounter = 0;
+    // Contract completion (U-29): SessionSwitchHost documents clearItems as
+    // clearing the command history AND the visible transcript.
+    this.transcript.clear();
     this.notify();
   };
 

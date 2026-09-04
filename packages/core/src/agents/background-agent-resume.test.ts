@@ -3889,9 +3889,24 @@ describe('BackgroundAgentResumeService', () => {
       }
     });
     const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless.mockRejectedValue(
-      new Error('setup failed'),
-    );
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent: {
+        execute: vi.fn(),
+        setExternalMessageProvider: vi.fn(() => {
+          throw new Error('setup failed');
+        }),
+        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+        getExecutionSummary: () => ({
+          totalTokens: 0,
+          outputTokens: 0,
+          totalDurationMs: 0,
+        }),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'iterated',
+      },
+      dispose,
+    });
 
     await expect(
       service.reviveCompletedBackgroundAgent(agentId, 'keep going'),
@@ -4082,6 +4097,12 @@ describe('BackgroundAgentResumeService', () => {
       subagentName: 'researcher',
       resolvedApprovalMode: 'default',
     });
+    const stats = {
+      totalTokens: 42,
+      outputTokens: 17,
+      toolUses: 3,
+      durationMs: 1200,
+    };
     fs.writeFileSync(
       outputFile,
       JSON.stringify({
@@ -4106,7 +4127,7 @@ describe('BackgroundAgentResumeService', () => {
       outputFile,
       metaPath,
     });
-    registry.complete(agentId, 'All done');
+    registry.complete(agentId, 'All done', stats);
     // Populate the pre-revive UI state that must survive a failed revive.
     const activities = [
       { name: 'Read', description: 'read src/index.ts', at: 1 },
@@ -4131,6 +4152,10 @@ describe('BackgroundAgentResumeService', () => {
     // `recentActivities`, silently dropping the retained activities. The
     // completed snapshot must be restored instead.
     expect(restored?.recentActivities).toEqual(activities);
+    expect(restored?.stats).toEqual(stats);
+    const restoredMeta = readAgentMeta(metaPath);
+    expect(restoredMeta).not.toHaveProperty('stats');
+    expect(restoredMeta).not.toHaveProperty('recentActivities');
   });
 
   it('does not restore more completed agents than the terminal-agent cap', async () => {

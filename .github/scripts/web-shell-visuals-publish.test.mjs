@@ -479,7 +479,31 @@ const writeExecutable = (path, source) => {
   chmodSync(path, 0o755);
 };
 
-const runPublishStep = ({ uploadSucceeds, script = publishStep() }) => {
+const ghStubSource = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+process.getBuiltinModule('node:fs').appendFileSync(process.env.CALL_LOG, args.join(' ') + '\\n');
+const endpoint = args[1] ?? '';
+if (endpoint === 'user') {
+  process.stdout.write('qwen-code-bot\\n');
+} else if (endpoint.endsWith('/pulls/7')) {
+  process.stdout.write(JSON.stringify({
+    state: 'open',
+    head: {
+      sha: process.env.RUN_HEAD_SHA,
+      repo: { full_name: process.env.RUN_HEAD_REPO },
+      ref: process.env.RUN_HEAD_BRANCH,
+    },
+  }));
+} else if (endpoint.endsWith('/issues/7/comments') && args.includes('--method')) {
+  process.stdout.write('[]\\n');
+}
+`;
+
+const runPublishStep = ({
+  uploadSucceeds,
+  script = publishStep(),
+  ghStub = ghStubSource,
+}) => {
   const root = mkdtempSync(join(tmpdir(), 'web-shell-visuals-workflow-'));
   try {
     const workspace = join(root, 'workspace');
@@ -492,6 +516,9 @@ const runPublishStep = ({ uploadSucceeds, script = publishStep() }) => {
     mkdirSync(scriptDir, { recursive: true });
     mkdirSync(runnerTemp);
     mkdirSync(bin);
+    // Force ESM scope onto the extensionless `gh` stub so a `require()`
+    // regression in it is caught here on every host (#10736).
+    writeFileSync(join(bin, 'package.json'), '{"type":"module"}\n');
     writeFileSync(join(workspace, 'visuals', 'pr.txt'), '7\n');
     writeFileSync(
       join(workspace, 'visuals', 'screenshots', 'home-light.png'),
@@ -508,28 +535,7 @@ const runPublishStep = ({ uploadSucceeds, script = publishStep() }) => {
       "process.exit(process.env.UPLOAD_SUCCEEDS === '1' ? 0 : 1);\n",
     );
     writeExecutable(join(runnerTemp, 'ossutil'), '#!/bin/sh\nexit 0\n');
-    writeExecutable(
-      join(bin, 'gh'),
-      `#!/usr/bin/env node
-const args = process.argv.slice(2);
-require('node:fs').appendFileSync(process.env.CALL_LOG, args.join(' ') + '\\n');
-const endpoint = args[1] ?? '';
-if (endpoint === 'user') {
-  process.stdout.write('qwen-code-bot\\n');
-} else if (endpoint.endsWith('/pulls/7')) {
-  process.stdout.write(JSON.stringify({
-    state: 'open',
-    head: {
-      sha: process.env.RUN_HEAD_SHA,
-      repo: { full_name: process.env.RUN_HEAD_REPO },
-      ref: process.env.RUN_HEAD_BRANCH,
-    },
-  }));
-} else if (endpoint.endsWith('/issues/7/comments') && args.includes('--method')) {
-  process.stdout.write('[]\\n');
-}
-`,
-    );
+    writeExecutable(join(bin, 'gh'), ghStub);
     writeExecutable(join(bin, 'sleep'), '#!/bin/sh\nexit 0\n');
 
     const result = spawnSync('bash', ['-c', script], {
@@ -556,14 +562,16 @@ if (endpoint === 'user') {
       },
     });
     const bodyPath = join(runnerTemp, 'visuals-comment.md');
+    const hostingStatusPath = join(runnerTemp, 'visuals-hosting-status.txt');
+    // A stub that dies at startup ends the step at the bot-identity check:
+    // it exits 0 BEFORE any of these artifacts exist, so they are optional.
     return {
       ...result,
-      body: readFileSync(bodyPath, 'utf8'),
-      calls: readFileSync(callLog, 'utf8'),
-      hostingStatus: readFileSync(
-        join(runnerTemp, 'visuals-hosting-status.txt'),
-        'utf8',
-      ).trim(),
+      body: existsSync(bodyPath) ? readFileSync(bodyPath, 'utf8') : null,
+      calls: existsSync(callLog) ? readFileSync(callLog, 'utf8') : '',
+      hostingStatus: existsSync(hostingStatusPath)
+        ? readFileSync(hostingStatusPath, 'utf8').trim()
+        : null,
     };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -979,4 +987,25 @@ test('publish workflow keeps successful hosting out of the failure path', () => 
     result.calls,
     /api repos\/QwenLM\/qwen-code\/issues\/7\/comments -F body=@/,
   );
+});
+
+// Witness for the bin/package.json pin in runPublishStep: without it this
+// suite cannot observe a `require()` regression in the stub (#10736).
+test('publish workflow fixture forces ESM scope onto the gh stub', () => {
+  // The pre-#10736 stub line is legal CJS but dies at startup once the
+  // fixture's pin forces ESM scope onto the extensionless stub, so the
+  // bot-identity lookup fails and the step skips commenting. It still exits
+  // 0 (`if [ -z "${BOT_LOGIN}" ]; then ... exit 0; fi` in the workflow), so
+  // the witness is the missing artifacts, not the status. Deleting the pin
+  // lets this stub parse as CJS on standard hosts and turns this test red.
+  const result = runPublishStep({
+    uploadSucceeds: true,
+    ghStub: ghStubSource.replace(
+      "process.getBuiltinModule('node:fs')",
+      "require('node:fs')",
+    ),
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.body, null); // the comment body was never written
+  assert.equal(result.calls, ''); // no gh call was logged
 });

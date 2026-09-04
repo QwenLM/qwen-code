@@ -10,12 +10,22 @@ import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
+export interface ServeWorkspaceRuntimeCapabilityStatus {
+  state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+  revision: number;
+  runtimeEpoch?: number;
+  error?: { code: string; message: string };
+}
+
 export interface ServeWorkspaceRuntimeStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping';
   runtimeLive: boolean;
   runtimeEpoch: number;
+  capabilities?: {
+    mcp?: ServeWorkspaceRuntimeCapabilityStatus;
+  };
 }
 
 /**
@@ -130,9 +140,20 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionContextUsage: 'qwen/status/session/context_usage',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
+  sessionAgents: 'qwen/status/session/agents',
+  sessionAgentTrace: 'qwen/status/session/agent_trace',
   sessionStats: 'qwen/status/session/stats',
   sessionLspStatus: 'qwen/status/session/lsp',
+  sessionResources: 'qwen/status/session/resources',
+  /**
+   * Read one saved workflow definition (script + parsed `meta`). Params:
+   * `{ sessionId, name }`; result: `ServeSessionSavedWorkflowStatus`, whose
+   * `workflow` is null when the name is unknown or Workflow controls are
+   * unavailable.
+   */
+  sessionSavedWorkflow: 'qwen/status/session/saved_workflow',
   sessionTranscript: 'qwen/status/session/transcript',
+  sessionTurnIndex: 'qwen/status/session/turn_index',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
@@ -418,6 +439,8 @@ export interface ServeWorkspaceMcpStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
+  source?: 'live' | 'cache';
   discoveryState?: ServeMcpDiscoveryState;
   servers: ServeWorkspaceMcpServerStatus[];
   errors?: ServeStatusCell[];
@@ -450,6 +473,7 @@ export interface ServeWorkspaceMcpToolsStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   tools: ServeWorkspaceMcpToolStatus[];
   errors?: ServeStatusCell[];
@@ -482,6 +506,7 @@ export interface ServeWorkspaceMcpResourcesStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   resources: ServeWorkspaceMcpResourceStatus[];
   errors?: ServeStatusCell[];
@@ -523,6 +548,27 @@ export interface ServeWorkspaceSkillsStatus {
   initialized: boolean;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
+}
+
+/**
+ * Sanitized Skill and MCP snapshots built from one live session's Config.
+ * The nested workspace status envelopes are reused intentionally so their
+ * loading, error, discovery, and compatibility fields remain identical.
+ */
+export interface ServeSessionResourcesStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  workspaceCwd: string;
+  skills: ServeWorkspaceSkillsStatus;
+  /**
+   * Session-scoped MCP snapshot. Status, discovery, and accounting come from
+   * the selected session's manager; workspace-owned pool, budget, and
+   * discovery-error enrichments are absent. The name-keyed `hasOAuthTokens`,
+   * `requiresAuth`, `authenticationState`, and `authenticationError` fields
+   * are always absent; consumers must not treat their absence as a negative
+   * authentication state.
+   */
+  mcp: ServeWorkspaceMcpStatus;
 }
 
 export interface ServeWorkspaceProviderCurrent {
@@ -643,6 +689,43 @@ export interface ServeSessionSupportedCommandsStatus {
     name: string;
     source: 'project' | 'user';
   }>;
+}
+
+/** Parsed `export const meta` contract of a saved workflow script. */
+export interface ServeSavedWorkflowMeta {
+  name: string;
+  description: string;
+  whenToUse?: string;
+  phases?: Array<{ title: string; detail?: string; model?: string }>;
+}
+
+/** One saved workflow definition, resolved and read for display. */
+export interface ServeSessionSavedWorkflowDetail {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  name: string;
+  source: 'project' | 'user';
+  /** Absolute path of the `.js` file the definition was read from. */
+  scriptPath: string;
+  /** Full script source, `export const meta` included. */
+  script: string;
+  /** Parsed meta block, or null when the script declares none or it is malformed. */
+  meta: ServeSavedWorkflowMeta | null;
+  /** Why `meta` is null although a meta block is present. */
+  metaError?: string;
+}
+
+/**
+ * Envelope for one saved-workflow read. `workflow` is null when the name is
+ * unknown, the file cannot be read, or Workflow controls are unavailable for
+ * the session (untrusted workspace) — the same fail-closed shape on every
+ * transport, so clients never need a 404 branch.
+ */
+export interface ServeSessionSavedWorkflowStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  name: string;
+  workflow: ServeSessionSavedWorkflowDetail | null;
 }
 
 export interface ServeLspServerStatus {
@@ -840,6 +923,8 @@ export interface ServeSessionWorkflowTaskStatus {
   id: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;
+  /** Saved workflow definition name, when this run came from one. */
+  workflowName?: string;
   /** Restored from the project snapshot store; controls are read-only. */
   isHistorical?: boolean;
   sourceRunId?: string;
@@ -878,6 +963,37 @@ export interface ServeSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: ServeSessionTaskStatus[];
+}
+
+export interface ServeSessionAgentsStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  now: number;
+  tasks: ServeSessionAgentTaskStatus[];
+}
+
+export interface ServeAgentTraceNode {
+  agentId: string;
+  agentType: string;
+  description: string;
+  parentSessionId: string;
+  parentAgentId: string | null;
+  rootAgentId: string;
+  toolUseId?: string;
+  depth?: number;
+  status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  createdAt: string;
+  lastUpdatedAt?: string;
+  lastError?: string;
+  lineageState: 'complete' | 'orphaned' | 'cycle';
+}
+
+export interface ServeSessionAgentTrace {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  nodes: ServeAgentTraceNode[];
+  rootAgentIds: string[];
+  warnings: string[];
 }
 
 export interface ServeSessionStatsModelMetrics {

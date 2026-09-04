@@ -41,16 +41,16 @@ Regular stable releases for production use.
 
 ### Preview Releases
 
-Weekly preview releases every Tuesday at 23:59 UTC for early access to upcoming features.
+Weekly preview releases every Tuesday at 17:00 UTC for early access to upcoming features.
 
 ### Nightly Releases
 
-Daily nightly releases at midnight UTC for bleeding-edge development testing.
+Daily nightly releases at 21:00 UTC for bleeding-edge development testing.
 
 ## Automated Release Schedule
 
-- **Nightly**: Every day at midnight UTC
-- **Preview**: Every Tuesday at 23:59 UTC
+- **Nightly**: Every day at 21:00 UTC
+- **Preview**: Every Tuesday at 17:00 UTC
 - **Stable**: Manual releases triggered by maintainers
 
 ### How to Use Different Release Types

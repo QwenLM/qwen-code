@@ -19,9 +19,11 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { join } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
+import { AcpAdaptor } from './adaptor/acp-adaptor.js';
 import { QwenCodeAdaptor } from './adaptor/qwen-code-adaptor.js';
+import { BackendRegistry } from './adaptor/registry.js';
+import type { BackendConfig, LiveConfig } from './config.js';
 import { LiveHostInstaller } from './host/live-host-installer.js';
-import type { LiveConfig } from './config.js';
 import {
   handoffLiveDiscoveryOwner,
   LiveDiscoveryOwnerActiveError,
@@ -37,15 +39,41 @@ import { LiveSession } from './orchestrator/live-session.js';
 const HOST_WS_PATH = '/live/host';
 
 export interface LiveDaemonDeps {
-  adaptor?: QwenCodeAdaptor;
+  /** Pre-built registry (tests); built from config.backends otherwise. */
+  registry?: BackendRegistry;
   /** Installer (tests inject a fake); production installs the real Host. */
   installer?: LiveHostInstaller;
   logger?: LiveLogger;
 }
 
+/** Build one adaptor from its config entry. */
+function buildAdaptor(
+  backend: BackendConfig,
+  fields: { defaultCwd?: string; logger: LiveLogger; clientId: string },
+): QwenCodeAdaptor | AcpAdaptor {
+  if (backend.kind === 'qwen-code') {
+    return new QwenCodeAdaptor({
+      baseUrl: backend.baseUrl,
+      ...(backend.token ? { token: backend.token } : {}),
+      ...(fields.defaultCwd ? { defaultCwd: fields.defaultCwd } : {}),
+      clientId: fields.clientId,
+      name: backend.name,
+    });
+  }
+  return new AcpAdaptor({
+    name: backend.name,
+    command: backend.command,
+    args: backend.args,
+    env: backend.env,
+    ...(backend.cwd ? { cwd: backend.cwd } : {}),
+    ...(fields.defaultCwd ? { defaultCwd: fields.defaultCwd } : {}),
+    logger: fields.logger,
+  });
+}
+
 export class LiveDaemon {
   private readonly logger: LiveLogger;
-  private readonly adaptor: QwenCodeAdaptor;
+  private readonly registry: BackendRegistry;
   private readonly installer: LiveHostInstaller;
   private readonly token = randomUUID();
   private readonly instanceNonce = randomUUID();
@@ -63,20 +91,25 @@ export class LiveDaemon {
   ) {
     this.logger = deps.logger ?? new LiveLogger();
     this.installer = deps.installer ?? new LiveHostInstaller();
-    this.adaptor =
-      deps.adaptor ??
-      new QwenCodeAdaptor({
-        baseUrl: config.serve.baseUrl,
-        ...(config.serve.token ? { token: config.serve.token } : {}),
-        ...(config.defaultCwd ? { defaultCwd: config.defaultCwd } : {}),
-        clientId: `qwen-live-${this.instanceNonce.slice(0, 8)}`,
-      });
+    this.registry =
+      deps.registry ??
+      new BackendRegistry(
+        config.backends.map((backend) => ({
+          adaptor: buildAdaptor(backend, {
+            ...(config.defaultCwd ? { defaultCwd: config.defaultCwd } : {}),
+            logger: this.logger,
+            clientId: `qwen-live-${this.instanceNonce.slice(0, 8)}-${backend.name}`,
+          }),
+          isDefault: backend.isDefault,
+        })),
+      );
   }
 
   async start(): Promise<{ port: number; url: string }> {
-    // Fail fast when qwen serve is missing or too old — before we take the
-    // Host discovery file from anyone.
-    await this.adaptor.preflight();
+    // Fail fast when the default backend is missing or too old — before we
+    // take the Host discovery file from anyone. Secondary backends are
+    // best-effort: a failure marks them unavailable and startup continues.
+    await this.registry.preflight((message) => this.logger.warn(message));
 
     const coordinator = new LiveHostCoordinator({
       daemonInstanceNonce: this.instanceNonce,
@@ -105,7 +138,7 @@ export class LiveDaemon {
 
     const session = new LiveSession({
       host: coordinator,
-      adaptor: this.adaptor,
+      registry: this.registry,
       realtime: {
         endpoint: this.config.realtime.endpoint,
         apiKey: this.config.realtime.apiKey,
@@ -122,6 +155,8 @@ export class LiveDaemon {
       onStart: (call) => session.start(call),
       onStop: (call) => session.stop(call),
       onInputAudio: (call) => session.pushAudio(call),
+      onPlaybackStarted: (call) => session.notePlaybackStarted(call),
+      onPlaybackCompleted: (call) => session.notePlaybackCompleted(call),
     });
 
     const port = await this.listen();
@@ -143,6 +178,9 @@ export class LiveDaemon {
     this.stopping = true;
     this.session?.dispose();
     this.coordinator?.dispose();
+    // Pumps are aborted by dispose, so no event can race the close; this
+    // terminates ACP subprocesses (and clears the serve adaptor's state).
+    await this.registry.closeAll((message) => this.logger.warn(message));
     if (this.discoveryPublished) {
       try {
         await removeLiveDiscoveryFile(this.config.discoveryDir, {
@@ -187,11 +225,6 @@ export class LiveDaemon {
 
   // -- internals ------------------------------------------------------------
 
-  /**
-   * Minimal HTTP surface for Host bootstrap: the installer endpoints. The
-   * same Bearer wall as the WS upgrade guards them — a browser context
-   * (Origin) is always refused.
-   */
   private handleRequest(
     req: IncomingMessage,
     res: import('node:http').ServerResponse,

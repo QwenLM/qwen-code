@@ -15,6 +15,29 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { getStableLiveDiscoveryBaseDir } from './host/discovery.js';
 
+/**
+ * One backend the live call can drive. `name` is what the voice model sees
+ * (session_create's `backend` arg); it becomes the scoping prefix for
+ * jobRefs and permission requestIds, so it must not contain ':'.
+ */
+export type BackendConfig =
+  | {
+      name: string;
+      kind: 'qwen-code';
+      baseUrl: string;
+      token?: string;
+      isDefault: boolean;
+    }
+  | {
+      name: string;
+      kind: 'acp';
+      command: string;
+      args: string[];
+      env: Record<string, string>;
+      cwd?: string;
+      isDefault: boolean;
+    };
+
 export interface LiveConfig {
   realtime: {
     endpoint: string;
@@ -22,10 +45,8 @@ export interface LiveConfig {
     model: string;
     voice?: string;
   };
-  serve: {
-    baseUrl: string;
-    token?: string;
-  };
+  /** Every configured backend; exactly one is the default. */
+  backends: BackendConfig[];
   /** Default working directory for handoff-created sessions. */
   defaultCwd?: string;
   /** Data root: session logs live in `<dataDir>/sessions`. */
@@ -41,6 +62,7 @@ export interface LiveConfig {
 const DEFAULT_REALTIME_ENDPOINT = 'https://dashscope.aliyuncs.com';
 const DEFAULT_REALTIME_MODEL = 'qwen3.5-omni-plus-realtime';
 const DEFAULT_SERVE_URL = 'http://127.0.0.1:4170';
+const BACKEND_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,31}$/i;
 
 function readConfigFile(path: string): Record<string, unknown> {
   let raw: string;
@@ -124,6 +146,170 @@ function resolvePort(
   return port;
 }
 
+/**
+ * Validate one raw backend entry (already known to be an object) from the
+ * named source. Kind-mismatched keys fail loud: a silently ignored
+ * `command` on a qwen-code entry is a config mistake, not a default.
+ */
+function parseBackend(
+  raw: Record<string, unknown>,
+  source: string,
+  index: number,
+): BackendConfig {
+  const where = `${source} entry #${index + 1}`;
+  const name = str(raw['name']);
+  if (!name || !BACKEND_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `Invalid backend name in ${where}: ${JSON.stringify(raw['name'])} ` +
+        '(expected up to 32 chars of letters, digits, "_" or "-", no ":")',
+    );
+  }
+  const kind = raw['kind'];
+  if (kind === 'qwen-code') {
+    for (const banned of ['command', 'args', 'env', 'cwd']) {
+      if (raw[banned] !== undefined) {
+        throw new Error(
+          `"${banned}" is not valid for kind qwen-code (${where})`,
+        );
+      }
+    }
+    const baseUrl = str(raw['serveUrl'] ?? raw['baseUrl']) ?? DEFAULT_SERVE_URL;
+    const token = str(raw['token']);
+    return {
+      name,
+      kind,
+      baseUrl,
+      ...(token ? { token } : {}),
+      isDefault: raw['default'] === true,
+    };
+  }
+  if (kind === 'acp') {
+    for (const banned of ['serveUrl', 'baseUrl', 'token']) {
+      if (raw[banned] !== undefined) {
+        throw new Error(`"${banned}" is not valid for kind acp (${where})`);
+      }
+    }
+    const command = str(raw['command']);
+    if (!command) {
+      throw new Error(`Invalid acp backend "command" in ${where}`);
+    }
+    const rawArgs = raw['args'] ?? [];
+    if (
+      !Array.isArray(rawArgs) ||
+      rawArgs.some((arg) => typeof arg !== 'string')
+    ) {
+      throw new Error(
+        `Invalid acp backend "args" in ${where}: expected string[]`,
+      );
+    }
+    const rawEnv = raw['env'] ?? {};
+    if (!isRecordLike(rawEnv)) {
+      throw new Error(
+        `Invalid acp backend "env" in ${where}: expected an object`,
+      );
+    }
+    for (const [key, value] of Object.entries(rawEnv)) {
+      if (typeof value !== 'string') {
+        throw new Error(
+          `Invalid acp backend "env" value for "${key}" in ${where}: expected a string`,
+        );
+      }
+    }
+    const cwd = pathStr(raw['cwd']);
+    return {
+      name,
+      kind,
+      command,
+      args: rawArgs as string[],
+      env: rawEnv as Record<string, string>,
+      ...(cwd ? { cwd } : {}),
+      isDefault: raw['default'] === true,
+    };
+  }
+  throw new Error(
+    `Invalid backend "kind" in ${where}: ${JSON.stringify(kind)} ` +
+      '(expected "qwen-code" or "acp")',
+  );
+}
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseBackends(
+  env: Record<string, string | undefined>,
+  file: Record<string, unknown>,
+  configPath: string,
+): BackendConfig[] {
+  let entries: unknown;
+  let source: string;
+  const envBackends = str(env['QWEN_LIVE_BACKENDS']);
+  if (envBackends !== undefined) {
+    try {
+      entries = JSON.parse(envBackends);
+    } catch (error) {
+      throw new Error(
+        `Invalid QWEN_LIVE_BACKENDS: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    source = 'QWEN_LIVE_BACKENDS';
+  } else if (file['backends'] !== undefined) {
+    entries = file['backends'];
+    source = configPath;
+  } else {
+    // Legacy single-backend spellings synthesize the implicit qwen-code
+    // backend so existing configs (and the e2e harness) keep working.
+    const baseUrl =
+      str(env['QWEN_LIVE_SERVE_URL']) ??
+      str(file['serveUrl']) ??
+      DEFAULT_SERVE_URL;
+    const token = str(env['QWEN_SERVER_TOKEN']) ?? str(file['serveToken']);
+    return [
+      {
+        name: 'qwen-code',
+        kind: 'qwen-code',
+        baseUrl,
+        ...(token ? { token } : {}),
+        isDefault: true,
+      },
+    ];
+  }
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new Error(
+      `${source}: "backends" must be a non-empty array, got ${JSON.stringify(entries)}`,
+    );
+  }
+  const backends = entries.map((entry, index) => {
+    if (!isRecordLike(entry)) {
+      throw new Error(`${source} entry #${index + 1} must be an object`);
+    }
+    return parseBackend(entry, source, index);
+  });
+  const names = new Set<string>();
+  for (const backend of backends) {
+    const lower = backend.name.toLowerCase();
+    if (names.has(lower)) {
+      throw new Error(`duplicate backend name '${backend.name}' in ${source}`);
+    }
+    names.add(lower);
+  }
+  const defaults = backends.filter((backend) => backend.isDefault);
+  if (defaults.length > 1) {
+    throw new Error(`${source}: at most one backend may set "default": true`);
+  }
+  if (defaults.length === 0 && backends.length > 1) {
+    throw new Error(
+      `${source}: mark one backend "default": true (a single entry is implicitly the default)`,
+    );
+  }
+  if (defaults.length === 0 && backends.length === 1) {
+    backends[0] = { ...backends[0], isDefault: true };
+  }
+  return backends;
+}
+
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,
 ): LiveConfig {
@@ -144,11 +330,11 @@ export function loadConfig(
   }
 
   const port = resolvePort(env, file, configPath);
+  const backends = parseBackends(env, file, configPath);
 
   const voice = str(env['QWEN_LIVE_VOICE']) ?? str(file['voice']) ?? 'Tina';
   const defaultCwd =
     pathStr(env['QWEN_LIVE_CWD']) ?? pathStr(file['defaultCwd']);
-  const serveToken = str(env['QWEN_SERVER_TOKEN']) ?? str(file['serveToken']);
   const shortcut = str(env['QWEN_LIVE_SHORTCUT']) ?? str(file['shortcut']);
 
   return {
@@ -164,13 +350,7 @@ export function loadConfig(
         DEFAULT_REALTIME_MODEL,
       ...(voice ? { voice } : {}),
     },
-    serve: {
-      baseUrl:
-        str(env['QWEN_LIVE_SERVE_URL']) ??
-        str(file['serveUrl']) ??
-        DEFAULT_SERVE_URL,
-      ...(serveToken ? { token: serveToken } : {}),
-    },
+    backends,
     ...(defaultCwd ? { defaultCwd } : {}),
     dataDir,
     discoveryDir:

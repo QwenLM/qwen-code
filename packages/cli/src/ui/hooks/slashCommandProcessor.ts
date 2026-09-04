@@ -80,6 +80,7 @@ import {
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
+import { quitCommand } from '../commands/quitCommand.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
@@ -124,9 +125,14 @@ const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
 const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
   'effort',
   'model',
+  'output-style',
   'statusline',
 ]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+const QUIT_COMMAND_NAMES = [
+  quitCommand.name,
+  ...(quitCommand.altNames ?? []),
+];
 
 function shouldHideSlashCommandInvocation(
   command: SlashCommand | undefined,
@@ -187,6 +193,7 @@ export interface SlashCommandProcessorActions {
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
   openEffortDialog: () => void;
+  openOutputStyleDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
@@ -889,11 +896,25 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
-      const {
+      let {
         commandToExecute,
         args,
         canonicalPath: resolvedCommandPath,
       } = parseSlashCommand(trimmed, commands);
+
+      if (!commandToExecute) {
+        const fallback = parseSlashCommand(trimmed, [quitCommand]);
+        if (
+          fallback.commandToExecute &&
+          !(config?.getDisabledSlashCommands() ?? []).some((name) =>
+            QUIT_COMMAND_NAMES.includes(name.trim().toLowerCase()),
+          )
+        ) {
+          commandToExecute = fallback.commandToExecute;
+          args = fallback.args;
+          resolvedCommandPath = fallback.canonicalPath;
+        }
+      }
 
       const recordedItems: HistoryItemWithoutId[] = [];
       const recordItem = (item: HistoryItemWithoutId) => {
@@ -1281,6 +1302,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'effort':
                       actions.openEffortDialog();
+                      return { type: 'handled' };
+                    case 'output-style':
+                      actions.openOutputStyleDialog();
                       return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {

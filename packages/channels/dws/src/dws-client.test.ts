@@ -11,6 +11,8 @@ import {
   DwsCommandError,
   parseDwsImEvent,
   type DwsCommandRunner,
+  type DwsImDispatch,
+  type DwsImMessage,
 } from './dws-client.js';
 import type {
   DwsEventProcessStarter,
@@ -448,6 +450,205 @@ describe('DwsClient', () => {
       senderId: 'open-alice',
       senderName: 'Alice',
     });
+  });
+
+  it('does not make the direct event reader wait for message processing', async () => {
+    let onLine!: (line: string) => void | Promise<void>;
+    const eventStarter = vi.fn<DwsEventProcessStarter>(
+      async (_executable, _args, lineHandler) => {
+        onLine = lineHandler;
+        return subscription();
+      },
+    );
+    const client = new DwsClient(
+      { executable: '/opt/dws' },
+      vi.fn(),
+      eventStarter,
+    );
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const completed: string[] = [];
+    const onMessage = vi.fn((message: DwsImMessage): DwsImDispatch => {
+      const processing = (async () => {
+        if (message.conversationId === 'conversation-a') await firstBlocked;
+        completed.push(message.conversationId);
+      })();
+      return { admitted: Promise.resolve(), completed: processing };
+    });
+
+    await client.subscribeToIm({ kind: 'direct' }, onMessage, vi.fn());
+    await onLine(
+      json({
+        type: 'user_im_message_receive_o2o_all',
+        event_id: 'event-a',
+        message_id: 'message-a',
+        conversation_id: 'conversation-a',
+        content: 'first request',
+        sender_open_dingtalk_id: 'user-a',
+        sender: 'User A',
+      }),
+    );
+    await onLine(
+      json({
+        type: 'user_im_message_receive_o2o_all',
+        event_id: 'event-b',
+        message_id: 'message-b',
+        conversation_id: 'conversation-b',
+        content: 'second request',
+        sender_open_dingtalk_id: 'user-b',
+        sender: 'User B',
+      }),
+    );
+
+    expect(onMessage).toHaveBeenCalledTimes(2);
+    expect(completed).toEqual(['conversation-b']);
+    releaseFirst();
+    await vi.waitFor(() =>
+      expect(completed).toEqual(['conversation-b', 'conversation-a']),
+    );
+  });
+
+  it('reports a detached direct-message processing failure', async () => {
+    let onLine!: (line: string) => void | Promise<void>;
+    const eventStarter = vi.fn<DwsEventProcessStarter>(
+      async (_executable, _args, lineHandler) => {
+        onLine = lineHandler;
+        return subscription();
+      },
+    );
+    const client = new DwsClient(
+      { executable: '/opt/dws' },
+      vi.fn(),
+      eventStarter,
+    );
+    const onError = vi.fn();
+
+    await client.subscribeToIm(
+      { kind: 'direct' },
+      vi.fn(
+        (): DwsImDispatch => ({
+          admitted: Promise.resolve(),
+          completed: Promise.reject(new Error('turn failed')),
+        }),
+      ),
+      onError,
+    );
+    await onLine(
+      json({
+        type: 'user_im_message_receive_o2o_all',
+        event_id: 'event-1',
+        message_id: 'message-1',
+        conversation_id: 'conversation-a',
+        content: 'request',
+        sender_open_dingtalk_id: 'user-a',
+        sender: 'User A',
+      }),
+    );
+
+    await vi.waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'turn failed' }),
+      ),
+    );
+  });
+
+  it('does not report completion after direct admission fails', async () => {
+    let onLine!: (line: string) => void | Promise<void>;
+    const eventStarter = vi.fn<DwsEventProcessStarter>(
+      async (_executable, _args, lineHandler) => {
+        onLine = lineHandler;
+        return subscription();
+      },
+    );
+    const client = new DwsClient(
+      { executable: '/opt/dws' },
+      vi.fn(),
+      eventStarter,
+    );
+    const onError = vi.fn();
+
+    await client.subscribeToIm(
+      { kind: 'direct' },
+      vi.fn(
+        (): DwsImDispatch => ({
+          admitted: Promise.reject(new Error('admission failed')),
+          completed: Promise.reject(new Error('completion failed')),
+        }),
+      ),
+      onError,
+    );
+
+    await expect(
+      onLine(
+        json({
+          type: 'user_im_message_receive_o2o_all',
+          event_id: 'event-1',
+          message_id: 'message-1',
+          conversation_id: 'conversation-a',
+          content: 'request',
+          sender_open_dingtalk_id: 'user-a',
+          sender: 'User A',
+        }),
+      ),
+    ).rejects.toThrow('admission failed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('observes completion failure while direct admission is pending', async () => {
+    let onLine!: (line: string) => void | Promise<void>;
+    const eventStarter = vi.fn<DwsEventProcessStarter>(
+      async (_executable, _args, lineHandler) => {
+        onLine = lineHandler;
+        return subscription();
+      },
+    );
+    const client = new DwsClient(
+      { executable: '/opt/dws' },
+      vi.fn(),
+      eventStarter,
+    );
+    let releaseAdmission!: () => void;
+    const admitted = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    let rejectCompletion!: (error: Error) => void;
+    const completed = new Promise<void>((_resolve, reject) => {
+      rejectCompletion = reject;
+    });
+    const onError = vi.fn();
+
+    await client.subscribeToIm(
+      { kind: 'direct' },
+      vi.fn((): DwsImDispatch => ({ admitted, completed })),
+      onError,
+    );
+    const reading = Promise.resolve(
+      onLine(
+        json({
+          type: 'user_im_message_receive_o2o_all',
+          event_id: 'event-1',
+          message_id: 'message-1',
+          conversation_id: 'conversation-a',
+          content: 'request',
+          sender_open_dingtalk_id: 'user-a',
+          sender: 'User A',
+        }),
+      ),
+    );
+    rejectCompletion(new Error('turn failed'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onError).not.toHaveBeenCalled();
+
+    releaseAdmission();
+    await reading;
+    await vi.waitFor(() =>
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ message: 'turn failed' }),
+      ),
+    );
   });
 
   it('subscribes to all ordinary group messages without a group filter', async () => {
