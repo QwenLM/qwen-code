@@ -113,7 +113,7 @@ const HAS_PROMPT_LATENCY_CREDENTIAL =
 // and QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 still force-runs it here.
 const SKIP_PROMPT_LATENCY =
   process.env['QWEN_BASELINE_SKIP_PROMPT_LATENCY'] === '1' ||
-  (!process.env['QWEN_BASELINE_ENABLE_PROMPT_LATENCY'] &&
+  (process.env['QWEN_BASELINE_ENABLE_PROMPT_LATENCY'] !== '1' &&
     process.env['RUNNER_ENVIRONMENT'] === 'self-hosted') ||
   !HAS_PROMPT_LATENCY_CREDENTIAL;
 
