@@ -73,7 +73,11 @@ export function pickDirectoryHandle(
 
 export interface PermissionResult {
   state: PermissionState;
-  /** True when reaching `granted` required (and consumed) a user gesture. */
+  /**
+   * True when `requestPermission` ran and consumed the click's transient
+   * activation — including when it ended in denial, in which case a picker
+   * opened in the same click would fail gesture-less.
+   */
   requested: boolean;
 }
 

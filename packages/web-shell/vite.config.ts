@@ -47,6 +47,11 @@ const daemonProxy: ProxyOptions = {
 export const QUALIFIED_VOICE_STREAM_PROXY =
   '^/workspaces/[^/]+/voice/stream/?$';
 
+// The local-files bridge upgrades here for secondary-workspace sessions;
+// without a ws-enabled entry the upgrade is never forwarded in dev and the
+// bridge hangs in `connecting`.
+export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
+
 export default defineConfig(({ command }) => ({
   root: 'client',
   plugins: [react(), tailwindcss()],
@@ -95,6 +100,7 @@ export default defineConfig(({ command }) => ({
       '/session': daemonProxy,
       '/permission': daemonProxy,
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
+      [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,
       '/extensions': daemonProxy,
       '/file': daemonProxy,

@@ -701,13 +701,73 @@ describe('LocalFilesBridge reconnection', () => {
     await h.running;
   });
 
-  it('re-registers when the daemon removes the server under us', async () => {
+  it('treats already_registered as benign and waits out the in-flight add', async () => {
     const h = harness();
-    const socket = await connect(h);
-    socket.emit({ type: 'mcp_unregistered', server: 'local-files' });
     await flush();
-    expect(h.rewarmCalls).toBe(1);
-    expect(socket.framesOfType('mcp_register')).toHaveLength(2);
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    await flush();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await flush();
+    expect(socket.framesOfType('mcp_register')).toHaveLength(1);
+    // The daemon's add for our own earlier frame can outlive our register
+    // timeout by an order of magnitude; its duplicate rejection must not be
+    // terminal.
+    socket.emit({
+      type: 'mcp_error',
+      code: 'already_registered',
+      message: 'duplicate',
+    });
+    await flush();
+    expect(lastPhase(h)).toBe('registering');
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await flush();
+    expect(lastPhase(h)).toBe('connected');
+    h.bridge.stop();
+    await h.running;
+  });
+
+  it('abandons a retry whose socket dropped during rewarm', async () => {
+    let resolveRewarm: (() => void) | undefined;
+    const h = harness({
+      registerTimeoutMs: 0,
+      rewarm: () =>
+        new Promise<void>((resolve) => {
+          resolveRewarm = resolve;
+        }),
+    });
+    await flush();
+    const first = h.sockets[0]!;
+    first.emitOpen();
+    await flush();
+    first.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await flush();
+    expect(first.framesOfType('mcp_register')).toHaveLength(1);
+    // The register timeout fires and the continuation parks in rewarm.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // The socket drops while rewarm is pending; the replacement connects.
+    first.emitClose(1006, 'dropped');
+    await flush();
+    const second = h.sockets[1]!;
+    second.emitOpen();
+    await flush();
+    resolveRewarm!();
+    await flush();
+    // The abandoned continuation must not register on the replacement before
+    // its initialize reply.
+    expect(second.framesOfType('mcp_register')).toHaveLength(0);
     h.bridge.stop();
     await h.running;
   });
@@ -723,6 +783,101 @@ describe('LocalFilesBridge stop', () => {
     expect(h.sockets[0]!.closeCount).toBe(1);
     expect(h.sockets).toHaveLength(1);
     expect(h.states.at(-1)).toEqual({ phase: 'stopped' });
+  });
+
+  it('ignores a recycled socket close that lands after the replacement connects', async () => {
+    const h = harness({ initializeTimeoutMs: 0 });
+    await flush();
+    const first = h.sockets[0]!;
+    first.emitOpen();
+    await flush();
+    // The initialize timeout recycles socket 0 and reconnects.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(h.sockets).toHaveLength(2);
+    const second = h.sockets[1]!;
+    second.emitOpen();
+    // Delivered synchronously: with a zero initialize timeout any flush in
+    // between would recycle this socket too.
+    second.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    second.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await flush();
+    expect(lastPhase(h)).toBe('connected');
+
+    // The daemon's uninitialized-socket timer closes the recycled socket late;
+    // it must not detach the healthy replacement.
+    first.emitClose(1006, 'uninitialized');
+    await flush();
+    expect(h.sockets).toHaveLength(2);
+    expect(lastPhase(h)).toBe('connected');
+    expect(second.closeCount).toBe(0);
+    h.bridge.stop();
+    await h.running;
+  });
+
+  it('drops a tool reply whose disconnect landed while the tool ran', async () => {
+    let resolveHandle: ((reply: JsonRpcResponse) => void) | undefined;
+    const deferred: LocalFilesRpcServer = {
+      handle: () =>
+        new Promise<JsonRpcResponse>((resolve) => {
+          resolveHandle = resolve;
+        }),
+    };
+    const h = harness({ server: deferred });
+    const socket = await connect(h);
+    socket.emit({
+      type: 'mcp_message',
+      id: 'frame-1',
+      server: 'local-files',
+      payload: { jsonrpc: '2.0', id: 7, method: 'tools/call', params: {} },
+    });
+    await flush();
+    h.bridge.stop();
+    await flush();
+    resolveHandle!({ jsonrpc: '2.0', id: 7, result: { content: [] } });
+    await flush();
+    expect(socket.framesOfType('mcp_message')).toHaveLength(0);
+    await h.running;
+  });
+
+  it('drops a tool reply whose socket was replaced while the tool ran', async () => {
+    let resolveHandle: ((reply: JsonRpcResponse) => void) | undefined;
+    const deferred: LocalFilesRpcServer = {
+      handle: () =>
+        new Promise<JsonRpcResponse>((resolve) => {
+          resolveHandle = resolve;
+        }),
+    };
+    const h = harness({ server: deferred });
+    const first = await connect(h);
+    first.emit({
+      type: 'mcp_message',
+      id: 'frame-1',
+      server: 'local-files',
+      payload: { jsonrpc: '2.0', id: 7, method: 'tools/call', params: {} },
+    });
+    await flush();
+    // The connection drops and a replacement connects while the tool runs.
+    first.emitClose(1006, 'dropped');
+    await flush();
+    const second = h.sockets[1]!;
+    second.emitOpen();
+    await flush();
+    resolveHandle!({ jsonrpc: '2.0', id: 7, result: { content: [] } });
+    await flush();
+    // The reply belongs to the dead connection: answering on the replacement
+    // would mix two connections' traffic.
+    expect(second.framesOfType('mcp_message')).toHaveLength(0);
+    expect(first.framesOfType('mcp_message')).toHaveLength(0);
+    h.bridge.stop();
+    await h.running;
   });
 
   it('is idempotent', async () => {

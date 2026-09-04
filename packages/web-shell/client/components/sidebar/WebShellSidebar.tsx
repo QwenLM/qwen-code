@@ -6121,7 +6121,10 @@ export function WebShellSidebar({
                 </button>
               )}
               {footerItems.has('localFiles') && (
-                <LocalFilesControl triggerClassName={styles.collapseButton} />
+                <LocalFilesControl
+                  triggerClassName={styles.collapseButton}
+                  workspaces={workspaces}
+                />
               )}
               {(mobileOpen || footerItems.has('collapse')) && (
                 <button

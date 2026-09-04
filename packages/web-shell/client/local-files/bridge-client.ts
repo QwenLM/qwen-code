@@ -354,15 +354,22 @@ export class LocalFilesBridge {
     this.socket = socket;
     socket.setHandlers({
       open: () => {
+        // A stale open from a recycled socket must not initialize (or arm
+        // timers over) the socket that replaced it.
+        if (this.socket !== socket) return;
         this.sendInitialize();
       },
       message: (data) => {
+        if (this.socket !== socket) return;
         void this.onMessage(data);
       },
       error: () => {
         // The close event follows and carries the reason we act on.
       },
       close: (code, reason) => {
+        // A recycled socket's late close (the daemon's uninitialized-socket
+        // timer) must not detach the healthy replacement.
+        if (this.socket !== socket) return;
         void this.onClose(code, reason);
       },
     });
@@ -408,6 +415,7 @@ export class LocalFilesBridge {
 
   private async retryRegister(reason: string): Promise<void> {
     if (this.stopped) return;
+    const socketAtEntry = this.socket;
     const max =
       this.options.maxRegisterAttempts ?? DEFAULTS.maxRegisterAttempts;
     if (this.registerAttempts >= max) {
@@ -430,6 +438,10 @@ export class LocalFilesBridge {
     // The ack can arrive while the re-warm is in flight; registering again
     // would be answered already_registered and fail the bridge terminally.
     if (this.state.phase === 'connected') return;
+    // The socket that started this continuation is gone (dropped during the
+    // re-warm): the replacement must answer initialize before it may
+    // register, so abandon this continuation instead of jumping its queue.
+    if (this.socket !== socketAtEntry) return;
     this.sendRegister();
   }
 
@@ -488,17 +500,6 @@ export class LocalFilesBridge {
         });
         return;
       }
-      case 'mcp_unregistered': {
-        // The daemon dropped our server (session ended, child restarted).
-        if (frame.server !== this.serverName) return;
-        this.setState({
-          phase: 'reconnecting',
-          attempt: this.reconnectAttempts,
-          reason: 'server unregistered by the daemon',
-        });
-        void this.retryRegister('server unregistered by the daemon');
-        return;
-      }
       case 'mcp_error': {
         const message = String(frame.message ?? 'unknown error');
         if (frame.code === 'register_failed') {
@@ -507,6 +508,31 @@ export class LocalFilesBridge {
             this.registerTimer = undefined;
           }
           void this.retryRegister(message);
+          return;
+        }
+        if (frame.code === 'already_registered') {
+          // Only this bridge's own earlier frame on this connection can
+          // produce the code (the registrar is per-connection and the
+          // cross-tab lock blocks a peer bridge): that attempt's add is
+          // still in flight at the daemon, whose deadline far exceeds our
+          // register timeout. Wait that attempt out instead of failing on
+          // our duplicate; the re-arm must not consume the attempt budget
+          // while the in-flight add is alive.
+          if (this.registerTimer) {
+            clearTimeout(this.registerTimer);
+            this.registerTimer = undefined;
+          }
+          this.registerTimer = setTimeout(() => {
+            this.registerTimer = undefined;
+            if (this.stopped || this.state.phase !== 'registering') return;
+            // Probe again without a re-warm (the daemon already holds our
+            // name; only its ack is missing) and without consuming the
+            // consecutive-failure budget: the in-flight add's own deadline is
+            // an order of magnitude above this window, and its eventual
+            // register_failed is what ends the wait.
+            this.registerAttempts = Math.max(0, this.registerAttempts - 1);
+            this.sendRegister();
+          }, this.options.registerTimeoutMs ?? DEFAULTS.registerTimeoutMs);
           return;
         }
         this.fail(String(frame.code ?? 'mcp_error'), message);
@@ -535,6 +561,7 @@ export class LocalFilesBridge {
     // One connection may host several client-side servers; answering a frame
     // addressed to another one would reply with the wrong catalogue.
     if (frame.server !== undefined && frame.server !== this.serverName) return;
+    const socket = this.socket;
     let reply: JsonRpcResponse | undefined;
     try {
       reply = await this.options.server.handle(payload as JsonRpcRequest);
@@ -555,6 +582,10 @@ export class LocalFilesBridge {
     // Notifications get no reply; sending one would confuse the daemon's
     // correlation table.
     if (reply === undefined) return;
+    // A disconnect (or a recycle) landed while the tool ran: the reply has
+    // nowhere honest to go, and answering on a replaced socket would mix
+    // two connections' traffic.
+    if (this.stopped || this.socket !== socket) return;
     this.send({
       type: 'mcp_message',
       id,

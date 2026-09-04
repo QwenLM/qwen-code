@@ -6,6 +6,11 @@
 
 import { useCallback, useMemo, useState } from 'react';
 import { FolderOpenIcon } from 'lucide-react';
+import type {
+  DaemonCapabilities,
+  DaemonClient,
+  DaemonWorkspaceCapability,
+} from '@qwen-code/sdk/daemon';
 import {
   useConnection,
   useWorkspace,
@@ -13,6 +18,7 @@ import {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import type { LocalFilesBlocker } from '../local-files/capabilities';
+import type { AcpWorkspaceSelector } from '../local-files/bridge-client';
 import {
   useLocalFilesBridge,
   type LocalFilesPhase,
@@ -162,13 +168,71 @@ interface LocalFilesControlProps {
    * neighbours instead of inventing a second button style.
    */
   triggerClassName: string;
+  /**
+   * The merged workspace list (capabilities snapshot plus a locked workspace
+   * registered before the snapshot). The sidebar already holds it; resolving
+   * on the bare snapshot alone would collapse a locked workspace's session
+   * onto the primary mount.
+   */
+  workspaces?: readonly DaemonWorkspaceCapability[];
+}
+
+/**
+ * Resolve the mount a session's bridge must dial, with the same rules voice
+ * uses (primary → legacy `/acp`, untrusted or live → no bridge).
+ */
+export function resolveLocalFilesWorkspaceSelector(options: {
+  capabilities: DaemonCapabilities | undefined;
+  workspaces?: readonly DaemonWorkspaceCapability[];
+  workspaceCwd: string | undefined;
+  sessionId: string | undefined;
+}): AcpWorkspaceSelector | undefined {
+  const target = resolveVoiceWorkspaceTarget({
+    capabilities: options.capabilities,
+    ...(options.workspaces === undefined
+      ? {}
+      : { workspaces: options.workspaces }),
+    intendedCwd: options.workspaceCwd,
+    sessionId: options.sessionId,
+  });
+  return target?.route === 'workspace-qualified' ? target.selector : undefined;
+}
+
+/**
+ * Registration retries must warm the runtime that owns the session: the
+ * legacy preheat route is bound to the primary workspace, so a secondary
+ * session's cold child would never warm and every attempt would fail.
+ */
+export function createLocalFilesRewarm(options: {
+  client: DaemonClient;
+  selector: AcpWorkspaceSelector | undefined;
+  preheat: () => Promise<unknown>;
+}): () => Promise<void> {
+  return async () => {
+    const selector = options.selector;
+    if (selector === undefined) {
+      await options.preheat();
+      return;
+    }
+    try {
+      const workspace =
+        selector.kind === 'id'
+          ? options.client.workspaceById(selector.value)
+          : options.client.workspaceByCwd(selector.value);
+      await workspace.ensureRuntime();
+    } catch {
+      // A daemon without the qualified route still needs the child warm.
+      await options.preheat();
+    }
+  };
 }
 
 export function LocalFilesControl({
   triggerClassName,
+  workspaces,
 }: LocalFilesControlProps) {
   const { t } = useI18n();
-  const { baseUrl, token, capabilities } = useWorkspace();
+  const { baseUrl, token, capabilities, client } = useWorkspace();
   const actions = useWorkspaceActions();
   const { sessionId, workspaceCwd } = useConnection();
   const [open, setOpen] = useState(false);
@@ -176,20 +240,26 @@ export function LocalFilesControl({
   // The bare /acp socket lands on the primary mount, where a secondary
   // runtime's session cannot register; resolve the workspace-qualified route
   // with the same rules voice uses (primary → legacy, untrusted → no bridge).
-  const workspaceSelector = useMemo(() => {
-    const target = resolveVoiceWorkspaceTarget({
-      capabilities,
-      intendedCwd: workspaceCwd ?? undefined,
-      sessionId: sessionId ?? undefined,
-    });
-    return target?.route === 'workspace-qualified'
-      ? target.selector
-      : undefined;
-  }, [capabilities, workspaceCwd, sessionId]);
+  const workspaceSelector = useMemo(
+    () =>
+      resolveLocalFilesWorkspaceSelector({
+        capabilities,
+        workspaces,
+        workspaceCwd: workspaceCwd ?? undefined,
+        sessionId: sessionId ?? undefined,
+      }),
+    [capabilities, workspaces, workspaceCwd, sessionId],
+  );
 
-  const rewarm = useCallback(async () => {
-    await actions.preheatAcp(5_000);
-  }, [actions]);
+  const rewarm = useCallback(
+    () =>
+      createLocalFilesRewarm({
+        client,
+        selector: workspaceSelector,
+        preheat: () => actions.preheatAcp(5_000),
+      })(),
+    [actions, client, workspaceSelector],
+  );
 
   const { status, connect, disconnect } = useLocalFilesBridge({
     sessionId,

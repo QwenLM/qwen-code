@@ -258,6 +258,46 @@ describe('createClientMcpServerProvider (session scope)', () => {
     expect(sender).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a live re-registration when a stale earlier registration fails late', async () => {
+    const registry = new ClientMcpSenderRegistry();
+    const bridge = setupBridge({ toolCount: 1 });
+    let releaseFirstAdd: ((ok: boolean) => void) | undefined;
+    let addCalls = 0;
+    bridge.addSessionRuntimeMcpServer.mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          addCalls += 1;
+          if (addCalls === 1) {
+            releaseFirstAdd = (ok) =>
+              ok ? resolve({ toolCount: 1 }) : reject(new Error('deadline'));
+          } else {
+            resolve({ toolCount: 1 });
+          }
+        }),
+    );
+    const provider = createClientMcpServerProvider(registry, bridge, 'connA');
+
+    // Register #1 parks inside the (slow) child-side add; the user reconnects
+    // and register #2 re-installs the route on the same connection.
+    const first = provider.registerClientMcpServer(
+      'local-files',
+      vi.fn(async () => msg(1)),
+      { sessionId: SESSION },
+    );
+    const secondSender = vi.fn(async () => msg(2));
+    await provider.registerClientMcpServer('local-files', secondSender, {
+      sessionId: SESSION,
+    });
+
+    // The stale add finally rejects; its rollback must not tear down the
+    // live second registration.
+    releaseFirstAdd!(false);
+    await expect(first).rejects.toThrow(/deadline/);
+
+    expect(registry.lookup('local-files')).toBeTypeOf('function');
+    expect(bridge.removeSessionRuntimeMcpServer).not.toHaveBeenCalled();
+  });
+
   it('removes the session server on scoped unregister', async () => {
     const registry = new ClientMcpSenderRegistry();
     const bridge = setupBridge({ toolCount: 1 });

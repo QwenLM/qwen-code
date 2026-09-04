@@ -244,12 +244,18 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   }, [restore]);
 
   // A session-scoped server belongs to exactly one session, so switching
-  // sessions means registering against the new one.
+  // sessions means registering against the new one. The workspace selector is
+  // part of that identity: capabilities arrive asynchronously, and a selector
+  // that resolves after the bridge started must rebind it onto the mount that
+  // owns the session.
+  const selectorKey = options.workspaceSelector
+    ? `${options.workspaceSelector.kind}:${options.workspaceSelector.value}`
+    : '';
   useEffect(() => {
     const handle = handleRef.current;
     if (handle === undefined) return;
     startBridge(handle);
-  }, [sessionId, startBridge]);
+  }, [sessionId, selectorKey, startBridge]);
 
   useEffect(
     () => () => {
@@ -286,7 +292,22 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
           startBridge(stored);
           return;
         }
-        // Denied or still prompting: fall through to a fresh pick.
+        // A request that ran consumed the click's transient activation, so a
+        // picker opened now would reject SecurityError gesture-less: ask for
+        // one more click instead of falling through. Deliberately does NOT
+        // touch handleRef: the rebind effect starts a bridge from whatever it
+        // holds, and an ungranted handle would register tools whose every
+        // call the browser rejects.
+        if (permission.requested) {
+          setStatus({
+            phase: 'needs-gesture',
+            blocker: null,
+            rootName: stored.name,
+          });
+          return;
+        }
+        // The query answered denied without any request: activation survived,
+        // so a fresh pick is still possible within this click.
       }
       const result = await pickDirectoryHandle(win);
       if (stale()) return;

@@ -86,7 +86,11 @@ export class ClientMcpSenderRegistry {
     string,
     Map<
       string,
-      { sender: (payload: unknown) => Promise<unknown>; owner: string }
+      {
+        sender: (payload: unknown) => Promise<unknown>;
+        owner: string;
+        registration?: object;
+      }
     >
   >();
   private readonly sessionScopedServerNames = new Set<string>();
@@ -121,13 +125,14 @@ export class ClientMcpSenderRegistry {
     sessionId: string,
     sender: (payload: unknown) => Promise<unknown>,
     owner: string,
+    registration?: object,
   ): void {
     let bySession = this.sessionSenders.get(serverName);
     if (!bySession) {
       bySession = new Map();
       this.sessionSenders.set(serverName, bySession);
     }
-    bySession.set(sessionId, { sender, owner });
+    bySession.set(sessionId, { sender, owner, registration });
     this.sessionScopedServerNames.add(serverName);
   }
 
@@ -135,11 +140,23 @@ export class ClientMcpSenderRegistry {
     return this.sessionSenders.get(serverName)?.get(sessionId)?.owner === owner;
   }
 
-  deleteSession(serverName: string, sessionId: string, owner: string): boolean {
+  deleteSession(
+    serverName: string,
+    sessionId: string,
+    owner: string,
+    registration?: object,
+  ): boolean {
     const bySession = this.sessionSenders.get(serverName);
-    if (bySession?.get(sessionId)?.owner !== owner) return false;
-    bySession.delete(sessionId);
-    if (bySession.size === 0) {
+    const entry = bySession?.get(sessionId);
+    if (entry?.owner !== owner) return false;
+    // A registration token scopes a rollback to the registration that stored
+    // it: a stale late-failing register must not delete the entry a newer
+    // register of the same (server, session, connection) re-installed.
+    if (registration !== undefined && entry.registration !== registration) {
+      return false;
+    }
+    bySession!.delete(sessionId);
+    if (bySession!.size === 0) {
       this.sessionSenders.delete(serverName);
     }
     return true;
@@ -255,6 +272,11 @@ async function registerSessionScopedClientMcpServer(
   sendSdkMcpMessage: WsClientMcpSender,
   sessionId: string,
 ): Promise<{ toolCount: number }> {
+  // Identity of THIS registration attempt, so the rollback below cannot tear
+  // down a newer registration of the same (server, session) on this
+  // connection: register frames dispatch off-queue, so a slow add can reject
+  // after a reconnect's register already re-installed the route.
+  const registration = {};
   registry.setSession(
     serverName,
     sessionId,
@@ -264,6 +286,7 @@ async function registerSessionScopedClientMcpServer(
         payload as JSONRPCMessage,
       ) as Promise<unknown>,
     originatorClientId,
+    registration,
   );
   try {
     const runtimeConfig: ClientMcpOverWsRuntimeConfig = {
@@ -305,7 +328,14 @@ async function registerSessionScopedClientMcpServer(
     // Owner-scoped on purpose: only tear the child-side server down while THIS
     // connection still owns the sender route. After a supersession the peer owns
     // the live tools, and removal is keyed by name — it would kill them.
-    if (registry.deleteSession(serverName, sessionId, originatorClientId)) {
+    if (
+      registry.deleteSession(
+        serverName,
+        sessionId,
+        originatorClientId,
+        registration,
+      )
+    ) {
       await bridge
         .removeSessionRuntimeMcpServer(
           sessionId,

@@ -396,6 +396,67 @@ describe('useLocalFilesBridge restore', () => {
     h.unmount();
   });
 
+  it('asks for another click when a denied request consumed the gesture', async () => {
+    const handle = fakeHandle('ai_coding', {
+      query: 'prompt',
+      request: 'denied',
+    });
+    const pick = vi.fn(async () => handle);
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(pick),
+      store: fakeStore(handle),
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status.phase).toBe('needs-gesture');
+
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    // requestPermission consumed the click's activation: a gesture-less
+    // picker would reject SecurityError, so connect stops here.
+    expect(pick).not.toHaveBeenCalled();
+    expect(h.get().status.phase).toBe('needs-gesture');
+    expect(h.sockets).toHaveLength(0);
+
+    // The ungranted handle must not leak into handleRef: a session switch
+    // would otherwise start a bridge whose every call the browser rejects.
+    h.rerender({ sessionId: 'session-2' });
+    await h.flush();
+    expect(h.sockets).toHaveLength(0);
+    expect(h.get().status.phase).toBe('needs-gesture');
+    h.unmount();
+  });
+
+  it('rebinds onto the qualified mount when the selector resolves late', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store: fakeStore(handle),
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    expect(h.sockets[0]!.url).toBe('wss://daemon.example/acp');
+
+    // Capabilities arrive after the bridge started (reload against a
+    // multi-workspace daemon): the rebind must follow the selector onto the
+    // mount that owns the session.
+    h.rerender({
+      sessionId: 'session-1',
+      workspaceSelector: { kind: 'id', value: 'ws-2' },
+    });
+    await h.flush();
+    expect(h.sockets).toHaveLength(2);
+    expect(h.sockets[1]!.url).toBe('wss://daemon.example/workspaces/ws-2/acp');
+    h.unmount();
+  });
+
   it('does not start a bridge from an ungranted handle on session switch', async () => {
     const handle = fakeHandle('ai_coding', {
       query: 'prompt',

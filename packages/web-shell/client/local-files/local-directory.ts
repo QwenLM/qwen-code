@@ -15,6 +15,7 @@ export interface LocalFileLike {
   readonly lastModified: number;
   readonly type: string;
   text(): Promise<string>;
+  arrayBuffer(): Promise<ArrayBuffer>;
 }
 
 export interface LocalFileWriterLike {
@@ -347,8 +348,20 @@ export class LocalDirectory {
     }
     let content: string;
     try {
-      content = await file.text();
+      // `text()` is a lossy UTF-8 decode that never throws: a Latin-1 or GBK
+      // file would come back as U+FFFD mojibake, and the read-modify-write
+      // cycle write_file mandates would then replace the original bytes
+      // irrecoverably. Decode strictly and refuse instead.
+      content = new TextDecoder('utf-8', { fatal: true }).decode(
+        await file.arrayBuffer(),
+      );
     } catch (err) {
+      if (err instanceof TypeError) {
+        throw new LocalDirectoryError(
+          'binary_content',
+          `${path} is not valid UTF-8 text; it cannot be returned as text.`,
+        );
+      }
       throw toLocalDirectoryError(err, path);
     }
     if (content.includes('\u0000')) {
@@ -437,11 +450,13 @@ export class LocalDirectory {
       );
     }
     // Matching is per line, so a multi-line pattern can never hit; scanning
-    // to a definitive "No match" would be a silent false negative.
-    if (pattern.includes('\n')) {
+    // to a definitive "No match" would be a silent false negative. A NUL byte
+    // is the same class: every file containing one is skipped as binary, and
+    // no file that reaches matching can contain one.
+    if (pattern.includes('\n') || pattern.includes('\u0000')) {
       throw new LocalDirectoryError(
         'invalid_path',
-        'Multi-line patterns are not supported: search matches one line at a time.',
+        'Multi-line or NUL-bearing patterns are not supported: search matches one line at a time and never opens binary files.',
       );
     }
     const segments = splitRelativePath(options.path ?? '');

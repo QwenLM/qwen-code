@@ -17,12 +17,24 @@ function domError(name: string, message = name): Error {
 class FakeFile implements LocalFileLike {
   lastModified = 1_700_000_000_000;
   type = 'text/plain';
-  constructor(public content: string) {}
+  constructor(
+    public content: string,
+    private readonly rawBytes?: Uint8Array,
+  ) {}
   get size(): number {
-    return new TextEncoder().encode(this.content).length;
+    return (
+      this.rawBytes?.byteLength ?? new TextEncoder().encode(this.content).length
+    );
   }
   async text(): Promise<string> {
-    return this.content;
+    // Lossy on purpose, mirroring the real File API.
+    return this.rawBytes
+      ? new TextDecoder().decode(this.rawBytes)
+      : this.content;
+  }
+  async arrayBuffer(): Promise<ArrayBuffer> {
+    const bytes = this.rawBytes ?? new TextEncoder().encode(this.content);
+    return bytes.slice().buffer as ArrayBuffer;
   }
 }
 
@@ -313,6 +325,24 @@ describe('LocalDirectory.read', () => {
     ).rejects.toMatchObject({ code: 'binary_content' });
   });
 
+  it('refuses invalid UTF-8 without NUL instead of returning replacement chars', async () => {
+    // A lossy decode would return U+FFFD mojibake, and write_file's
+    // read-modify-write cycle would then replace the original bytes.
+    const root = tree();
+    root
+      .dir('notes')
+      .files.set(
+        'latin1.txt',
+        new FakeFileHandle(
+          'latin1.txt',
+          new FakeFile('', new Uint8Array([0x63, 0x61, 0x66, 0xe9])),
+        ),
+      );
+    await expect(
+      new LocalDirectory(root).read('notes/latin1.txt'),
+    ).rejects.toMatchObject({ code: 'binary_content' });
+  });
+
   it('maps a missing file to not_found', async () => {
     await expect(
       new LocalDirectory(tree()).read('src/missing.ts'),
@@ -408,6 +438,14 @@ describe('LocalDirectory.search', () => {
     // "No match" would be a false negative the model acts on.
     await expect(
       new LocalDirectory(tree()).search('export default a;\nconst'),
+    ).rejects.toMatchObject({ code: 'invalid_path' });
+  });
+
+  it('rejects a NUL-bearing pattern instead of reporting a silent no-match', async () => {
+    // Every file containing NUL is skipped as binary, so such a pattern can
+    // never hit either; same false-negative class as the multi-line guard.
+    await expect(
+      new LocalDirectory(tree()).search('SQLite\u0000'),
     ).rejects.toMatchObject({ code: 'invalid_path' });
   });
 
