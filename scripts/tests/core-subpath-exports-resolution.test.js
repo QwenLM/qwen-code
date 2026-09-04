@@ -26,13 +26,18 @@
 //    two instances of barrel-exported, stateful modules in one process, the
 //    module-identity failure #10908's Known risks name. The esbuild guard
 //    below bundles every core subpath statically imported from
-//    packages/cli/src under the cli tsconfig and asserts every input lands
-//    under packages/core/src, never packages/core/dist.
+//    packages/cli/src — including goalWire, which the bundle reaches through
+//    @qwen-code/acp-bridge — under the cli tsconfig and asserts every input
+//    lands under packages/core/src, never packages/core/dist.
 //
 // The pinned-target check makes a built core `dist` a prerequisite of the
 // plain-Node guard (`import.meta.resolve` alone deliberately does not need
-// one); `scripts/vitest-global-setup.js` already fails fast with an
-// actionable message when workspace dist output is missing (#9149).
+// one). This lane's vitest config does not wire
+// `scripts/vitest-global-setup.js` (that guard is a globalSetup only in the
+// packages/core and packages/cli configs, and its DIST_PREREQUISITES has no
+// key covering this lane), so a missing dist surfaces as the existence
+// assertion below naming the absent file — run `npm run build` from the
+// repository root to produce it (#9149).
 
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -102,9 +107,11 @@ describe('core subpath specifiers resolve under plain Node', () => {
   );
 });
 
-// The core subpath specifiers statically imported from packages/cli/src,
-// mapped to the core source file the matching named entry in
-// packages/cli/tsconfig.json `paths` must resolve each one to.
+// The core subpath specifiers the cli bundle resolves under
+// packages/cli/tsconfig.json `paths` — everything statically imported from
+// packages/cli/src, plus goalWire, which the bundle reaches through
+// @qwen-code/acp-bridge's transcript-replay — each mapped to the core source
+// file the matching named `paths` entry must resolve it to.
 const expectedSrcTargets = {
   '@qwen-code/qwen-code-core/storage': 'packages/core/src/config/storage.ts',
   '@qwen-code/qwen-code-core/atomicFileWrite':
@@ -119,10 +126,11 @@ const expectedSrcTargets = {
     'packages/core/src/services/tool-write-origin.ts',
   '@qwen-code/qwen-code-core/memoryScopes':
     'packages/core/src/memory/scopes.ts',
+  '@qwen-code/qwen-code-core/goalWire': 'packages/core/src/goals/goal-wire.ts',
 };
 
 describe('core subpath specifiers bundle from the core src tree', () => {
-  it('resolves every cli/src subpath under packages/core/src', () => {
+  it('resolves every bundled core subpath under packages/core/src', () => {
     const result = buildSync({
       absWorkingDir: root,
       stdin: {
@@ -141,7 +149,13 @@ describe('core subpath specifiers bundle from the core src tree', () => {
       logLevel: 'silent',
       tsconfig: join(root, 'packages', 'cli', 'tsconfig.json'),
     });
-    const inputs = Object.keys(result.metafile.inputs);
+    // esbuild emits metafile input keys with the platform path separator
+    // (backslash on Windows); normalize to forward slashes so the target
+    // literals above and the leak filter below compare identically on every
+    // runner.
+    const inputs = Object.keys(result.metafile.inputs).map((input) =>
+      input.replace(/\\/g, '/'),
+    );
     expect(
       inputs.filter((input) => input.includes('packages/core/dist/')),
     ).toEqual([]);
