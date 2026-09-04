@@ -85,7 +85,14 @@ describe('security workflows', () => {
     expect(auditStep).toContain('status=0');
     expect(auditStep).toContain('exit "$status"');
     expect(auditStep).toContain('timeout 8m npm audit "$@"');
-    expect(auditStep).toContain("grep -q 'audit endpoint returned an error'");
+    // Streamed, not captured, so a run that now takes up to 16 minutes
+    // reports progress instead of going silent and printing at the end.
+    expect(auditStep).toContain('| tee "$log"');
+    expect(auditStep).toContain('result="${PIPESTATUS[0]}"');
+    expect(auditStep).not.toContain('output="$(timeout');
+    expect(auditStep).toContain(
+      'grep -q \'audit endpoint returned an error\' "$log"',
+    );
     expect(auditStep).toContain('[ "$result" -ne 124 ]');
     expect(auditStep).toContain('[ "$attempt" -eq 2 ]');
     expect(auditStep).toContain('sleep 15');
