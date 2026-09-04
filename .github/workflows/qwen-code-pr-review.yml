@@ -2144,6 +2144,15 @@ jobs:
             # Pinned like every read here, and an unreadable identity
             # returns 1 instead of accepting every actor-bearing event: an
             # unattributable witness keeps the red failure, never a cede.
+            # Only the credential the reviewed agent inherits is excluded —
+            # not the PR's pushers (maintainer decision, R29-1/R29-2). A
+            # pusher who wants no review needs no forgery: one real head
+            # move per run before the salvage threshold cedes that run
+            # green by design (the queued replacement owns the new head),
+            # so an author-acted away-and-back pair corroborating planted
+            # signals adds no capability the author lacks; excluding the
+            # author would instead turn the common legitimate shape — the
+            # author's own revert during a run — into a red failure.
             bot_login="$("${QWEN_CI_REAL_GH:-gh}" api user --jq '.login' 2>/dev/null || true)"
             [ -n "$bot_login" ] || return 1
             events="$("${QWEN_CI_REAL_GH:-gh}" api graphql -f query='query($owner:String!, $repo:String!, $number:Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { timelineItems(last: 25, itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT]) { nodes { ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } afterCommit { oid } actor { login } } } } } } }' -F owner="$owner" -F repo="$repo" -F number="${PR_NUMBER:-}" --jq '.data.repository.pullRequest.timelineItems.nodes[]? | (.beforeCommit.oid // "") + " " + (.afterCommit.oid // "") + " " + (.createdAt // "") + " " + (.actor.login // "")' 2>/dev/null)" || return 1

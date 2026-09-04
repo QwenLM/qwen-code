@@ -11,6 +11,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -165,6 +167,9 @@ function runReviewGhWrapper(
     if (salvageFifo) {
       salvagePath = path.join(tempDir, 'salvage-ok');
       spawnSync('mkfifo', [salvagePath]);
+      // A plant that silently failed would let the wedge case pass for
+      // the wrong reason (the read of a missing file returns at once).
+      expect(statSync(salvagePath).isFIFO()).toBe(true);
     } else if (salvageContent !== undefined) {
       salvagePath = path.join(tempDir, 'salvage-ok');
       writeFileSync(salvagePath, salvageContent);
@@ -329,6 +334,12 @@ describe('qwen resolve workflow', () => {
     expect(concurrency).toContain(
       "cancel-in-progress: \"${{ github.event_name == 'pull_request_target' && github.event.action == 'closed' }}\"",
     );
+    // The other half of the model: every CEDE branch relies on a push
+    // QUEUING a replacement lifecycle run, which only happens while
+    // `synchronize` stays a pull_request_target trigger.
+    const types = parse(workflow).on?.pull_request_target?.types ?? [];
+    expect(types).toContain('synchronize');
+    expect(types).toContain('closed');
   });
 
   it('listens for /resolve comments', () => {
