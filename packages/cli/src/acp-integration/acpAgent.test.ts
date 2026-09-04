@@ -29927,12 +29927,25 @@ describe('QwenAgent runtime-root pinning choke point', () => {
     // directly is exactly the shape that regressed. No behavioral test can
     // see the difference (both spellings reach the same function), so pin
     // the source: the only call left is the helper's own delegation.
-    const source = readFileSync(
-      new URL('./acpAgent.ts', import.meta.url),
-      'utf8',
-    );
-    const directCalls = source.match(/\brunWithAcpRuntimeOutputDir\(/g) ?? [];
-    expect(directCalls).toHaveLength(1);
-    expect(source).toContain('private runWithPinnedRuntimeBaseDir<T>(');
+    const source = readFileSync('src/acp-integration/acpAgent.ts', 'utf8');
+    const directCalls = source
+      .split('\n')
+      .map((line, index) => ({ line: index + 1, text: line.trim() }))
+      .filter(
+        ({ text }) =>
+          /\brunWithAcpRuntimeOutputDir\(/.test(text) &&
+          !text.startsWith('//') &&
+          !text.startsWith('*') &&
+          !text.startsWith('/*'),
+      );
+    const located = directCalls.map(({ line, text }) => `${line}: ${text}`);
+    expect(
+      located,
+      `acpAgent.ts must not call runWithAcpRuntimeOutputDir directly; route the operation through this.runWithPinnedRuntimeBaseDir (see #10095). Direct calls at:\n${located.join('\n')}`,
+    ).toEqual([
+      expect.stringMatching(
+        /^\d+: return runWithAcpRuntimeOutputDir\(settings, cwd, operation\);$/,
+      ),
+    ]);
   });
 });
