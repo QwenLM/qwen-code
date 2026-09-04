@@ -124,6 +124,26 @@ export function validateModelOutput(
   return true;
 }
 
+// The CLI traps SIGHUP and exits only once `runExitCleanup()` has drained, a
+// chain it bounds at 5s (packages/cli/src/utils/cleanup.ts). Waiting longer
+// than that bound is what makes cleanup() return with the child actually gone.
+const INTERACTIVE_EXIT_GRACE_MS = 10_000;
+
+// Resolves when `promise` settles, or after `ms` if it never does. The timer
+// is cleared and unrefed so a won race leaves no handle holding the worker's
+// event loop open.
+function settleWithin(promise: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+    const settle = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    void promise.then(settle, settle);
+  });
+}
+
 // Simulates typing a string one character at a time to avoid paste detection.
 export async function type(ptyProcess: pty.IPty, text: string) {
   const delay = 5;
@@ -200,7 +220,10 @@ export class TestRig {
   testName?: string;
   _lastRunStdout?: string;
   _interactiveOutput = '';
-  private readonly interactiveProcesses: pty.IPty[] = [];
+  private readonly interactiveProcesses: Array<{
+    ptyProcess: pty.IPty;
+    exited: Promise<unknown>;
+  }> = [];
 
   constructor() {
     this.bundlePath = join(__dirname, '..', 'dist/cli.js');
@@ -496,13 +519,16 @@ export class TestRig {
   async cleanup() {
     // A session a test never closed keeps its CLI child forwarding PTY bytes
     // into this worker's stdout; after vitest tears the worker down those
-    // writes EPIPE and fail an otherwise all-green run (#10969).
-    for (const ptyProcess of this.interactiveProcesses.splice(0)) {
+    // writes EPIPE and fail an otherwise all-green run (#10969). Signalling
+    // alone still returns with the child alive and writing, so wait for it to
+    // actually go away (#10990).
+    for (const { ptyProcess, exited } of this.interactiveProcesses.splice(0)) {
       try {
         ptyProcess.kill();
       } catch {
         // Process may have already exited
       }
+      await settleWithin(exited, INTERACTIVE_EXIT_GRACE_MS);
     }
 
     // Clean up test directory
@@ -944,7 +970,10 @@ export class TestRig {
         ...e2eRendererEnv(renderer),
       } as { [key: string]: string },
     });
-    this.interactiveProcesses.push(ptyProcess);
+    const exited = new Promise<void>((resolve) => {
+      ptyProcess.onExit(() => resolve());
+    });
+    this.interactiveProcesses.push({ ptyProcess, exited });
 
     ptyProcess.onData((data) => {
       this._interactiveOutput += data;

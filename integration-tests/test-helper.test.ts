@@ -17,6 +17,12 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+// How long the stand-in below stays alive after it is signalled. The real CLI
+// traps SIGHUP and exits only once its own exit-cleanup chain has drained, so
+// a stand-in that dies on the default action would let cleanup() return early
+// and still look correct.
+const STAND_IN_EXIT_DELAY_MS = 750;
+
 describe('TestRig', () => {
   const originalKeepOutput = process.env['KEEP_OUTPUT'];
 
@@ -63,7 +69,7 @@ describe('TestRig', () => {
     expect(existsSync(testDir)).toBe(true);
   });
 
-  it('kills an interactive session a test never closed during cleanup', async () => {
+  it('waits for an interactive session a test never closed to end', async () => {
     // KEEP_OUTPUT is what CI sets, and it makes cleanup() keep the test
     // directory — the spawned child must not survive that path either.
     process.env['KEEP_OUTPUT'] = 'true';
@@ -72,15 +78,30 @@ describe('TestRig', () => {
     // Stands in for the CLI bundle: what is under test is that cleanup ends
     // whatever runInteractive spawned, not what the CLI itself does.
     rig.bundlePath = rig.createFile(
-      'idle-cli.js',
-      'setInterval(() => {}, 1000);\n',
+      'slow-exit-cli.js',
+      'process.on("SIGHUP", () => setTimeout(() => process.exit(129), ' +
+        `${STAND_IN_EXIT_DELAY_MS}));\n` +
+        'setInterval(() => {}, 1000);\n' +
+        'process.stdout.write("STAND_IN_READY\\n");\n',
     );
 
     const { ptyProcess } = rig.runInteractive();
     expect(isProcessAlive(ptyProcess.pid)).toBe(true);
+    // Signal before the handler is installed and the default action ends the
+    // child at once, measuring nothing. A real session is booted by the time
+    // its test ends, so wait for the stand-in to report itself up.
+    expect(await rig.waitForText('STAND_IN_READY', 30_000)).toBe(true);
 
+    const cleanupStartedAt = Date.now();
     await rig.cleanup();
+    const cleanupTookMs = Date.now() - cleanupStartedAt;
 
+    // Signalling alone returns straight through the delay above, leaving the
+    // child forwarding PTY bytes into a worker vitest is tearing down.
+    expect(
+      cleanupTookMs,
+      'cleanup() returned before the interactive CLI child exited',
+    ).toBeGreaterThanOrEqual(STAND_IN_EXIT_DELAY_MS);
     await expect
       .poll(() => isProcessAlive(ptyProcess.pid), {
         message: 'the interactive CLI child outlived cleanup()',
