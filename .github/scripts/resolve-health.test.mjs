@@ -1497,6 +1497,148 @@ describe('resolve-health: decisions', () => {
     assert.deepEqual(decide(tick3, { number: 47, texts }), []);
   });
 
+  it('records a request that arrives while the alarm holds its picture', () => {
+    // A request below `staleHours` joins no roster, moves no streak and is not
+    // the latest attempt, so `sameState` is true and the alarm branch would
+    // write nothing — and the quiet branch's rise-keyed refresh is unreachable
+    // while the alarm fires. The request would then live only in the live
+    // scan, and its deletion would take the barrier with it.
+    const stale = [1, 2, 3].map((i) =>
+      request(`2026-08-24T0${i}:00:00Z`, 40 + i),
+    );
+    const attempts = [
+      ...[1, 2, 3, 4, 5].map((d) =>
+        result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 39),
+      ),
+      result('2026-08-26T06:00:00Z', PUSHED, 39),
+    ];
+    const lane = (fresh) => [
+      { number: 39, state: 'open', comments: attempts },
+      ...stale.map((r, i) => ({
+        number: 41 + i,
+        state: 'open',
+        comments: [r],
+      })),
+      ...(fresh
+        ? [
+            {
+              number: 50,
+              state: 'open',
+              comments: [request('2026-08-27T10:00:00Z', 50)],
+            },
+          ]
+        : []),
+    ];
+    const steady = assess(lane(false), { now });
+    assert.equal(steady.alarm, true);
+    const filed = decide(steady, null)[0].body;
+    const existing = { number: 42, createdAt: FILED_AT, texts: [filed] };
+    // The picture itself has not moved...
+    assert.deepEqual(decide(steady, existing), []);
+    // ...but a request arriving on top of it must still be recorded.
+    const withRequest = assess(lane(true), { now });
+    assert.equal(withRequest.alarm, true);
+    assert.equal(withRequest.unanswered.length, 3, 'the roster is unchanged');
+    const recorded = decide(withRequest, existing);
+    assert.deepEqual(
+      recorded.map((a) => a.type),
+      ['comment'],
+    );
+    assert.equal(
+      readState([recorded[0].body]).newestRequest,
+      '2026-08-27T10:00:00Z',
+    );
+    assert.ok(
+      !recorded[0].body.includes('the picture has changed'),
+      recorded[0].body,
+    );
+    // Days later the request comment is gone and the roster has aged out of
+    // the window. The recorded barrier still refuses the older push.
+    const later = new Date('2026-09-01T12:00:00Z');
+    const cleared = assess(
+      [{ number: 39, state: 'open', comments: attempts }],
+      {
+        now: later,
+      },
+    );
+    assert.equal(cleared.alarm, false);
+    assert.equal(cleared.latestAttempt.at, '2026-08-26T06:00:00Z');
+    assert.deepEqual(
+      decide(cleared, {
+        number: 42,
+        createdAt: FILED_AT,
+        texts: [filed, recorded[0].body],
+      }),
+      [],
+      'the push predates the request the watch recorded',
+    );
+  });
+
+  it('will not read a push as recovery while a request has no result at all', () => {
+    // The barrier compares COMMENT times, and the producer pushes before it
+    // posts: a request typed inside that lag raises the barrier only to its
+    // own timestamp, which the trailing comment clears. The request itself is
+    // the evidence the clocks cannot give — one the lane never answered is
+    // refused whatever the timestamps say.
+    const seeded =
+      '<!-- qwen-resolve-health-state {"streak":5,"unanswered":[],"newestUnanswered":null,"latest":null} -->';
+    const existing = { number: 42, createdAt: FILED_AT, texts: [seeded] };
+    const lane = (served) => [
+      {
+        number: 31,
+        state: 'open',
+        comments: [
+          request('2026-08-27T00:00:00Z', 31),
+          // Pushed before 05:00; the report posts five minutes after.
+          result('2026-08-27T05:05:00Z', PUSHED, 31),
+        ],
+      },
+      {
+        number: 32,
+        state: 'open',
+        comments: [
+          request('2026-08-27T05:00:00Z', 32),
+          ...(served ? [result('2026-08-27T05:10:00Z', PUSHED, 32)] : []),
+        ],
+      },
+    ];
+    const lagged = assess(lane(false), { now });
+    assert.equal(lagged.latestAttempt.at, '2026-08-27T05:05:00Z');
+    assert.equal(lagged.unserved, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(lagged, existing).map((a) => a.type),
+      ['comment'],
+      'refuses to certify while PR 32 has no result at all',
+    );
+    // And it must not be read off the ROSTER, which needs `staleHours`: on the
+    // first tick the request is minutes old, the roster is empty and the alarm
+    // is quiet, yet the trailing comment still clears its timestamp. This is
+    // the arm that separates the two readings.
+    const firstTick = assess(lane(false), {
+      now: new Date('2026-08-27T06:00:00Z'),
+    });
+    assert.equal(
+      firstTick.unanswered.length,
+      0,
+      'a 1h-old request is not stale',
+    );
+    assert.equal(firstTick.alarm, false);
+    assert.equal(firstTick.unserved, '2026-08-27T05:00:00Z');
+    assert.deepEqual(
+      decide(firstTick, existing).map((a) => a.type),
+      ['comment'],
+      'refuses before the request is old enough to be on any roster',
+    );
+    // The guard is not a freeze: once every request has its result, the close
+    // resumes.
+    const answered = assess(lane(true), { now });
+    assert.equal(answered.unserved, null);
+    assert.deepEqual(
+      decide(answered, existing).map((a) => a.type),
+      ['comment', 'close'],
+    );
+  });
+
   it('holds for a request its author edited after posting', () => {
     // The producer fires on comment creation only, so the unanswered ROSTER
     // must ignore an edited comment: a trusted account could otherwise edit an

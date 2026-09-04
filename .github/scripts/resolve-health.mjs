@@ -219,6 +219,8 @@ export function assess(prs, options = {}) {
   // REFUSES a close). It floors with `created_at`, which no edit moves, so an
   // old comment edited today cannot outrank a recent push.
   let newestRequest = null;
+  // The newest request the lane never answered — see the roster loop below.
+  let unserved = null;
   const isRequestShaped = (c) =>
     c.user !== opts.bot &&
     ANSWERABLE_ASSOCIATIONS.has(c.author_association) &&
@@ -282,6 +284,14 @@ export function assess(prs, options = {}) {
       // first run reported must not leave the first request "unanswered"
       // forever because its result landed after the retry's timestamp.
       const answered = prResults.some((r) => r.at > req.created_at);
+      // A request with no result at all, at any age. The roster below needs
+      // `staleHours` so a run still in flight does not raise the alarm; the
+      // recovery gate needs the opposite reading — a request in flight is
+      // precisely a reason not to certify that the lane works again — so it
+      // reads this instead. See decide().
+      if (!answered && (!unserved || req.created_at > unserved)) {
+        unserved = req.created_at;
+      }
       const ageHours = (now.getTime() - Date.parse(req.created_at)) / 3_600_000;
       if (!answered && ageHours >= opts.staleHours) {
         unanswered.push({
@@ -322,6 +332,7 @@ export function assess(prs, options = {}) {
     pushFailedInStreak: pushFailed,
     unanswered,
     newestRequest,
+    unserved,
     latestAttempt: attempts.at(-1) ?? null,
     alarm:
       streak >= opts.threshold || unanswered.length >= opts.unansweredThreshold,
@@ -520,6 +531,19 @@ function renderFirstRecord(assessment, options = {}) {
   ].join('\n');
 }
 
+// The write decide() makes when the alarm's picture is unchanged but a new
+// request has appeared. It must not reuse the refresh's headline, which says
+// the alarm is not firing — here it is.
+function renderRequestRecord(assessment, options = {}, previous = null) {
+  return [
+    HEALTH_MARKER,
+    stateMarker(stateOf(assessment, previous)),
+    'Still failing, with the same picture as the last report. Recording a newer request the watch has now seen, so the record survives that comment being deleted.',
+    '',
+    renderReport(assessment, options),
+  ].join('\n');
+}
+
 // The write decide() makes with the alarm quiet: it records state and claims
 // nothing else, so it must not reuse the update's "still failing" headline.
 function renderStateRefresh(assessment, options = {}, previous = null) {
@@ -571,6 +595,22 @@ export function decide(assessment, existing, options = {}) {
             ? renderUpdate(assessment, options, previous)
             : renderFirstRecord(assessment, options),
         });
+      } else if (
+        (stateOf(assessment, previous).newestRequest ?? '') >
+        (previous.newestRequest ?? '')
+      ) {
+        // A request can arrive without moving the picture `sameState`
+        // compares: below `staleHours` it is not on the roster yet, and it
+        // changes neither the streak nor the latest attempt. The quiet
+        // branch's rise-keyed refresh is unreachable while the alarm fires,
+        // so without this the request lives only in the live scan and its
+        // deletion takes the barrier with it. Keyed on the rise, never on
+        // every tick, so an unchanged picture still writes nothing.
+        actions.push({
+          type: 'comment',
+          number: existing.number,
+          body: renderRequestRecord(assessment, options, previous),
+        });
       }
     }
   } else if (existing) {
@@ -582,9 +622,11 @@ export function decide(assessment, existing, options = {}) {
     // would hide a lane that is still broken.
     const previous = readState(existing.texts);
     const latest = assessment.latestAttempt;
-    // ...and the push must postdate every unanswered request the watch has
-    // seen since the issue opened: a push that landed before those requests
-    // cannot be evidence that anything ran after them. Requests answered by
+    // ...and the attempt must postdate every unanswered request the watch has
+    // seen since the issue opened: a result that landed before those requests
+    // cannot be evidence that anything ran after them. Read on the result
+    // COMMENT's time, which is the only time the watch can see; the guard
+    // below covers what that proxy cannot. Requests answered by
     // a closed PR or by ageing out of the window leave no trace in the
     // current assessment, so their newest timestamp is carried in the state
     // markers the watch writes on the issue.
@@ -621,7 +663,25 @@ export function decide(assessment, existing, options = {}) {
     const barrier = [recorded, carried.newestRequest, existing.createdAt]
       .filter((t) => typeof t === 'string' && t)
       .reduce((a, b) => (a > b ? a : b), '');
-    if (latest && latest.kind === 'pushed' && latest.at > barrier) {
+    // The barrier compares comment times, and the producer pushes BEFORE it
+    // composes and posts the report: a result comment at T proves the push
+    // happened at or before T, never that it happened after some particular
+    // moment. A request typed inside that push→comment lag therefore raises
+    // the barrier only to its own timestamp, which the trailing comment
+    // clears — certifying a recovery with a push that predates the request.
+    // Push time appears in nothing the watch reads, so the gate cannot be
+    // fixed by comparing better timestamps. What closes it is the request
+    // itself: a request the lane never answered is refused as evidence
+    // regardless of what the clocks say, and one typed in that lag is exactly
+    // that. Deliberately read WITHOUT `staleHours` — a run still in flight is
+    // a reason not to certify, not a reason to wait — so the ordinary close
+    // resumes as soon as every request has its result.
+    if (
+      latest &&
+      latest.kind === 'pushed' &&
+      latest.at > barrier &&
+      !assessment.unserved
+    ) {
       // Comment-then-close is not atomic: if the close fails after the
       // comment lands, the `recovered` field the comment wrote keeps the
       // next tick from repeating it while it retries the close. A success
