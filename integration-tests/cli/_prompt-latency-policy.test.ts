@@ -42,6 +42,22 @@ describe('shouldSkipPromptLatency', () => {
     expect(shouldSkipPromptLatency({ ...KEY })).toBe(false);
   });
 
+  it('counts every recognized credential env key', () => {
+    // Spelled out, not imported: a shared list would be tautological.
+    for (const key of [
+      'DASHSCOPE_API_KEY',
+      'OPENAI_API_KEY',
+      'ANTHROPIC_API_KEY',
+      'GEMINI_API_KEY',
+      'GOOGLE_API_KEY',
+      'QWEN_API_KEY',
+    ]) {
+      expect(shouldSkipPromptLatency({ ...HOSTED, [key]: 'k' }), key).toBe(
+        false,
+      );
+    }
+  });
+
   it('skips without a credential', () => {
     expect(shouldSkipPromptLatency({ ...HOSTED })).toBe(true);
     expect(shouldSkipPromptLatency({ ...HOSTED, OPENAI_API_KEY: '' })).toBe(
@@ -104,8 +120,8 @@ describe('promptLatencySkipReason', () => {
   });
 
   it('reports the missing credential when none is set', () => {
-    expect(promptLatencySkipReason({ ...HOSTED }, 20)).toMatch(
-      /^No recognized model credential env var is set/,
+    expect(promptLatencySkipReason({ ...HOSTED }, 20)).toBe(
+      'No recognized model credential env var is set; prompt latency requires real model access. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run with non-env auth.',
     );
   });
 
