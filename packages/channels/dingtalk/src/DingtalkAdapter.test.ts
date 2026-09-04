@@ -97,6 +97,20 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
       dingtalkSdkMock.nextConnect = undefined;
       return connect?.() ?? Promise.resolve();
     });
+    // Mirrors the real SDK's getEndpoint() (client.mjs): two unconditional
+    // credential console.logs that ignore the debug flag, plus one benign log.
+    getEndpoint = vi.fn(() => {
+      console.log(this.options);
+      console.log(
+        'res.data',
+        JSON.stringify({
+          endpoint: 'wss://api.dingtalk.com/ws',
+          ticket: 'stream-ticket',
+        }),
+      );
+      console.log('sdk connect log');
+      return Promise.resolve(this);
+    });
 
     onSystem = vi.fn();
     onEvent = vi.fn();
@@ -4940,6 +4954,87 @@ describe('DingtalkChannel quoted media', () => {
     expect(stderrSpy).toHaveBeenCalledWith(
       '[DingTalk] downloadMedia API failed: HTTP 503 unavailable\n',
     );
+  });
+});
+
+describe('DingtalkChannel SDK connect credential logging', () => {
+  it('drops the SDK client-config and gateway-ticket logs during getEndpoint', async () => {
+    createChannel();
+    const client = latestMockClient() as {
+      getEndpoint(): Promise<unknown>;
+    };
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await client.getEndpoint();
+      const logged = logSpy.mock.calls
+        .map((call) =>
+          call
+            .map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg)))
+            .join(' '),
+        )
+        .join('\n');
+      expect(logged).not.toContain('clientSecret');
+      expect(logged).not.toContain('client-secret');
+      expect(logged).not.toContain('res.data');
+      expect(logged).not.toContain('stream-ticket');
+      // Unrelated SDK output still reaches stdout.
+      expect(logSpy).toHaveBeenCalledWith('sdk connect log');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('restores console.log once the connect window closes', async () => {
+    createChannel();
+    const client = latestMockClient() as {
+      getEndpoint(): Promise<unknown>;
+    };
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const logBefore = console.log;
+    try {
+      await client.getEndpoint();
+      expect(console.log).toBe(logBefore);
+      // After the window the filter is gone: even credential-shaped logs go
+      // straight through to the pre-existing console.log (the SDK only logs
+      // them from inside getEndpoint, so nothing leaks in practice).
+      console.log('res.data', '{"ticket":"after"}');
+      expect(logSpy).toHaveBeenCalledWith('res.data', '{"ticket":"after"}');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('wraps every client the connection manager (re)creates', async () => {
+    const channel = createChannel();
+    const manager = (
+      channel as unknown as {
+        connectionManager?: { options: { createClient(): unknown } };
+      }
+    ).connectionManager;
+    expect(manager).toBeDefined();
+    const reconnectClient = manager!.options.createClient() as {
+      getEndpoint(): Promise<unknown>;
+    };
+    expect(reconnectClient).not.toBe(dingtalkSdkMock.instances[0]);
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await reconnectClient.getEndpoint();
+      const logged = logSpy.mock.calls
+        .map((call) =>
+          call
+            .map((arg) => (typeof arg === 'string' ? arg : JSON.stringify(arg)))
+            .join(' '),
+        )
+        .join('\n');
+      expect(logged).not.toContain('client-secret');
+      expect(logged).not.toContain('stream-ticket');
+      expect(logSpy).toHaveBeenCalledWith('sdk connect log');
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });
 

@@ -806,7 +806,64 @@ type DingTalkClientInternals = DWClient & {
   onSystem(message: DWClientDownStream): void;
   onEvent(message: DWClientDownStream): void;
   onCallback(message: DWClientDownStream): void;
+  getEndpoint(): Promise<DingTalkClientInternals>;
 };
+
+/**
+ * The SDK's getEndpoint() unconditionally console.log()s the DWClient config
+ * (clientId + clientSecret) and the gateway response (endpoint + ticket) to
+ * stdout — neither call goes through printDebug(), so the SDK debug flag
+ * cannot silence them (dingtalk-stream-sdk-nodejs@2.0.4, latest). While a
+ * connect is in flight, drop exactly those two log shapes; every other
+ * console.log passes through untouched, and qwen-code's own logging (stderr)
+ * never crosses this path. See issue #10936.
+ */
+function isSdkCredentialLog(args: unknown[]): boolean {
+  const [first, second] = args;
+  // console.log(this.config): the DWClient config always owns clientSecret
+  // (the SDK constructor refuses to build without it).
+  if (
+    typeof first === 'object' &&
+    first !== null &&
+    !Array.isArray(first) &&
+    Object.prototype.hasOwnProperty.call(first, 'clientSecret')
+  ) {
+    return true;
+  }
+  // console.log('res.data', JSON.stringify(res.data)): the gateway
+  // connection response carrying the live stream ticket.
+  return first === 'res.data' && typeof second === 'string';
+}
+
+let credentialLogSuppressionDepth = 0;
+let unsuppressedConsoleLog: ((...args: unknown[]) => void) | undefined;
+
+function suppressedConsoleLog(...args: unknown[]): void {
+  if (isSdkCredentialLog(args)) return;
+  unsuppressedConsoleLog?.(...args);
+}
+
+function beginCredentialLogSuppression(): void {
+  if (credentialLogSuppressionDepth === 0) {
+    unsuppressedConsoleLog = console.log;
+    console.log = suppressedConsoleLog;
+  }
+  credentialLogSuppressionDepth++;
+}
+
+function endCredentialLogSuppression(): void {
+  credentialLogSuppressionDepth = Math.max(
+    0,
+    credentialLogSuppressionDepth - 1,
+  );
+  if (
+    credentialLogSuppressionDepth === 0 &&
+    console.log === suppressedConsoleLog
+  ) {
+    console.log = unsuppressedConsoleLog!;
+    unsuppressedConsoleLog = undefined;
+  }
+}
 
 type DingtalkChannelConfig = ChannelConfig & {
   useConnectionManager?: unknown;
@@ -1014,6 +1071,27 @@ export class DingtalkChannel extends ChannelBase {
     // dispatch table and should be checked when upgrading the DingTalk SDK.
     client.onDownStream = (raw: unknown) => {
       this.onDownStream(raw, client);
+    };
+    this.quietSdkConnectLogging(client);
+  }
+
+  /**
+   * Shadow getEndpoint() (the SDK prototype method, like onDownStream above)
+   * with a wrapper that drops the SDK's unconditional credential console.logs
+   * for the duration of the call. Every (re)connect goes through
+   * createClient(), so initial connects, manager-driven reconnects, and the
+   * SDK's own auto-reconnect all inherit the wrapper.
+   */
+  private quietSdkConnectLogging(client: DingTalkClientInternals): void {
+    if (typeof client.getEndpoint !== 'function') return;
+    const sdkGetEndpoint = client.getEndpoint.bind(client);
+    client.getEndpoint = async (): Promise<DingTalkClientInternals> => {
+      beginCredentialLogSuppression();
+      try {
+        return await sdkGetEndpoint();
+      } finally {
+        endCredentialLogSuppression();
+      }
     };
   }
 
