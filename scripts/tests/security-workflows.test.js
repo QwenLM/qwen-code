@@ -105,7 +105,13 @@ describe('security workflows', () => {
     // would let a real high-severity finding be retried instead of reported.
     expect(auditStep).toContain("*'audit endpoint returned an error'*) ;;");
     expect(auditStep).toContain('*) return 1 ;;');
-    expect(auditStep).toContain('audit_deadline=$(( $(date +%s) + 300 ))');
+    // npm's own 5xx backoff is what made a failing attempt cost 302-422s during
+    // the 2026-09-03 incident, so the step disables it and spaces its retries
+    // itself. The budget then has to outlast one attempt measured WITHOUT that
+    // flag, or the loop returns before ever retrying — which is what a 300s
+    // budget did. Both are pinned by execution below; these name the cause.
+    expect(auditStep).toContain('--fetch-retries=0');
+    expect(auditStep).toContain('audit_deadline=$(( $(date +%s) + 600 ))');
     expect(trufflehogStep).not.toContain('continue-on-error');
     const trufflehogPin = trufflehogStep.match(
       /trufflesecurity\/trufflehog@[0-9a-f]{40}' # v([\d.]+)/,
@@ -140,6 +146,10 @@ const auditRunBlock = parse(
 // AUDIT_ENDPOINT_FAILURES makes the first N audit calls fail the way the
 // registry did on 2026-09-03 (npm prints the marker the step retries on);
 // AUDIT_FINDING makes every audit call report a high-severity CVE instead.
+// AUDIT_LATENCY_SECONDS charges the clock for the call itself, defaulting to
+// the 302s a failing attempt actually cost in that incident: a clock that only
+// advanced on `sleep` modelled the retry spacing and omitted the dominant
+// term, which is how a budget below one attempt stayed green.
 const NPM_STUB = [
   '#!/usr/bin/env bash',
   'echo "$*" >> "${CALLS_LOG}"',
@@ -148,6 +158,8 @@ const NPM_STUB = [
   '  audit)',
   '    calls=$(( $(cat "${COUNTER_DIR}/audit") + 1 ))',
   '    echo "${calls}" > "${COUNTER_DIR}/audit"',
+  '    now=$(( $(cat "${COUNTER_DIR}/clock") + ${AUDIT_LATENCY_SECONDS:-302} ))',
+  '    echo "${now}" > "${COUNTER_DIR}/clock"',
   '    if [ -n "${AUDIT_FINDING:-}" ]; then',
   "      printf '%s\\n' '# npm audit report' 'Severity: high' '1 high severity vulnerability'",
   '      exit 1',
@@ -162,14 +174,14 @@ const NPM_STUB = [
   'exit 0',
 ].join('\n');
 
-// A stubbed sleep that does not advance a clock would let a mutated step — one
-// that retries findings too — spin until the test times out, so the fake clock
-// moves with each backoff and the shared deadline still bounds the loop. The
-// assertion then fails on the attempt COUNT, which says what went wrong.
-// SLEEP_SECONDS lets a test spend the whole retry budget in one backoff.
+// The fake clock moves on each backoff too, so the shared deadline bounds the
+// loop even under a mutation that retries findings — which would otherwise
+// spin to the test timeout, since AUDIT_FINDING has no failure budget to
+// exhaust. The assertion then fails on the attempt COUNT, which says what
+// went wrong.
 const SLEEP_STUB = [
   '#!/usr/bin/env bash',
-  'now=$(( $(cat "${COUNTER_DIR}/clock") + ${SLEEP_SECONDS:-30} ))',
+  'now=$(( $(cat "${COUNTER_DIR}/clock") + 30 ))',
   'echo "${now}" > "${COUNTER_DIR}/clock"',
   'exit 0',
 ].join('\n');
@@ -179,98 +191,131 @@ const DATE_STUB = [
   'echo $(( 1000000000 + $(cat "${COUNTER_DIR}/clock") ))',
 ].join('\n');
 
-describe('Dependency CVE audit step', () => {
-  const runAuditStep = ({
-    endpointFailures = 0,
-    finding = false,
-    sleepSeconds = 30,
-  } = {}) => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'cve-audit-'));
-    const bin = path.join(dir, 'bin');
-    const counters = path.join(dir, 'counters');
-    mkdirSync(bin);
-    mkdirSync(counters);
-    for (const [name, body] of [
-      ['npm', NPM_STUB],
-      ['sleep', SLEEP_STUB],
-      ['date', DATE_STUB],
-    ]) {
-      writeFileSync(path.join(bin, name), body);
-      chmodSync(path.join(bin, name), 0o755);
-    }
-    writeFileSync(path.join(counters, 'audit'), '0');
-    writeFileSync(path.join(counters, 'clock'), '0');
-    // Two vendored locks: one the step audits, one it deliberately skips.
-    for (const pkg of ['alpha', 'mobile-mcp']) {
-      mkdirSync(path.join(dir, 'packages', pkg), { recursive: true });
-      writeFileSync(path.join(dir, 'packages', pkg, 'package-lock.json'), '{}');
-    }
-    const callsLog = path.join(dir, 'calls.log');
-    writeFileSync(callsLog, '');
-    const result = spawnSync(
-      'bash',
-      ['-e', '-o', 'pipefail', '-c', auditRunBlock],
-      {
-        cwd: dir,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: `${bin}:${process.env.PATH}`,
-          CALLS_LOG: callsLog,
-          COUNTER_DIR: counters,
-          AUDIT_ENDPOINT_FAILURES: String(endpointFailures),
-          AUDIT_FINDING: finding ? '1' : '',
-          SLEEP_SECONDS: String(sleepSeconds),
+// Bash-driven: extensionless stubs on a colon-joined PATH, which is the shape
+// scripts/tests/vitest.config.ts excludes wholesale on Windows. Skipping only
+// this block keeps the YAML-parse assertions above running there.
+describe.skipIf(process.platform === 'win32')(
+  'Dependency CVE audit step',
+  () => {
+    const runAuditStep = ({
+      endpointFailures = 0,
+      finding = false,
+      attemptLatency = 302,
+    } = {}) => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'cve-audit-'));
+      const bin = path.join(dir, 'bin');
+      const counters = path.join(dir, 'counters');
+      mkdirSync(bin);
+      mkdirSync(counters);
+      for (const [name, body] of [
+        ['npm', NPM_STUB],
+        ['sleep', SLEEP_STUB],
+        ['date', DATE_STUB],
+      ]) {
+        writeFileSync(path.join(bin, name), body);
+        chmodSync(path.join(bin, name), 0o755);
+      }
+      writeFileSync(path.join(counters, 'audit'), '0');
+      writeFileSync(path.join(counters, 'clock'), '0');
+      // Two vendored locks: one the step audits, one it deliberately skips.
+      for (const pkg of ['alpha', 'mobile-mcp']) {
+        mkdirSync(path.join(dir, 'packages', pkg), { recursive: true });
+        writeFileSync(
+          path.join(dir, 'packages', pkg, 'package-lock.json'),
+          '{}',
+        );
+      }
+      const callsLog = path.join(dir, 'calls.log');
+      writeFileSync(callsLog, '');
+      const result = spawnSync(
+        'bash',
+        ['-e', '-o', 'pipefail', '-c', auditRunBlock],
+        {
+          cwd: dir,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            CALLS_LOG: callsLog,
+            COUNTER_DIR: counters,
+            AUDIT_ENDPOINT_FAILURES: String(endpointFailures),
+            AUDIT_FINDING: finding ? '1' : '',
+            AUDIT_LATENCY_SECONDS: String(attemptLatency),
+          },
         },
-      },
-    );
-    const calls = readFileSync(callsLog, 'utf8')
-      .split('\n')
-      .filter((line) => line.length > 0);
-    rmSync(dir, { recursive: true, force: true });
-    return {
-      status: result.status,
-      audits: calls.filter((line) => line.startsWith('audit')).length,
-      installs: calls.filter((line) => line.startsWith('ci ')).length,
-      stdout: result.stdout,
+      );
+      const calls = readFileSync(callsLog, 'utf8')
+        .split('\n')
+        .filter((line) => line.length > 0);
+      rmSync(dir, { recursive: true, force: true });
+      return {
+        status: result.status,
+        audits: calls.filter((line) => line.startsWith('audit')).length,
+        installs: calls.filter((line) => line.startsWith('ci ')).length,
+        retried: result.stdout.includes(
+          '::notice::npm audit endpoint unavailable; retrying.',
+        ),
+        stdout: result.stdout,
+      };
     };
-  };
 
-  it('passes a clean tree and audits every non-skipped lockfile', () => {
-    expect(runAuditStep()).toMatchObject({
-      status: 0,
-      // Root workspace audit plus packages/alpha; mobile-mcp is skipped.
-      audits: 2,
-      installs: 1,
+    it('passes a clean tree and audits every non-skipped lockfile', () => {
+      expect(runAuditStep()).toMatchObject({
+        status: 0,
+        // Root workspace audit plus packages/alpha; mobile-mcp is skipped.
+        audits: 2,
+        installs: 1,
+        retried: false,
+      });
     });
-  });
 
-  it('retries an endpoint error and still passes once the registry answers', () => {
-    const result = runAuditStep({ endpointFailures: 1 });
-    expect(result).toMatchObject({ status: 0, audits: 3, installs: 1 });
-    expect(result.stdout).toContain(
-      '::notice::npm audit endpoint unavailable; retrying.',
-    );
-    // The report from the successful attempt still reaches the log.
-    expect(result.stdout).toContain('found 0 vulnerabilities');
-  });
-
-  it('fails a high-severity finding on the first attempt, without retrying', () => {
-    expect(runAuditStep({ finding: true })).toMatchObject({
-      status: 1,
-      // One attempt per audit site: a finding is not a transport error, so
-      // retrying it would only delay the same red.
-      audits: 2,
-      installs: 1,
+    it('retries an attempt that cost what the incident measured', () => {
+      // 422s is the slowest failing attempt observed on 2026-09-03, against a
+      // 600s budget. This is the pin that keeps the budget above one real
+      // attempt: at 300s the check reads 422 -lt 300, the loop returns having
+      // never retried, and this test goes red on the attempt count.
+      const result = runAuditStep({ endpointFailures: 1, attemptLatency: 422 });
+      expect(result).toMatchObject({
+        status: 0,
+        audits: 3,
+        installs: 1,
+        retried: true,
+      });
+      // The report from the successful attempt still reaches the log.
+      expect(result.stdout).toContain('found 0 vulnerabilities');
     });
-  });
 
-  it('stops retrying once the shared deadline has passed', () => {
-    // One backoff spends the whole 300 s budget, so the root audit gets one
-    // retry and the vendored one none: the deadline is shared by every audit
-    // in the step, which is what keeps a dead endpoint inside the job timeout.
-    expect(
-      runAuditStep({ endpointFailures: 99, sleepSeconds: 301 }),
-    ).toMatchObject({ status: 1, audits: 3, installs: 1 });
-  });
-});
+    it('fails a high-severity finding on the first attempt, without retrying', () => {
+      expect(runAuditStep({ finding: true })).toMatchObject({
+        status: 1,
+        // One attempt per audit site: a finding is not a transport error, so
+        // retrying it would only delay the same red.
+        audits: 2,
+        installs: 1,
+        retried: false,
+      });
+    });
+
+    it('spends the shared budget once and does not top it up per audit', () => {
+      // At the incident's 302s an attempt, the root audit gets one retry and
+      // the second attempt lands past 600s; the vendored audit then inherits an
+      // already-expired budget and gets none. That is what keeps a dead
+      // endpoint inside the job timeout instead of multiplying by audit site.
+      expect(runAuditStep({ endpointFailures: 99 })).toMatchObject({
+        status: 1,
+        audits: 3,
+        installs: 1,
+        retried: true,
+      });
+    });
+
+    it('does not retry an attempt that outlasted the budget', () => {
+      // The shape the 300s budget produced in production: one attempt costs
+      // more than the whole budget, so there is nothing left to retry with.
+      // The step must still fail loudly rather than loop or pass.
+      expect(
+        runAuditStep({ endpointFailures: 99, attemptLatency: 700 }),
+      ).toMatchObject({ status: 1, audits: 2, installs: 1, retried: false });
+    });
+  },
+);

@@ -27,10 +27,11 @@ jobs:
   dependency-cve:
     name: 'Dependency CVE audit'
     runs-on: 'ubuntu-latest'
-    # A dead audit endpoint makes each of this job's three audits burn its own
-    # minutes in npm's backoff before erroring, so the retry budget below needs
-    # headroom above the ~1 minute a healthy run takes.
-    timeout-minutes: 25
+    # Sized for the case where --fetch-retries=0 below does not take effect and
+    # every audit still burns npm's backoff: the root audit gets two ~7-minute
+    # attempts inside the retry budget, then each vendored audit one more —
+    # ~30 minutes with the install. A healthy run is ~1 minute.
+    timeout-minutes: 35
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -61,11 +62,22 @@ jobs:
           # patrol could absorb them (five candidates a cycle, and only once a
           # failure is 30 minutes stale). Retry just that transport error, under
           # one deadline shared by every audit in this step.
-          audit_deadline=$(( $(date +%s) + 300 ))
+          #
+          # --fetch-retries=0 is what makes the budget affordable. The root
+          # audit answered in ~2s when the endpoint was healthy and took 302s
+          # when it 500'd — same 2128-package payload, so the minutes are npm's
+          # own 5xx backoff, not the request; a 400 from the same endpoint
+          # failed in 2.3s, which is npm not retrying a 4xx. This loop replaces
+          # that backoff with one policy that spaces attempts 30s apart.
+          #
+          # The budget still has to outlast one attempt measured WITHOUT that
+          # flag (422s worst observed) or the loop returns before ever
+          # retrying, which is what a 300s budget did.
+          audit_deadline=$(( $(date +%s) + 600 ))
           audit() {
             local out
             while :; do
-              if out="$(npm audit --omit=dev --audit-level=high "$@" 2>&1)"; then
+              if out="$(npm audit --omit=dev --audit-level=high --fetch-retries=0 "$@" 2>&1)"; then
                 printf '%s\n' "${out}"
                 return 0
               fi
