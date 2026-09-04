@@ -99,9 +99,11 @@ describe('unhandled-error exemption on the platform lanes', () => {
 // one at a time; the other fifteen were still on vitest's 5s default, so a
 // contended host — not a defect — was enough to fail them. Three tests had
 // already been hand-patched past 5s individually (auto-recall 12s,
-// provider-extension-local 20s/30s, ChannelBase 8s), which is the shape this
-// pin replaces. It sweeps the whole map so a new workspace cannot quietly join
-// the lane on the 5s default.
+// provider-extension-local 20s/30s, ChannelBase 8s). Those patches stay: a
+// per-test timeout outranks the config-level field and stays load-bearing off
+// the pool, where the ternary deliberately yields `undefined` (vitest's 5s
+// default), so this pin guards the config-level ceiling only. It sweeps the
+// whole map so a new workspace cannot quietly join the lane on the 5s default.
 const configModules: Record<
   string,
   () => Promise<{ default: ExemptionConfig }>
@@ -219,6 +221,49 @@ describe('shared-pool test timeout', () => {
     // lower off-pool value (15s), node-repl/sdk-typescript/scripts/tests
     // carry flat ceilings, and qwen-live's ceiling is unconditional.
     vi.stubEnv('RUNNER_NAME', 'ubuntu-latest-runner');
+    vi.resetModules();
+    try {
+      for (const name of [
+        'integrations/external-context',
+        'integrations/external-context-mem0',
+        'packages/acp-bridge',
+        'packages/audio-capture',
+        'packages/channels/base',
+        'packages/channels/dingtalk',
+        'packages/channels/dws',
+        'packages/channels/feishu',
+        'packages/channels/github',
+        'packages/channels/gitlab',
+        'packages/channels/qqbot',
+        'packages/channels/telegram',
+        'packages/channels/wecom',
+        'packages/channels/weixin',
+        'packages/chrome-extension',
+        'packages/web-shell',
+      ]) {
+        const mod = await configModules[name]!();
+        expect(mod.default.test?.testTimeout, name).toBeUndefined();
+      }
+      // webui's vitest configuration is the function-form vite.config.ts.
+      const webui = await import('../../packages/webui/vite.config.js');
+      const config = await webui.default({ command: 'serve', mode: 'test' });
+      expect(config.test?.testTimeout, 'packages/webui').toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('leaves the default alone when RUNNER_NAME is unset', async () => {
+    // Developer machines run with RUNNER_NAME unset, and no CI lane produces
+    // that state naturally (GitHub Actions sets it; lanes like
+    // qwen-autofix.yml pass `${{ runner.name }}` explicitly), so this arm
+    // creates it. In vitest 3.2.7 stubbing `undefined` deletes the variable
+    // even when the ambient environment sets it, and unstubAllEnvs below
+    // restores the ambient value. A ternary refactored to treat a missing
+    // variable as pool (`?? true`, or `=== undefined || startsWith(...)`)
+    // passes the on-pool floor and the foreign-string off-pool sample above;
+    // it must fail here, on the state the configs actually see off CI.
+    vi.stubEnv('RUNNER_NAME', undefined);
     vi.resetModules();
     try {
       for (const name of [
