@@ -98,9 +98,13 @@ export const ContextMenuProvider: React.FC<{
   }, []);
 
   const executeIndex = useCallback((index: number) => {
-    const item = menuRef.current?.items[index];
+    // Same synchronous guard as closeMenu: KeypressContext broadcasts a whole
+    // stdin chunk in one tick with no render between, so a double Enter must
+    // not run the item twice. Null the mirror before the async setMenu.
+    const current = menuRef.current;
+    menuRef.current = null;
     setMenu(null);
-    if (item) item.onSelect();
+    current?.items[index]?.onSelect();
   }, []);
 
   const value = useMemo(

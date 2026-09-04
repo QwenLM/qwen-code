@@ -156,6 +156,26 @@ describe('ContextMenuProvider', () => {
     expect(menu.menu).toBeNull();
   });
 
+  it('a double executeIndex in the same tick runs the item once', () => {
+    const menu = mountProbe();
+    const onSelect = vi.fn();
+    act(() =>
+      menu.openMenu([{ id: 'a', label: 'Open Link', onSelect }], {
+        x: 0,
+        y: 0,
+      }),
+    );
+    // Two Enters dispatched with no render between (one stdin chunk): the
+    // second must not re-run onSelect — executeIndex nulls the mirror
+    // synchronously, same guard as closeMenu.
+    act(() => {
+      menu.executeIndex(0);
+      menu.executeIndex(0);
+    });
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(menu.menu).toBeNull();
+  });
+
   it('notifies onMenuChange when the menu opens and closes', () => {
     const onMenuChange = vi.fn();
     let latest: ContextMenuContextValue | undefined;
