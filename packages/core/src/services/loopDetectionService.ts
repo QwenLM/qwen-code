@@ -20,6 +20,7 @@ import {
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 import { ORPHAN_TOOL_USE_REPAIR_REASON } from '../core/llm-chat.js';
+import { CANCELLED_TOOL_ERROR_PREFIX } from '../core/coreToolScheduler.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
 import {
   FULL_OUTPUT_DIGEST_LABEL,
@@ -57,10 +58,9 @@ const TOOL_CALL_LOOP_THRESHOLD = 5;
 // dead end to surface to the user instead of burning tokens on.
 const REPEATED_TOOL_ERROR_THRESHOLD = 3;
 
-// Producer prefix of user-cancellation error payloads
-// (coreToolScheduler.ts createCancelledResponse / the scheduler's
-// auxiliary-cancel path): `[Operation Cancelled] Reason: <reason>`.
-const CANCELLED_TOOL_ERROR_PREFIX = '[Operation Cancelled] Reason:';
+// Producer prefix of user-cancellation error payloads: the producer-owned
+// constant CANCELLED_TOOL_ERROR_PREFIX (coreToolScheduler.ts) anchors the
+// `[Operation Cancelled] Reason: <reason>` shape.
 
 // Producer shape of MCP tool errors (mcp-tool.ts buildMcpToolError):
 // `MCP tool '<name>' reported tool error for function call:
