@@ -90,6 +90,16 @@ ACP 子进程
 
 frame 与 secure-context 检测逻辑可直接搬 `.qwen/scripts/fsa-probe/probe.html` 的「环境」段（`isTopLevel` / `parentOriginRelation` / `isSecureContext` / `typeof showDirectoryPicker`）。
 
+### 4.1 Desktop Shell 宿主（Tauri 2）
+
+Desktop Shell 没有第二套 UI：它拉起本机 daemon（钳制 `127.0.0.1`、`--require-auth`）后把同一窗口导航到 daemon 自带 Web Shell（`http://127.0.0.1:<port>/`），因此共用同一份 React 树，footer 入口默认会出现。由此得出三点：
+
+1. 桌面场景 daemon 恒在本机，常规工具本就够得着本地磁盘，桥在这里没有增量价值；
+2. macOS / Linux 的 WebKit webview 没有 `showDirectoryPicker`，入口只能降级成死入口，且"改用 Chrome/Edge"的文案在桌面应用里不可执行；Windows WebView2 理论上能跑通，但 app 托管的回环源下原生目录选择框与权限提示是否可用，本仓库无测试或文档佐证；
+3. 故 `isDesktopShell()`（既有 `window.__TAURI__` 探针）为真时，从 footer **默认**列表排除 `localFiles`；显式 `footer.items` 配置仍可开启，保留逃逸口。
+
+不用 `isLocalDaemon()` 当闸门：SSH 隧道到 localhost 的远端 daemon 同样呈现为回环，而那正是桥最该存在的场景。
+
 ## 5. 会话归属与授权（安全）
 
 1. **必须 session-scoped。** workspace 级注册会让同 workspace 下**所有**会话——包括渠道消息（DingTalk 等）驱动的会话、后台 agent、别人的 tab——都能读写用户本地磁盘（事实 11）。会话级注册由 `client-mcp-sender-registry.ts:165-183` 硬拒绝跨会话调用（事实 10）。
