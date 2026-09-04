@@ -23812,12 +23812,12 @@ describe('Session', () => {
             .mocked(mockChat.addHistory)
             .mock.calls.map(([message]) => message)
             .find((message) =>
-              (message as core.Content)?.parts?.some(
+              (message as Content)?.parts?.some(
                 (part) =>
                   (part as { functionResponse?: { id?: string } })
                     .functionResponse?.id === 'call-update',
               ),
-            ) as core.Content;
+            ) as Content;
           expect(preserved).toBeDefined();
           expect(
             preserved.parts?.map(
