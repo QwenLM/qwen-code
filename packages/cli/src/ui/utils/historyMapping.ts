@@ -202,7 +202,10 @@ export function computeApiTruncationIndex(
   // the target, an identity that reaches no entry, one that reaches
   // several, or one flagged file-key-only by `/restore` — falls through to
   // the positional walk below, which is the behavior that shipped before
-  // identities existed.
+  // identities existed. The lookup is bounded by `startIndex`: compression
+  // records restore identity marks onto entries inside the compressed
+  // prefix, and resolving one of those absorbed marks would truncate at the
+  // prefix and silently drop every real turn.
   const target = uiHistory[targetIndex]!;
   if (
     isRealUserTurn(target) &&
@@ -212,6 +215,7 @@ export function computeApiTruncationIndex(
     const identifiedIndex = findApiHistoryPromptIndex(
       apiHistory,
       target.promptId,
+      startIndex,
     );
     if (identifiedIndex !== -1) return identifiedIndex;
   }

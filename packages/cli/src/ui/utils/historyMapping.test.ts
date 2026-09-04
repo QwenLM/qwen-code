@@ -425,6 +425,53 @@ describe('computeApiTruncationIndex', () => {
       // where the positional walk cannot reach post-compression).
       expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
     });
+
+    it('fails loud when the only identity match sits inside the compressed prefix', () => {
+      // recordChatCompression persists promptIds for absorbed turns, so on
+      // resume the compressed prefix entries themselves carry identity marks.
+      // If the target turn's own API entry is unmarked while an entry INSIDE
+      // the prefix shares its id, the identity lookup must not resolve below
+      // the prefix: truncating at the prefix entry would silently drop the
+      // summary and every real turn where the positional walk refuses (-1).
+      const target = userItem(3, 'pre 2') as HistoryItem & {
+        promptId: string;
+      };
+      target.promptId = 'session########1';
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre 1'),
+        llmItem(2),
+        target,
+        llmItem(4),
+      ];
+      const prefixSummary = userContent(
+        '<state_snapshot>summary\n\nResume the prior task...',
+      );
+      markApiHistoryPrompt(prefixSummary, 'session########1');
+      const api: Content[] = [
+        startupEntry(),
+        prefixSummary,
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('pre 2'),
+        modelContent('response 2'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+
+      // The bound must not over-refuse: when the target's own post-prefix
+      // entry carries the shared id, it resolves exactly even though the
+      // prefix also carries a mark with that id.
+      const markedSurvivor = userContent('pre 2');
+      markApiHistoryPrompt(markedSurvivor, 'session########1');
+      expect(
+        computeApiTruncationIndex(ui, 3, [
+          startupEntry(),
+          prefixSummary,
+          modelContent('Got it. Thanks for the additional context!'),
+          markedSurvivor,
+          modelContent('response 2'),
+        ]),
+      ).toBe(3);
+    });
   });
 
   describe('with fast (non-summarizing) compression markers', () => {

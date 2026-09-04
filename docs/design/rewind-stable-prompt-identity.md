@@ -30,10 +30,10 @@ Identity is an accelerator, never a new failure mode. `promptId` is minted as
 an invariant this design may rely on. The mapping therefore falls back to the
 pre-existing positional walk whenever identity does not resolve:
 
-- the target UI turn carries no `promptId` (legacy sessions, restored
-  checkpoints, retries);
+- the target UI turn carries no `promptId` (legacy sessions, retries);
 - its `promptId` matches no API entry;
-- its `promptId` matches more than one API entry.
+- its `promptId` matches more than one API entry;
+- its `promptId` is flagged `promptIdFileKeyOnly` by `/restore` (see below).
 
 The consequence is that this change can only make rewind more accurate than it
 was, never less: where an identity resolves uniquely it replaces a guess with a
@@ -42,8 +42,11 @@ In particular it never introduces a refusal on a session that previously
 rewound, which is what a fail-closed-on-ambiguity rule would do.
 
 `/restore` loads a JSON checkpoint, so its `clientHistory` cannot carry Symbol
-marks. The restore path drops `promptId` from the restored UI items to keep
-both sides of that history consistently unidentified.
+marks. The restore path keeps `promptId` on the restored UI items — file
+restore and the rewind selector's turn-diff previews key on them — but flags
+each with `promptIdFileKeyOnly` so the rewind mapping never resolves those
+ids against model history (a later prompt can re-mint one) and maps the
+restored turns positionally instead.
 
 ## Scope
 
