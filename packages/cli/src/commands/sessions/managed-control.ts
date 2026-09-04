@@ -90,6 +90,12 @@ interface PeekResponse {
   rosterEntry?: AgentViewRosterEntry;
   launch?: AgentViewLaunchFile;
   live?: boolean;
+  /**
+   * The supervisor's own verdict that `answer` would be accepted right
+   * now — its refusal model, not the waiting state alone. Absent in
+   * replies from supervisors that predate the field.
+   */
+  answerable?: boolean;
 }
 
 function isPeekResponse(value: unknown): value is PeekResponse {
@@ -166,9 +172,17 @@ export async function peekManagedSession(
     lines.push(`Last:      ${lastResult}`);
   }
 
-  // Only offered when it would do something: the supervisor refuses an
-  // answer to a session that is not waiting for input.
-  if (presentation.taskState === 'waiting') {
+  // Only offered when it would do something. The supervisor reports the
+  // verdict — its refusal model knows about a pending previous answer,
+  // a live attach elsewhere and a missing process; re-deriving from the
+  // waiting state alone re-advertises a command guaranteed to fail. A
+  // supervisor too old to report the field falls back to the waiting
+  // state.
+  const answerable =
+    typeof response.answerable === 'boolean'
+      ? response.answerable
+      : presentation.taskState === 'waiting';
+  if (answerable) {
     lines.push(
       '',
       `Answer it with: qwen sessions answer ${shortSessionId(response.state.sessionId)} "<your answer>"`,

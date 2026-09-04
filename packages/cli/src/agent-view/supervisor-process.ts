@@ -1132,8 +1132,39 @@ class AgentViewSupervisorProcessHandler
         await readAgentViewWorker(sessionId, store),
       ),
       live: this.workers.has(sessionId),
+      answerable: this.isSessionAnswerable(sessionId, state, activity),
     };
   }
+
+  /**
+   * The refusal model of `queueAnswerForSessionLocked`, read without
+   * its side effects (no stale-attach detach, no reconnect): peek
+   * offers `qwen sessions answer` only when following the hint would
+   * not be refused. Re-deriving this from the waiting state alone
+   * re-advertises a command that is guaranteed to fail while a
+   * previous answer is pending, a live attach is open, or no process
+   * can take a blocking wait.
+   */
+  private isSessionAnswerable(
+    sessionId: string,
+    state: AgentViewSessionStateFile,
+    activity: AgentViewActivityFile | undefined,
+  ): boolean {
+    if (state.sessionState !== 'needs_input') return false;
+    // A live attach refuses the answer; a stale attach flag is detached
+    // by the answer path itself, so it does not block.
+    if (this.hasLiveAttach(sessionId)) return false;
+    // The previous answer has not been picked up yet.
+    if (this.hasPendingWorkerInputControl(sessionId)) return false;
+    // Soft questions queue through the prompt path, which can reconnect
+    // or respawn a worker to deliver; a blocking wait needs a live
+    // process right now.
+    if (getAgentViewActivityInputState(activity) === 'soft_question') {
+      return true;
+    }
+    return this.workers.has(sessionId);
+  }
+
   async send(params?: Record<string, unknown>) {
     const sessionId = await resolveManagedSessionId(
       requireSessionId(params),

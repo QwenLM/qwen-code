@@ -93,6 +93,68 @@ describe('peekManagedSession', () => {
     expect(result.lines.join('\n')).not.toContain('qwen sessions answer');
   });
 
+  it('offers the hint when the supervisor says the session is answerable', async () => {
+    const open = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state(),
+        answerable: true,
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(open));
+    expect(result.lines.join('\n')).toContain('qwen sessions answer');
+  });
+
+  it('withholds the hint while the previous answer is still pending', async () => {
+    // Right after a delivered answer the supervisor refuses the next one
+    // with "is waiting for the previous response" — yet the session is
+    // still waiting for input. The hint must follow the supervisor's
+    // verdict, not the waiting state alone.
+    const pending = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state(),
+        answerable: false,
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(pending));
+    expect(result.lines.join('\n')).not.toContain('qwen sessions answer');
+  });
+
+  it('withholds the hint while a live attach is open elsewhere', async () => {
+    // An attached session refuses the answer with "is currently attached
+    // elsewhere", whatever the waiting state says.
+    const attached = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ attachState: 'attached' }),
+        answerable: false,
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(attached));
+    expect(result.lines.join('\n')).not.toContain('qwen sessions answer');
+  });
+
+  it('withholds the hint when no live process can take the answer', async () => {
+    // A blocking wait with no live process is refused with "is not
+    // running"; the state line still says so.
+    const dead = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state(),
+        answerable: false,
+        live: false,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(dead));
+    const text = result.lines.join('\n');
+    expect(text).not.toContain('qwen sessions answer');
+    expect(text).toContain('no live process');
+  });
+
   it('says when the session has no live process', async () => {
     const dead = handle({
       peek: vi.fn().mockResolvedValue({
