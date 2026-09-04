@@ -9,13 +9,13 @@
  * session needs before `qwen sessions ps` reporting "needs input" means
  * anything.
  *
- * The argv shape is the only thing here; the decisions live in
- * `managed-control.ts`, which is why this file has no branches worth
- * testing on its own.
+ * The argv shape is most of what is here; the decisions live in
+ * `managed-control.ts`. The one thing this file decides on its own is
+ * which stream a result goes to.
  */
 
 import type { Argv, CommandModule } from 'yargs';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   answerManagedSession,
   peekManagedSession,
@@ -46,8 +46,16 @@ const connectSupervisor: ConnectSupervisor = async () => {
   return connectExistingAgentViewSupervisor();
 };
 
+/**
+ * Print a result, and set the exit code if it failed.
+ *
+ * Failure lines go to stderr, the way `list`, `ps` and `--bg` report
+ * errors; success lines stay on stdout, so redirecting the command's
+ * output never captures an error message alongside the result.
+ */
 function report(result: ManagedControlResult): void {
-  for (const line of result.lines) writeStdoutLine(line);
+  const write = result.exitCode !== 0 ? writeStderrLine : writeStdoutLine;
+  for (const line of result.lines) write(line);
   if (result.exitCode !== 0) process.exitCode = result.exitCode;
 }
 

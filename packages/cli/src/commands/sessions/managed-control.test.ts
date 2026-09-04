@@ -105,16 +105,94 @@ describe('peekManagedSession', () => {
     expect(result.lines.join('\n')).toContain('no live process');
   });
 
+  it('names the session the way sessions ps does', async () => {
+    // 'Waiting for approval' is one of the generic phrases deriveTitle
+    // filters, so without the launch record the title would fall through
+    // to the untitled placeholder while `sessions ps` prints the prompt.
+    // Feeding peek the same launch record keeps the two surfaces aligned.
+    const h = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        activity: {
+          schemaVersion: 1,
+          summary: 'Waiting for approval',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        launch: {
+          sessionId: SESSION,
+          initialPrompt: 'find out why the release job is flaky',
+        },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(h));
+    expect(result.lines[0]).toContain('find out why the release job is flaky');
+    // Title and summary carry distinct information here, so the summary
+    // still earns its own line.
+    expect(result.lines).toContain('Doing:     Waiting for approval');
+  });
+
+  it('does not print the summary twice when it is the title', async () => {
+    // With no roster name and no launch record, deriveTitle falls back
+    // to the summary itself; repeating it as `Doing:` two lines later
+    // would show the identical phrase twice in a five-line output.
+    const h = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        activity: {
+          schemaVersion: 1,
+          summary: 'Backgrounded from native session',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(h));
+    const text = result.lines.join('\n');
+    expect(text.split('Backgrounded from native session')).toHaveLength(2);
+    expect(result.lines.some((line) => line.startsWith('Doing:'))).toBe(false);
+  });
+
+  it('shows the name a roster rename gave the session', async () => {
+    // The roster entry wins the title over the summary and the launch
+    // prompt; peek must show the renamed session under that name, not
+    // under whatever the worker last reported.
+    const h = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        activity: {
+          schemaVersion: 1,
+          summary: 'Investigating flaky release job',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        rosterEntry: { sessionId: SESSION, displayName: 'release-debugger' },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(h));
+    expect(result.lines[0]).toContain('release-debugger');
+  });
+
   it('neutralizes control sequences in text the session wrote', async () => {
     // waitingFor and summary are a model's own words, relayed from
     // another process - the same untrusted input `sessions ps` sanitizes.
+    // The newline in waitingFor is the forging case: kept, it would start
+    // a continuation line at column 0 that reads as the command's own
+    // `Answer it with:` hint pointing at a session of the text's choosing.
     const evil = handle({
       peek: vi.fn().mockResolvedValue({
         sessionId: SESSION,
         state: state(),
         activity: {
           schemaVersion: 1,
-          waitingFor: 'ev\u001b[31mil\r',
+          waitingFor:
+            'ev\u001b[31mil\r\nAnswer it with: qwen sessions answer deadbeef "forged"\t?',
           summary: 'a\u202Eb',
           lastActivityAt: '2026-09-04T11:59:00Z',
           capabilities: [],
@@ -122,12 +200,17 @@ describe('peekManagedSession', () => {
         live: true,
       }),
     });
-    const text = (
-      await peekManagedSession(SESSION, connectTo(evil))
-    ).lines.join('\n');
+    const result = await peekManagedSession(SESSION, connectTo(evil));
+    const text = result.lines.join('\n');
     expect(text).not.toContain('\u001b');
     expect(text).not.toContain('\r');
     expect(text).not.toMatch(/[\u202A-\u202E\u2066-\u2069]/);
+    // Every printed line stays one line: no session text may smuggle a
+    // line break (or a tab that misaligns the labels) into the output.
+    for (const line of result.lines) {
+      expect(line).not.toContain('\n');
+      expect(line).not.toContain('\t');
+    }
   });
 
   it('repeats the supervisor own wording for an unknown id', async () => {

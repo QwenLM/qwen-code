@@ -28,6 +28,8 @@ import {
 import { deriveAgentViewPresentation } from '../../agent-view/presentation.js';
 import type {
   AgentViewActivityFile,
+  AgentViewLaunchFile,
+  AgentViewRosterEntry,
   AgentViewSessionStateFile,
 } from '../../agent-view/protocol.js';
 
@@ -65,16 +67,28 @@ const NO_SUPERVISOR: ManagedControlResult = {
  * words, or a path it chose — so it carries the same risk as a registry
  * record: escape sequences that repaint the screen, and bidi overrides
  * that reorder what is read. `sessions ps` sanitizes for the same reason.
+ *
+ * `sanitizeTerminalText` deliberately preserves TAB and LF for multi-line
+ * render sites, but everything this file prints is one labelled line: a
+ * kept LF would let session text start a forged continuation at column 0
+ * — a fake `Answer it with:` hint, for instance. The one-line renderer
+ * `ps.ts` drops those two on top of the shared helper for exactly this
+ * reason, so this does the same.
  */
 function clean(value: string | undefined, limit = 500): string {
   if (!value) return '';
-  return truncateToWidth(sanitizeTerminalText(value).replace(/\r/g, ''), limit);
+  return truncateToWidth(
+    sanitizeTerminalText(value).replace(/[\t\n]/g, ''),
+    limit,
+  );
 }
 
 interface PeekResponse {
   sessionId: string;
   state: AgentViewSessionStateFile;
   activity?: AgentViewActivityFile;
+  rosterEntry?: AgentViewRosterEntry;
+  launch?: AgentViewLaunchFile;
   live?: boolean;
 }
 
@@ -92,9 +106,10 @@ export function shortSessionId(sessionId: string): string {
 /**
  * Report what a background session is doing, and what it is waiting for.
  *
- * The state line comes from `deriveAgentViewPresentation`, the same
- * source as the roster and `sessions ps`, so three surfaces cannot
- * describe one session three ways.
+ * The title and the state line come from `deriveAgentViewPresentation`,
+ * fed the same roster entry, launch record and activity the roster and
+ * `sessions ps` use, so three surfaces cannot describe one session
+ * three ways.
  */
 export async function peekManagedSession(
   sessionId: string,
@@ -118,10 +133,13 @@ export async function peekManagedSession(
 
   const presentation = deriveAgentViewPresentation({
     state: response.state,
+    rosterEntry: response.rosterEntry,
+    launch: response.launch,
     activity: response.activity,
   });
+  const title = clean(presentation.title, 200);
   const lines = [
-    `${clean(presentation.title, 200)}  [${shortSessionId(response.state.sessionId)}]`,
+    `${title}  [${shortSessionId(response.state.sessionId)}]`,
     `State:     ${presentation.taskState}${response.live === false ? ' (no live process)' : ''}`,
     `Directory: ${clean(response.state.activeCwd, 200)}`,
   ];
@@ -131,7 +149,10 @@ export async function peekManagedSession(
     lines.push(`Waiting:   ${waitingFor}`);
   }
   const summary = clean(response.activity?.summary, 300);
-  if (summary) {
+  // deriveTitle falls back to this same summary when neither a roster
+  // name nor a launch prompt is available, so printing it again as
+  // `Doing:` would repeat one phrase twice in five lines.
+  if (summary && summary !== title) {
     lines.push(`Doing:     ${summary}`);
   }
   const lastResult = clean(response.activity?.lastResult, 300);
