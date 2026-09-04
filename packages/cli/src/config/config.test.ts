@@ -1521,6 +1521,20 @@ describe('loadCliConfig', () => {
       resetOutputStyleWarningsForTesting();
     });
 
+    // A `mockReturnValue` verdict is the same for every folder, so it cannot
+    // show which workspace the call site asks about. This one answers from the
+    // path argument the way the real `isWorkspaceTrusted` does — a call about
+    // some other folder comes back trusted, and the assertion that depends on
+    // the revocation goes red.
+    const distrustWorkspace = (untrusted: string) => {
+      vi.mocked(isWorkspaceTrusted).mockImplementation(
+        (_settings, _trustConfig, workspacePath) => ({
+          isTrusted: (workspacePath ?? process.cwd()) !== untrusted,
+          source: 'file',
+        }),
+      );
+    };
+
     it('leaves the style unset by default', async () => {
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
@@ -1574,15 +1588,26 @@ describe('loadCliConfig', () => {
     });
 
     it('does not read project styles from an untrusted workspace', async () => {
-      vi.mocked(isWorkspaceTrusted).mockReturnValue({
-        isTrusted: false,
-        source: 'file',
-      });
+      const workspace = process.cwd();
+      distrustWorkspace(workspace);
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
-      await loadCliConfig({}, argv, '/repo');
+      await loadCliConfig({}, argv, workspace);
       expect(ServerConfig.loadOutputStyleCatalog).toHaveBeenCalledWith({
         projectRoot: undefined,
+      });
+    });
+
+    // The positive control for the mock above: revoking trust for a folder
+    // that is not this workspace must leave this workspace's styles alone.
+    it('reads project styles when another folder is the untrusted one', async () => {
+      const workspace = process.cwd();
+      distrustWorkspace('/some/other/repo');
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv, workspace);
+      expect(ServerConfig.loadOutputStyleCatalog).toHaveBeenCalledWith({
+        projectRoot: workspace,
       });
     });
 
@@ -1651,6 +1676,37 @@ describe('loadCliConfig', () => {
       );
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining('Concise, Proactive, Explanatory, Learning'),
+      );
+    });
+
+    // The list has to name what this session can actually select. Built-ins
+    // alone read as a complete catalog and send the user looking for a style
+    // the warning never mentions.
+    it('names the loaded custom styles in the unknown-style warning', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const custom: ServerConfig.OutputStyleDefinition = {
+        name: 'Reviewer',
+        source: 'user',
+        description: 'Reviews without editing',
+        keepCodingInstructions: false,
+        prompt: 'Review only.',
+      };
+      vi.mocked(ServerConfig.loadOutputStyleCatalog).mockResolvedValue([
+        ...ServerConfig.BUILT_IN_OUTPUT_STYLES,
+        custom,
+      ]);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { general: { outputStyle: 'Verbose' } },
+        argv,
+        '/repo',
+      );
+      expect(config.getOutputStyle()).toBeUndefined();
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Available styles: Concise, Proactive, Explanatory, Learning, Reviewer.',
+        ),
       );
     });
 
