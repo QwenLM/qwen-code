@@ -7,21 +7,12 @@ on:
     # Daily at 02:30 UTC, between the monthly Scorecard and nightly CodeQL.
     - cron: '30 2 * * *'
 
-concurrency:
-  group: '${{ github.workflow }}-${{ github.ref }}'
-  cancel-in-progress: false
-
 permissions:
   contents: 'read'
-
-defaults:
-  run:
-    shell: 'bash'
 
 jobs:
   dependency-cve:
     name: 'Dependency CVE audit'
-    if: "github.event_name == 'schedule'"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 30
     steps:
@@ -82,7 +73,7 @@ jobs:
   track-dependency-cve:
     name: 'Track dependency audit failure'
     needs: 'dependency-cve'
-    if: "${{ always() && github.event_name == 'schedule' && (needs.dependency-cve.result == 'success' || needs.dependency-cve.result == 'failure') }}"
+    if: "${{ always() && (needs.dependency-cve.result == 'success' || needs.dependency-cve.result == 'failure') }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:

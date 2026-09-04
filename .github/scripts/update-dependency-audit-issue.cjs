@@ -6,12 +6,11 @@
 
 module.exports = async ({ github, context }) => {
   const marker = '<!-- qwen-dependency-cve-audit-failure -->';
-  const result = process.env.AUDIT_RESULT;
-  const { owner, repo } = context.repo;
+  const failed = process.env.AUDIT_RESULT === 'failure';
+  const repository = context.repo;
   const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
   const issues = await github.paginate(github.rest.issues.listForRepo, {
-    owner,
-    repo,
+    ...repository,
     state: 'open',
     per_page: 100,
   });
@@ -19,20 +18,10 @@ module.exports = async ({ github, context }) => {
     (candidate) => !candidate.pull_request && candidate.body?.includes(marker),
   );
 
-  if (result === 'failure') {
-    const occurrence = `Dependency audit failed again: [run ${context.runId}](${runUrl}).`;
-    if (issue) {
-      await github.rest.issues.createComment({
-        owner,
-        repo,
-        issue_number: issue.number,
-        body: occurrence,
-      });
-      return;
-    }
+  if (!issue) {
+    if (!failed) return;
     await github.rest.issues.create({
-      owner,
-      repo,
+      ...repository,
       title: 'Daily dependency CVE audit failed',
       body: [
         marker,
@@ -48,16 +37,16 @@ module.exports = async ({ github, context }) => {
     return;
   }
 
-  if (issue) {
-    await github.rest.issues.createComment({
-      owner,
-      repo,
-      issue_number: issue.number,
-      body: `Dependency audit recovered: [run ${context.runId}](${runUrl}). Closing this incident.`,
-    });
+  await github.rest.issues.createComment({
+    ...repository,
+    issue_number: issue.number,
+    body: failed
+      ? `Dependency audit failed again: [run ${context.runId}](${runUrl}).`
+      : `Dependency audit recovered: [run ${context.runId}](${runUrl}). Closing this incident.`,
+  });
+  if (!failed) {
     await github.rest.issues.update({
-      owner,
-      repo,
+      ...repository,
       issue_number: issue.number,
       state: 'closed',
     });

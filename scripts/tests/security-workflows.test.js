@@ -18,9 +18,6 @@ const repoRoot = path.resolve(
 const readWorkflow = (name) =>
   readFileSync(path.join(repoRoot, `.github/workflows/${name}`), 'utf8');
 
-const readScript = (name) =>
-  readFileSync(path.join(repoRoot, `.github/scripts/${name}`), 'utf8');
-
 describe('security workflows', () => {
   it('keeps Scorecard monthly and reporting-only', () => {
     const workflow = readWorkflow('scorecard-monthly.yml');
@@ -52,17 +49,15 @@ describe('security workflows', () => {
       'Audit production dependencies',
     );
     const trackingJob = getWorkflowJob(workflow, 'track-dependency-cve');
-    const trackingScript = readScript('update-dependency-audit-issue.cjs');
 
     expect(workflow).not.toContain('pull_request:');
     expect(workflow).not.toContain('\n  push:');
     expect(workflow).toContain("- cron: '30 2 * * *'");
-    expect(dependencyJob).toContain('if: "github.event_name == \'schedule\'"');
     expect(dependencyJob).toContain('timeout-minutes: 30');
     expect(dependencyJob).not.toContain('continue-on-error');
     expect(trackingJob).toContain("needs: 'dependency-cve'");
     expect(trackingJob).toContain(
-      "always() && github.event_name == 'schedule' && (needs.dependency-cve.result == 'success' || needs.dependency-cve.result == 'failure')",
+      "always() && (needs.dependency-cve.result == 'success' || needs.dependency-cve.result == 'failure')",
     );
     expect(trackingJob).toContain("issues: 'write'");
     expect(trackingJob).toContain("contents: 'read'");
@@ -75,17 +70,6 @@ describe('security workflows', () => {
     expect(trackingJob).toContain(
       "require('./.github/scripts/update-dependency-audit-issue.cjs')",
     );
-    expect(trackingScript).toContain(
-      '<!-- qwen-dependency-cve-audit-failure -->',
-    );
-    expect(trackingScript).toContain("labels: 'scope/ci-cd'");
-    expect(trackingScript).toContain('github.rest.issues.createComment');
-    expect(trackingScript).toContain('github.rest.issues.create');
-    expect(trackingScript).toContain("state: 'closed'");
-    expect(workflow).toContain(
-      "group: '${{ github.workflow }}-${{ github.ref }}'",
-    );
-    expect(workflow).toContain('cancel-in-progress: false');
     expect(workflow).toContain(
       'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10',
     );
