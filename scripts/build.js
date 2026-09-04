@@ -68,6 +68,7 @@ const buildOrder = [
   'packages/channels/plugin-example',
   'packages/audio-capture',
   'packages/node-repl',
+  'packages/browser-use',
   'packages/acp-bridge',
   'packages/sdk-typescript',
   'packages/cli',
