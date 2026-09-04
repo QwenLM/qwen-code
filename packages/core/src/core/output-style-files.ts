@@ -10,11 +10,17 @@ import * as path from 'path';
 import { Storage } from '../config/storage.js';
 import { QWEN_DIR } from '../utils/paths.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
-import { normalizeContent, stripAnsiAndControl } from '../utils/textUtils.js';
+import {
+  isBinary,
+  normalizeContent,
+  stripAnsiAndControl,
+  stripHtmlComments,
+} from '../utils/textUtils.js';
 import { isWithinRoot } from '../utils/fileUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   BUILT_IN_OUTPUT_STYLES,
+  getBuiltInOutputStyle,
   type OutputStyleDefinition,
   type OutputStyleSource,
 } from './output-styles.js';
@@ -24,8 +30,13 @@ const debugLogger = createDebugLogger('OUTPUT_STYLE_FILES');
 /** Directory name, under `~/.qwen` and a project's `.qwen`, that holds style files. */
 export const OUTPUT_STYLES_DIR_NAME = 'output-styles';
 
-/** A style file larger than this is skipped: it is a prompt, not a document. */
-const MAX_OUTPUT_STYLE_FILE_BYTES = 1024 * 1024;
+/**
+ * A style file larger than this is skipped: it is a prompt, not a document.
+ * The bound matches `LOOP_TASK_FILE_MAX_BYTES`, the house bound for file text
+ * injected into the system prompt — a style file this size already costs
+ * roughly 6k tokens on every request in the session.
+ */
+const MAX_OUTPUT_STYLE_FILE_BYTES = 25_000;
 const MAX_OUTPUT_STYLE_NAME_LENGTH = 64;
 const MAX_DERIVED_DESCRIPTION_LENGTH = 120;
 
@@ -37,12 +48,50 @@ const KNOWN_FRONTMATTER_KEYS = new Set([
 ]);
 
 /**
+ * The frontmatter fence, tolerant of the variants a hand-written Markdown file
+ * carries: trailing whitespace on either fence, and an empty block.
+ */
+const FRONTMATTER_FENCE =
+  /^---[ \t]*\n([\s\S]*?)\n?---[ \t]*(?:\n|$)([\s\S]*)$/;
+
+/**
+ * Whether a fenced block is frontmatter at all, rather than a decorative `---`
+ * rule around prose. Frontmatter is a mapping of the keys this loader knows;
+ * anything else keeps its text in the prompt instead of silently losing it.
+ */
+function isFrontmatterBlock(block: string): boolean {
+  let sawKey = false;
+  for (const line of block.split('\n')) {
+    const trimmed = line.trimStart();
+    // A blank line, or a YAML comment -- which a Markdown heading also looks
+    // like, so a block of nothing else is prose rather than frontmatter.
+    if (!trimmed || trimmed.startsWith('#')) {
+      continue;
+    }
+    // An indented line continues the value of the key above it.
+    if (/^\s/.test(line)) {
+      if (!sawKey) {
+        return false;
+      }
+      continue;
+    }
+    const key = /^([A-Za-z0-9_-]+):(?:\s|$)/.exec(line)?.[1];
+    if (!key || !KNOWN_FRONTMATTER_KEYS.has(key)) {
+      return false;
+    }
+    sawKey = true;
+  }
+  return sawKey || !block.trim();
+}
+
+/**
  * Parses one `*.md` style file.
  *
  * The file is the style's prompt with an optional YAML frontmatter:
  * `name` (defaults to the file name), `description` (defaults to the first
- * line of the body) and `keep-coding-instructions` (defaults to `false`, so
- * a custom style is assumed not to be about coding unless it says so).
+ * line of the body) and `keep-coding-instructions` (defaults to what the
+ * built-in style of the same name declares, and to `false` otherwise, so a
+ * custom style is assumed not to be about coding unless it says so).
  *
  * Throws on a file that cannot be a style: an empty body, or a name that is
  * empty, too long, reserved (`default`) or carries control characters.
@@ -53,15 +102,20 @@ export function parseOutputStyleFile(
   source: Exclude<OutputStyleSource, 'built-in'>,
 ): OutputStyleDefinition {
   const normalized = normalizeContent(content);
-  const match = normalized.match(/^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/);
+  const fence = FRONTMATTER_FENCE.exec(normalized);
+  const match = fence && isFrontmatterBlock(fence[1]) ? fence : null;
   const frontmatter: Record<string, unknown> = match ? parseYaml(match[1]) : {};
-  const body = (match ? match[2] : normalized).trim();
+  // HTML comments are a note to the reader, not an instruction to the model,
+  // and the sibling `.qwen/rules/` loader already drops them from the same
+  // sink. Stripping where the body is cut covers the prompt, the derived
+  // description and the empty-body rejection at once.
+  const body = stripHtmlComments(match ? match[2] : normalized).trim();
 
-  const fallbackName = path.basename(filePath).replace(/\.md$/i, '');
+  const fallbackName = path.basename(filePath).replace(/\.md$/i, '').trim();
   const name = validateOutputStyleName(
-    frontmatter['name'] == null
-      ? fallbackName
-      : String(frontmatter['name']).trim(),
+    typeof frontmatter['name'] === 'string'
+      ? frontmatter['name'].trim()
+      : fallbackName,
   );
 
   if (!body) {
@@ -83,8 +137,11 @@ export function parseOutputStyleFile(
     sanitizeDescription(deriveDescription(body)) ||
     `Custom ${name} output style`;
 
-  const keepRaw = frontmatter['keep-coding-instructions'];
-  const keepCodingInstructions = keepRaw === true || keepRaw === 'true';
+  const keepCodingInstructions = resolveKeepCodingInstructions(
+    frontmatter,
+    name,
+    filePath,
+  );
 
   const unknownKeys = Object.keys(frontmatter).filter(
     (key) => !KNOWN_FRONTMATTER_KEYS.has(key),
@@ -96,6 +153,37 @@ export function parseOutputStyleFile(
   }
 
   return { name, source, description, keepCodingInstructions, prompt: body };
+}
+
+/**
+ * Whether the style keeps the software-engineering section of the base prompt.
+ *
+ * A file that declares nothing inherits the built-in style it shadows, so
+ * rewriting `concise.md` changes the wording without silently deleting the
+ * verification and faithful-reporting guidance; a file with no built-in
+ * counterpart is assumed not to be about coding. A declared value is read in
+ * the parser's own terms -- the YAML fallback parser yields strings, so
+ * `True` arrives as `'True'` -- and anything else is reported and kept `false`.
+ */
+function resolveKeepCodingInstructions(
+  frontmatter: Record<string, unknown>,
+  name: string,
+  filePath: string,
+): boolean {
+  if (!('keep-coding-instructions' in frontmatter)) {
+    return getBuiltInOutputStyle(name)?.keepCodingInstructions ?? false;
+  }
+  const raw = frontmatter['keep-coding-instructions'];
+  const spelling = typeof raw === 'string' ? raw.trim().toLowerCase() : raw;
+  if (spelling === true || spelling === 'true') {
+    return true;
+  }
+  if (spelling !== false && spelling !== 'false') {
+    debugLogger.warn(
+      `Output style ${filePath}: keep-coding-instructions value ${JSON.stringify(raw)} is not true or false; treating it as false`,
+    );
+  }
+  return false;
 }
 
 /**
@@ -182,7 +270,7 @@ async function resolveStyleFileToRead(
   filePath: string,
   source: Exclude<OutputStyleSource, 'built-in'>,
   confineTo: string,
-): Promise<{ readPath: string; size: number } | null> {
+): Promise<string | null> {
   // `lstat` is the guard for a project file: it does not follow the final
   // component, so a symlink is not a regular file and never reaches the read.
   // The explicit branch below changes no outcome -- it exists so a refused
@@ -208,7 +296,37 @@ async function resolveStyleFileToRead(
     );
     return null;
   }
-  return { readPath: realPath, size: stat.size };
+  return realPath;
+}
+
+/**
+ * Reads at most `MAX_OUTPUT_STYLE_FILE_BYTES + 1` bytes: the extra byte is the
+ * over-size signal and the only thing needed past the cap, so the bound holds
+ * on the bytes actually read rather than on a `stat` the file can outgrow.
+ */
+async function readBoundedStyleFile(readPath: string): Promise<Buffer> {
+  const handle = await fs.open(readPath, 'r');
+  try {
+    const cap = MAX_OUTPUT_STYLE_FILE_BYTES + 1;
+    const buffer = Buffer.alloc(cap);
+    let total = 0;
+    // A single read() can come back short before EOF; loop until full or EOF.
+    while (total < cap) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        total,
+        cap - total,
+        total,
+      );
+      if (bytesRead === 0) {
+        break;
+      }
+      total += bytesRead;
+    }
+    return buffer.subarray(0, total);
+  } finally {
+    await handle.close();
+  }
 }
 
 /**
@@ -240,22 +358,32 @@ export async function loadOutputStylesFromDir(
   for (const entry of entries.filter((e) => /\.md$/i.test(e)).sort()) {
     const filePath = path.join(dir, entry);
     try {
-      const resolved = await resolveStyleFileToRead(
+      const readPath = await resolveStyleFileToRead(
         filePath,
         source,
         confineTo,
       );
-      if (!resolved) {
+      if (!readPath) {
         continue;
       }
-      if (resolved.size > MAX_OUTPUT_STYLE_FILE_BYTES) {
+      const buffer = await readBoundedStyleFile(readPath);
+      if (buffer.byteLength > MAX_OUTPUT_STYLE_FILE_BYTES) {
         debugLogger.warn(
           `Skipping output style ${filePath}: larger than ${MAX_OUTPUT_STYLE_FILE_BYTES} bytes`,
         );
         continue;
       }
+      // A UTF-16 file -- what PowerShell's `>` and Notepad write -- decodes as
+      // NUL-riddled mojibake that still parses as a style and reaches the
+      // system prompt, so the bytes are sniffed before they are decoded.
+      if (isBinary(buffer)) {
+        debugLogger.warn(
+          `Skipping output style ${filePath}: it is not UTF-8 text`,
+        );
+        continue;
+      }
       const style = parseOutputStyleFile(
-        await fs.readFile(resolved.readPath, 'utf8'),
+        buffer.toString('utf8'),
         filePath,
         source,
       );
@@ -303,8 +431,8 @@ export interface OutputStyleCatalogOptions {
   /**
    * Project whose `.qwen/output-styles` is included. Leave unset for an
    * untrusted workspace: a checked-in style file is a prompt, so it is only
-   * read from a project the user has trusted. A project root that is the
-   * home directory is skipped, since it would only repeat the user level.
+   * read from a project the user has trusted. A project whose style directory
+   * is the user's own is skipped, since it would only repeat the user level.
    */
   projectRoot?: string;
 }
@@ -320,9 +448,14 @@ export async function loadOutputStyleCatalog(
   options: OutputStyleCatalogOptions = {},
 ): Promise<readonly OutputStyleDefinition[]> {
   const projectRoot = options.projectRoot;
+  // Compare the directories that would actually be read: the user level
+  // resolves through `QWEN_HOME`, so `projectRoot` vs `os.homedir()` both
+  // drops a legitimate project level and lets a relocated `QWEN_HOME` load
+  // the user's own files a second time, labelled `(project)`.
   const includeProject =
     projectRoot !== undefined &&
-    path.resolve(projectRoot) !== path.resolve(os.homedir());
+    path.resolve(getProjectOutputStylesDir(projectRoot)) !==
+      path.resolve(getUserOutputStylesDir());
   const [projectStyles, userStyles] = await Promise.all([
     includeProject
       ? loadOutputStylesFromDir(
