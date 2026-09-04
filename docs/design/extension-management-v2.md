@@ -144,8 +144,8 @@ stalled runtime refresh cannot permanently block later extension mutations; the
 already-started refresh may still settle afterward. Sensitive settings are
 staged as one atomic secret bundle under a per-prepare revision. A non-secret
 selector records that revision and secure-storage backend inside the staged
-artifact, so only the winning
-artifact commit activates a complete bundle. The store commit is therefore the
+artifact, so only the winning artifact commit activates a complete bundle. The
+store commit is therefore the
 durability point and releases the commit lane immediately. Extension reload,
 legacy per-key settings synchronization, manager runtime refresh, prepared-file
 cleanup, and daemon runtime reconciliation run outside it. These post-commit
