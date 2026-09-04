@@ -337,7 +337,11 @@ function applyDaemonTranscriptEvent(
       if (event.meta) block.meta = { ...block.meta, ...event.meta };
       block.images = [
         ...(block.images ?? []),
-        { data: event.data, mimeType: event.mimeType },
+        {
+          data: event.data,
+          mimeType: event.mimeType,
+          ...(event.attachmentId ? { attachmentId: event.attachmentId } : {}),
+        },
       ];
       next.retainedBytes += estimateBlockBytes(block) - bytesBefore;
       break;
