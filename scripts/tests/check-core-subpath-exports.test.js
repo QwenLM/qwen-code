@@ -54,6 +54,7 @@ describe('scripts/check-core-subpath-exports.mjs', () => {
     cliSpecifiers = ['@qwen-code/qwen-code-core/config/storage.js'],
     acpBridgeSpecifiers = ['@qwen-code/qwen-code-core/goalWire'],
     sdkSpecifiers = ['@qwen-code/qwen-code-core/version.js'],
+    distOverrides = {},
     withUnpublishedSrcTarget = false,
   } = {}) {
     cwd = mkdtempSync(join(tmpdir(), 'qwen-core-subpath-check-'));
@@ -78,6 +79,9 @@ describe('scripts/check-core-subpath-exports.mjs', () => {
       // Named-entry and catch-all targets named only by fixture sources.
       'dist/src/goals/goal-wire.js': 'export const goalWire = {};',
       'dist/src/version.js': "export const version = 'fixture';",
+      // Entries here replace the defaults above (e.g. a probe target that
+      // exists but lacks the export the script probes for).
+      ...distOverrides,
     };
     for (const [relativePath, source] of Object.entries(distFiles)) {
       const filePath = join(coreDir, relativePath);
@@ -190,5 +194,52 @@ describe('scripts/check-core-subpath-exports.mjs', () => {
     expect(status).toBe(1);
     expect(stderr).toContain('@qwen-code/qwen-code-core/src/config/storage.ts');
     expect(stderr).toContain('resolved target is not published');
+  });
+
+  it('passes for the deliberately published ./package.json specifier', async () => {
+    // core's exports map carries "./package.json": "./package.json" and npm
+    // ships package.json regardless of "files", so the dist-containment
+    // guard must allow it. Removing the allow-clause from the script turns
+    // this red while the unpublished ./src/* test above stays red.
+    createFixture({
+      cliSpecifiers: [
+        '@qwen-code/qwen-code-core/config/storage.js',
+        '@qwen-code/qwen-code-core/package.json',
+      ],
+    });
+    const { status, stdout } = await runCheck();
+    expect(status).toBe(0);
+    expect(stdout).toContain('✓ @qwen-code/qwen-code-core/package.json');
+  });
+
+  it('fails when a probe target exists but lacks the probed export', async () => {
+    // Witnesses the named-export probe stage: an exports edit retargeting a
+    // probed specifier at an existing dist module without the export must
+    // fail. Removing the probe import and the export-name check from the
+    // script turns this green.
+    createFixture({
+      distOverrides: {
+        'dist/src/config/storage.js': 'export const notStorage = 1;',
+      },
+    });
+    const { status, stderr } = await runCheck();
+    expect(status).toBe(1);
+    expect(stderr).toContain('@qwen-code/qwen-code-core/config/storage.js');
+    expect(stderr).toContain('Storage is undefined');
+  });
+
+  it('fails when the ./* catch-all is missing from the exports map', async () => {
+    // Drives path-style specifiers into the resolve-failure branch: without
+    // the ./* catch-all, import.meta.resolve throws ERR_PACKAGE_PATH_NOT_EXPORTED.
+    // Removing failed++ from the script's resolve catch turns this green.
+    const mutatedExports = { ...INTACT_EXPORTS };
+    delete mutatedExports['./*'];
+    createFixture({ coreExports: mutatedExports });
+    const { status, stderr } = await runCheck();
+    expect(status).toBe(1);
+    expect(stderr).toContain('@qwen-code/qwen-code-core/config/storage.js');
+    expect(stderr).toContain(
+      'core subpath specifiers do not resolve through the package exports map.',
+    );
   });
 });

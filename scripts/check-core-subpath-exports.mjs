@@ -69,8 +69,11 @@ if (!existsSync(coreDist)) {
 // packages/core/src/... file, so a bare existsSync passes while the published
 // artifact ships nothing and the installed CLI dies with ERR_MODULE_NOT_FOUND.
 // Legitimate runtime specifiers all resolve under dist/, so require exactly
-// that instead of trusting the repo tree.
+// that instead of trusting the repo tree. The one exception is core's own
+// package.json, which the exports map deliberately publishes
+// ("./package.json": "./package.json") and npm ships regardless of "files".
 const publishedDist = path.join(root, 'packages', 'core', 'dist') + path.sep;
+const corePackageJson = path.join(root, 'packages', 'core', 'package.json');
 
 let failed = 0;
 for (const specifier of specifiers) {
@@ -90,7 +93,7 @@ for (const specifier of specifiers) {
     failed++;
     continue;
   }
-  if (!resolved.startsWith(publishedDist)) {
+  if (!resolved.startsWith(publishedDist) && resolved !== corePackageJson) {
     console.error(
       `✗ ${specifier}\n    resolved target is not published: ${resolved} lies outside ${path.relative(root, publishedDist)} (core ships "files": dist, vendor, scripts/postinstall.js)`,
     );
