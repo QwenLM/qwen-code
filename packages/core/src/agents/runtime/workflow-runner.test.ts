@@ -184,6 +184,38 @@ describe('WorkflowRunner', () => {
     expect(registry.get(handle.runId)?.args).toEqual(args);
   });
 
+  it('retains a saved workflow name when resuming with an inline script', async () => {
+    const { config, registry } = configWithRegistry();
+    resolveSavedWorkflowScriptMock.mockResolvedValueOnce({
+      name: 'review',
+      savedWorkflowName: 'review',
+      scriptPath: '/tmp/review.js',
+      script: 'return "done"',
+    });
+    const initial = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      scriptPath: '/tmp/review.js',
+      args: undefined,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+    await initial.completion;
+
+    const resumed = await WorkflowRunner.start({
+      config,
+      signal: new AbortController().signal,
+      script: 'return "resumed"',
+      args: undefined,
+      resumeFromRunId: initial.runId,
+      runInBackground: true,
+      dispatch: async () => 'unused',
+    });
+    await resumed.completion;
+
+    expect(registry.get(initial.runId)?.workflowName).toBe('review');
+  });
+
   it('records sandbox logs in the replay event ledger', async () => {
     const { config, registry } = configWithRegistry();
     const handle = await WorkflowRunner.start({

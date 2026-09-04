@@ -156,7 +156,14 @@ jobs:
   daemon-e2e:
     name: 'Real daemon E2E / Java 11'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
-    timeout-minutes: 30
+    # 45, not 30: this job is ~90% setup. A quiet run is 12.2 min end to end --
+    # npm ci 5.9 + build 5.2 -- and the Java daemon E2E it exists for costs
+    # about a minute. On the shared pool that setup is what stretches: npm ci
+    # measured 4.0-5.9 min across 11 green runs and 19.9/22.6 min on the two
+    # that died, which is the whole difference between them. At that factor the
+    # setup alone needs ~44 min, so 30 cancelled the job before a single
+    # assertion ran. Matches the 45 tier release.yml's quality_build uses.
+    timeout-minutes: 45
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
