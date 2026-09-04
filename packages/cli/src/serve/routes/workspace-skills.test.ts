@@ -408,6 +408,28 @@ describe('workspace Skill management routes', () => {
     expect(response.body.code).toBe('skill_not_found');
   });
 
+  it('invalidates config status when a qualified mutation fails', async () => {
+    const harness = createHarness();
+    harness.installWorkspaceSkill.mockRejectedValueOnce(
+      Object.assign(new Error('closed'), {
+        code: 'workspace_generation_closed',
+      }),
+    );
+
+    const response = await request(harness.app)
+      .post('/workspaces/workspace-1/config/skills/install')
+      .send({
+        name: 'demo-skill',
+        scope: 'workspace',
+        source: { type: 'folder', path: '/tmp/demo-skill' },
+      });
+
+    expect(response.status).toBe(503);
+    expect(harness.invalidateSkillsConfigStatus).toHaveBeenCalledWith(
+      '/workspace',
+    );
+  });
+
   it('maps a vanished configured Skill to not found', async () => {
     const harness = createHarness();
     harness.deleteWorkspaceSkill.mockRejectedValueOnce(

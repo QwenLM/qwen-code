@@ -498,6 +498,7 @@ export function registerWorkspaceSkillsRoutes(
         invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         if (!sendSkillManagementError(res, err))
           deps.sendBridgeError(res, err, { route: installRoute });
       }
@@ -536,6 +537,7 @@ export function registerWorkspaceSkillsRoutes(
         invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         if (!sendSkillManagementError(res, err))
           deps.sendBridgeError(res, err, { route: deleteRoute });
       }
@@ -560,6 +562,7 @@ export function registerWorkspaceSkillsRoutes(
         invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         deps.sendBridgeError(res, err, { route: batchRoute });
       }
     },
@@ -583,6 +586,7 @@ export function registerWorkspaceSkillsRoutes(
         invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         res.status(200).json(result);
       } catch (err) {
+        invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         deps.sendBridgeError(res, err, { route });
       }
     },
@@ -686,6 +690,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
           activation: reconcileSkills([runtime]),
         });
       } catch (error) {
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
         if (!sendSkillManagementError(res, error)) {
           deps.sendBridgeError(res, error, { route: configRoute });
         }
@@ -730,6 +735,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
           activation: reconcileSkills([runtime]),
         });
       } catch (error) {
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
         if (!sendSkillManagementError(res, error)) {
           deps.sendBridgeError(res, error, { route: configRoute });
         }
@@ -778,6 +784,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
             : result.activation,
         });
       } catch (error) {
+        deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
         deps.sendBridgeError(res, error, { route: configRoute });
       }
     },
@@ -820,6 +827,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
         invalidateConfigStatus(runtime, input.scope);
         res.status(200).json(result);
       } catch (err) {
+        invalidateConfigStatus(runtime, input.scope);
         if (!sendSkillManagementError(res, err))
           deps.sendBridgeError(res, err, { route: installRoute });
       }
@@ -870,6 +878,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
         invalidateConfigStatus(runtime, scope);
         res.status(200).json(result);
       } catch (err) {
+        invalidateConfigStatus(runtime, scope);
         if (!sendSkillManagementError(res, err))
           deps.sendBridgeError(res, err, { route: deleteRoute });
       }
@@ -902,6 +911,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
         invalidateConfigStatus(runtime);
         res.status(200).json(result);
       } catch (err) {
+        invalidateConfigStatus(runtime);
         deps.sendBridgeError(res, err, { route: batchRoute });
       }
     },
@@ -933,6 +943,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
         invalidateConfigStatus(runtime);
         res.status(200).json(result);
       } catch (err) {
+        invalidateConfigStatus(runtime);
         deps.sendBridgeError(res, err, { route });
       }
     },
