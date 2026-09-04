@@ -23942,8 +23942,7 @@ describe('Session', () => {
         reopen();
 
         const pauseCall = mockGoalRuntime.dispatch.mock.calls.find(
-          ([request]: [{ action: string; reason?: string }]) =>
-            request.action === 'pause',
+          (call) => call[0].action === 'pause',
         ) as [{ reason?: string }];
         expect(pauseCall[0].reason).toBe(GOAL_PAUSE_REASON_SESSION_DISPOSED);
         // The session did not close, so the record must not say it did.
