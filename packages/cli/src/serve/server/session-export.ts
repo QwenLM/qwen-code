@@ -28,6 +28,12 @@ export type SessionExportFormat = (typeof SESSION_EXPORT_FORMATS)[number];
 
 interface ExportFormatDefinition {
   mimeType: string;
+  // `records` is required because the HTML path cannot render without it: the
+  // document projector is the only HTML implementation left, and it projects
+  // from original records rather than from the normalized session data. The
+  // other formatters take `ExportSessionData` alone and simply ignore the
+  // second argument, which structural typing allows. Keep the signature shared
+  // so a caller cannot pick a format and then forget to pass records.
   render: (data: ExportSessionData, records: readonly unknown[]) => string;
 }
 

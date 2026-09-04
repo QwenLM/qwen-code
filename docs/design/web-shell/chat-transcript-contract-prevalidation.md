@@ -59,13 +59,13 @@ ChatTranscriptModel
 
 ### 2.1 当前生产边界
 
-| 消费端                  | 当前事实                                                                                                                  | 本方案处理                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| Web/Qwen Server         | daemon state 经 SDK reducer 产生 `DaemonTranscriptBlock[]`，完整 WebShell 渲染                                            | 保持生产路径不变；作为语义和兼容基线                         |
-| Qwen Tauri Desktop      | 构建并复制同一 WebShell 产物                                                                                              | 不增加 Desktop adapter；MR1 不认证安装产物行为               |
-| VS Code                 | MR2A 继续由现有 legacy `MessageList` 渲染；不注册 transcript update、不引入 `@qwen-code/web-shell`、不发布死 feature flag | 该 render site 是 MR2B 的设计接入 seam，不新增空生产 adapter |
-| HTML Export             | CLI、Web API 和 VS Code 导出均把原始 records 交给 document projector，并使用版本绑定的产品模板                            | 产品路径已收敛；无 records 的公共调用保留 legacy 兼容        |
-| OpenWork/Craft Electron | 独立聊天实现                                                                                                              | 本方案范围外                                                 |
+| 消费端                  | 当前事实                                                                                                                  | 本方案处理                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Web/Qwen Server         | daemon state 经 SDK reducer 产生 `DaemonTranscriptBlock[]`，完整 WebShell 渲染                                            | 保持生产路径不变；作为语义和兼容基线                                                                |
+| Qwen Tauri Desktop      | 构建并复制同一 WebShell 产物                                                                                              | 不增加 Desktop adapter；MR1 不认证安装产物行为                                                      |
+| VS Code                 | MR2A 继续由现有 legacy `MessageList` 渲染；不注册 transcript update、不引入 `@qwen-code/web-shell`、不发布死 feature flag | 该 render site 是 MR2B 的设计接入 seam，不新增空生产 adapter                                        |
+| HTML Export             | CLI、Web API 和 VS Code 导出均把原始 records 交给 document projector，并使用版本绑定的产品模板                            | 产品路径已收敛；legacy renderer 已随 `@qwen-code/webui` 退休移除，`toHtml` 要求 records（见 §12.4） |
+| OpenWork/Craft Electron | 独立聊天实现                                                                                                              | 本方案范围外                                                                                        |
 
 当前 `WebShellTranscript`：
 
@@ -559,6 +559,7 @@ JSON Schema 无法表达 UTF-8 总字节、总文本、总图片和 envelope 预
 - Markdown 图片与结构化 images 共用 MIME/来源/字节策略；
 - code、diff、shell、command 和普通文本中的 URL 字面量只作为文本，不触发资源加载；
 - 外部链接仅在明确用户点击时导航，去除 credential，并按策略处理 query/fragment；
+- credential 去除的实际作用域是 http(s)：自由文本中的内嵌 URL 由 `sanitizeEmbeddedUrls` 逐个改写，Markdown link/autolink 由 `normalizeNavigableUrl` 处理，两者都清空 userinfo、query 和 fragment；非 navigable scheme（`ssh user:pw@host`）、裸参数形式的凭据（`-pSECRET`、`--token=...`）以及 `code` / `inlineCode` 节点内的内容按原文导出。document boundary 不是通用 secret scanner，这条边界必须与代码保持一致，不能在文档里给出更强的承诺；
 - 超限时在富解析前输出安全占位和 diagnostic，不继续容错解析危险内容。
 
 ### 10.8 document mode
@@ -723,6 +724,17 @@ MR2B 从 MR2A 之后开始，并由真实 VS Code consumer 驱动：
 
 MR2A 先独立收敛产品 HTML Export。MR2B 再接入 VS Code live timeline，避免 renderer、transport、host actions、VSIX 与许可证变更挤入同一评审。JSON Schema 无法表达的 credential URL、脱敏 path、总字节和资源预算继续由小型语义安全层负责，不恢复重复的逐字段结构 validator。
 
+### 12.4 legacy HTML renderer 退休
+
+MR2A 落地后，`@qwen-code/webui` 只剩 HTML Export 的 legacy 回退这一个消费者。该 package 随后被整体退休，legacy renderer 一并移除。删除证据：
+
+1. **无剩余产品消费者**：CLI `/export html`、Web API `session-export` 和 VS Code `/export html` 都无条件传入原始 records，因此 legacy 分支在产品路径上不可达；
+2. **接口收紧**：`toHtml(sessionData, originalRecords)` 的第二参改为必填，`loadHtmlTemplate` 与 `injectDataIntoHtmlTemplate` 连同 UMD/CDN 模板一并删除，document renderer 成为唯一 HTML 导出实现；
+3. **回退被显式拒绝而非静默降级**：integration runner 遇到 legacy exported JSONL 时直接报错，要求提供 source ChatRecord JSONL，避免用一条未经 allowlist 的路径渲染旧文件；
+4. **防回归**：CI 增加 `check:no-webui`，拒绝重新引入该 package 或其依赖。
+
+本节只覆盖 legacy HTML renderer。VS Code legacy `MessageList` 不在此范围内，其移除仍受 §15 的观察期与删除证据约束。
+
 ## 13. 验证架构与测试矩阵
 
 ```mermaid
@@ -866,6 +878,6 @@ Web/Qwen 和 Tauri 不迁移。若 MR2A/MR2B 对共享组件的改动导致默�
 - HTML 产品路径与 integration runner 不再维护第二套 renderer；
 - Web/Qwen Server 和 Tauri Desktop 默认行为无回归；
 - security、network、budget、CSP、version、VSIX/CLI packaging 和观察期完成；
-- legacy HTML renderer 与 VS Code timeline 只有在各自有删除证据时才移除；
+- legacy HTML renderer 已移除，删除证据见 §12.4；VS Code legacy timeline 仍只有在有删除证据时才移除；
 - 未引入新的跨宿主 ChatPanel 包、通用消息模型或 OpenWork overlay；
 - 后续任何公共契约变化继续更新本文档，不创建平行设计来源。
