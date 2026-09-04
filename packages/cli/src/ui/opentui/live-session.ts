@@ -548,7 +548,7 @@ async function resolveSteeredPromptParts(
 // flight to create the chat. Bounded so a config that never finishes
 // initializing still reports its own error instead of hanging the prompt —
 // the same budget commands-dispatch gives its registry self-heal.
-const STARTUP_CHAT_WAIT_MS = 15_000;
+export const STARTUP_CHAT_WAIT_MS = 15_000;
 const STARTUP_CHAT_POLL_MS = 100;
 
 /**
@@ -578,8 +578,17 @@ export async function* livePromptEvents(
   // `getChat()` and the prompt is dropped as "Chat not initialized". The
   // registry self-heal in commands-dispatch bounds the same window; this
   // waits it out so the turn starts against a real chat.
+  //
+  // Chat existence alone is not readiness: `startChat()` assigns the chat and
+  // only then awaits the SessionStart hook, its context and `setTools()`, so
+  // releasing on existence sends the session's first prompt with no tool
+  // declarations. `setTools()` is the flight's last stage and always writes
+  // `tools`, which makes its presence the marker that the chat is complete.
   const chatDeadline = Date.now() + STARTUP_CHAT_WAIT_MS;
-  while (!client.isInitialized() && Date.now() < chatDeadline) {
+  const chatReady = () =>
+    client.isInitialized() &&
+    client.getChat().getGenerationConfig().tools !== undefined;
+  while (!chatReady() && Date.now() < chatDeadline) {
     await new Promise((resolve) => setTimeout(resolve, STARTUP_CHAT_POLL_MS));
   }
   const promptId = options?.promptId ?? nextLivePromptId(config);

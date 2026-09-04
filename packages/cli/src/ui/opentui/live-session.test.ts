@@ -29,6 +29,7 @@ import {
   nextApprovalMode,
   resetPromptCountForTesting,
   selectAutoApprovals,
+  STARTUP_CHAT_WAIT_MS,
   type WaitingCallInfo,
 } from './live-session.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
@@ -192,7 +193,15 @@ function createFakeConfig(
 ) {
   return {
     initialize: vi.fn(async () => {}),
-    getGeminiClient: () => ({ sendMessageStream, isInitialized }),
+    getGeminiClient: () => ({
+      sendMessageStream,
+      isInitialized,
+      // A chat the startup flight has already completed: `setTools()` ran, so
+      // its declarations are in the generation config the send reads.
+      getChat: () => ({
+        getGenerationConfig: () => ({ tools: [{ functionDeclarations: [] }] }),
+      }),
+    }),
     getSessionId: () => 'session-1',
     getModel: () => 'test-model',
     getMaxSessionTurns: () => 10,
@@ -299,6 +308,87 @@ describe('livePromptEvents', () => {
     }, 250);
 
     await drain(livePromptEvents(config, 'hello'));
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds the first send until the startup chat has tool declarations', async () => {
+    // `startChat()` assigns the chat (client.ts:2261) and only then awaits the
+    // SessionStart hook, the session-start context and `setTools()`. A wait
+    // that releases on chat existence alone sends the first prompt of the
+    // session with no tool declarations at all.
+    let chatExists = false;
+    let tools: unknown[] | undefined;
+    let toolsAtSend: unknown[] | undefined;
+    const sendMessageStream = vi.fn(function* () {
+      toolsAtSend = tools;
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => chatExists,
+        getChat: () => ({ getGenerationConfig: () => ({ tools }) }),
+      }),
+    } as unknown as Config;
+
+    vi.useFakeTimers();
+    try {
+      chatExists = true;
+      const pending = drain(livePromptEvents(config, 'hello'));
+      // The chat exists while the startup flight is still inside setTools().
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(sendMessageStream).not.toHaveBeenCalled();
+      tools = [{ functionDeclarations: [] }];
+      await vi.advanceTimersByTimeAsync(1_000);
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+    // A literal, not the mutable `tools`, so a send that observed no tools
+    // cannot pass by comparing two undefined values.
+    expect(toolsAtSend).toEqual([{ functionDeclarations: [] }]);
+  });
+
+  it('reports the client error once the startup chat wait is spent', async () => {
+    // The bound is what keeps a config that never finishes initializing from
+    // polling forever: the turn falls through to the send and surfaces the
+    // client's own error instead of hanging the prompt.
+    const sendMessageStream = vi.fn(function* () {
+      throw new Error('Chat not initialized');
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => false,
+        getChat: () => {
+          throw new Error('Chat not initialized');
+        },
+      }),
+    } as unknown as Config;
+
+    vi.useFakeTimers();
+    try {
+      const pending = drain(livePromptEvents(config, 'hello'));
+      // The wait expires deep inside the virtual-time run, so keep the
+      // rejection handled until the assertion below can claim it.
+      void pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(STARTUP_CHAT_WAIT_MS + 1_000);
+      await expect(pending).rejects.toThrow('Chat not initialized');
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(sendMessageStream).toHaveBeenCalledTimes(1);
   });
