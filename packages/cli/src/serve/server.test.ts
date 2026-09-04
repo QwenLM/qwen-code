@@ -28788,7 +28788,7 @@ describe('createServeApp', () => {
       expect(res.headers['content-disposition']).toMatch(
         /^attachment; filename="qwen-code-export-.+\.html"$/,
       );
-      expect(res.text).toContain('id="chat-data"');
+      expect(res.text).toContain('id="transcript-document"');
       expect(res.text).toContain('hello export');
       expect(res.text).toContain('export response');
     });
