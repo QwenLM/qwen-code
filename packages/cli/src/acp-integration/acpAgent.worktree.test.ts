@@ -215,6 +215,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     snapshot: vi.fn(() => ({})),
   })),
   restoreWorktreeContext: mockRestoreWorktreeContext,
+  listWorkflowSnapshots: vi.fn().mockResolvedValue([]),
   HookEventName: {
     PreToolUse: 'PreToolUse',
     PostToolUse: 'PostToolUse',
@@ -273,6 +274,7 @@ vi.mock('./service/filesystem.js', () => ({
 vi.mock('../config/settings.js', () => ({
   SettingScope: {},
   loadSettings: vi.fn(),
+  reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
 }));
 // Passthrough: the real cache would serve the first mockReturnValue to every
 // later same-cwd call, breaking tests that re-point loadSettings per call.
@@ -285,6 +287,7 @@ vi.mock('../config/settings-cache.js', async () => {
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+  buildEnabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
   // newSessionConfig's catch narrows on this class; without the export an
   // unrelated error in the try block surfaces as a confusing mock error.
   SessionIdConflictError: class SessionIdConflictError extends Error {},
@@ -363,6 +366,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
+      getTargetDir: vi.fn().mockReturnValue('/fake/project'),
       getAuthType: vi.fn().mockReturnValue('api-key'),
       getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getLlmClient: vi.fn().mockReturnValue({

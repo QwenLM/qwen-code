@@ -964,7 +964,11 @@ describe('daemon event schema', () => {
         id: 1,
         v: 1,
         type: 'session_metadata_updated',
-        data: { sessionId: 's-1', displayName: 'My Session' },
+        data: {
+          sessionId: 's-1',
+          displayName: 'My Session',
+          titleSource: 'manual',
+        },
       }),
     ).toBeDefined();
 
@@ -983,6 +987,15 @@ describe('daemon event schema', () => {
         v: 1,
         type: 'session_metadata_updated',
         data: {},
+      }),
+    ).toBeUndefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 4,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1', titleSource: 'unknown' },
       }),
     ).toBeUndefined();
   });

@@ -54,8 +54,8 @@ import type { WorkspaceRegistry } from './workspace-registry.js';
  * bound workspace root and can compute relative paths if they
  * prefer; the global scope (`~/.qwen/QWEN.md`) is NOT under the
  * workspace root, so rewriting to a workspace-relative form would
- * lose information. The bearer-token gate + the daemon's loopback-
- * default binding already restrict who can see these paths. If a
+ * lose information. Configured bearer auth or the daemon's trusted-loopback
+ * binding already defines who can see these paths. If a
  * future deployment shape needs path redaction (e.g. multi-tenant
  * over a shared host), it should land as a `--redact-paths`
  * deployment toggle rather than a per-route default flip — tracked

@@ -69,6 +69,15 @@ export function validateWorkspaceSkillName(name: string): string {
   return normalized;
 }
 
+function rejectInstallArtifactSkillName(name: string): void {
+  if (/\.(backup|installing)-\d+-\d+$/.test(name)) {
+    skillError(
+      'invalid_skill_name',
+      'Skill name ends with a reserved install-artifact suffix',
+    );
+  }
+}
+
 function decodeBase64(value: string): Buffer {
   if (!value || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
     skillError('invalid_skill_source', 'Invalid base64 skill content');
@@ -763,6 +772,7 @@ export async function installWorkspaceSkill(
 ): Promise<WorkspaceSkillMutationResult> {
   assertGenerationOpen?.();
   const skillName = validateWorkspaceSkillName(request.name);
+  rejectInstallArtifactSkillName(skillName);
   const files = await filesFromSource(request.source, githubToken);
   const baseDir = skillBaseDir(workspace, request.scope);
   assertGenerationOpen?.();

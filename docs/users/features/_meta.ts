@@ -14,6 +14,7 @@ export default {
   'structured-output': 'Structured Output',
   'dual-output': 'Dual Output',
   'approval-mode': 'Approval Mode',
+  'output-styles': 'Output Styles',
   'auto-mode': 'Auto Mode',
   worktree: 'Worktrees',
   mcp: 'MCP',

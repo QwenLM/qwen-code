@@ -12,10 +12,12 @@ import {
   getSubagentSessionDir,
   getAgentJsonlPath,
   getAgentMetaPath,
+  getAgentMetaTerminalSummary,
   attachJsonlTranscriptWriter,
   buildAgentTranscriptAttach,
   normalizeResumedAgentDepth,
   readAgentMeta,
+  readAgentTrace,
   readLastTranscriptRecordUuidSync,
   writeAgentMeta,
   type AgentMeta,
@@ -220,6 +222,28 @@ describe('agent-transcript', () => {
         subagentName: 'explore',
         executionAllowedTools: [],
       });
+    });
+
+    it('caps the persisted terminal activity summary', () => {
+      const activities = Array.from({ length: 12 }, (_, index) => ({
+        name: `tool-${index}`,
+        description: `activity-${index}`,
+        at: index,
+      }));
+      const summary = getAgentMetaTerminalSummary(
+        { totalTokens: 12, outputTokens: 8, toolUses: 12, durationMs: 100 },
+        activities,
+      );
+
+      expect(summary.stats).toEqual({
+        totalTokens: 12,
+        outputTokens: 8,
+        toolUses: 12,
+        durationMs: 100,
+      });
+      expect(summary.recentActivities).toHaveLength(10);
+      expect(summary.recentActivities?.[0]?.name).toBe('tool-2');
+      expect(summary.recentActivities?.at(-1)?.name).toBe('tool-11');
     });
   });
 
@@ -898,6 +922,97 @@ describe('agent-transcript', () => {
       expect(normalizeResumedAgentDepth(null as unknown as number)).toBe(
         undefined,
       );
+    });
+  });
+
+  describe('readAgentTrace', () => {
+    let projectDir: string;
+
+    beforeEach(() => {
+      projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-trace-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    });
+
+    it('returns complete, filtered lineage and marks missing parents', async () => {
+      const sessionId = 'session-1';
+      const write = (meta: AgentMeta) =>
+        writeAgentMeta(
+          getAgentMetaPath(projectDir, sessionId, meta.agentId),
+          meta,
+        );
+      write({
+        agentId: 'root',
+        agentType: 'reviewer',
+        description: 'root task',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        status: 'completed',
+      });
+      write({
+        agentId: 'child',
+        agentType: 'tester',
+        description: 'child task',
+        parentSessionId: sessionId,
+        parentAgentId: 'root',
+        createdAt: '2026-01-01T00:00:01.000Z',
+        status: 'running',
+      });
+      write({
+        agentId: 'orphan',
+        agentType: 'tester',
+        description: 'orphan task',
+        parentSessionId: sessionId,
+        parentAgentId: 'missing',
+        createdAt: '2026-01-01T00:00:02.000Z',
+      });
+      write({
+        agentId: 'cycle-a',
+        agentType: 'tester',
+        description: 'cycle a',
+        parentSessionId: sessionId,
+        parentAgentId: 'cycle-b',
+        createdAt: '2026-01-01T00:00:03.000Z',
+      });
+      write({
+        agentId: 'cycle-b',
+        agentType: 'tester',
+        description: 'cycle b',
+        parentSessionId: sessionId,
+        parentAgentId: 'cycle-a',
+        createdAt: '2026-01-01T00:00:04.000Z',
+      });
+      write({
+        agentId: '0-cycle-child',
+        agentType: 'tester',
+        description: 'cycle child',
+        parentSessionId: sessionId,
+        parentAgentId: 'cycle-a',
+        createdAt: '2026-01-01T00:00:05.000Z',
+      });
+
+      const trace = await readAgentTrace(projectDir, sessionId, 'root');
+
+      expect(trace.rootAgentIds).toEqual(['root']);
+      expect(trace.nodes.map((node) => node.agentId)).toEqual([
+        'root',
+        'child',
+      ]);
+      expect(
+        trace.nodes.find((node) => node.agentId === 'child'),
+      ).toMatchObject({ rootAgentId: 'root', lineageState: 'complete' });
+      const fullTrace = await readAgentTrace(projectDir, sessionId);
+      expect(
+        fullTrace.nodes.find((node) => node.agentId === 'orphan'),
+      ).toMatchObject({ lineageState: 'orphaned' });
+      expect(
+        fullTrace.nodes
+          .filter((node) => node.lineageState === 'cycle')
+          .map((node) => node.rootAgentId),
+      ).toEqual(['cycle-a', 'cycle-a', 'cycle-a']);
     });
   });
 });
