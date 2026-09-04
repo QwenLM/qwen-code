@@ -1525,7 +1525,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: '',
     description:
-      'Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: "qwen-plus,qwen-turbo". Set via CLI with --fallback-model.',
+      'Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Each ID must resolve to a registered model (e.g. under modelProviders); unregistered IDs are skipped. Example: "qwen-plus,qwen-turbo". Set via CLI with --fallback-model.',
     showInDialog: true,
   },
 

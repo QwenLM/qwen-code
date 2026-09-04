@@ -660,7 +660,7 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'array',
           string: true,
           description:
-            'Fallback model(s) for capacity errors (429/503/529), repeatable or comma-separated (max 3)',
+            'Fallback model(s) for capacity errors (429/503/529), repeatable or comma-separated (max 3). Each ID must resolve to a registered model (e.g. under modelProviders); unregistered IDs are skipped.',
           coerce: (models: string[]) =>
             models
               .flatMap((m) => m.split(',').map((s) => s.trim()))
