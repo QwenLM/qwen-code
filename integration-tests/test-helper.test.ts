@@ -149,6 +149,11 @@ describe('TestRig', () => {
       }
       const cleanupTookMs = Date.now() - cleanupStartedAt;
 
+      // Literals, not the constant: a bound derived from it retunes with the
+      // value it polices. Floor is the CLI's 5s exit-cleanup chain, ceiling
+      // vitest's 10s default hookTimeout — see INTERACTIVE_EXIT_GRACE_MS.
+      expect(INTERACTIVE_EXIT_GRACE_MS).toBeGreaterThan(5_000);
+      expect(INTERACTIVE_EXIT_GRACE_MS).toBeLessThan(10_000);
       // Bounded, or a child that ignores SIGHUP hangs teardown forever.
       expect(cleanupTookMs).toBeLessThan(INTERACTIVE_EXIT_GRACE_MS + 5_000);
       // Giving up has to name the child it abandoned, or the EPIPE crash this
