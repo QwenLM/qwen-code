@@ -1606,6 +1606,16 @@
             "refuse"
           ]
         },
+        "crossSessionHeldExpiry": {
+          "description": "How long a message held for your review waits before it expires and the sending session is told nobody answered. \"never\" keeps held messages until the session ends. Only affects messages that are held; accepted and refused ones are settled on arrival. Options: 1m, 5m, 10m, never",
+          "enum": [
+            "1m",
+            "5m",
+            "10m",
+            "never"
+          ],
+          "default": "5m"
+        },
         "modelGrades": {
           "type": "object",
           "additionalProperties": {
@@ -3636,7 +3646,7 @@
           }
         },
         "sessionWorkflow": {
-          "description": "Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default and does not change ordinary Todo or execution behavior.",
+          "description": "Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default; Workflow markers, approval gates, and visualization stay off until enabled. Todo updates preserve omitted active dependencies in every mode.",
           "type": "boolean",
           "default": false
         },

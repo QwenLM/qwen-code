@@ -42,6 +42,7 @@ export function isTaskExecutionRaw(raw: unknown): boolean {
 
 export function isSubAgentToolCall(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
+  if (name === 'workflow') return false;
   if (name === 'agent' || name === 'task') return true;
   if (tool.subTools || tool.subContent) return true;
   if (isTaskExecutionRaw(tool.rawOutput)) return true;

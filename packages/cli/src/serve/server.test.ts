@@ -159,6 +159,7 @@ import type {
   ServeSessionContextUsageStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
+  ServeSessionResourcesStatus,
   ServeSessionStatsStatus,
   ServeSessionSupportedCommandsStatus,
   ServeSessionTasksStatus,
@@ -219,6 +220,7 @@ import {
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { getActiveSseCount } from './routes/sse-events.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
+import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -602,6 +604,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_monitor_tool_correlation',
   'session_stats',
   'session_lsp',
+  'session_resources',
   'session_status',
   'session_close',
   'session_archive',
@@ -717,7 +720,11 @@ const EXPECTED_REGISTERED_FEATURES = [
       return [feature, 'scheduled_task_session_reuse'];
     }
     if (feature === 'session_export') {
-      return [feature, 'standalone_sessions_v1'];
+      return [
+        feature,
+        'standalone_sessions_v1',
+        'standalone_session_options_v1',
+      ];
     }
     return [feature];
   }).filter(
@@ -958,6 +965,10 @@ interface FakeBridgeOpts {
     opts?: { includeWorkflows?: boolean },
   ) => Promise<ServeSessionTasksStatus>;
   sessionLspImpl?: (sessionId: string) => Promise<ServeSessionLspStatus>;
+  sessionResourcesImpl?: (
+    sessionId: string,
+  ) => Promise<ServeSessionResourcesStatus>;
+  sessionSavedWorkflowImpl?: AcpSessionBridge['getSessionSavedWorkflow'];
   sessionTranscriptImpl?: AcpSessionBridge['getSessionTranscriptPage'];
   cancelSessionTaskImpl?: (
     sessionId: string,
@@ -1266,6 +1277,8 @@ interface FakeBridge extends AcpSessionBridge {
   sessionTasksCalls: string[];
   sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined>;
   sessionLspCalls: string[];
+  sessionResourcesCalls: string[];
+  sessionSavedWorkflowCalls: Array<{ sessionId: string; name: string }>;
   sessionTranscriptCalls: Array<
     Parameters<AcpSessionBridge['getSessionTranscriptPage']>[0]
   >;
@@ -1480,6 +1493,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined> =
     [];
   const sessionLspCalls: string[] = [];
+  const sessionResourcesCalls: string[] = [];
+  const sessionSavedWorkflowCalls: FakeBridge['sessionSavedWorkflowCalls'] = [];
   const sessionTranscriptCalls: FakeBridge['sessionTranscriptCalls'] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const controlSessionWorkflowTaskCalls: FakeBridge['controlSessionWorkflowTaskCalls'] =
@@ -1804,6 +1819,22 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       now: 1_700_000_000_000,
       tasks: [],
     }));
+  const sessionSavedWorkflowImpl: AcpSessionBridge['getSessionSavedWorkflow'] =
+    opts.sessionSavedWorkflowImpl ??
+    (async (sessionId, name) => ({
+      v: 1 as const,
+      sessionId,
+      name,
+      workflow: {
+        v: 1 as const,
+        sessionId,
+        name,
+        source: 'project' as const,
+        scriptPath: `${WS_BOUND}/.qwen/workflows/${name}.js`,
+        script: `export const meta = { name: '${name}', description: 'd' }`,
+        meta: { name, description: 'd' },
+      },
+    }));
   const sessionLspImpl =
     opts.sessionLspImpl ??
     (async (sessionId) => ({
@@ -1817,6 +1848,26 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       inProgressServers: 0,
       notStartedServers: 0,
       servers: [],
+    }));
+  const sessionResourcesImpl =
+    opts.sessionResourcesImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      workspaceCwd: WS_BOUND,
+      skills: {
+        v: 1 as const,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        skills: [],
+      },
+      mcp: {
+        v: 1 as const,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        discoveryState: 'completed' as const,
+        servers: [],
+      },
     }));
   const sessionTranscriptImpl =
     opts.sessionTranscriptImpl ??
@@ -2101,6 +2152,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionTasksCalls,
     sessionTasksOptions,
     sessionLspCalls,
+    sessionResourcesCalls,
+    sessionSavedWorkflowCalls,
     sessionTranscriptCalls,
     cancelSessionTaskCalls,
     controlSessionWorkflowTaskCalls,
@@ -2399,6 +2452,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionLspStatus(sessionId) {
       sessionLspCalls.push(sessionId);
       return sessionLspImpl(sessionId);
+    },
+    async getSessionResourcesStatus(sessionId) {
+      sessionResourcesCalls.push(sessionId);
+      return sessionResourcesImpl(sessionId);
+    },
+    async getSessionSavedWorkflow(sessionId, name) {
+      sessionSavedWorkflowCalls.push({ sessionId, name });
+      return sessionSavedWorkflowImpl(sessionId, name);
     },
     async getSessionTranscriptPage(req) {
       sessionTranscriptCalls.push(req);
@@ -2955,7 +3016,10 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'standalone_sessions_v1') {
+        if (
+          feature === 'standalone_sessions_v1' ||
+          feature === 'standalone_session_options_v1'
+        ) {
           expect(predicate({ standaloneSessionsAvailable: true })).toBe(true);
           expect(predicate({ standaloneSessionsAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -4585,13 +4649,16 @@ describe('createServeApp', () => {
       // the primary.
       const primaryInvoke = vi.fn().mockResolvedValue(undefined);
       const secondaryInvoke = vi.fn().mockResolvedValue(undefined);
+      const primaryPublish = vi.fn();
+      const secondaryPublish = vi.fn();
       const primaryBridge = {
-        ...fakeBridge(),
+        ...fakeBridge({ knownClientIds: ['client-1'] }),
         invokeWorkspaceCommand: primaryInvoke,
-        publishWorkspaceEvent: vi.fn(),
+        publishWorkspaceEvent: primaryPublish,
       } as unknown as AcpSessionBridge;
       const secondaryBridge = {
         invokeWorkspaceCommand: secondaryInvoke,
+        publishWorkspaceEvent: secondaryPublish,
       } as unknown as AcpSessionBridge;
       const registry = createWorkspaceRegistry([
         makeWorkspaceRuntimeForTest({
@@ -4634,6 +4701,7 @@ describe('createServeApp', () => {
         .post('/workspace/settings')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
         .send({
           scope: 'user',
           key: 'experimental.sessionWorkflow',
@@ -4656,6 +4724,20 @@ describe('createServeApp', () => {
         SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
         { enabled: expect.any(Boolean) },
       );
+      const expectedEvent = {
+        type: 'settings_changed',
+        data: {
+          key: 'experimental.sessionWorkflow',
+          value: true,
+          scope: 'user',
+        },
+        originatorClientId: 'client-1',
+      };
+      expect(primaryPublish).toHaveBeenCalledWith(expectedEvent);
+      expect(secondaryPublish).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: expectedEvent.data,
+      });
     });
 
     it('classifies the daemon-owned Live runtime without exposing provenance', async () => {
@@ -5311,6 +5393,13 @@ describe('createServeApp', () => {
       expect(res.body.features).toContain('session_shell_command');
     });
   });
+
+  // `vi.waitFor` defaults to a 1000ms deadline, which is a developer-machine
+  // figure: on the shared pool the archive install and its settle take longer
+  // than that, and release run 33713579913 lost both of these cases with
+  // --retry=2 already on. The wait is scaffolding for the state these cases
+  // assert, never the thing under test, so it gets the room the host needs.
+  const ARCHIVE_WAIT = { timeout: 15_000 };
 
   describe('read-only status routes', () => {
     it('registers workspace permissions without settings persistence and requires a live session for writes', async () => {
@@ -6187,7 +6276,7 @@ describe('createServeApp', () => {
             source: 'upload:DEMO.TAR.GZ',
             name: 'uploaded-ext',
           });
-        });
+        }, ARCHIVE_WAIT);
         expect(recordedSource).toMatch(
           /^upload:v1:[0-9a-f-]{36}:DEMO\.TAR\.GZ$/,
         );
@@ -6212,7 +6301,7 @@ describe('createServeApp', () => {
             status: 'installed',
             source: `upload:${maxLengthFilename}`,
           });
-        });
+        }, ARCHIVE_WAIT);
         expect(recordedSource).toMatch(/^upload:v1:[0-9a-f-]{36}:/);
         expect(recordedSource.endsWith(`:${maxLengthFilename}`)).toBe(true);
         expect(localSourcePath).toMatch(/extension\.zip$/);
@@ -6558,7 +6647,10 @@ describe('createServeApp', () => {
             .send(Buffer.from('archive'));
 
         const first = await upload();
-        await vi.waitFor(() => expect(requestSetting).toBeDefined());
+        await vi.waitFor(
+          () => expect(requestSetting).toBeDefined(),
+          ARCHIVE_WAIT,
+        );
         const second = await upload();
         await vi.waitFor(async () => {
           const poll = await request(app)
@@ -6566,7 +6658,7 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
             .set('Authorization', 'Bearer secret');
           expect(poll.body.status).toBe('succeeded');
-        });
+        }, ARCHIVE_WAIT);
         releaseFirst?.();
         await vi.waitFor(async () => {
           const poll = await request(app)
@@ -6574,7 +6666,7 @@ describe('createServeApp', () => {
             .set('Host', `127.0.0.1:${tokenOpts.port}`)
             .set('Authorization', 'Bearer secret');
           expect(poll.body.status).toBe('succeeded');
-        });
+        }, ARCHIVE_WAIT);
 
         await expect(
           requestSetting?.({
@@ -9775,12 +9867,31 @@ describe('createServeApp', () => {
           },
         ],
       };
+      const resources: ServeSessionResourcesStatus = {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: WS_BOUND,
+        skills: {
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          skills: [],
+        },
+        mcp: {
+          v: 1,
+          workspaceCwd: WS_BOUND,
+          initialized: true,
+          discoveryState: 'completed',
+          servers: [],
+        },
+      };
       const bridge = fakeBridge({
         sessionContextImpl: async () => context,
         sessionSupportedCommandsImpl: async () => commands,
         sessionStatsImpl: async () => stats,
         sessionTasksImpl: async () => tasks,
         sessionLspImpl: async () => lsp,
+        sessionResourcesImpl: async () => resources,
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -9806,6 +9917,9 @@ describe('createServeApp', () => {
       const lspRes = await request(app)
         .get('/session/s-1/lsp')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const resourcesRes = await request(app)
+        .get('/session/s-1/resources')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(200);
       expect(contextRes.body).toEqual(context);
@@ -9820,6 +9934,8 @@ describe('createServeApp', () => {
       expect(workflowTasksRes.body).toEqual(tasks);
       expect(lspRes.status).toBe(200);
       expect(lspRes.body).toEqual(lsp);
+      expect(resourcesRes.status).toBe(200);
+      expect(resourcesRes.body).toEqual(resources);
       expect(bridge.sessionContextCalls).toEqual(['s-1']);
       expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
       expect(bridge.sessionStatsCalls).toEqual(['s-1']);
@@ -9829,6 +9945,7 @@ describe('createServeApp', () => {
         { includeWorkflows: true },
       ]);
       expect(bridge.sessionLspCalls).toEqual(['s-1']);
+      expect(bridge.sessionResourcesCalls).toEqual(['s-1']);
     });
 
     it('dispatches read-only session snapshots through the live owner runtime', async () => {
@@ -9846,6 +9963,23 @@ describe('createServeApp', () => {
           sessionId,
           workspaceCwd: WS_DIFFERENT,
           state: { owner: 'secondary' },
+        }),
+        sessionResourcesImpl: async (sessionId) => ({
+          v: 1,
+          sessionId,
+          workspaceCwd: WS_DIFFERENT,
+          skills: {
+            v: 1,
+            workspaceCwd: WS_DIFFERENT,
+            initialized: true,
+            skills: [],
+          },
+          mcp: {
+            v: 1,
+            workspaceCwd: WS_DIFFERENT,
+            initialized: true,
+            servers: [],
+          },
         }),
       });
       const registry = createWorkspaceRegistry([
@@ -9871,6 +10005,9 @@ describe('createServeApp', () => {
       const res = await request(app)
         .get('/session/s-secondary/context')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const resourcesRes = await request(app)
+        .get('/session/s-secondary/resources')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
@@ -9880,6 +10017,10 @@ describe('createServeApp', () => {
       });
       expect(primaryBridge.sessionContextCalls).toEqual([]);
       expect(secondaryBridge.sessionContextCalls).toEqual(['s-secondary']);
+      expect(resourcesRes.status).toBe(200);
+      expect(resourcesRes.body.workspaceCwd).toBe(WS_DIFFERENT);
+      expect(primaryBridge.sessionResourcesCalls).toEqual([]);
+      expect(secondaryBridge.sessionResourcesCalls).toEqual(['s-secondary']);
     });
 
     it('surfaces live owner scan failures as structured bridge errors on owner-routed reads', async () => {
@@ -10025,6 +10166,9 @@ describe('createServeApp', () => {
         sessionLspImpl: async (sessionId) => {
           throw new SessionNotFoundError(sessionId);
         },
+        sessionResourcesImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
       });
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
@@ -10047,6 +10191,9 @@ describe('createServeApp', () => {
       const lspRes = await request(app)
         .get('/session/missing/lsp')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const resourcesRes = await request(app)
+        .get('/session/missing/resources')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(contextRes.status).toBe(404);
       expect(contextRes.body.sessionId).toBe('missing');
@@ -10058,6 +10205,8 @@ describe('createServeApp', () => {
       expect(tasksRes.body.sessionId).toBe('missing');
       expect(lspRes.status).toBe(404);
       expect(lspRes.body.sessionId).toBe('missing');
+      expect(resourcesRes.status).toBe(404);
+      expect(resourcesRes.body.sessionId).toBe('missing');
     });
 
     it('rejects task cancellation with invalid kind', async () => {
@@ -10110,6 +10259,53 @@ describe('createServeApp', () => {
           context: { clientId: 'client-1' },
         },
       ]);
+    });
+
+    it('reads a saved workflow definition and fails closed for an untrusted workspace', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .get('/session/s-1/saved-workflows/deep-review')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        v: 1,
+        sessionId: 's-1',
+        name: 'deep-review',
+        workflow: {
+          source: 'project',
+          scriptPath: `${WS_BOUND}/.qwen/workflows/deep-review.js`,
+          meta: { name: 'deep-review', description: 'd' },
+        },
+      });
+      expect(bridge.sessionSavedWorkflowCalls).toEqual([
+        { sessionId: 's-1', name: 'deep-review' },
+      ]);
+
+      const untrustedBridge = fakeBridge();
+      const untrustedApp = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge: untrustedBridge, primaryWorkspaceTrusted: false },
+      );
+      const closedRes = await request(untrustedApp)
+        .get('/session/s-1/saved-workflows/deep-review')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(closedRes.status).toBe(200);
+      expect(closedRes.body).toEqual({
+        v: 1,
+        sessionId: 's-1',
+        name: 'deep-review',
+        workflow: null,
+      });
+      expect(untrustedBridge.sessionSavedWorkflowCalls).toEqual([]);
     });
 
     it('controls live runs, saved definitions, and history through one route', async () => {
@@ -16013,6 +16209,8 @@ describe('createServeApp', () => {
       timestamp: string;
       prompt: string;
       mtime: Date;
+      customTitle?: string;
+      titleSource?: 'manual' | 'auto';
       state?: 'active' | 'archived';
       parentSessionId?: string;
       sourceType?: string;
@@ -16036,6 +16234,21 @@ describe('createServeApp', () => {
         cwd: input.cwd,
       };
       const lines = [JSON.stringify(record)];
+      if (input.customTitle !== undefined) {
+        lines.push(
+          JSON.stringify({
+            ...record,
+            uuid: `${input.sessionId}-title-1`,
+            parentUuid: record.uuid,
+            type: 'system',
+            subtype: 'custom_title',
+            systemPayload: {
+              customTitle: input.customTitle,
+              ...(input.titleSource ? { titleSource: input.titleSource } : {}),
+            },
+          }),
+        );
+      }
       if (input.parentSessionId !== undefined) {
         // Mirror ChatRecordingService.recordParentSession: a single
         // `parent_session` system record near the head of the transcript that
@@ -16315,6 +16528,8 @@ describe('createServeApp', () => {
         timestamp: '2026-05-17T12:00:00.000Z',
         prompt: 'stored only prompt',
         mtime: new Date('2026-05-17T12:10:00.000Z'),
+        customTitle: 'Manual title',
+        titleSource: 'manual',
       });
       await writeStoredSession({
         sessionId: liveAndStoredId,
@@ -16353,7 +16568,8 @@ describe('createServeApp', () => {
           expect.objectContaining({
             sessionId: storedOnlyId,
             workspaceCwd: WS_BOUND,
-            displayName: 'stored only prompt',
+            displayName: 'Manual title',
+            titleSource: 'manual',
             clientCount: 0,
             hasActivePrompt: false,
           }),
@@ -32303,7 +32519,10 @@ describe('runQwenServe', () => {
     // promptly; this assertion mainly proves the close didn't hang on the
     // live connection. Even if the connection had stayed open, the 5s
     // force-close timer would unblock us.
-    expect(elapsed).toBeLessThan(5_500);
+    // The bound must stay under the pool's 60s testTimeout or vitest — not
+    // the assertion — decides a hung close; 10x covers a force-close window
+    // stretched by host contention while a real stall still fails the timeout.
+    expectWithinLatencyBudget(elapsed, 5_500, { poolMultiplier: 10 });
     // Drain the fetch promise so vitest doesn't complain about open handles.
     try {
       const res = await sseFetch;
@@ -37327,6 +37546,9 @@ describe('Live conversation runtime lifecycle', () => {
     expect(partialCapabilities.body.features).not.toContain(
       'standalone_sessions_v1',
     );
+    expect(partialCapabilities.body.features).not.toContain(
+      'standalone_session_options_v1',
+    );
 
     const complete = setupLiveRuntime();
     const completeRoute = await supertest(complete.app)
@@ -37339,6 +37561,9 @@ describe('Live conversation runtime lifecycle', () => {
     expect(completeRoute.status).toBe(400);
     expect(completeCapabilities.body.features).toContain(
       'standalone_sessions_v1',
+    );
+    expect(completeCapabilities.body.features).toContain(
+      'standalone_session_options_v1',
     );
   });
 
@@ -37630,6 +37855,128 @@ describe('Live conversation runtime lifecycle', () => {
       await expect(retryPromise).resolves.toMatchObject({ status: 200 });
       expect(onConversationRuntimeReady).toHaveBeenCalledOnce();
     } finally {
+      await restoreLiveSettings();
+    }
+  });
+
+  it('logs a boot failure once per episode with the full cause chain', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    let captured = '';
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+      chunk: unknown,
+    ) => {
+      captured += String(chunk);
+      return true;
+    }) as unknown as typeof process.stderr.write);
+    const route = `/workspaces/${encodeURIComponent(
+      setup.root.configuredRoot,
+    )}/sessions?sourceType=default`;
+    const driveBoot = async (settle: () => void) => {
+      const before = setup.createWorkspaceRuntime.mock.calls.length;
+      const promise = request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime.mock.calls.length).toBeGreaterThan(
+          before,
+        );
+      });
+      settle();
+      return promise;
+    };
+    try {
+      const first = await driveBoot(() =>
+        setup.rejectCreation(
+          new Error('WRAPPED-BOOT-FAILURE-ONE', {
+            cause: new Error('ROOT-CAUSE-ONE EACCES'),
+          }),
+        ),
+      );
+      expect(first.status).toBe(503);
+
+      const second = await driveBoot(() =>
+        setup.rejectCreation(
+          new Error('WRAPPED-BOOT-FAILURE-TWO', {
+            cause: new Error('ROOT-CAUSE-TWO'),
+          }),
+        ),
+      );
+      expect(second.status).toBe(503);
+      const firstEpisode = captured;
+      expect(firstEpisode).toContain(
+        'qwen serve: Conversations runtime boot failed:',
+      );
+      expect(firstEpisode).toContain('WRAPPED-BOOT-FAILURE-ONE');
+      expect(firstEpisode).toContain('ROOT-CAUSE-ONE');
+      expect(firstEpisode).not.toContain('WRAPPED-BOOT-FAILURE-TWO');
+      expect(firstEpisode).not.toContain('ROOT-CAUSE-TWO');
+
+      const recovered = await driveBoot(() => setup.resolveCreation());
+      expect(recovered.status).toBe(200);
+
+      vi.mocked(setup.conversationWorkspace.revalidate).mockRejectedValueOnce(
+        new Error('ROOT-CAUSE-THREE ENOENT'),
+      );
+      const third = await request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(third.status).toBe(503);
+      expect(captured).toContain('ROOT-CAUSE-THREE');
+      const episodeLines = captured
+        .split('\n')
+        .filter((line) =>
+          line.includes('qwen serve: Conversations runtime boot failed:'),
+        );
+      expect(episodeLines).toHaveLength(2);
+    } finally {
+      stderrSpy.mockRestore();
+      await restoreLiveSettings();
+    }
+  });
+
+  it('keeps the classified boot rejection when the stderr write itself fails', async () => {
+    const restoreLiveSettings = await disableLiveVoiceAtBoot();
+    const setup = setupLiveRuntime();
+    let writeAttempts = 0;
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+      chunk: unknown,
+    ) => {
+      if (String(chunk).includes('qwen serve: Conversations runtime boot')) {
+        writeAttempts += 1;
+        throw new Error('EPIPE dead stderr');
+      }
+      return true;
+    }) as unknown as typeof process.stderr.write);
+    const route = `/workspaces/${encodeURIComponent(
+      setup.root.configuredRoot,
+    )}/sessions?sourceType=default`;
+    const failBootOnce = async (message: string) => {
+      const before = setup.createWorkspaceRuntime.mock.calls.length;
+      const promise = request(setup.app)
+        .get(route)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime.mock.calls.length).toBeGreaterThan(
+          before,
+        );
+      });
+      setup.rejectCreation(new Error(message));
+      return promise;
+    };
+    try {
+      const first = await failBootOnce('SENTINEL-BOOT-FAILURE-ONE');
+      expect(first.status).toBe(503);
+      expect(first.body.code).toBe('conversation_runtime_unavailable');
+
+      const second = await failBootOnce('SENTINEL-BOOT-FAILURE-TWO');
+      expect(second.status).toBe(503);
+      expect(second.body.code).toBe('conversation_runtime_unavailable');
+      expect(writeAttempts).toBe(1);
+    } finally {
+      stderrSpy.mockRestore();
       await restoreLiveSettings();
     }
   });

@@ -3367,6 +3367,22 @@ const SETTINGS_SCHEMA = {
           { value: 'refuse', label: 'Refuse' },
         ],
       },
+      crossSessionHeldExpiry: {
+        type: 'enum',
+        label: 'Held Message Expiry',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: '5m' as string,
+        description:
+          'How long a message held for your review waits before it expires and the sending session is told nobody answered. "never" keeps held messages until the session ends. Only affects messages that are held; accepted and refused ones are settled on arrival.',
+        showInDialog: false,
+        options: [
+          { value: '1m', label: '1 minute' },
+          { value: '5m', label: '5 minutes' },
+          { value: '10m', label: '10 minutes' },
+          { value: 'never', label: 'Never' },
+        ],
+      },
       modelGrades: {
         type: 'object',
         label: 'Model Grades',
@@ -3841,7 +3857,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default and does not change ordinary Todo or execution behavior.',
+          'Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default; Workflow markers, approval gates, and visualization stay off until enabled. Todo updates preserve omitted active dependencies in every mode.',
         showInDialog: true,
       },
       cron: {

@@ -23,6 +23,7 @@ import {
   DaemonHttpError,
   DaemonSessionClient,
   DaemonStandaloneCreationOutcomeUnknownError,
+  STANDALONE_SESSION_OPTIONS_CAPABILITY,
   UNRECOGNIZED_DIAGNOSTICS_LIMIT,
   createDaemonTranscriptStore,
   estimateDaemonTranscriptBlockBytes,
@@ -37,6 +38,7 @@ import {
   type DaemonApprovalMode,
   type DaemonEvent,
   type DaemonSseConnectReason,
+  type DaemonStandaloneSessionOptions,
   type DaemonTranscriptBlock,
   type DaemonTranscriptState,
   type DaemonTranscriptStore,
@@ -1526,8 +1528,34 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               !shouldCreateFreshSession
             ) {
               if (!workspaceScoped) {
+                let standaloneOptions:
+                  | DaemonStandaloneSessionOptions
+                  | undefined;
+                if (
+                  effectSessionContext?.kind === 'standalone' &&
+                  capabilityFeatures.includes(
+                    STANDALONE_SESSION_OPTIONS_CAPABILITY,
+                  )
+                ) {
+                  try {
+                    standaloneOptions =
+                      await client.getStandaloneSessionOptions();
+                  } catch (error) {
+                    console.warn(
+                      '[DaemonSessionProvider] standalone session options failed in deferred connect:',
+                      error,
+                    );
+                  }
+                }
+                if (disposed || abort.signal.aborted) return;
+                const providerModelStatus =
+                  mapProviderStatus(standaloneOptions);
+                // The options request can outlive a first-prompt create: the
+                // composer does not block while this branch is still
+                // connecting, so the session may already be attached by the
+                // time the response lands. Never publish over it.
                 setConnection((current) =>
-                  current.status === 'error'
+                  current.status === 'error' || current.sessionId
                     ? current
                     : {
                         ...clearNonWorkspaceSessionState(current),
@@ -1539,10 +1567,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                         gitStatus: undefined,
                         commands: undefined,
                         skills: undefined,
-                        models: undefined,
-                        currentModel: undefined,
-                        currentMode: undefined,
-                        contextWindow: undefined,
+                        models: standaloneOptions
+                          ? providerModelStatus.models
+                          : undefined,
+                        currentModel: providerModelStatus.currentModel,
+                        currentMode: providerModelStatus.currentMode,
+                        contextWindow: providerModelStatus.contextWindow,
                         providers: undefined,
                         capabilities: caps,
                         error: undefined,
@@ -2395,11 +2425,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const sideEffectEvents = eventGroups.flatMap(
               (group) => group.sideEffects,
             );
-            if (activeWorkspaceScoped && sideEffectEvents.length > 0) {
-              bumpWorkspaceEventSignals(
+            if (sideEffectEvents.length > 0) {
+              bumpSessionEventSignals(
                 sideEffectEvents,
                 setWorkspaceEventSignals,
-                activeSession.workspaceCwd,
+                activeWorkspaceScoped ? activeSession.workspaceCwd : undefined,
+                false,
               );
             }
             if (replayExceededCapacity) {
@@ -2928,13 +2959,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   break;
                 }
               }
-              if (activeWorkspaceScoped) {
-                bumpWorkspaceEventSignals(
-                  uiEvents,
-                  setWorkspaceEventSignals,
-                  activeProductSessionContext.cwd,
-                );
-              }
+              bumpSessionEventSignals(
+                uiEvents,
+                setWorkspaceEventSignals,
+                activeWorkspaceScoped
+                  ? activeProductSessionContext.cwd
+                  : undefined,
+              );
               if (uiEvents.length > 0) {
                 const hasGenerationSignal = hasActiveGenerationSignal(uiEvents);
                 setPromptStatus((current) =>
@@ -3979,13 +4010,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             overrides?.approvalMode ??
               createSessionRequestRef.current?.approvalMode,
           );
+          const modelServiceId =
+            overrides?.modelServiceId ??
+            createSessionRequestRef.current?.modelServiceId;
           return DaemonSessionClient.createStandalone(client, {
-            ...(createSessionRequestRef.current?.modelServiceId !== undefined
-              ? {
-                  modelServiceId:
-                    createSessionRequestRef.current.modelServiceId,
-                }
-              : {}),
+            ...(modelServiceId !== undefined ? { modelServiceId } : {}),
             ...(approvalMode !== undefined ? { approvalMode } : {}),
           });
         },
@@ -4923,10 +4952,11 @@ function getNumber(
   return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined;
 }
 
-function bumpWorkspaceEventSignals(
+function bumpSessionEventSignals(
   events: readonly DaemonUiEvent[],
   setSignals: Dispatch<SetStateAction<DaemonWorkspaceEventSignals>>,
-  workspaceCwd: string,
+  workspaceCwd?: string,
+  includeArtifactEvents = true,
 ): void {
   let memory = 0;
   let agents = 0;
@@ -4946,6 +4976,11 @@ function bumpWorkspaceEventSignals(
   let auth = 0;
 
   for (const event of events) {
+    if (event.type === 'session.artifact.changed') {
+      if (includeArtifactEvents) artifacts += 1;
+      continue;
+    }
+    if (!workspaceCwd) continue;
     switch (event.type) {
       case 'workspace.memory.changed':
         memory += 1;
@@ -4985,9 +5020,6 @@ function bumpWorkspaceEventSignals(
           failed: event.failed,
         };
         break;
-      case 'session.artifact.changed':
-        artifacts += 1;
-        break;
       case 'workspace.initialized':
         init += 1;
         break;
@@ -5019,7 +5051,9 @@ function bumpWorkspaceEventSignals(
     return;
 
   setSignals((current) => {
-    const existing = current.skillMutationsByCwd?.[workspaceCwd] ?? [];
+    const existing = workspaceCwd
+      ? (current.skillMutationsByCwd?.[workspaceCwd] ?? [])
+      : [];
     const existingIds = new Set(existing.map((mutation) => mutation.id));
     const newSkillMutations = skillMutations.filter(
       (mutation) => !existingIds.has(mutation.id),
@@ -5053,7 +5087,7 @@ function bumpWorkspaceEventSignals(
         : current.lastSkillMutation
           ? { lastSkillMutation: current.lastSkillMutation }
           : {}),
-      ...(newSkillMutations.length > 0
+      ...(newSkillMutations.length > 0 && workspaceCwd
         ? {
             skillMutationsByCwd: {
               ...current.skillMutationsByCwd,

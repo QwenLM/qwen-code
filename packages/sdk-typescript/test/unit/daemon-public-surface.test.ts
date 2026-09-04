@@ -31,6 +31,7 @@ import type {
   DaemonStandaloneFields,
   DaemonStandaloneMetadataResult,
   DaemonStandaloneSession,
+  DaemonStandaloneSessionOptions,
   DaemonStandaloneSessionCreating,
   DaemonStandaloneSessionListOptions,
   DaemonStandaloneSessionListPage,
@@ -92,6 +93,7 @@ import type {
   DaemonPendingPromptSummary,
   DaemonPendingPromptsResult,
   DaemonSessionLspStatus,
+  DaemonSessionResourcesStatus,
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
@@ -172,6 +174,7 @@ import type {
   DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
   DaemonChannelStartupFailure as DaemonEntryChannelStartupFailure,
   DaemonChannelWorkerStartErrorResponse as DaemonEntryChannelWorkerStartErrorResponse,
+  DaemonSessionResourcesStatus as DaemonEntrySessionResourcesStatus,
   DaemonUiDebugReason as DaemonEntryUiDebugReason,
   DaemonUnrecognizedDiagnostic as DaemonEntryUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason as DaemonEntryUnrecognizedDiagnosticReason,
@@ -203,6 +206,9 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(Public.STANDALONE_SESSIONS_CAPABILITY).toBe(
       'standalone_sessions_v1',
     );
+    expect(Public.STANDALONE_SESSION_OPTIONS_CAPABILITY).toBe(
+      'standalone_session_options_v1',
+    );
     expect(typeof Public.isStandaloneSessionNotFoundError).toBe('function');
     expect(typeof Public.isStandaloneCreationOutcomeUnknown).toBe('function');
     expect(typeof Public.DaemonStandaloneProtocolError).toBe('function');
@@ -215,6 +221,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<CreateStandaloneSessionOptions>().not.toBeNever();
     expectTypeOf<RestoreStandaloneSessionRequest>().not.toBeNever();
     expectTypeOf<DaemonStandaloneSession>().not.toBeNever();
+    expectTypeOf<DaemonStandaloneSessionOptions>().not.toBeNever();
     expectTypeOf<DaemonRestoredStandaloneSession>().not.toBeNever();
     expectTypeOf<DaemonStandaloneSessionSummary>().not.toBeNever();
     expectTypeOf<DaemonStandaloneSessionLookup>().not.toBeNever();
@@ -319,6 +326,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
+    expectTypeOf<DaemonSessionResourcesStatus>().toEqualTypeOf<DaemonEntrySessionResourcesStatus>();
     expectTypeOf<DaemonTrustChangeRequestedData>().not.toBeNever();
     expectTypeOf<DaemonTrustChangeRequestedEvent>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceTrustChangeRequest>().not.toBeNever();

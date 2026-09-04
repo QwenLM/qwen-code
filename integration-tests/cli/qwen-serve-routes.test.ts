@@ -58,6 +58,15 @@ const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'integration-test-token';
+// The ACP child's `initialize` handshake gets 10s by default, which is a
+// budget for an interactive desktop, not for a shard sharing a 128-core ECS
+// host with ~30 other jobs. Run 33633418567 lost `honors and reserves a
+// normalized caller-supplied session ID` to three ~10s
+// `AcpSessionBridge initialize timed out` attempts and a 504 on the
+// sandbox:docker leg while the same commit's sandbox:none shards passed —
+// the same signature #10605 diagnosed in run 33351032808. Nothing here
+// asserts the handshake budget, so raise it for the spawned daemon only.
+const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 let daemon: ChildProcess;
@@ -148,6 +157,8 @@ beforeAll(async () => {
       // / IDE-launcher environments.
       '--workspace',
       REPO_ROOT,
+      '--initialize-timeout-ms',
+      String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -380,6 +391,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
+      'session_resources',
       'session_status',
       'session_close',
       'session_archive',
@@ -388,6 +400,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_organization',
       'session_export',
       'standalone_sessions_v1',
+      'standalone_session_options_v1',
       'session_transcript',
       'session_transcript_pagination',
       'mcp_guardrails',

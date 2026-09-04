@@ -63,6 +63,14 @@ const lspConfigWatcherMock = vi.hoisted(() => ({
     stopWatching: ReturnType<typeof vi.fn>;
   }>,
 }));
+const mockSelectTuiRenderer = vi.hoisted(() =>
+  vi.fn(() => ({
+    renderer: 'ink' as 'ink' | 'opentui',
+    reason: 'no renderer requested',
+    strict: false,
+  })),
+);
+const mockStartOpenTuiUI = vi.hoisted(() => vi.fn());
 
 const sessionRegistryConfigStub = {
   getTargetDir: () => '/tmp/project',
@@ -279,6 +287,24 @@ vi.mock('./config/extension-file-watcher.js', () => ({
     stopWatching() {}
   },
 }));
+
+// The OpenTUI entry touches the native FFI at module scope — it must never
+// load inside this suite, so the mock is total (no importOriginal).
+vi.mock('./ui/opentui/start-opentui-ui.js', () => ({
+  startOpenTuiUI: mockStartOpenTuiUI,
+}));
+
+// Only the gate function is replaced; the real module supplies the env-var
+// name constants the dispatch error messages are asserted against. The
+// default keeps every pre-existing main() test on the ink path.
+vi.mock('./ui/opentui/renderer-selection.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./ui/opentui/renderer-selection.js')>();
+  return {
+    ...actual,
+    selectTuiRenderer: mockSelectTuiRenderer,
+  };
+});
 
 function withLspDisabledConfig<T extends object>(
   config: T,
@@ -1638,6 +1664,214 @@ describe('llm.tsx main function', () => {
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledTimes(
       2,
     );
+  });
+});
+
+describe('llm.tsx OpenTUI renderer dispatch', () => {
+  let originalEnvNoRelaunch: string | undefined;
+  let initialSigintListeners: NodeJS.SignalsListener[];
+  let initialSigtermListeners: NodeJS.SignalsListener[];
+
+  beforeEach(() => {
+    originalEnvNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    initialSigintListeners = process.listeners(
+      'SIGINT',
+    ) as NodeJS.SignalsListener[];
+    initialSigtermListeners = process.listeners(
+      'SIGTERM',
+    ) as NodeJS.SignalsListener[];
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if (!(process.stdin as any).setRawMode) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (process.stdin as any).setRawMode = vi.fn();
+    }
+    vi.spyOn(process.stdin, 'setRawMode');
+
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    Object.defineProperty(process.stdin, 'isRaw', {
+      value: false,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    for (const listener of process.listeners('SIGINT')) {
+      if (
+        !initialSigintListeners.includes(listener as NodeJS.SignalsListener)
+      ) {
+        process.removeListener('SIGINT', listener);
+      }
+    }
+    for (const listener of process.listeners('SIGTERM')) {
+      if (
+        !initialSigtermListeners.includes(listener as NodeJS.SignalsListener)
+      ) {
+        process.removeListener('SIGTERM', listener);
+      }
+    }
+    if (originalEnvNoRelaunch !== undefined) {
+      process.env['QWEN_CODE_NO_RELAUNCH'] = originalEnvNoRelaunch;
+    } else {
+      delete process.env['QWEN_CODE_NO_RELAUNCH'];
+    }
+    vi.restoreAllMocks();
+  });
+
+  // Drives main() to the renderer dispatch: interactive config, no
+  // relaunch, TTY stdin — the same harness the kitty-protocol tests use.
+  const interactiveMainSetup = async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const initializerModule = await import('./core/initializer.js');
+    const initializeAppSpy = vi
+      .spyOn(initializerModule, 'initializeApp')
+      .mockResolvedValue({
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        memoryFileCount: 0,
+      });
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...sessionRegistryConfigStub,
+      isInteractive: () => true,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      getModelProvidersConfig: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getMemoryFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      isTelemetryInitializationDeferred: () => true,
+    } as unknown as Config);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(parseArguments).mockResolvedValue({
+      model: undefined,
+      sandbox: undefined,
+      sandboxImage: undefined,
+      debug: undefined,
+      prompt: undefined,
+      promptInteractive: undefined,
+      systemPrompt: undefined,
+      appendSystemPrompt: undefined,
+      outputStyle: undefined,
+      query: undefined,
+      yolo: undefined,
+      bare: undefined,
+      approvalMode: undefined,
+      telemetry: undefined,
+      telemetryTarget: undefined,
+      telemetryOtlpEndpoint: undefined,
+      telemetryOtlpProtocol: undefined,
+      telemetryLogPrompts: undefined,
+      telemetryOutfile: undefined,
+      allowedMcpServerNames: undefined,
+      mcpConfig: undefined,
+      allowedTools: undefined,
+      acp: undefined,
+      experimentalAcp: undefined,
+      extensions: undefined,
+      listExtensions: undefined,
+      openaiLogging: undefined,
+      openaiApiKey: undefined,
+      openaiBaseUrl: undefined,
+      openaiLoggingDir: undefined,
+      proxy: undefined,
+      includeDirectories: undefined,
+      screenReader: undefined,
+      inputFormat: undefined,
+      outputFormat: undefined,
+      includePartialMessages: undefined,
+      continue: undefined,
+      resume: undefined,
+      coreTools: undefined,
+      excludeTools: undefined,
+      disabledSlashCommands: undefined,
+      authType: undefined,
+      maxSessionTurns: undefined,
+      maxWallTime: undefined,
+      maxToolCalls: undefined,
+      maxSubagentDepth: undefined,
+      experimentalLsp: undefined,
+      restoreAskUserQuestion: undefined,
+      channel: undefined,
+      chatRecording: undefined,
+      sessionId: undefined,
+      fallbackModel: undefined,
+    });
+    return initializeAppSpy;
+  };
+
+  const selectOpentui = (strict: boolean) => {
+    mockSelectTuiRenderer.mockReturnValueOnce({
+      renderer: 'opentui',
+      reason: 'requested via QWEN_TUI_RENDERER=opentui',
+      strict,
+    });
+  };
+
+  it('strict mode fails loudly when the OpenTUI entry declines to start', async () => {
+    await interactiveMainSetup();
+    selectOpentui(true);
+    mockStartOpenTuiUI.mockResolvedValue(false);
+
+    await expect(main()).rejects.toThrow(
+      /QWEN_TUI_RENDERER_STRICT forbids the ink fallback/,
+    );
+    // The dispatch rejected before the ink UI could mount.
+    expect(mockStartPostRenderPrefetches).not.toHaveBeenCalled();
+  });
+
+  it('strict mode rethrows OpenTUI boot failures', async () => {
+    await interactiveMainSetup();
+    selectOpentui(true);
+    const bootError = new Error('opentui boot exploded');
+    mockStartOpenTuiUI.mockRejectedValue(bootError);
+
+    await expect(main()).rejects.toThrow('opentui boot exploded');
+    expect(mockStartPostRenderPrefetches).not.toHaveBeenCalled();
+  });
+
+  it('falls back to ink without strict mode when the OpenTUI entry declines', async () => {
+    await interactiveMainSetup();
+    selectOpentui(false);
+    // The entry writes its own stderr warning when it declines; llm.tsx
+    // only falls through to startInteractiveUI, proven by the post-render
+    // prefetch hook inside it running.
+    mockStartOpenTuiUI.mockResolvedValue(false);
+
+    await main();
+
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalled();
   });
 });
 

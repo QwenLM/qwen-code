@@ -48,6 +48,11 @@ const sdkMocks = vi.hoisted(() => {
   class MockDaemonClient {
     constructor(_opts: unknown) {}
 
+    workspaceByCwd = vi.fn(() => ({
+      runtimeMcpTools: workspaceMcpTools,
+      runtimeMcpResources: workspaceMcpResources,
+    }));
+
     capabilities = capabilities;
     workspaceMcp = workspaceMcp;
     workspaceMcpTools = workspaceMcpTools;
@@ -533,7 +538,7 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context).toBeUndefined();
   });
 
-  it('returns MCP tools fallback for older daemons', async () => {
+  it('propagates MCP tools failures', async () => {
     sdkMocks.workspaceMcpTools.mockRejectedValueOnce(
       new Error('missing route'),
     );
@@ -555,21 +560,9 @@ describe('DaemonWorkspaceProvider', () => {
     const workspaceActions = actions;
 
     await act(async () => {
-      await expect(workspaceActions.loadMcpTools('server-a')).resolves.toEqual({
-        v: 1,
-        workspaceCwd: '',
-        serverName: 'server-a',
-        initialized: false,
-        acpChannelLive: false,
-        tools: [],
-        errors: [
-          {
-            kind: 'mcp_tools',
-            status: 'error',
-            error: 'The connected daemon does not expose MCP tool details.',
-          },
-        ],
-      });
+      await expect(workspaceActions.loadMcpTools('server-a')).rejects.toThrow(
+        'missing route',
+      );
     });
   });
 
@@ -609,7 +602,7 @@ describe('DaemonWorkspaceProvider', () => {
     expect(sdkMocks.workspaceMcpResources).toHaveBeenCalledWith('docs');
   });
 
-  it('returns MCP resources fallback for older daemons', async () => {
+  it('propagates MCP resources failures', async () => {
     sdkMocks.workspaceMcpResources.mockRejectedValueOnce(
       new Error('missing route'),
     );
@@ -632,21 +625,7 @@ describe('DaemonWorkspaceProvider', () => {
     await act(async () => {
       await expect(
         workspaceActions.loadMcpResources('server-a'),
-      ).resolves.toEqual({
-        v: 1,
-        workspaceCwd: '',
-        serverName: 'server-a',
-        initialized: false,
-        acpChannelLive: false,
-        resources: [],
-        errors: [
-          {
-            kind: 'mcp_resources',
-            status: 'error',
-            error: 'The connected daemon does not expose MCP resource details.',
-          },
-        ],
-      });
+      ).rejects.toThrow('missing route');
     });
   });
 

@@ -30,6 +30,7 @@ import {
   InvalidRewindTargetError,
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
+  McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   PermissionForbiddenError,
@@ -514,6 +515,13 @@ export function sendBridgeError(
       code: 'workspace_init_race',
       target: err.target,
       kind: err.kind,
+    });
+    return;
+  }
+  if (err instanceof McpAuthenticationInProgressError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'mcp_authentication_in_progress',
     });
     return;
   }

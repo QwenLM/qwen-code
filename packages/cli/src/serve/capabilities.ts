@@ -126,6 +126,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
+  session_resources: { since: 'v1' },
   session_status: { since: 'v1' },
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
@@ -134,6 +135,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_organization: { since: 'v1' },
   session_export: { since: 'v1' },
   standalone_sessions_v1: { since: 'v1' },
+  standalone_session_options_v1: { since: 'v1' },
   session_transcript: { since: 'v1' },
   session_transcript_pagination: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
@@ -591,6 +593,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['require_auth', (toggles) => toggles.requireAuth === true],
   [
     'standalone_sessions_v1',
+    (toggles) => toggles.standaloneSessionsAvailable === true,
+  ],
+  [
+    'standalone_session_options_v1',
     (toggles) => toggles.standaloneSessionsAvailable === true,
   ],
   ['mcp_workspace_pool', (toggles) => toggles.mcpPoolActive === true],

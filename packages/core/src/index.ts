@@ -456,6 +456,10 @@ export {
   type ResolvedSavedWorkflow,
   type WorkflowSaveResult,
 } from './agents/runtime/workflow-saved.js';
+export {
+  extractAndStripMeta,
+  type WorkflowMeta,
+} from './agents/runtime/workflow-sandbox.js';
 export * from './services/toolUseSummary.js';
 export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
