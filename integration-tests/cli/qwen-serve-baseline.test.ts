@@ -104,8 +104,17 @@ const HAS_PROMPT_LATENCY_CREDENTIAL =
   Object.entries(process.env).some(
     ([key, value]) => key.startsWith('QWEN_CUSTOM_API_KEY_') && Boolean(value),
   );
+// The pool runners share one ECS host with ~30 concurrent jobs, so the slowest
+// of PROMPT_ITERATIONS real model round-trips measures that contention rather
+// than the daemon: `promptP99MaxMs` becomes a coin flip, and every one of
+// vitest's attempts re-issues all 20 prompts inside the 10-minute budget below.
+// `integration-tests/vitest.config.ts` exempts the same runners from the
+// analogous pressure class. The dedicated macOS legs still record the baseline,
+// and QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 still force-runs it here.
 const SKIP_PROMPT_LATENCY =
   process.env['QWEN_BASELINE_SKIP_PROMPT_LATENCY'] === '1' ||
+  (!process.env['QWEN_BASELINE_ENABLE_PROMPT_LATENCY'] &&
+    process.env['RUNNER_ENVIRONMENT'] === 'self-hosted') ||
   !HAS_PROMPT_LATENCY_CREDENTIAL;
 
 const FIXTURES_DIR = path.resolve(__dirname, '../fixtures');
@@ -672,14 +681,15 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
       );
 
       if (SKIP_PROMPT_LATENCY) {
-        it('prompt latency skipped (no model credential env)', () => {
+        it('prompt latency skipped', () => {
           snapshot.promptLatency = {
             iterations: 0,
             firstByteMs: null,
             totalMs: null,
             skipped: true,
-            skipReason:
-              'No recognized model credential env var is set; prompt latency requires real model access. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run with non-env auth.',
+            skipReason: !HAS_PROMPT_LATENCY_CREDENTIAL
+              ? 'No recognized model credential env var is set; prompt latency requires real model access. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run with non-env auth.'
+              : 'Shared self-hosted pool: 20 real model round-trips would measure host contention, not the daemon. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run.',
           };
           // Mark via a no-op assertion so the suite still appears in output.
           expect(true).toBe(true);
