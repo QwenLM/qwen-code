@@ -15,6 +15,7 @@ import type {
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { isSubAgentToolCall } from '../../adapters/toolClassification';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { formatRuntime } from '../../utils/formatRuntime';
 import {
   getAgentDescription,
@@ -547,6 +548,7 @@ export function PlanExecutionView({
   showStepDetails?: boolean;
 }) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const taskIndex = useMemo(() => createTaskExecutionIndex(tasks), [tasks]);
 
   // One derivation for the whole graph, so a hover — which only flips
@@ -1318,6 +1320,7 @@ export function PlanExecutionView({
                             : todo.id,
                         )
                       }
+                      disabled={documentMode}
                     >
                       {/* Status reaches assistive tech as words; the left
                           rule that carries it visually is colour only. */}

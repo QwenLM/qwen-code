@@ -34,6 +34,8 @@ import {
   DAEMON_TRACESTATE_META_KEY,
   INVOCATION_CONTEXT_META_KEY,
   PRIVATE_ACP_CAPABILITY_ENV,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   SESSION_PR_LIST_LIMIT,
@@ -52,6 +54,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
 import type { AcpChannel, AcpChannelTransportGuard } from './channel.js';
+import { channelFactoryForwardsChildEnv } from './child-env-forwarding.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
@@ -77,9 +80,12 @@ import {
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
+  type ServeSessionAgentsStatus,
+  type ServeSessionAgentTrace,
   type ServeSessionStatsStatus,
   type ServeSessionContextStatus,
   type ServeSessionLspStatus,
+  type ServeSessionResourcesStatus,
   type ServeSessionSavedWorkflowStatus,
   type ServeSessionTasksStatus,
   type ServeSessionWorkflowTaskStatus,
@@ -160,6 +166,7 @@ import {
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_UPDATES,
@@ -213,6 +220,8 @@ import type {
   BridgeWorkspaceMemoryRememberResult,
   BridgeSessionTranscriptPage,
   BridgeSessionTranscriptPageRequest,
+  BridgeSessionTurnIndexPage,
+  BridgeSessionTurnIndexPageRequest,
   BridgeGenerationStreamEvent,
   BridgeWorkspaceGenerationStreamEvent,
   BridgePromptContentBlock,
@@ -1127,6 +1136,7 @@ interface SessionEntry {
   promptQueue: Promise<void>;
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
+  deferredRestoreAskUserQuestionPrompts?: Map<string, string>;
   pendingAgentNotificationCount: number;
   /**
    * Optional prompt terminal ledger sink (injected via BridgeOptions).
@@ -2859,6 +2869,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     opts.childEnvOverrides
       ? Object.freeze({ ...opts.childEnvOverrides })
       : Object.freeze({});
+  // The mandatory-lease attestation is conjunctive: the frozen overrides must
+  // offer the exact Conversations marker AND the configured factory must be
+  // attested to forward overrides into the spawned child's environment. A
+  // marker-shaped override map paired with a factory that ignores its second
+  // argument does not attest, because the child would run unleased while the
+  // daemon believes the transcripts are fenced.
+  const mandatoryLeaseAttested =
+    childEnvOverrides[PRIVATE_CONVERSATIONS_RUNTIME_ENV] ===
+      PRIVATE_CONVERSATIONS_RUNTIME_ENABLE &&
+    channelFactoryForwardsChildEnv(channelFactory);
   const initTimeoutMs = opts.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
   if (!Number.isInteger(initTimeoutMs) || initTimeoutMs <= 0) {
     throw new TypeError(
@@ -7359,6 +7379,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   }
 
+  async function requestSessionTurnIndexPage(
+    req: BridgeSessionTurnIndexPageRequest,
+  ): Promise<BridgeSessionTurnIndexPage> {
+    try {
+      const response = await withEnsuredWorkspaceControl((info) =>
+        withTimeout(
+          Promise.race([
+            info.connection.extMethod(
+              SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+              { ...req, cwd: boundWorkspace },
+            ),
+            getChannelClosedReject(info),
+          ]),
+          Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
+          SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+        ),
+      );
+      return response as unknown as BridgeSessionTurnIndexPage;
+    } catch (err) {
+      if (isAcpSessionResourceNotFound(err, req.sessionId)) {
+        throw new SessionNotFoundError(req.sessionId);
+      }
+      throw err;
+    }
+  }
+
   async function refreshedReplayFieldsFor(
     entry: SessionEntry,
     historyPageSize: number,
@@ -7600,12 +7646,45 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return true;
   };
 
+  const deferOrFireRestoreAskUserQuestionPrompt = (
+    entry: SessionEntry,
+    restoreAskUserQuestionHint: boolean,
+    requestedClientId: string | undefined,
+    registeredClientId: string,
+    options: {
+      suppressRestorePrompt?: boolean;
+      deferRestorePrompt?: boolean;
+    },
+  ): boolean => {
+    if (
+      options.deferRestorePrompt === true &&
+      restoreAskUserQuestionHint &&
+      requestedClientId !== undefined &&
+      options.suppressRestorePrompt !== true
+    ) {
+      entry.deferredRestoreAskUserQuestionPrompts ??= new Map();
+      entry.deferredRestoreAskUserQuestionPrompts.set(
+        registeredClientId,
+        requestedClientId,
+      );
+      return false;
+    }
+    return maybeFireRestoreAskUserQuestionPrompt(
+      entry,
+      restoreAskUserQuestionHint,
+      requestedClientId,
+      registeredClientId,
+      options,
+    );
+  };
+
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
     options: {
       skipFreshSessionAdmission?: boolean;
       suppressRestorePrompt?: boolean;
+      deferRestorePrompt?: boolean;
       daemonOwnedStandaloneRestore?: boolean;
     } = {},
   ): Promise<BridgeRestoredSession> {
@@ -8197,6 +8276,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   ...(hideInheritedHistory
                     ? { [LOAD_REPLAY_HIDE_INHERITED_META_KEY]: true }
                     : {}),
+                  ...(req.suppressWorktreeContextRestore
+                    ? {
+                        [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+                      }
+                    : {}),
                 },
               });
               return await restoreChannel.connection.loadSession(request);
@@ -8216,6 +8300,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   options.suppressRestorePrompt === true)
                   ? {
                       [DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
+                    }
+                  : {}),
+                ...(req.suppressWorktreeContextRestore
+                  ? {
+                      [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
                     }
                   : {}),
               },
@@ -8382,13 +8471,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             throw error;
           }
         }
-        const restorePromptAdmitted = maybeFireRestoreAskUserQuestionPrompt(
-          racedEntry,
-          restoreAskUserQuestionHint,
-          req.clientId,
-          clientId,
-          options,
-        );
+        let restorePromptAdmitted = false;
+        if (options.deferRestorePrompt !== true) {
+          restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
+            racedEntry,
+            restoreAskUserQuestionHint,
+            req.clientId,
+            clientId,
+            options,
+          );
+        }
         const sourcePersisted = await applyRestoreSourceIfMissing(
           racedEntry,
           req,
@@ -8409,6 +8501,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             1 + coalesceState.count,
           );
           throw error;
+        }
+        if (options.deferRestorePrompt === true) {
+          restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
+            racedEntry,
+            restoreAskUserQuestionHint,
+            req.clientId,
+            clientId,
+            options,
+          );
         }
         return {
           sessionId: racedEntry.sessionId,
@@ -8542,13 +8643,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // directly.
       entry.attachCount = coalesceState.count;
       registeredEntry = entry;
-      const restorePromptAdmitted = maybeFireRestoreAskUserQuestionPrompt(
-        entry,
-        restoreAskUserQuestionHint,
-        req.clientId,
-        clientId,
-        options,
-      );
+      let restorePromptAdmitted = false;
+      if (options.deferRestorePrompt !== true) {
+        restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
+          entry,
+          restoreAskUserQuestionHint,
+          req.clientId,
+          clientId,
+          options,
+        );
+      }
       const sourcePersisted = entry.sourceType
         ? await persistSessionSource(
             entry,
@@ -8568,6 +8672,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         await rollbackAttachRegistration(entry, clientId);
         throw error;
+      }
+      if (options.deferRestorePrompt === true) {
+        restorePromptAdmitted = deferOrFireRestoreAskUserQuestionPrompt(
+          entry,
+          restoreAskUserQuestionHint,
+          req.clientId,
+          clientId,
+          options,
+        );
       }
       // Explicit `session/load` / `session/resume` is "give me THIS
       // id"; it must NOT become the implicit attach target for
@@ -9040,6 +9153,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     { dispatched: boolean }
   >();
   const bridgeApi: AcpSessionBridge = {
+    // Derived once from the frozen overrides and the configured channel
+    // factory; immutable for the bridge's lifetime.
+    mandatoryLeaseAttested,
     setLiveScreenContextCaptureHandler(handler) {
       liveScreenContextCaptureHandler = handler;
     },
@@ -9259,11 +9375,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     async loadSession(req) {
-      return restoreSession('load', req);
+      return restoreSession('load', req, {
+        ...(req.deferRestoreAskUserQuestionPrompt
+          ? { deferRestorePrompt: true }
+          : {}),
+      });
     },
 
     async resumeSession(req) {
-      return restoreSession('resume', req);
+      return restoreSession('resume', req, {
+        ...(req.deferRestoreAskUserQuestionPrompt
+          ? { deferRestorePrompt: true }
+          : {}),
+      });
     },
 
     async spawnStandaloneSession(req) {
@@ -11312,6 +11436,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
+    fireDeferredRestoreAskUserQuestionPrompt(sessionId, clientId) {
+      if (clientId === undefined) return false;
+      const entry = byId.get(sessionId);
+      const requestedClientId =
+        entry?.deferredRestoreAskUserQuestionPrompts?.get(clientId);
+      if (!entry || requestedClientId === undefined) return false;
+      entry.deferredRestoreAskUserQuestionPrompts?.delete(clientId);
+      return maybeFireRestoreAskUserQuestionPrompt(
+        entry,
+        true,
+        requestedClientId,
+        clientId,
+        {},
+      );
+    },
+
+    discardDeferredRestoreAskUserQuestionPrompt(sessionId, clientId) {
+      if (clientId === undefined) return;
+      const entry = byId.get(sessionId);
+      entry?.deferredRestoreAskUserQuestionPrompts?.delete(clientId);
+    },
+
     async closeSession(sessionId, context, closeOpts) {
       return closeSessionImpl(sessionId, context, closeOpts);
     },
@@ -12037,10 +12183,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async getSessionAgentsStatus(sessionId) {
+      return requestSessionStatus<ServeSessionAgentsStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionAgents,
+      );
+    },
+
+    async getSessionAgentTrace(sessionId, rootAgentId) {
+      return requestSessionStatus<ServeSessionAgentTrace>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionAgentTrace,
+        rootAgentId === undefined ? undefined : { rootAgentId },
+      );
+    },
+
     async getSessionLspStatus(sessionId) {
       return requestSessionStatus<ServeSessionLspStatus>(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionLspStatus,
+      );
+    },
+
+    async getSessionResourcesStatus(sessionId) {
+      return requestSessionStatus<ServeSessionResourcesStatus>(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionResources,
       );
     },
 
@@ -12054,6 +12222,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     async getSessionTranscriptPage(req) {
       return requestSessionTranscriptPage(req);
+    },
+
+    async flushSessionTranscript(sessionId) {
+      // The child flushes before every backward page; a one-record page is the
+      // existing read-only barrier without adding another ACP extension.
+      await requestSessionTranscriptPage({
+        sessionId,
+        direction: 'backward',
+        limit: 1,
+      });
+    },
+
+    async getSessionTurnIndexPage(req) {
+      return requestSessionTurnIndexPage(req);
     },
 
     async cancelSessionTask(sessionId, taskId, taskKind, context) {
@@ -12866,6 +13048,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
       return await entry.attachments.read(attachmentId);
+    },
+
+    async listSessionAttachments(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return await entry.attachments.list();
     },
 
     async removeSessionAttachment(sessionId, attachmentId, context) {

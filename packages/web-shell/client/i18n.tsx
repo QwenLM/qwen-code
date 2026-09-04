@@ -69,8 +69,9 @@ const EN: Messages = {
   'branchPicker.hint.behindDirty': (v) =>
     `↓${v?.count ?? 0} · uncommitted changes`,
   'branchPicker.hint.setsUpstream': 'Sets upstream on push',
+  'branchPicker.hint.createsPushBranch': (v) => `Creates ${v?.target ?? ''}`,
   'branchPicker.hint.aheadBehind': (v) =>
-    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · update first`,
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · diverged`,
   'branchPicker.hint.nothingToPush': 'Nothing to push',
   'branchPicker.hint.noChanges': 'No changes',
   'branchPicker.hint.changes': (v) =>
@@ -2811,7 +2812,20 @@ const EN: Messages = {
   'environment.history': 'Commit history',
   'environment.agents': 'Subagents',
   'environment.unnamedAgent': (v) => `Agent (${v?.index ?? 0})`,
+  'workflow.open': 'Open agent workflow',
+  'workflow.mainAgent': 'Main agent',
+  'workflow.empty': 'No subagents in this workflow',
+  'workflow.loadFailed': 'Failed to load agent workflow',
   'environment.unavailable': 'Unavailable',
+  'environment.attachments': 'Attachments',
+  'environment.artifacts': 'Artifacts',
+  'environment.artifactsEmpty':
+    'Artifacts generated in this session will appear here.',
+  'rightPanel.attachmentLoadFailed': (v) =>
+    `Failed to load attachment: ${v?.error ?? 'Unknown error'}`,
+  'rightPanel.savedContentUnavailable': 'Saved panel content is unavailable',
+  'rightPanel.restoreFailed': (v) =>
+    `Failed to restore panel: ${v?.error ?? 'Unknown error'}`,
   'userMessage.showMore': 'Show more',
   'userMessage.showLess': 'Collapse',
   'userMessage.sendFailed': 'Failed to send',
@@ -3475,6 +3489,9 @@ const EN: Messages = {
   'settings.label.ui.chatWidth': 'Chat width',
   'settings.description.ui.chatWidth':
     'Frontend-only chat content width. Stored in this browser.',
+  'settings.label.ui.enableFollowupSuggestions': 'Enable Follow-up Suggestions',
+  'settings.description.ui.enableFollowupSuggestions':
+    'Show context-aware follow-up suggestions after a task completes. Press Tab or Right Arrow to insert, Enter to accept and submit.',
   'settings.option.ui.chatWidth.1000': 'Regular',
   'settings.option.ui.chatWidth.wide': 'Ultra wide',
   'settings.label.visionModel': 'Vision Model',
@@ -3542,8 +3559,9 @@ const ZH: Messages = {
   'branchPicker.hint.upstreamGone': '上游分支已不存在',
   'branchPicker.hint.behindDirty': (v) => `↓${v?.count ?? 0} · 有未提交更改`,
   'branchPicker.hint.setsUpstream': '推送时设置上游',
+  'branchPicker.hint.createsPushBranch': (v) => `将创建 ${v?.target ?? ''}`,
   'branchPicker.hint.aheadBehind': (v) =>
-    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · 请先更新`,
+    `↑${v?.ahead ?? 0} ↓${v?.behind ?? 0} · 已分叉`,
   'branchPicker.hint.nothingToPush': '无待推送',
   'branchPicker.hint.noChanges': '无更改',
   'branchPicker.hint.changes': (v) => `${v?.count ?? 0} 处更改`,
@@ -6155,7 +6173,18 @@ const ZH: Messages = {
   'environment.history': '提交历史',
   'environment.agents': '子智能体',
   'environment.unnamedAgent': (v) => `智能体（${v?.index ?? 0}）`,
+  'workflow.open': '打开智能体工作流',
+  'workflow.mainAgent': '主智能体',
+  'workflow.empty': '此工作流中暂无子智能体',
+  'workflow.loadFailed': '工作流加载失败',
   'environment.unavailable': '不可用',
+  'environment.attachments': '附件',
+  'environment.artifacts': '产物',
+  'environment.artifactsEmpty': '此会话生成的产物会显示在这里。',
+  'rightPanel.attachmentLoadFailed': (v) =>
+    `附件加载失败：${v?.error ?? '未知错误'}`,
+  'rightPanel.savedContentUnavailable': '保存的面板内容已不可用',
+  'rightPanel.restoreFailed': (v) => `面板恢复失败：${v?.error ?? '未知错误'}`,
   'userMessage.showMore': '显示更多',
   'userMessage.showLess': '收起',
   'userMessage.sendFailed': '发送失败',
@@ -6825,7 +6854,7 @@ const ZH: Messages = {
     '对话结束后显示可选反馈对话框，帮助改进 Qwen 表现。',
   'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
   'settings.description.ui.enableFollowupSuggestions':
-    '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键接受，按 Enter 接受并提交。',
+    '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键插入，按 Enter 接受并提交。',
   'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
   'settings.description.ui.shellOutputMaxLines':
     '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',
