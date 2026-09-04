@@ -138,6 +138,10 @@ export class WeixinChannel extends ChannelBase {
           senderName: msg.fromUserId,
           chatId: msg.fromUserId,
           text: msg.text,
+          // A caption-less image or file carries only the placeholder above,
+          // which no user action can prefix -- gating it on `messagePrefix`
+          // would drop every WeChat media message.
+          ...(msg.syntheticText ? { syntheticText: true as const } : {}),
           isGroup: false,
           isMentioned: false,
           isReplyToBot: false,
