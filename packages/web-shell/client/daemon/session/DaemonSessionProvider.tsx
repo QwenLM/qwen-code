@@ -4716,12 +4716,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         }
         // Placement comes from snapshot-local ordinals, never from record-id
         // ordering: ids are not ordered, and guessing a position could
-        // interleave two ranges that were never adjacent. A window the index
-        // cannot fully order takes the page at the tail instead.
+        // interleave two ranges that were never adjacent. The ordinals are read
+        // after the await on purpose — an append-only refresh leaves them
+        // unchanged, while a divergent one discards the pages and makes the
+        // window unorderable, which takes the page to the tail instead of
+        // placing it by a snapshot that no longer describes the chain.
         const insertAt =
           ledgerInsertIndexForOrdinal(
             ledger,
-            turnOrdinalMap(index),
+            turnOrdinalMap(turnIndexRef.current),
             target.entry.ordinal,
           ) ?? ledger.spans.length;
         store.reset(
