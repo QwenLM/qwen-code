@@ -14,6 +14,10 @@ import {
   DEFAULT_AGENT_VIEW_ATTACH_LEASE_TTL_MS,
 } from './attach-lease.js';
 import type { AgentViewAttachLease } from './attach-lease.js';
+import {
+  readPidNamespaceId,
+  readProcStartToken,
+} from '@qwen-code/qwen-code-core';
 import { AGENT_VIEW_PROTOCOL_VERSION } from './protocol.js';
 import type {
   AgentViewActivityFile,
@@ -79,6 +83,40 @@ import {
   canAgentViewQueueFollowUp,
   getAgentViewActivityInputState,
 } from './presentation.js';
+
+/**
+ * The pid fields of a worker file, with the identity that makes them
+ * trustworthy to a later reader.
+ *
+ * Recording the numbers alone is not enough. Nothing reaps this store
+ * while no supervisor runs — `clearAgentViewWorkerPids` does not get to
+ * run after a SIGKILL or a reboot — so the durable file keeps naming pids
+ * the OS is free to hand to unrelated processes, and a `~/.qwen` shared
+ * between machines or namespaces offers pids that mean nothing here. A
+ * reader pairing these tokens with `isSameProcess` gets the same evidence
+ * standard the live-session registry already holds its own records to,
+ * instead of a bare `kill(pid, 0)`.
+ *
+ * Reading the token can fail (the process exits between spawn and this
+ * call, `/proc` is unreadable, the platform has none); `null` then records
+ * "no identity available", which readers degrade to a liveness check
+ * rather than treating as a mismatch.
+ */
+function workerPidIdentity(host: { pid: number; workerPid: number }): {
+  hostPid: number;
+  workerPid: number;
+  hostProcStart: string | null;
+  workerProcStart: string | null;
+  pidNs: number | null;
+} {
+  return {
+    hostPid: host.pid,
+    workerPid: host.workerPid,
+    hostProcStart: readProcStartToken(host.pid),
+    workerProcStart: readProcStartToken(host.workerPid),
+    pidNs: readPidNamespaceId(),
+  };
+}
 
 function resolveSessionCwd(cwd: string): string {
   try {
@@ -470,8 +508,7 @@ class AgentViewSupervisorProcessHandler
           result.sessionId,
           {
             schemaVersion: 1,
-            hostPid: host.pid,
-            workerPid: host.workerPid,
+            ...workerPidIdentity(host),
             ...(host.hostId ? { hostId: host.hostId } : {}),
             ...(host.endpoint ? { hostEndpoint: host.endpoint } : {}),
             ...(host.authToken ? { hostAuthToken: host.authToken } : {}),
@@ -703,8 +740,7 @@ class AgentViewSupervisorProcessHandler
           adoption.sessionId,
           {
             schemaVersion: 1,
-            hostPid: host.pid,
-            workerPid: host.workerPid,
+            ...workerPidIdentity(host),
             ...(host.hostId ? { hostId: host.hostId } : {}),
             ...(host.endpoint ? { hostEndpoint: host.endpoint } : {}),
             ...(host.authToken ? { hostAuthToken: host.authToken } : {}),
@@ -2322,8 +2358,7 @@ class WorkerRegistry {
           sessionId,
           {
             schemaVersion: 1,
-            hostPid: host.pid,
-            workerPid: host.workerPid,
+            ...workerPidIdentity(host),
             ...(host.hostId ? { hostId: host.hostId } : {}),
             hostEndpoint: worker.hostEndpoint,
             ...(worker.hostAuthToken
@@ -2521,8 +2556,7 @@ class WorkerRegistry {
         sessionId,
         {
           schemaVersion: 1,
-          hostPid: host.pid,
-          workerPid: host.workerPid,
+          ...workerPidIdentity(host),
           ...(host.hostId ? { hostId: host.hostId } : {}),
           ...(host.endpoint ? { hostEndpoint: host.endpoint } : {}),
           ...(host.authToken ? { hostAuthToken: host.authToken } : {}),

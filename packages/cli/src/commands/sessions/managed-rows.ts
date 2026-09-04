@@ -15,15 +15,29 @@
  *
  * This module turns both sources into one row shape. It is deliberately
  * pure: the readers stay in the command, so the merge and the labelling
- * are testable without a filesystem or a supervisor. The one probe it
- * makes — `isPidAlive`, which decides whether a recorded pid may still
- * be printed — is an input the tests control like any other.
+ * are testable without a filesystem or a supervisor. The probes it makes
+ * — the process-identity checks that decide whether a recorded pid may
+ * still be printed — are inputs the tests control like any other.
+ *
+ * Both sources describe the same sessions, and both had their own idea of
+ * what a session's identity is. That is the bug class this module has to
+ * keep closed:
+ *
+ * - the store files a session under a sanitized (lowercased) directory
+ *   name and reports that as the id, while the registry keeps the raw
+ *   spelling the worker registered with, so the merge canonicalizes
+ *   through `sanitizeSessionId` before comparing;
+ * - the registry verifies a pid with a recorded start token plus
+ *   namespace and boot-id guards, so a managed pid is held to the same
+ *   standard rather than to a bare liveness probe.
  */
 
 import {
-  isPidAlive,
+  isSameProcess,
+  readPidNamespaceId,
   type SessionRegistryRecord,
 } from '@qwen-code/qwen-code-core';
+import { sanitizeSessionId } from '../../agent-view/protocol.js';
 import type {
   AgentViewSessionSnapshot,
   AgentViewWorkerFile,
@@ -130,17 +144,49 @@ export function managedSessionRows(
  *
  * The worker is the process doing the work; the host only owns the PTY —
  * report whichever lives, worker first, matching the supervisor's own
- * two-pid liveness idiom. The store is durable and nothing reaps it when
- * no supervisor runs, so a crash or a reboot leaves recorded pids behind
- * that are dead, or recycled to an unrelated process; printing one would
- * point a `kill` at the wrong target. When neither lives, the row prints
- * `-`, exactly like a session that never had a worker.
+ * two-pid liveness idiom.
+ *
+ * Liveness alone is not enough to print a number a user or a script may
+ * `kill`. The store is durable and nothing reaps it while no supervisor
+ * runs, so a crash or a reboot leaves recorded pids behind; once the OS
+ * recycles one, a bare `kill(pid, 0)` says "alive" about a process that
+ * has nothing to do with this session. A `~/.qwen` shared between
+ * machines or PID namespaces — an NFS home, a devcontainer with the home
+ * mounted — reaches the same end without any recycling, because a foreign
+ * file's pids get probed here, where low numbers routinely belong to live
+ * local processes. So each candidate is checked with `isSameProcess`
+ * against the start token the supervisor recorded beside it, which is the
+ * contract the registry rows in this very table already answer to.
+ *
+ * Degradation is deliberate in two places. A worker file written before
+ * those tokens existed carries none, and `isSameProcess` reads that as
+ * "no identity recorded" and falls through to a liveness check — the
+ * behaviour this command had before, rather than a blanked pid on every
+ * pre-existing session. And the namespace guard only fires when both
+ * sides are known and disagree; an unreadable namespace on either side
+ * must not blank a real worker's pid.
+ *
+ * When nothing qualifies the row prints `-`, exactly like a session that
+ * never had a worker.
  */
 function liveWorkerPid(
   worker: AgentViewWorkerFile | undefined,
 ): number | undefined {
-  for (const pid of [worker?.workerPid, worker?.hostPid]) {
-    if (pid !== undefined && isPidAlive(pid)) return pid;
+  if (!worker) return undefined;
+  const ownNamespace = readPidNamespaceId();
+  if (
+    worker.pidNs != null &&
+    ownNamespace != null &&
+    worker.pidNs !== ownNamespace
+  ) {
+    return undefined;
+  }
+  const candidates = [
+    [worker.workerPid, worker.workerProcStart],
+    [worker.hostPid, worker.hostProcStart],
+  ] as const;
+  for (const [pid, procStart] of candidates) {
+    if (pid !== undefined && isSameProcess(pid, procStart)) return pid;
   }
   return undefined;
 }
@@ -176,11 +222,21 @@ export function mergeSessionRows(
   records: readonly SessionRegistryRecord[],
   managed: readonly SessionRow[],
 ): SessionRow[] {
-  const managedIds = new Set(managed.map((row) => row.sessionId));
+  // Canonicalized on both sides rather than compared raw. The two
+  // sources spell one id differently: the store reports the sanitized
+  // directory name it files the session under, while the registry keeps
+  // the raw spelling the worker registered with — adoption keeps both on
+  // purpose, because the native session store is case-sensitive. Comparing
+  // the spellings would let any managed session whose id contains an
+  // uppercase letter through this filter, and the table would list it
+  // twice: once with its real state, once as `interactive`.
+  const managedIds = new Set(
+    managed.map((row) => sanitizeSessionId(row.sessionId)),
+  );
   return [
     ...managed,
     ...records
-      .filter((record) => !managedIds.has(record.sessionId))
+      .filter((record) => !managedIds.has(sanitizeSessionId(record.sessionId)))
       .map(registryRow),
   ];
 }

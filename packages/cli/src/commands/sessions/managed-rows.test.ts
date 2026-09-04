@@ -15,9 +15,27 @@ import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
 import type { AgentViewTaskState } from '../../agent-view/presentation.js';
 
 const isPidAlive = vi.fn((pid: number) => pid > 0);
+/** The start token the OS would report for a pid right now. */
+const currentProcStart = vi.fn((pid: number): string | null => `start-${pid}`);
+const pidNamespaceId = vi.fn((): number | null => null);
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
+  readProcStartToken: (...args: unknown[]) =>
+    currentProcStart(...(args as [number])),
+  readPidNamespaceId: () => pidNamespaceId(),
+  // Mirrors the real degradation contract rather than stubbing a verdict,
+  // so a test that records no token exercises the same fall-through to a
+  // bare liveness check that a pre-identity worker file gets in
+  // production: `procStart == null` and an unreadable current token both
+  // mean "no identity available", never "mismatch".
+  isSameProcess: (pid: number, procStart?: string | null) => {
+    if (!isPidAlive(pid)) return false;
+    if (procStart == null) return true;
+    const current = currentProcStart(pid);
+    if (current === null) return true;
+    return current === procStart;
+  },
 }));
 
 const { managedSessionRows, mergeSessionRows } = await import(
@@ -29,6 +47,10 @@ const NOW = Date.parse('2026-09-04T12:00:00Z');
 beforeEach(() => {
   isPidAlive.mockReset();
   isPidAlive.mockImplementation((pid: number) => pid > 0);
+  currentProcStart.mockReset();
+  currentProcStart.mockImplementation((pid: number) => `start-${pid}`);
+  pidNamespaceId.mockReset();
+  pidNamespaceId.mockImplementation(() => null);
 });
 
 function state(
@@ -164,6 +186,79 @@ describe('managedSessionRows', () => {
     expect(row.pid).toBe(100);
   });
 
+  it('drops a live pid the recorded identity does not vouch for', () => {
+    // The half of the blocker liveness cannot see. After a SIGKILL or a
+    // reboot nothing clears the durable worker file, and the OS is free to
+    // hand 200 to something unrelated: `kill(200, 0)` then says "alive"
+    // about a process that has nothing to do with this session, and a
+    // script reading `--json` would kill a stranger.
+    const [row] = managedSessionRows(
+      [
+        snapshot({
+          worker: workerFile({
+            workerPid: 200,
+            workerProcStart: 'start-200-before-the-reboot',
+          }),
+        }),
+      ],
+      NOW,
+    );
+    expect(isPidAlive(200)).toBe(true);
+    expect(row.pid).toBeUndefined();
+  });
+
+  it('refuses pids from a worker file written in another PID namespace', () => {
+    // One `~/.qwen` shared across machines or namespaces — an NFS home, a
+    // devcontainer with the home mounted — needs no recycling to break
+    // this: the foreign file's pids get probed here, where low numbers
+    // routinely belong to live local processes.
+    pidNamespaceId.mockImplementation(() => 4026531999);
+    const [row] = managedSessionRows(
+      [
+        snapshot({
+          worker: workerFile({
+            workerPid: 200,
+            workerProcStart: 'start-200',
+            pidNs: 4026531837,
+          }),
+        }),
+      ],
+      NOW,
+    );
+    expect(row.pid).toBeUndefined();
+  });
+
+  it('still reports a pid when either side’s namespace is unreadable', () => {
+    // The guard fires only on a known disagreement. `/proc` being
+    // unreadable must not blank the pid of a worker that is really there.
+    pidNamespaceId.mockImplementation(() => null);
+    const [row] = managedSessionRows(
+      [
+        snapshot({
+          worker: workerFile({
+            workerPid: 200,
+            workerProcStart: 'start-200',
+            pidNs: 4026531837,
+          }),
+        }),
+      ],
+      NOW,
+    );
+    expect(row.pid).toBe(200);
+  });
+
+  it('keeps reporting pids from a worker file written before identity existed', () => {
+    // `AgentViewWorkerFile` is a durable schemaVersion 1 record. A file
+    // written by an older supervisor carries no token, and that must
+    // degrade to the liveness check this command already did — not blank
+    // the pid of every session that predates the field.
+    const [row] = managedSessionRows(
+      [snapshot({ worker: workerFile({ hostPid: 100, workerPid: 200 }) })],
+      NOW,
+    );
+    expect(row.pid).toBe(200);
+  });
+
   it('leaves the pid unset when no process is recorded, rather than reporting 0', () => {
     // A managed session that has not spawned a worker yet, or whose
     // worker has exited, has no pid to point at. Zero is a real pid.
@@ -259,6 +354,22 @@ describe('mergeSessionRows', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].managed).toBe(true);
     expect(rows[0].taskState).toBe('running');
+  });
+
+  it('lists a mixed-case session once, though the two sources spell it differently', () => {
+    // The store files a session under a sanitized, lowercased directory
+    // name and reports that as the id; the registry keeps the raw spelling
+    // the worker registered with, which adoption preserves on purpose
+    // because the native session store is case-sensitive. A raw string
+    // comparison lets this record through and the table lists one session
+    // twice — once with its real state, once as `interactive`.
+    const rows = mergeSessionRows(
+      [record({ sessionId: 'Managed-1', name: 'app-ab' })],
+      managedSessionRows([snapshot({ state: state() })], NOW),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].managed).toBe(true);
+    expect(rows[0].sessionId).toBe('managed-1');
   });
 
   it('lets a live registry record survive the adopting window', () => {
