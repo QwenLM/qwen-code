@@ -1,8 +1,8 @@
 # Session Workflow DAG — design plan
 
-Status: proposal, not implemented. Written before code, reviewed against the
-brief once, revised. The revision is recorded at the bottom rather than
-silently folded in.
+Status: implemented by this change. Written before code, reviewed against the
+brief once, revised. The revision — and the two corrections found during
+implementation — are recorded at the bottom rather than silently folded in.
 
 ## Brief
 
@@ -14,7 +14,7 @@ me**.
 This is a product surface, not a greenfield page: it inherits the Web Shell
 token system, light/dark, CSS modules, and a stylesheet-source test
 convention. So the palette is not up for invention — the plan spends its
-freedom on structure and on the *rule* governing existing tokens.
+freedom on structure and on the _rule_ governing existing tokens.
 
 ## What is wrong today
 
@@ -22,7 +22,7 @@ Read against the three questions, not as taste:
 
 1. **Reading order is inverted.** The node leads with a status glyph, then the
    raw Todo id, then the status word; `nodeContent` — the only element that
-   says what the step *is* — is third. At graph scale the reader scans
+   says what the step _is_ — is third. At graph scale the reader scans
    `● step-3 Blocked` before "Compare findings". An id is an address, and it
    is the least useful thing at the largest scale.
 2. **Status is stated three or four times per node**: the glyph, the status
@@ -44,15 +44,15 @@ Read against the three questions, not as taste:
 
 No new values; a rule for the existing tokens.
 
-| role | token | used for |
-| --- | --- | --- |
-| ink | `--foreground` | step content — the only full-contrast text |
-| quiet | `--muted-foreground` | counts, elapsed, ids |
-| rule | `--border` | every node edge, every dependency line |
-| live | `--status-running-fg` | running, and nothing else |
-| done | `--status-done-fg` | completed, and nothing else |
-| wait | `--status-attention-fg` | needs attention, and nothing else |
-| pick | `--agent-blue-500` | selection and focus only, never decoration |
+| role  | token                   | used for                                   |
+| ----- | ----------------------- | ------------------------------------------ |
+| ink   | `--foreground`          | step content — the only full-contrast text |
+| quiet | `--muted-foreground`    | counts, elapsed, ids                       |
+| rule  | `--border`              | every node edge, every dependency line     |
+| live  | `--status-running-fg`   | running, and nothing else                  |
+| done  | `--status-done-fg`      | completed, and nothing else                |
+| wait  | `--status-attention-fg` | needs attention, and nothing else          |
+| pick  | `--agent-blue-500`      | selection and focus only, never decoration |
 
 **The rule: a node carries at most one status colour, in exactly one place,
 and only when the status is worth saying.** Waiting/blocked is the resting
@@ -139,7 +139,7 @@ changed the plan.
 
 - Cream/serif/terracotta, or near-black with an acid accent: not applicable,
   the tokens are the product's.
-- Hairline rules everywhere: I *am* moving toward hairlines, which is itself a
+- Hairline rules everywhere: I _am_ moving toward hairlines, which is itself a
   default look. Kept, but for a subject-specific reason — the hairline
   replaces a per-status border tint, and the argument is the one the codebase
   already makes for `blocked`: most nodes in a healthy plan are resting, and
@@ -189,7 +189,7 @@ was wrong and a later reader should see why.
    screenshot"). Colour plus a screen-reader-only word leaves a sighted
    colour-blind reader, high-contrast mode, and any greyscale capture with no
    way to tell running from completed. The rule is corrected to: one carrier
-   of the status *colour*, plus a redundant non-colour channel. The glyph
+   of the status _colour_, plus a redundant non-colour channel. The glyph
    returns for every status, in the meta line so the content still leads, and
    muted so the rule stays the only thing carrying the tone.
 
@@ -203,11 +203,14 @@ was wrong and a later reader should see why.
 
 ## Open questions
 
+The first two were answered by the implementation; the answers are recorded
+here so the decisions stay visible.
+
 1. Does the elapsed count on a running node belong on the node face, or only
-   in the inspector? It is the strongest "alive" signal, but it is also the
-   only per-node value that changes every second.
+   in the inspector? — On the face: the meta line renders it whenever it is
+   greater than zero.
 2. Should `attention` keep a badge, or fold into the left rule as the `wait`
-   tone? Folding is consistent with the one-status rule, but attention is the
-   one state the reader is being asked to act on.
+   tone? — Folded into the rule: `data-attention` carries it, declared after
+   every status tone so it wins the cascade.
 3. Verification: this box cannot run a browser, so the visual pass would ship
    read from CSS. Worth a real render before merge.
