@@ -420,4 +420,129 @@ describe('OpenTuiOutputStyleDialog', () => {
     expect(harness.setOutputStyle).not.toHaveBeenCalled();
     expect(harness.refreshSystemInstruction).not.toHaveBeenCalled();
   });
+
+  it('keeps the navigated row when the shell re-renders with new callbacks', async () => {
+    // The mount site passes `onClose`/`notify` as fresh inline closures on
+    // every shell render. If the catalog effect depended on them, the reload
+    // would land a new style array and re-derive the selection -- Enter would
+    // then apply the previously active style instead of the navigated row.
+    mocks.loadSessionOutputStyles.mockImplementation(async () => [
+      ...BUILT_IN_OUTPUT_STYLES,
+    ]);
+    const harness = createHarness();
+    const view = render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByText('Concise')).not.toBeNull());
+    press('down');
+    expect(screen.getByText('Concise').parentElement?.textContent).toContain(
+      '● Concise',
+    );
+
+    await act(async () => {
+      view.rerender(
+        <OpenTuiOutputStyleDialog
+          config={harness.config}
+          settings={harness.settings}
+          onClose={vi.fn()}
+          notify={vi.fn()}
+        />,
+      );
+      // Let a reload, were one started, resolve and re-derive the selection.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(mocks.loadSessionOutputStyles).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('Concise').parentElement?.textContent).toContain(
+      '● Concise',
+    );
+    press('return');
+    await waitFor(() =>
+      expect(harness.setOutputStyle).toHaveBeenCalledWith(CONCISE),
+    );
+  });
+
+  it('lists the active style the reloaded catalog no longer carries', async () => {
+    // The catalog is re-read on every open and skips a file it cannot parse,
+    // so the live style can be missing from it. Snapping to index 0 would mark
+    // `default` as active and one Enter would persist that over the setting.
+    const custom: OutputStyleDefinition = {
+      name: 'Reviewer',
+      description: 'Reviews without editing',
+      source: 'user',
+      prompt: 'Review only.',
+      keepCodingInstructions: false,
+    };
+    mocks.loadSessionOutputStyles.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+    ]);
+    const harness = createHarness({ current: custom });
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText('Reviewer').parentElement?.textContent).toContain(
+        '● Reviewer',
+      ),
+    );
+    expect(
+      screen.getByText('default').parentElement?.textContent,
+    ).not.toContain('● default');
+
+    press('return');
+    await waitFor(() =>
+      expect(harness.setOutputStyle).toHaveBeenCalledWith(custom),
+    );
+    expect(harness.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'general.outputStyle',
+      'Reviewer',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+  });
+
+  it('does not duplicate a catalog entry that differs only in case', async () => {
+    // The catalog dedupes and looks styles up case-insensitively, so an
+    // exact-equality membership test would append a second row here.
+    const listed: OutputStyleDefinition = {
+      name: 'reviewer',
+      description: 'Reviews without editing',
+      source: 'user',
+      prompt: 'Review only.',
+      keepCodingInstructions: false,
+    };
+    mocks.loadSessionOutputStyles.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+      listed,
+    ]);
+    const harness = createHarness({ current: { ...listed, name: 'Reviewer' } });
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByText('reviewer')).not.toBeNull());
+    expect(screen.getAllByText('reviewer')).toHaveLength(1);
+    expect(screen.queryByText('Reviewer')).toBeNull();
+    expect(screen.getByText('reviewer').parentElement?.textContent).toContain(
+      '● reviewer',
+    );
+  });
 });
