@@ -6,6 +6,7 @@ on:
   schedule:
     # Daily at 02:30 UTC, between the monthly Scorecard and nightly CodeQL.
     - cron: '30 2 * * *'
+  workflow_dispatch: {}
 
 permissions:
   contents: 'read'
@@ -14,7 +15,7 @@ jobs:
   dependency-cve:
     name: 'Dependency CVE audit'
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -42,7 +43,7 @@ jobs:
             local attempt output result
             for attempt in 1 2; do
               result=0
-              output="$(timeout 4m npm audit "$@" 2>&1)" || result=$?
+              output="$(timeout 8m npm audit "$@" 2>&1)" || result=$?
               printf '%s\n' "$output"
               [ "$result" -eq 0 ] && return 0
               if [ "$result" -ne 124 ] &&

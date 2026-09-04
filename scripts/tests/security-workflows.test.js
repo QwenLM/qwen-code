@@ -39,7 +39,7 @@ describe('security workflows', () => {
     expect(workflow).toContain('persist-credentials: false');
   });
 
-  it('runs the dependency gate only on the daily schedule', () => {
+  it('runs the dependency gate on schedule or manual dispatch', () => {
     const workflow = readWorkflow('security-checks.yml');
     const dependencyJob = getWorkflowJob(workflow, 'dependency-cve');
     const dependencyCheckoutStep = getWorkflowStep(dependencyJob, 'Checkout');
@@ -53,7 +53,8 @@ describe('security workflows', () => {
     expect(workflow).not.toContain('pull_request:');
     expect(workflow).not.toContain('\n  push:');
     expect(workflow).toContain("- cron: '30 2 * * *'");
-    expect(dependencyJob).toContain('timeout-minutes: 30');
+    expect(workflow).toContain('workflow_dispatch: {}');
+    expect(dependencyJob).toContain('timeout-minutes: 60');
     expect(dependencyJob).not.toContain('continue-on-error');
     expect(trackingJob).toContain("needs: 'dependency-cve'");
     expect(trackingJob).toContain(
@@ -83,9 +84,11 @@ describe('security workflows', () => {
     expect(auditStep).not.toContain('continue-on-error');
     expect(auditStep).toContain('status=0');
     expect(auditStep).toContain('exit "$status"');
-    expect(auditStep).toContain('timeout 4m npm audit "$@"');
+    expect(auditStep).toContain('timeout 8m npm audit "$@"');
     expect(auditStep).toContain("grep -q 'audit endpoint returned an error'");
+    expect(auditStep).toContain('[ "$result" -ne 124 ]');
     expect(auditStep).toContain('[ "$attempt" -eq 2 ]');
+    expect(auditStep).toContain('sleep 15');
     expect(auditStep).toContain(
       'run_npm_audit --omit=dev --audit-level=high || status=$?',
     );

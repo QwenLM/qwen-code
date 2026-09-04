@@ -41,24 +41,72 @@ describe('update dependency audit issue', () => {
     expect(api.create).toHaveBeenCalledOnce();
     expect(api.create.mock.calls[0][0]).toMatchObject({
       title: 'Daily dependency CVE audit failed',
+      body: expect.stringContaining(
+        '<!-- qwen-dependency-cve-audit-failure -->',
+      ),
       labels: ['scope/ci-cd', 'status/needs-triage'],
     });
+    expect(api.create.mock.calls[0][0].body).toContain(
+      'a setup or dependency-install failure',
+    );
+    expect(api.createComment).not.toHaveBeenCalled();
+    expect(api.update).not.toHaveBeenCalled();
 
     const issue = {
       number: 42,
       body: '<!-- qwen-dependency-cve-audit-failure -->',
     };
-    github.paginate.mockResolvedValueOnce([issue]);
+    const newerDecoy = {
+      number: 84,
+      body: `Quoted ${issue.body}`,
+    };
+    const pullRequestShadow = {
+      number: 900,
+      body: issue.body,
+      pull_request: {},
+    };
+    github.paginate.mockResolvedValueOnce([
+      newerDecoy,
+      pullRequestShadow,
+      issue,
+    ]);
     await updateDependencyAuditIssue({ github, context });
     expect(api.createComment).toHaveBeenLastCalledWith(
-      expect.objectContaining({ issue_number: 42 }),
+      expect.objectContaining({
+        issue_number: 42,
+        body: expect.stringContaining('failed again'),
+      }),
     );
+    expect(api.update).not.toHaveBeenCalled();
 
     vi.stubEnv('AUDIT_RESULT', 'success');
-    github.paginate.mockResolvedValueOnce([issue]);
+    github.paginate.mockResolvedValueOnce([newerDecoy, issue]);
     await updateDependencyAuditIssue({ github, context });
+    expect(api.createComment).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        issue_number: 42,
+        body: expect.stringContaining('recovered'),
+      }),
+    );
     expect(api.update).toHaveBeenCalledWith(
       expect.objectContaining({ issue_number: 42, state: 'closed' }),
+    );
+
+    api.create.mockClear();
+    api.createComment.mockClear();
+    api.update.mockClear();
+    github.paginate.mockResolvedValueOnce([]);
+    await updateDependencyAuditIssue({ github, context });
+    expect(api.create).not.toHaveBeenCalled();
+    expect(api.createComment).not.toHaveBeenCalled();
+    expect(api.update).not.toHaveBeenCalled();
+    expect(github.paginate).toHaveBeenCalledWith(
+      api.listForRepo,
+      expect.objectContaining({
+        state: 'open',
+        sort: 'created',
+        direction: 'desc',
+      }),
     );
   });
 });

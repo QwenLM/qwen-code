@@ -12,11 +12,14 @@ module.exports = async ({ github, context }) => {
   const issues = await github.paginate(github.rest.issues.listForRepo, {
     ...repository,
     state: 'open',
+    sort: 'created',
+    direction: 'desc',
     per_page: 100,
   });
-  const issue = issues.find(
+  const matches = issues.filter(
     (candidate) => !candidate.pull_request && candidate.body?.includes(marker),
   );
+  const issue = matches[matches.length - 1];
 
   if (!issue) {
     if (!failed) return;
@@ -30,7 +33,7 @@ module.exports = async ({ github, context }) => {
         '',
         `- Run: ${runUrl}`,
         '',
-        'Check whether the run found a high-severity vulnerability or the npm audit service remained unavailable after its bounded retry.',
+        'Check the failing step in the run. Possible causes include a new high-severity vulnerability, the npm audit endpoint remaining unavailable after its bounded retry, or a setup or dependency-install failure.',
       ].join('\n'),
       labels: ['scope/ci-cd', 'status/needs-triage'],
     });
