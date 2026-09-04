@@ -1208,6 +1208,22 @@ describe('runCliEntry', () => {
       expect(mocks.main).not.toHaveBeenCalled();
     });
 
+    it('reports the usage for a bare --bg', async () => {
+      // The flag-led gate admits the bare shape, so the empty prompt must
+      // reach the dispatch usage path — not fall through to the strict
+      // parser, which knows no `bg` and dies on 'Unknown argument'. The
+      // usage text itself is pinned by background-entry.test.ts
+      // ('refuses an empty prompt with the usage'); the mock returning 1
+      // pins that the entry propagates it.
+      mocks.runBackgroundDispatch.mockResolvedValue(1);
+
+      await runCliEntry([BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).toHaveBeenCalledWith('');
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+    });
+
     it('lets the version intercept win over --bg', async () => {
       await runCliEntry(['--version', BACKGROUND_FLAG]);
 
