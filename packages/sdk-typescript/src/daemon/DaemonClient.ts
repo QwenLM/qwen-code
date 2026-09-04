@@ -620,6 +620,8 @@ export interface CreateSessionRequest {
   sourceType?: string;
   /** Optional source-specific identifier. Requires `sourceType`. */
   sourceId?: string;
+  /** Pairing credential used only to authorize Chrome extension sessions. */
+  extensionPairingCredential?: string;
   /**
    * Create the session in an isolated git worktree. The daemon creates
    * a worktree under `<repoRoot>/.qwen/worktrees/<slug>` and relocates
@@ -645,6 +647,8 @@ export interface RestoreSessionRequest {
    */
   workspaceCwd?: string;
   approvalMode?: string;
+  /** Pairing credential required when restoring a Chrome extension session. */
+  extensionPairingCredential?: string;
   /** Latest persisted records to include in the initial load replay. */
   historyPageSize?: number;
   /** Load-only live-turn replay projection. Omit for the complete journal. */
@@ -3015,6 +3019,9 @@ export class DaemonClient {
             ? { sourceType: req.sourceType }
             : {}),
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          ...(req.extensionPairingCredential !== undefined
+            ? { extensionPairingCredential: req.extensionPairingCredential }
+            : {}),
           ...(req.worktree !== undefined ? { worktree: req.worktree } : {}),
           ...(req.branch !== undefined ? { branch: req.branch } : {}),
         }),
@@ -3647,6 +3654,9 @@ export class DaemonClient {
           cwd: req.workspaceCwd,
           ...(req.approvalMode !== undefined
             ? { approvalMode: req.approvalMode }
+            : {}),
+          ...(req.extensionPairingCredential !== undefined
+            ? { extensionPairingCredential: req.extensionPairingCredential }
             : {}),
           ...(action === 'load' && req.historyPageSize !== undefined
             ? { historyPageSize: req.historyPageSize }

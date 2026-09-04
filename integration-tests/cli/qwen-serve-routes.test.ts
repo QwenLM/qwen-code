@@ -319,7 +319,7 @@ describe('qwen serve — capabilities envelope', () => {
     // Conditional tags absent under this suite's spawn flags (no
     // `--require-auth` / `--allow-origin` / deadline env vars /
     // rate-limit opt-in, no `--channel`, no configured batch ASR model):
-    // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
+    // `require_auth`, `cdp_tunnel_over_ws`,
     // `prompt_absolute_deadline`, `writer_idle_timeout`,
     // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
     // `native_directory_picker` is host-conditional (the daemon host's GUI
@@ -433,6 +433,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_btw',
       'mcp_workspace_pool',
       'mcp_pool_restart',
+      'allow_origin',
       'auth_device_flow',
       'permission_mediation',
       'non_blocking_prompt',
@@ -465,6 +466,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_persisted_transcript',
       'workspace_session_export',
       'workspace_archived_session_export',
+      'client_mcp_over_ws',
       'workspace_session_live_state',
       'workspace_session_metadata',
       'voice_transcribe',

@@ -6,14 +6,11 @@ Messaging host to install.
 
 It does two things:
 
-- **Side panel** — frames the daemon's Web Shell (chat + tools), the same UI the
-  daemon serves to the browser. The panel has no UI of its own.
-- **Service worker** — a CDP-tunnel pipe. It connects to the daemon's `/acp`
-  WebSocket and bridges `cdp_*` frames into `chrome.debugger`, so the agent can
-  drive the real browser when an external CDP MCP adapter is configured.
-- **Readiness warning** — the framed Web Shell stays usable for chat while a
-  small status message distinguishes a disabled CDP tunnel from a missing
-  browser automation adapter.
+- **Side panel** — handles daemon discovery and pairing, then frames the
+  daemon's Web Shell (chat + tools).
+- **Service worker** — hosts Qwen's native browser MCP tools and executes them
+  through `chrome.debugger`. Tool calls travel over the daemon's reverse MCP
+  WebSocket.
 
 ## Build
 
@@ -26,57 +23,62 @@ Then load it: `chrome://extensions` → enable Developer mode → **Load unpacke
 
 ## Run
 
-The extension is a client; the daemon does the work and must be started
-separately (an extension cannot spawn a local process). Open the side panel and
-it will tell you exactly what to run — it generates the command with this
-extension's own id:
+The extension cannot spawn a local process, so start the daemon separately:
 
 ```bash
-qwen serve --allow-origin chrome-extension://<this-extension-id>
+qwen serve
 ```
 
-`--allow-origin chrome-extension://<id>` is required: it lets the daemon's Web
-Shell be framed by the extension (the `frame-ancestors` CSP) and accepts the
-extension's requests. The side panel reads the id at runtime via
-`chrome.runtime.id`, so you never have to look it up.
+The official extension id is pinned by `qwen serve`, so no browser-related
+environment variables or `--allow-origin` flag are required. Custom or forked
+extension builds must still pass their own origin explicitly:
 
-Do not replace this command with `--open-with-auth`. That mode delivers its generated bearer only to the tab it opens; the extension cannot discover it. To protect a daemon used by the extension, set `QWEN_SERVER_TOKEN` explicitly and configure the same stable token in every authorized client.
+```bash
+qwen serve --allow-origin chrome-extension://<custom-extension-id>
+```
 
-Once the daemon is reachable and permits framing, the side panel swaps the
-welcome screen for the chat UI automatically.
+Paste the pairing code printed by `qwen serve`. The credential remains in
+Chrome storage across extension reloads, but a restarted daemon requires a new
+pairing code because the daemon keeps trust state in memory. Once pairing
+succeeds, the panel opens the chat UI and browser tools register immediately.
+If Chrome storage is cleared while the daemon is still running, restart the
+daemon to generate fresh pairing material.
+
+The first-use exchange sends only an HMAC challenge proof; the pairing code and
+derived credential secret never cross HTTP. The extension verifies the daemon's
+proof before storing that credential, then uses a separate challenge-response
+before sending it over `/acp`. Pairing endpoints intentionally precede bearer
+authentication so an unknown process never receives a stored bearer token. The
+pairing code is time-limited and failed attempts are bounded.
+
+Do not replace this command with `--open-with-auth`. That mode delivers its
+generated bearer only to the tab it opens; the extension cannot discover it. To
+protect a daemon used by the extension, set `QWEN_SERVER_TOKEN` explicitly and
+configure the same stable token in every authorized client.
 
 ## Browser Automation Tools
 
-The command above only makes the side panel and Web Shell available. Browser
-automation tools such as console/network inspection, screenshots, and page
-clicking require an explicit external MCP adapter command:
+Browser debugging tools are implemented in and bundled with this Chrome
+extension. The main `@qwen-code/qwen-code` npm package does not contain an
+external Chrome DevTools MCP server. The first-release catalog covers page
+snapshot/navigation/input, screenshots, JavaScript evaluation, console output,
+and network request/response inspection.
 
-```bash
-QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
-qwen serve --allow-origin chrome-extension://<this-extension-id>
-```
+Tools act on the active tab. `evaluate_script` and `send_request` execute in the
+page context and can access that page's authenticated session, so use a dedicated
+browser profile or tab for untrusted sites and keep normal tool approval enabled.
 
-No browser automation adapter is bundled with the main `@qwen-code/qwen-code`
-package. When `QWEN_CDP_MCP_COMMAND` is unset, the extension can still open the
-Web Shell, but the daemon will not register browser automation MCP tools.
-Install the adapter separately and point the daemon at its executable:
+An explicitly configured `QWEN_CDP_MCP_COMMAND` remains a deprecated
+compatibility path targeted for removal in PR2. When present, the extension does
+not register its native tool catalog and instead keeps the CDP tunnel available
+to that adapter.
 
-The pinned adapter requires Node.js 22.12 or newer.
-
-```bash
-npm install -g chrome-devtools-mcp@1.5.0
-QWEN_CDP_MCP_COMMAND=chrome-devtools-mcp \
-  qwen serve --allow-origin chrome-extension://idkijaaipeeinemigojbjkmfmabokbdk
-```
-
-The separately installed adapter is not included in the Qwen Code npm package
-or Chrome extension zip.
-Clients can distinguish the states through `/capabilities`:
+Relevant `/capabilities` tags:
 
 - `allow_origin` means the extension may frame and call the daemon.
 - `cdp_tunnel_over_ws` means the daemon exposes the reverse CDP tunnel.
-- `browser_automation_mcp` means the external adapter command is configured and
-  browser automation MCP tools can be registered when the CDP bridge connects.
+- `client_mcp_over_ws` means extension-hosted tools can register over `/acp`.
+- `browser_automation_mcp` means the legacy external adapter is configured.
 
 When browser automation is configured, the panel also checks `/workspace/mcp`.
 It warns when the adapter has not connected or when an existing user-defined
@@ -86,17 +88,14 @@ It warns when the adapter has not connected or when an existing user-defined
 
 The side panel probes `GET /health` and `GET /capabilities` and shows one of:
 
-| State                    | Meaning                                   | Shown                            |
-| ------------------------ | ----------------------------------------- | -------------------------------- |
-| `down`                   | no daemon reachable                       | "Start qwen serve" + command     |
-| `needs-allow-origin`     | daemon up but `--allow-origin` not set    | "Allow this extension" + command |
-| `chat-only`              | Web Shell ready, CDP tunnel disabled      | chat + bridge warning            |
-| `tunnel-only`            | CDP tunnel ready, adapter missing         | chat + adapter warning           |
-| `automation-unavailable` | adapter status could not be read          | chat + status warning            |
-| `automation-pending`     | adapter not connected                     | chat + connection warning        |
-| `automation-shadowed`    | an existing MCP config takes precedence   | chat + migration warning         |
-| `automation-configured`  | adapter configured, discovery not started | the Web Shell                    |
-| `automation-connected`   | extension-backed MCP connected            | the Web Shell                    |
+| State                | Meaning                                  | Shown                            |
+| -------------------- | ---------------------------------------- | -------------------------------- |
+| `down`               | no daemon reachable                      | "Start qwen serve" + command     |
+| `needs-upgrade`      | daemon lacks secure extension pairing    | Qwen Code update command         |
+| `needs-restart`      | Chrome lost the active daemon credential | daemon restart guidance          |
+| `needs-allow-origin` | daemon up but `--allow-origin` not set   | "Allow this extension" + command |
+| `needs-pairing`      | daemon reachable, credential not trusted | pairing-code form                |
+| `ready`              | daemon reachable and paired              | the Web Shell (chat)             |
 
 ## Automated real-Chrome acceptance
 
@@ -141,3 +140,8 @@ draw manual review and must be justified in the store listing.
 alpha. Chrome refuses to update an extension to a lower version, so testers
 upgrading from the `1.0.0` build must remove it in `chrome://extensions`
 before loading this package.
+
+Release the matching Qwen Code CLI before publishing the extension update. The
+pairing handshake intentionally does not downgrade for older daemons; the side
+panel detects them and shows an update command instead of sending browser tools
+to an unauthenticated local process.

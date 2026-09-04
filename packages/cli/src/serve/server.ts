@@ -92,6 +92,7 @@ import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
+import { installExtensionPairingRoutes } from './extension-pairing-routes.js';
 import { mountMcpAppSandbox } from './mcp-app-sandbox.js';
 import {
   mountWorkspaceMemoryRoutes,
@@ -1178,6 +1179,10 @@ export function createServeApp(
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
+      clientMcpRuntimeRegistrations:
+        clientMcpSenderRegistry.runtimeRegistrations.bind(
+          clientMcpSenderRegistry,
+        ),
     });
   if (!injectedWorkspaceRegistry && !deps.bridge) {
     defaultBridgeForAdmission = bridge;
@@ -2080,6 +2085,9 @@ export function createServeApp(
     });
   }
 
+  if (opts.extensionPairingManager) {
+    installExtensionPairingRoutes(app, opts.extensionPairingManager);
+  }
   // Credentials are a listener-scoped set, not one token: while Local Control
   // is on, the LAN listener accepts a revocable pairing token and rejects the
   // runtime token, and the primary listener does the reverse. With no Local
@@ -2888,6 +2896,7 @@ export function createServeApp(
     promptDeadlineMs: opts.promptDeadlineMs,
     sessionShellCommandEnabled,
     languageCodes,
+    verifyExtensionPairingCredential: opts.verifyExtensionPairingCredential,
     virtualSubagentSessions,
     conversationRuntimeActivity,
     ...(standaloneSessionService ? { standaloneSessionService } : {}),
@@ -3297,6 +3306,7 @@ export function createServeApp(
     ...(standaloneSessionService ? { standaloneSessionService } : {}),
     checkRate: rateLimiter?.checkRate,
     clientMcpOverWs: opts.clientMcpOverWs === true,
+    allowUnpairedClientMcp: opts.allowUnpairedClientMcp === true,
     // Reverse tool channel (issue #5626, Phase 2). Per-connection provider:
     // on `mcp_register` it records the WS registrar's sender in the shared
     // registry and adds an SDK-type runtime MCP server in the ACP child
@@ -3315,6 +3325,7 @@ export function createServeApp(
     // Plan C CDP tunnel (issue #5626): the `/cdp` branch + `cdp_*` routing
     // activate only when the flag is on and a registry is supplied.
     cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
+    verifyExtensionPairingCredential: opts.verifyExtensionPairingCredential,
     ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
     // Browser captures audio and streams raw PCM here; the daemon transcribes
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade

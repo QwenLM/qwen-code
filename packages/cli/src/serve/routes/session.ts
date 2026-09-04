@@ -253,6 +253,9 @@ interface RegisterSessionRoutesDeps {
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
+  verifyExtensionPairingCredential?: (
+    credential: string | undefined,
+  ) => boolean;
   virtualSubagentSessions?: VirtualSubagentSessions;
   materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
   isLiveSessionActive?: (sessionId: string) => boolean;
@@ -263,6 +266,19 @@ interface RegisterSessionRoutesDeps {
     StandaloneSessionService,
     'restoreLegacyForCompatibility' | 'dispatchPrompt' | 'continueSession'
   >;
+}
+
+const WEB_SHELL_SESSION_SOURCE = 'default';
+const CHROME_EXTENSION_SESSION_SOURCE_ID = 'chrome_extension';
+
+function isChromeExtensionSessionSource(source: {
+  sourceType?: string;
+  sourceId?: string;
+}): boolean {
+  return (
+    source.sourceType === CHROME_EXTENSION_SESSION_SOURCE_ID ||
+    source.sourceId === CHROME_EXTENSION_SESSION_SOURCE_ID
+  );
 }
 
 // Chosen cap for one serialized transcript response, kept proportional to
@@ -2767,7 +2783,7 @@ export function registerSessionRoutes(
     }
     const approvalMode = parseOptionalApprovalMode(body, res);
     if (approvalMode === null) return;
-    const source = parseRequestedSessionSource(body, res);
+    let source = parseRequestedSessionSource(body, res);
     if (source === null) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
@@ -2780,6 +2796,54 @@ export function registerSessionRoutes(
         code: 'invalid_session_id',
       });
       return;
+    }
+    const rawExtensionCredential = body['extensionPairingCredential'];
+    if (
+      rawExtensionCredential !== undefined &&
+      typeof rawExtensionCredential !== 'string'
+    ) {
+      res.status(400).json({
+        error: '`extensionPairingCredential` must be a string when provided',
+        code: 'invalid_extension_pairing_credential',
+      });
+      return;
+    }
+    if (
+      source.sourceType === CHROME_EXTENSION_SESSION_SOURCE_ID ||
+      source.sourceId === CHROME_EXTENSION_SESSION_SOURCE_ID
+    ) {
+      res.status(400).json({
+        error: '`chrome_extension` is reserved session metadata',
+        code: 'reserved_session_source',
+      });
+      return;
+    }
+    if (typeof rawExtensionCredential === 'string') {
+      if (
+        deps.verifyExtensionPairingCredential?.(rawExtensionCredential) !== true
+      ) {
+        res.status(401).json({
+          error: 'Chrome extension pairing credential rejected',
+          code: 'extension_pairing_rejected',
+        });
+        return;
+      }
+      if (
+        source.sourceType !== undefined &&
+        (source.sourceType !== WEB_SHELL_SESSION_SOURCE ||
+          source.sourceId !== undefined)
+      ) {
+        res.status(400).json({
+          error:
+            '`extensionPairingCredential` cannot be combined with session source metadata',
+          code: 'extension_pairing_source_conflict',
+        });
+        return;
+      }
+      source = {
+        sourceType: WEB_SHELL_SESSION_SOURCE,
+        sourceId: CHROME_EXTENSION_SESSION_SOURCE_ID,
+      };
     }
     const requestedSessionId =
       parsedSessionId.kind === 'valid' ? parsedSessionId.sessionId : undefined;
@@ -2808,7 +2872,6 @@ export function registerSessionRoutes(
     let worktreeMeta:
       | { slug: string; path: string; branch: string }
       | undefined;
-
     try {
       // ── Branch creation ────────────────────────────────────────────
       // When `branch` is present, create and checkout a new git branch
@@ -3632,6 +3695,30 @@ export function registerSessionRoutes(
       }
       let restoredStorageSessionId = sessionId;
       try {
+        const sessionService = createWorkspaceRuntimeSessionService(runtime);
+        const metadata = await sessionService.readCreationMetadata(sessionId);
+        let source = metadata;
+        try {
+          source = {
+            ...metadata,
+            ...runtime.bridge.getSessionSummary(sessionId),
+          };
+        } catch {
+          // A persisted session has no live summary until restore succeeds.
+        }
+        if (isChromeExtensionSessionSource(source)) {
+          const credential = body['extensionPairingCredential'];
+          if (
+            typeof credential !== 'string' ||
+            deps.verifyExtensionPairingCredential?.(credential) !== true
+          ) {
+            res.status(401).json({
+              error: 'Chrome extension pairing credential rejected',
+              code: 'extension_pairing_rejected',
+            });
+            return;
+          }
+        }
         // The coordinator canonicalizes lock keys (every case variant of a
         // caller id contends on one key), so the request spelling alone
         // covers the raw-spelled batch delete/archive/unarchive locks.

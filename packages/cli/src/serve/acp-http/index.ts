@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
@@ -229,6 +230,7 @@ function buildChromeDevToolsMcpRuntimeConfig(
   localPort: number | undefined,
   hostname: string | undefined,
   env: Readonly<NodeJS.ProcessEnv>,
+  accessToken: string,
 ): Record<string, unknown> | undefined {
   if (
     localPort === undefined ||
@@ -248,7 +250,7 @@ function buildChromeDevToolsMcpRuntimeConfig(
     command,
     args: [
       '--wsEndpoint',
-      `ws://${formatCdpEndpointHost(hostname)}:${localPort}/cdp`,
+      `ws://${formatCdpEndpointHost(hostname)}:${localPort}/cdp?access_token=${encodeURIComponent(accessToken)}`,
     ],
     alwaysLoadTools: true,
     [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
@@ -456,6 +458,11 @@ export interface MountAcpHttpOptions {
    */
   clientMcpOverWs?: boolean;
   /**
+   * Explicit compatibility opt-in for reverse MCP clients that do not use the
+   * Chrome extension pairing credential.
+   */
+  allowUnpairedClientMcp?: boolean;
+  /**
    * Injection point for the deep wiring into the agent's live MCP stack. When
    * supplied, an `mcp_register` frame registers a real SDK-type runtime MCP
    * server whose discovery + tool calls round-trip over the WS. When omitted,
@@ -483,6 +490,14 @@ export interface MountAcpHttpOptions {
    * link. Off by default.
    */
   cdpTunnelOverWs?: boolean;
+  /**
+   * Extension-native browser tools must prove the daemon was explicitly paired
+   * before a `qwen-cdp-bridge` connection can register tools or claim CDP.
+   * Legacy CDP-only bridges do not use this credential.
+   */
+  verifyExtensionPairingCredential?: (
+    credential: string | undefined,
+  ) => boolean;
   /**
    * Process-scoped registry that pairs the extension `/acp` reverse connection
    * with the `/cdp` endpoint. Required when {@link cdpTunnelOverWs} is on;
@@ -681,6 +696,10 @@ export function mountAcpHttp(
       ? runtimeEffectiveEnv(opts.workspaceRegistry.primary, daemonEnv)
       : daemonEnv;
   const path = opts.path ?? '/acp';
+  const cdpTunnelAccessToken = randomBytes(32).toString('base64url');
+  const expectedCdpTunnelAccessTokenHash = createHash('sha256')
+    .update(cdpTunnelAccessToken)
+    .digest();
   const preAttachBudget = new AcpPreAttachBudget({
     maxFrames: ACP_PRE_ATTACH_MAX_FRAMES_GLOBAL,
     maxBytes: ACP_PRE_ATTACH_MAX_PAYLOAD_BYTES_GLOBAL,
@@ -801,6 +820,7 @@ export function mountAcpHttp(
       localPort,
       opts.hostname,
       daemonEnv,
+      cdpTunnelAccessToken,
     );
     if (!runtimeConfig) {
       cdpMcpTerminalSkipLogged = true;
@@ -1755,6 +1775,27 @@ export function mountAcpHttp(
 
       // ── /cdp branch: hand the upgraded socket to the CDP-tunnel glue ──
       if (isCdpPath) {
+        const accessToken = new URL(
+          req.url ?? '',
+          'ws://127.0.0.1',
+        ).searchParams.get('access_token');
+        const actualAccessTokenHash = accessToken
+          ? createHash('sha256').update(accessToken).digest()
+          : undefined;
+        if (
+          !actualAccessTokenHash ||
+          actualAccessTokenHash.length !==
+            expectedCdpTunnelAccessTokenHash.length ||
+          !timingSafeEqual(
+            expectedCdpTunnelAccessTokenHash,
+            actualAccessTokenHash,
+          )
+        ) {
+          logReject('cdp-access-token-mismatch');
+          socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+          socket.destroy();
+          return;
+        }
         wss!.handleUpgrade(req, socket, head, (ws: WebSocket) => {
           if (disposed) {
             ws.close(1012, 'Server shutting down');
@@ -1909,6 +1950,9 @@ export function mountAcpHttp(
         activeMount.webSockets.add(ws);
         activeMount.pendingWebSockets.add(ws);
         let initialized = false;
+        let clientMcpAuthorized =
+          opts.verifyExtensionPairingCredential === undefined ||
+          opts.allowUnpairedClientMcp === true;
         const initTimer = setTimeout(() => {
           if (!initialized) {
             writeStderrLine(
@@ -2082,6 +2126,18 @@ export function mountAcpHttp(
                   type: 'mcp_error',
                   code: 'not_initialized',
                   message: 'initialize the ACP connection before mcp_register',
+                }),
+              );
+              return;
+            }
+
+            if (!clientMcpAuthorized) {
+              ws.send(
+                JSON.stringify({
+                  type: 'mcp_error',
+                  code: 'not_authorized',
+                  message:
+                    'pair the Chrome extension before registering browser tools',
                 }),
               );
               return;
@@ -2273,6 +2329,50 @@ export function mountAcpHttp(
               return;
             }
 
+            const clientInfo =
+              message.params &&
+              typeof message.params === 'object' &&
+              !Array.isArray(message.params) &&
+              typeof (message.params as Record<string, unknown>)[
+                'clientInfo'
+              ] === 'object' &&
+              (message.params as Record<string, unknown>)['clientInfo'] !==
+                null &&
+              !Array.isArray(
+                (message.params as Record<string, unknown>)['clientInfo'],
+              )
+                ? ((message.params as Record<string, unknown>)[
+                    'clientInfo'
+                  ] as Record<string, unknown>)
+                : undefined;
+            const clientName =
+              typeof clientInfo?.['name'] === 'string'
+                ? clientInfo['name']
+                : undefined;
+            const requiresExtensionPairing =
+              clientName === CDP_BRIDGE_CLIENT_NAME;
+            if (requiresExtensionPairing) {
+              clientMcpAuthorized =
+                opts.verifyExtensionPairingCredential?.(
+                  typeof clientInfo?.['extensionPairingCredential'] === 'string'
+                    ? clientInfo['extensionPairingCredential']
+                    : undefined,
+                ) === true;
+            }
+            if (requiresExtensionPairing && !clientMcpAuthorized) {
+              ws.send(
+                JSON.stringify(
+                  rpcError(
+                    message.id,
+                    RPC.INVALID_REQUEST,
+                    'Chrome extension is not paired with this daemon',
+                  ),
+                ),
+              );
+              ws.close(1008, 'Extension not paired');
+              return;
+            }
+
             const conn = activeMount.registry.create(fromLoopback);
             if (!conn) {
               ws.send(
@@ -2333,16 +2433,6 @@ export function mountAcpHttp(
             // Gate on `clientInfo.name`: web UI / Zed agents share this `/acp`
             // endpoint, and an un-gated last-writer-wins would let an agent steal
             // the bridge with `cdp_*` frames it can't answer.
-            const clientName =
-              message.params &&
-              typeof message.params === 'object' &&
-              !Array.isArray(message.params)
-                ? (
-                    (message.params as Record<string, unknown>)[
-                      'clientInfo'
-                    ] as { name?: string } | undefined
-                  )?.name
-                : undefined;
             if (
               activeMount.primary &&
               opts.cdpTunnelOverWs === true &&

@@ -239,6 +239,7 @@ function sessionWriterRpcError(err: unknown):
 }
 
 const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
+const CHROME_EXTENSION_SESSION_SOURCE_ID = 'chrome_extension';
 
 type PermissionResponse = Parameters<
   HttpAcpBridge['respondToSessionPermission']
@@ -1781,13 +1782,20 @@ export class AcpDispatcher {
             }
             return;
           }
-          if (isReservedLiveSessionSource(source)) {
+          if (
+            isReservedLiveSessionSource(source) ||
+            source.sourceType === CHROME_EXTENSION_SESSION_SOURCE_ID ||
+            source.sourceId === CHROME_EXTENSION_SESSION_SOURCE_ID
+          ) {
             if (id !== undefined) {
               conn.sendConn(
                 error(
                   id,
                   RPC.INVALID_PARAMS,
-                  'The requested session source is reserved for daemon-owned Live Voice sessions.',
+                  source.sourceType === CHROME_EXTENSION_SESSION_SOURCE_ID ||
+                    source.sourceId === CHROME_EXTENSION_SESSION_SOURCE_ID
+                    ? '`chrome_extension` is reserved session metadata'
+                    : 'The requested session source is reserved for daemon-owned Live Voice sessions.',
                 ),
               );
             }
@@ -2025,6 +2033,17 @@ export class AcpDispatcher {
                       sessionService,
                     )
                   : await sessionService.readCreationMetadata(storageSessionId);
+                // Chrome extension sessions are paired to the extension that
+                // owns them; they can only be restored through the paired
+                // extension's dedicated route, never through generic ACP.
+                if (
+                  metadata?.sourceType === CHROME_EXTENSION_SESSION_SOURCE_ID ||
+                  metadata?.sourceId === CHROME_EXTENSION_SESSION_SOURCE_ID
+                ) {
+                  throw new AcpParamError(
+                    'Chrome extension sessions can only be restored by the paired extension',
+                  );
+                }
                 // The reserved standalone source is hidden only on the
                 // isolated Conversations surface (parity with the REST
                 // restore handler); generic restores keep loading legacy

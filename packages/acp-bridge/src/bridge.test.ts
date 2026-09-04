@@ -360,6 +360,34 @@ function reportingGrade(bridge: {
 }
 
 describe('createAcpSessionBridge', () => {
+  it('restores client-hosted MCP servers when an ACP child starts', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async () => ({ toolCount: 20 }),
+    });
+    const bridge = makeBridge({
+      channelFactory: vi.fn().mockResolvedValue(handle.channel),
+      clientMcpRuntimeRegistrations: () => [
+        {
+          name: 'qwen-browser-tools',
+          config: { type: 'sdk', __clientMcpOverWs: true },
+          originatorClientId: 'extension-client',
+        },
+      ],
+    });
+
+    await bridge.preheat();
+
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd,
+      params: {
+        name: 'qwen-browser-tools',
+        config: { type: 'sdk', __clientMcpOverWs: true },
+        originatorClientId: 'extension-client',
+      },
+    });
+    await bridge.shutdown();
+  });
+
   it.each([undefined, 60_000])(
     'rejects a fractional initialization timeout with restore timeout %s',
     (sessionRestoreTimeoutMs) => {

@@ -29,6 +29,7 @@ export function isLocalDaemon(): boolean {
 }
 
 let cachedDaemonToken: string | undefined;
+let cachedExtensionPairingCredential: string | undefined;
 const DAEMON_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 const DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS = 2500;
 const DAEMON_TOKEN_STORAGE_KEY = 'qwen-daemon-token';
@@ -81,6 +82,10 @@ export function getDaemonToken(): string | undefined {
   return cachedDaemonToken;
 }
 
+export function getExtensionPairingCredential(): string | undefined {
+  return cachedExtensionPairingCredential;
+}
+
 export function waitForDaemonTokenMessage(
   timeoutMs = DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS,
 ): Promise<string | undefined> {
@@ -105,9 +110,18 @@ export function waitForDaemonTokenMessage(
       ) {
         return;
       }
-      const data = event.data as { type?: unknown; token?: unknown };
+      const data = event.data as {
+        type?: unknown;
+        token?: unknown;
+        extensionPairingCredential?: unknown;
+      };
       if (data?.type !== DAEMON_AUTH_MESSAGE_TYPE) return;
       const token = typeof data.token === 'string' ? data.token : '';
+      const credential =
+        typeof data.extensionPairingCredential === 'string'
+          ? data.extensionPairingCredential.trim()
+          : '';
+      cachedExtensionPairingCredential = credential || undefined;
       finish(token.trim() || undefined);
     };
     const timer = setTimeout(() => finish(undefined), timeoutMs);

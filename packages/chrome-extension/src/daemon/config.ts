@@ -15,6 +15,8 @@ export interface DaemonConfig {
   baseUrl: string;
   /** Bearer token; omitted for loopback (auth-free) daemons. */
   token?: string;
+  /** One-time-paired credential that lets the extension expose browser tools. */
+  extensionPairingCredential?: string;
 }
 
 /** `qwen serve`'s default bind (see `qwen serve --port`, default 4170). */
@@ -51,7 +53,14 @@ export async function getDaemonConfig(): Promise<DaemonConfig> {
     console.warn('[DaemonConfig] ignoring non-loopback baseUrl:', baseUrl);
     return { baseUrl: DEFAULT_DAEMON_BASE_URL, token: undefined };
   }
-  return { baseUrl, token: cfg.token?.trim() || undefined };
+  const token = cfg.token?.trim() || undefined;
+  const extensionPairingCredential =
+    cfg.extensionPairingCredential?.trim() || undefined;
+  return {
+    baseUrl,
+    ...(token ? { token } : {}),
+    ...(extensionPairingCredential ? { extensionPairingCredential } : {}),
+  };
 }
 
 /** Persist a partial daemon config override. */
