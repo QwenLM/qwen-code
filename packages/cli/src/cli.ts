@@ -734,7 +734,7 @@ export async function runCliEntry(
             process.exitCode = await runBackgroundDispatch(read.prompt);
           } else {
             writeStderrLine(
-              `qwen --bg runs only the prompt and does not honor ${read.unsupportedFlag}. Re-run without it.`,
+              `qwen --bg runs only the prompt and does not honor ${read.unsupportedFlag}. Re-run without it, or pass prompt words after --.`,
             );
             process.exitCode = 1;
           }

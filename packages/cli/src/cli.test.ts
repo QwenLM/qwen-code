@@ -1340,6 +1340,10 @@ describe('runCliEntry', () => {
       expect(mocks.main).not.toHaveBeenCalled();
       expect(process.exitCode).toBe(1);
       expect(stderr.join('')).toContain('--yolo');
+      // The only spelling that keeps a dash-led word as prompt data is
+      // `qwen --bg -- <words>` (pinned in background-entry.test.ts);
+      // the advice must name it, or it is undiscoverable.
+      expect(stderr.join('')).toContain('after --');
     });
 
     it('leaves a --help launch with an attached --bg=<prompt> to the full parser', async () => {
