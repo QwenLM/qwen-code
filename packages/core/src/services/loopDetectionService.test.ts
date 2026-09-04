@@ -6,6 +6,9 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as path from 'node:path';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type {
@@ -3840,6 +3843,119 @@ ${tail}`;
       expect(legacyService.getLastLoopType()).toBe(
         LoopType.REPEATED_TOOL_ERROR,
       );
+    });
+
+    it('fires when the same shell failure alternates raw and keep-both truncation forms', () => {
+      // The varying Command: line moves an identical failure core across
+      // the shell's in-tool truncation threshold between rounds: short
+      // command -> raw block, long command -> keep='both' envelope. Both
+      // forms carry the same producer failure-core digest and must
+      // fingerprint identically — distinct signature namespaces per form
+      // would reset the streak exactly on the round where the form flips
+      // and the guard would never fire (issue #10887).
+      const keepBothEnvelopeFor = (attempt: number): string => {
+        const tail = [
+          ...SHELL_FAILURE_CORE.split('\n'),
+          `Process Group PGID: ${10000 + attempt}`,
+          `${FULL_OUTPUT_DIGEST_LABEL}${shellFailureCoreDigest}`,
+        ].join('\n');
+        return `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
+The full output has been saved to: /tmp/shell-${attempt}/find.output
+To read the complete output, use the read_file tool with the absolute file path above.
+The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
+
+Truncated part of the output:
+Command: find /nonexistent-${attempt} -name core
+Directory: /work
+
+---
+... [CONTENT TRUNCATED] ...
+---
+
+${tail}`;
+      };
+      expect(
+        service.recordToolErrorBatch(
+          errorResult(shellFailureBlock(0), 'alt-raw-0'),
+        ),
+      ).toBe(false);
+      expect(
+        service.recordToolErrorBatch(
+          errorResult(keepBothEnvelopeFor(1), 'alt-envelope-1'),
+        ),
+      ).toBe(false);
+      expect(
+        service.recordToolErrorBatch(
+          errorResult(shellFailureBlock(2), 'alt-raw-2'),
+        ),
+      ).toBe(true);
+      expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+    });
+
+    it('fires on repeated scheduler-gate stubs of one shell failure with varied Command/PGID per round', async () => {
+      // A failure block in the (scheduler persistence gate, shell in-tool
+      // threshold] size band skips in-tool truncation and is persisted by
+      // the gate via the REAL persistAndTruncateToolResult -> buildStub.
+      // buildStub must reuse the producer-anchored failure-core digest:
+      // with the per-call volatile Command:/PGID lines varied per round,
+      // hashing the full block would fingerprint every retry uniquely and
+      // REPEATED_TOOL_ERROR would never fire (issue #10887).
+      const actualTruncation = await vi.importActual<
+        typeof import('../tools/truncation.js')
+      >('../tools/truncation.js');
+      // Pad Output so the block sits in the band: above the scheduler's
+      // 28k persistence gate, below the shell's own 30k threshold.
+      const paddedCore = [
+        `Output: ${'error TS2345: argument not assignable. '.repeat(730)}`,
+        'Error: Exit code 1',
+        'Exit Code: 1',
+        'Signal: (none)',
+      ].join('\n');
+      const coreDigest = createHash('sha256').update(paddedCore).digest('hex');
+      const blockFor = (attempt: number): string =>
+        [
+          `Command: npm run build -- --filter pkg-${attempt}`,
+          `Directory: /work/dir-${attempt}`,
+          paddedCore,
+          `Process Group PGID: ${10000 + attempt}`,
+          `${FULL_OUTPUT_DIGEST_LABEL}${coreDigest}`,
+        ].join('\n');
+      expect(blockFor(0).length).toBeGreaterThan(28_000);
+      expect(blockFor(0).length).toBeLessThanOrEqual(30_000);
+      const toolResultsDir = mkdtempSync(
+        path.join(tmpdir(), 'qc-pr10916-gate-'),
+      );
+      const gateConfig = {
+        getToolResultBytesWritten: () => 0,
+        trackToolResultBytes: vi.fn(),
+        storage: { getToolResultsDir: () => toolResultsDir },
+      } as unknown as Config;
+      try {
+        const firedPerRound: boolean[] = [];
+        for (let round = 0; round < REPEATED_TOOL_ERROR_THRESHOLD; round++) {
+          const persisted = await actualTruncation.persistAndTruncateToolResult(
+            `call-band-${round}`,
+            'run_shell_command',
+            blockFor(round),
+            gateConfig,
+          );
+          // The gate really stubbed the oversized block.
+          expect(persisted.content.startsWith('<persisted-output>')).toBe(true);
+          expect(persisted.content.length).toBeLessThan(blockFor(round).length);
+          firedPerRound.push(
+            service.recordToolErrorBatch(
+              errorResult(persisted.content, `band-${round}`),
+            ),
+          );
+        }
+        expect(firedPerRound).toEqual([
+          ...Array(REPEATED_TOOL_ERROR_THRESHOLD - 1).fill(false),
+          true,
+        ]);
+        expect(service.getLastLoopType()).toBe(LoopType.REPEATED_TOOL_ERROR);
+      } finally {
+        rmSync(toolResultsDir, { recursive: true, force: true });
+      }
     });
 
     it('fires on repeated MCP errors with varied function-call JSON but identical server payloads', () => {

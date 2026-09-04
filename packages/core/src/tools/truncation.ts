@@ -426,6 +426,35 @@ export function normalizeToolResultCallId(callId: string): string | undefined {
     : safeCallId;
 }
 
+/**
+ * Reads a line-anchored FULL_OUTPUT_DIGEST_LABEL digest embedded in `text`
+ * (the shape shell.ts failure blocks produce: a sha256 of the stable
+ * failure core anchored as the block's last line): the label must START a
+ * line and be followed by exactly 64 hex chars ending the line. A mid-line
+ * mention of the label (quoted content) never matches. Mirrors the
+ * consumer-side extractors in services/loopDetectionService.ts and
+ * tools/tool-response-finalizer.ts.
+ */
+function extractAnchoredFullDigest(text: string): string | null {
+  let searchFrom = 0;
+  for (;;) {
+    const index = text.indexOf(FULL_OUTPUT_DIGEST_LABEL, searchFrom);
+    if (index === -1) return null;
+    if (index === 0 || text[index - 1] === '\n') {
+      const digestStart = index + FULL_OUTPUT_DIGEST_LABEL.length;
+      const digest = text.slice(digestStart, digestStart + 64);
+      const terminator = text[digestStart + 64];
+      if (
+        /^[0-9a-f]{64}$/.test(digest) &&
+        (terminator === undefined || terminator === '\n' || terminator === '\r')
+      ) {
+        return digest;
+      }
+    }
+    searchFrom = index + FULL_OUTPUT_DIGEST_LABEL.length;
+  }
+}
+
 export async function persistAndTruncateToolResult(
   callId: string,
   toolName: string,
@@ -528,8 +557,21 @@ function buildStub(
   // sha256 of the FULL pre-truncation output (see FULL_OUTPUT_DIGEST_LABEL):
   // the envelope's per-call unique path would otherwise fingerprint uniquely
   // every poll, silently disabling every result-aware loop guard for exactly
-  // the largest results (issue #9450).
-  const fullDigest = crypto.createHash('sha256').update(content).digest('hex');
+  // the largest results (issue #9450). When the content already carries a
+  // producer-anchored digest, reuse it: shell.ts failure blocks anchor a
+  // sha256 of the stable failure core (Output/Error/Exit Code/Signal), and
+  // hashing the full block here instead would fold the per-call volatile
+  // Command:/PGID lines into the envelope digest — every retry of the
+  // identical failure would then fingerprint uniquely and the
+  // error-repetition streak would never accumulate for failures in the
+  // (scheduler persistence gate, shell in-tool threshold] size band
+  // (issue #10887). Content without an anchored digest keeps the
+  // full-content hash: the preview only covers the first PREVIEW_SIZE_CHARS
+  // chars, so the digest must stay sensitive to mutations anywhere in the
+  // full content (issue #9450).
+  const fullDigest =
+    extractAnchoredFullDigest(content) ??
+    crypto.createHash('sha256').update(content).digest('hex');
 
   if (isFilePath) {
     return `<persisted-output>

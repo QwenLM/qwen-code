@@ -242,6 +242,14 @@ const STUB_PREVIEW_MARKER = `Preview (up to ${PREVIEW_SIZE_CHARS} chars):`;
 const STUB_TRUNCATED_PART_MARKER = 'Truncated part of the output:\n';
 
 /**
+ * Prefix of the reduction every digest-carrying stub shape maps to. Shared
+ * literal between stripPersistenceEnvelope and normalizeToolErrorText so
+ * the raw/enveloped shapes of one shell failure cannot drift into two
+ * signature namespaces again (issue #10887).
+ */
+const PERSISTED_STUB_DIGEST_PREFIX = '<persisted-stub>sha256:';
+
+/**
  * Reads the sha256 digest a stub producer embedded for the FULL
  * pre-truncation output: the label must START its line and be followed by
  * exactly 64 hex chars ending the line. A mid-line mention of the label
@@ -289,7 +297,7 @@ function stripPersistenceEnvelope(value: string): string {
   }
   const digest = extractAnchoredStubDigest(value);
   if (digest !== null) {
-    return `<persisted-stub>sha256:${digest}`;
+    return `${PERSISTED_STUB_DIGEST_PREFIX}${digest}`;
   }
   for (const marker of [STUB_PREVIEW_MARKER, STUB_TRUNCATED_PART_MARKER]) {
     const payloadStart = value.indexOf(marker);
@@ -691,6 +699,22 @@ export class LoopDetectionService {
    * owns the identity (issue #10887). Stub envelopes reduce through
    * stripPersistenceEnvelope (their digest or path-free payload); other
    * text falls back to the volatile-line filter.
+   *
+   * One signature namespace for every digest-carrying shape: the identical
+   * failure reaches this guard raw (under the scheduler persistence gate),
+   * in a buildStub envelope (the (gate, shell-threshold] size band), in a
+   * keep='both' truncation envelope, or in the batch-budget finalizer's
+   * fitText envelope — the varying Command: line and varying sibling sizes
+   * move the same failure core across those thresholds between rounds.
+   * Every shape retains the producer's line-anchored failure-core digest
+   * in its raw text (the raw block's last line, the stub envelope's digest
+   * line, keep='both' tail / fitText header retention), so the raw block
+   * must reduce to the SAME prefix the stub reduction emits — distinct
+   * prefixes per shape would reset the streak exactly on the round where
+   * the truncation form flips (issue #10887). The PGID gate keeps this
+   * scoped to shell-shaped payloads: non-shell stubs carry no PGID and
+   * keep their stripPersistenceEnvelope fingerprint unchanged (that
+   * reduction is shared with the stateful-read path, issue #9450).
    */
   private static normalizeToolErrorText(error: string): string {
     const mcpNormalized = LoopDetectionService.normalizeMcpToolError(error);
@@ -699,7 +723,7 @@ export class LoopDetectionService {
     if (enveloped.includes('Process Group PGID:')) {
       const digest = extractAnchoredStubDigest(enveloped);
       if (digest !== null) {
-        return `<shell-failure-core>sha256:${digest}`;
+        return `${PERSISTED_STUB_DIGEST_PREFIX}${digest}`;
       }
     }
     return LoopDetectionService.stripShellBlockVolatiles(enveloped);
