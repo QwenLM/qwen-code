@@ -200,6 +200,7 @@ export class TestRig {
   testName?: string;
   _lastRunStdout?: string;
   _interactiveOutput = '';
+  private readonly interactiveProcesses: pty.IPty[] = [];
 
   constructor() {
     this.bundlePath = join(__dirname, '..', 'dist/cli.js');
@@ -493,6 +494,17 @@ export class TestRig {
   }
 
   async cleanup() {
+    // A session a test never closed keeps its CLI child forwarding PTY bytes
+    // into this worker's stdout; after vitest tears the worker down those
+    // writes EPIPE and fail an otherwise all-green run (#10969).
+    for (const ptyProcess of this.interactiveProcesses.splice(0)) {
+      try {
+        ptyProcess.kill();
+      } catch {
+        // Process may have already exited
+      }
+    }
+
     // Clean up test directory
     if (this.testDir && !env['KEEP_OUTPUT']) {
       try {
@@ -932,6 +944,7 @@ export class TestRig {
         ...e2eRendererEnv(renderer),
       } as { [key: string]: string },
     });
+    this.interactiveProcesses.push(ptyProcess);
 
     ptyProcess.onData((data) => {
       this._interactiveOutput += data;
