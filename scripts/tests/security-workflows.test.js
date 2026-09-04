@@ -54,7 +54,7 @@ describe('security workflows', () => {
     expect(workflow).not.toContain('\n  push:');
     expect(workflow).toContain("- cron: '30 2 * * *'");
     expect(workflow).toContain('workflow_dispatch: {}');
-    expect(dependencyJob).toContain('timeout-minutes: 60');
+    expect(dependencyJob).toContain('timeout-minutes: 40');
     expect(dependencyJob).not.toContain('continue-on-error');
     expect(trackingJob).toContain("needs: 'dependency-cve'");
     expect(trackingJob).toContain(
@@ -84,21 +84,6 @@ describe('security workflows', () => {
     expect(auditStep).not.toContain('continue-on-error');
     expect(auditStep).toContain('status=0');
     expect(auditStep).toContain('exit "$status"');
-    expect(auditStep).toContain('timeout 8m npm audit "$@"');
-    // Streamed, not captured, so a run that now takes up to 16 minutes
-    // reports progress instead of going silent and printing at the end.
-    expect(auditStep).toContain('| tee "$log"');
-    expect(auditStep).toContain('result="${PIPESTATUS[0]}"');
-    expect(auditStep).not.toContain('output="$(timeout');
-    expect(auditStep).toContain(
-      'grep -q \'audit endpoint returned an error\' "$log"',
-    );
-    expect(auditStep).toContain('[ "$result" -ne 124 ]');
-    expect(auditStep).toContain('[ "$attempt" -eq 2 ]');
-    expect(auditStep).toContain('sleep 15');
-    expect(auditStep).toContain(
-      'run_npm_audit --omit=dev --audit-level=high || status=$?',
-    );
     expect(auditStep).toContain(') || status=$?');
     expect(auditStep).toContain('for lockfile in packages/*/package-lock.json');
     expect(auditStep).toContain('[ -f "$lockfile" ] || continue');
@@ -109,9 +94,28 @@ describe('security workflows', () => {
     expect(auditStep).toContain(
       'npm ci --ignore-scripts --no-audit --progress=false --workspaces=false &&',
     );
+    // A registry-side audit failure is retried and then reported as its own
+    // error, never swallowed: an endpoint outage must not read as a CVE
+    // finding, and must not pass the gate either. Witnessed by bash in
+    // security-checks-audit-retry.test.js.
+    expect(auditStep).toContain('audit endpoint returned an error');
     expect(auditStep).toContain(
-      'run_npm_audit --omit=dev --audit-level=high --workspaces=false',
+      'audit npm audit --omit=dev --audit-level=high || status=$?',
     );
+    expect(auditStep).toContain(
+      'audit npm audit --omit=dev --audit-level=high --workspaces=false',
+    );
+    expect(auditStep).not.toContain('|| true');
+    // Every factor of the worst-case arithmetic is pinned, because the job
+    // ceiling is only safe while none of them drifts: the per-attempt cap, the
+    // backoff between attempts, and the ceiling itself — three audit sites
+    // (root plus the two vendored lockfiles the loop does not skip), two
+    // attempts each, 300s + 15s + 300s per site = 1845s of audit work. The
+    // attempt count is pinned behaviourally by the call counters in
+    // security-checks-audit-retry.test.js. Loosen any of these and a registry
+    // outage turns a reported verdict into a bare job cancel.
+    expect(auditStep).toContain('timeout 300 "$@"');
+    expect(auditStep).toContain('sleep 15');
     expect(workflow).not.toContain('secret-scan:');
     expect(workflow).not.toContain('trufflesecurity/trufflehog');
   });

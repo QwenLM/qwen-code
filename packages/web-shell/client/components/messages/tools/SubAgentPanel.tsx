@@ -9,6 +9,7 @@ import {
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { useWebShellCustomization } from '../../../customization';
 import { useI18n } from '../../../i18n';
+import { useTranscriptRenderMode } from '../../../transcriptRenderMode';
 // Circular import with ToolGroup (agents render tool rows; agent tool
 // rows render SubAgentPanel). Safe only while both modules dereference
 // each other's exports at render time — never in top-level code.
@@ -88,7 +89,8 @@ function SubToolTime({
   timestamp?: number;
   children: ReactNode;
 }) {
-  if (timestamp === undefined) return <>{children}</>;
+  const documentMode = useTranscriptRenderMode() === 'document';
+  if (documentMode || timestamp === undefined) return <>{children}</>;
   return (
     <div className={styles.toolTimeRow}>
       {children}
@@ -106,12 +108,22 @@ const SubToolLine = memo(function SubToolLine({
   tool: ACPToolCall;
   approval?: PermissionRequest | null;
 }) {
+  const documentMode = useTranscriptRenderMode() === 'document';
   // Same expandable row as the main transcript.
   const body =
     tool.subTools || tool.subContent ? (
-      <SubAgentPanel tool={tool} approval={approval} />
+      <SubAgentPanel
+        tool={tool}
+        approval={approval}
+        defaultExpanded={documentMode}
+      />
     ) : (
-      <ToolLine tool={tool} approval={approval} hideCollapsedOutput />
+      <ToolLine
+        tool={tool}
+        approval={approval}
+        forceExpanded={documentMode}
+        hideCollapsedOutput
+      />
     );
   return <SubToolTime timestamp={tool.startTime}>{body}</SubToolTime>;
 });
@@ -166,11 +178,12 @@ function getAgentResultText(tool: ACPToolCall): string {
 function SubAgentStream({ text }: { text: string }) {
   const { compactThinking } = useWebShellCustomization();
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const [streamExpanded, setStreamExpanded] = useState(false);
   const [overflowing, setOverflowing] = useState(false);
   const streamRef = useRef<HTMLPreElement>(null);
 
-  const collapsed = compactThinking && !streamExpanded;
+  const collapsed = compactThinking && !documentMode && !streamExpanded;
 
   useEffect(() => {
     const el = streamRef.current;
@@ -201,7 +214,7 @@ function SubAgentStream({ text }: { text: string }) {
       >
         {text}
       </pre>
-      {compactThinking && (overflowing || streamExpanded) && (
+      {compactThinking && !documentMode && (overflowing || streamExpanded) && (
         <button
           className={styles.expandToggle}
           onClick={() => setStreamExpanded((v) => !v)}
@@ -224,8 +237,13 @@ function SubAgentStream({ text }: { text: string }) {
  */
 function SubAgentResult({ content }: { content: string }) {
   const { compactThinking } = useWebShellCustomization();
+  const documentMode = useTranscriptRenderMode() === 'document';
   return (
-    <div className={compactThinking ? styles.scrollWindow : undefined}>
+    <div
+      className={
+        compactThinking && !documentMode ? styles.scrollWindow : undefined
+      }
+    >
       <Markdown content={content} source="assistant" />
     </div>
   );
@@ -248,15 +266,21 @@ function SubAgentTools({
   children: ReactNode;
 }) {
   const windowRef = useRef<HTMLDivElement>(null);
+  const documentMode = useTranscriptRenderMode() === 'document';
 
   useEffect(() => {
     const el = windowRef.current;
     if (!el) return;
-    el.scrollTop = pinTail ? el.scrollHeight : 0;
-  }, [pinTail, itemCount]);
+    if (!documentMode) el.scrollTop = pinTail ? el.scrollHeight : 0;
+  }, [documentMode, pinTail, itemCount]);
 
   return (
-    <div ref={windowRef} className={`${styles.tools} ${styles.scrollWindow}`}>
+    <div
+      ref={windowRef}
+      className={
+        documentMode ? styles.tools : `${styles.tools} ${styles.scrollWindow}`
+      }
+    >
       {children}
     </div>
   );
@@ -270,6 +294,7 @@ export function SubAgentPanel({
   inline,
 }: SubAgentPanelProps) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const isComplete = tool.status === 'completed' || tool.status === 'failed';
   const displayStatus = getAgentDisplayStatus(tool);
   const [expanded, setExpanded] = useState(defaultExpanded ?? false);
@@ -308,7 +333,12 @@ export function SubAgentPanel({
   return (
     <div className={inline ? undefined : styles.panel}>
       {!hideHeader && (
-        <div className={styles.header} onClick={() => setExpanded(!expanded)}>
+        <div
+          className={`${styles.header}${documentMode ? ` ${styles.documentHeader}` : ''}`}
+          onClick={() => {
+            if (!documentMode) setExpanded(!expanded);
+          }}
+        >
           <StatusIcon status={displayStatus} />
           <span className={chromeStyles.lineName}>
             {localizeAgentTypeName(agentType, t)}:
@@ -329,7 +359,7 @@ export function SubAgentPanel({
         </div>
       )}
 
-      {(expanded || hideHeader) && (
+      {(documentMode || expanded || hideHeader) && (
         <div className={styles.body}>
           {/* One chronological story instead of Result/Tools tabs.
               Completed: conclusion first, then the steps that produced it
