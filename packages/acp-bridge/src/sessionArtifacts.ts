@@ -5,12 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import {
-  constants as fsConstants,
-  promises as fs,
-  type BigIntStats,
-  type Stats,
-} from 'node:fs';
+import { promises as fs, type BigIntStats, type Stats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -40,6 +35,10 @@ import type {
   SessionArtifactRetention,
   SessionArtifactSnapshotRecordPayload,
 } from '@qwen-code/qwen-code-core';
+import {
+  isUnverifiableIdentityError,
+  openNoFollow,
+} from '@qwen-code/qwen-code-core/noFollowOpen';
 import { writeStderrLine } from './internal/stderrLine.js';
 
 export type DaemonSessionArtifactKind =
@@ -3302,10 +3301,10 @@ async function getWorkspaceStatus(
     // Number spelling loses precision above 2^53, so two files created close
     // together can round to the SAME numeric ino and defeat the swap check.
     const preOpenStat = await fs.lstat(realPath, { bigint: true });
-    const handle = await fs.open(
-      realPath,
-      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
-    );
+    // Where O_NOFOLLOW does not exist (Windows) the helper compensates
+    // with an lstat/open/fstat identity check instead of collapsing to a
+    // plain open that follows symlinks (#8227).
+    const handle = await openNoFollow(realPath);
     try {
       if (!isSameFile(preOpenStat, await handle.stat({ bigint: true }))) {
         return { status: 'missing', escaped: true };
@@ -3373,6 +3372,13 @@ async function getWorkspaceStatus(
   } catch (error) {
     if (isNoFollowSymlinkError(error)) {
       return { status: 'missing', escaped: true };
+    }
+    if (isUnverifiableIdentityError(error)) {
+      // inode-0 volume: the file could not be proven identical to the one
+      // the pre-open check saw. Fail closed like a missing artifact, but
+      // do NOT flag a symlink escape we did not observe — the path passed
+      // the containment check above (#8227 follow-up).
+      return { status: 'missing' };
     }
     if (!isNotFoundError(error)) {
       throw error;

@@ -88,7 +88,10 @@ export interface ChannelWorkerGroup {
   beginWorkspaceDrain(workspaceCwd: string): void;
   cancelWorkspaceDrain(workspaceCwd: string): void;
   workspaceActivity(workspaceCwd: string): number;
-  removeWorkspace(workspaceCwd: string): Promise<void>;
+  removeWorkspace(
+    workspaceCwd: string,
+    options?: { permanent?: boolean },
+  ): Promise<void>;
   restoreWorkspace(workspaceCwd: string): Promise<void>;
   deliverChannelMessage(
     request: Parameters<
@@ -752,9 +755,13 @@ export function createChannelWorkerGroup(
         ? 1
         : 0;
     },
-    removeWorkspace(workspaceCwd) {
+    removeWorkspace(workspaceCwd, options) {
       const existing = removalPromises.get(workspaceCwd);
-      if (existing) return existing;
+      if (existing) {
+        return options?.permanent
+          ? existing.finally(() => groupsByWorkspace.delete(workspaceCwd))
+          : existing;
+      }
       drainingWorkspaces.add(workspaceCwd);
       const removal = (async () => {
         try {
@@ -776,6 +783,7 @@ export function createChannelWorkerGroup(
           if (killError) throw killError;
         } finally {
           drainingWorkspaces.delete(workspaceCwd);
+          if (options?.permanent) groupsByWorkspace.delete(workspaceCwd);
         }
       })();
       removalPromises.set(workspaceCwd, removal);

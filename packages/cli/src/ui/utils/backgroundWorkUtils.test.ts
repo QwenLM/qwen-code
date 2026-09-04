@@ -152,6 +152,7 @@ function createEnumeratingMockConfig(overrides?: {
   monitors?: unknown[];
   shells?: unknown[];
   workflows?: unknown[];
+  startingWorkflows?: string[];
 }): Config {
   return {
     getBackgroundTaskRegistry: () => ({
@@ -165,6 +166,7 @@ function createEnumeratingMockConfig(overrides?: {
     }),
     getWorkflowRunRegistry: () => ({
       list: () => overrides?.workflows ?? [],
+      listStartingRunIds: () => overrides?.startingWorkflows ?? [],
     }),
   } as unknown as Config;
 }
@@ -207,7 +209,11 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
           status: 'running',
           description: 'research the codebase',
           subagentType: 'Explore',
-          startTime: now - 75_600_000,
+          // Stamped at call time, not from the describe-scope `now`: the
+          // rendered duration is measured against the `Date.now()` taken
+          // inside `describeBlockingBackgroundWork`, so a collection-time
+          // stamp reads 21h plus however long collecting took.
+          startTime: Date.now() - 75_600_000,
         },
         {
           agentId: 'fg_run',
@@ -231,7 +237,7 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     expect(summary?.lines[0]).toContain('Explore: research the codebase');
     expect(summary?.lines[0]).toContain('(running 21h)');
     expect(summary?.hasTaskEntries).toBe(true);
-    expect(summary?.hasWorkflowRuns).toBe(false);
+    expect(summary?.hasStartingWorkflowRuns).toBe(false);
   });
 
   it('lists monitors, running shells, and running/pausing workflow runs', () => {
@@ -282,7 +288,102 @@ describe('describeBlockingBackgroundWork (#8741)', () => {
     expect(joined).not.toContain('shell_2');
     expect(joined).not.toContain('wf_3');
     expect(summary?.hasTaskEntries).toBe(true);
-    expect(summary?.hasWorkflowRuns).toBe(true);
+    expect(summary?.hasInspectableWorkflowRuns).toBe(true);
+    expect(summary?.hasStartingWorkflowRuns).toBe(false);
+  });
+
+  it('lists workflow runs that are still starting', () => {
+    const summary = describeBlockingBackgroundWork(
+      createEnumeratingMockConfig({ startingWorkflows: ['wf_starting'] }),
+    );
+
+    expect(summary?.lines).toEqual(['  [wf_starting] (starting)']);
+    expect(summary?.hasTaskEntries).toBe(false);
+    expect(summary?.hasStartingWorkflowRuns).toBe(true);
+  });
+
+  it('renders a starting run without a fabricated duration', () => {
+    const summary = describeBlockingBackgroundWork(
+      createEnumeratingMockConfig({ startingWorkflows: ['wf_a', 'wf_b'] }),
+    );
+    expect(summary?.lines).toHaveLength(2);
+    for (const line of summary!.lines) {
+      // A reservation has no registered startTime; printing one would
+      // report a duration the run has not run for.
+      expect(line).not.toMatch(/\d+s\)/);
+      expect(line).toMatch(/\(starting\)$/);
+    }
+  });
+
+  it('lists a starting run alongside a registered one, newest last', () => {
+    const summary = describeBlockingBackgroundWork(
+      createEnumeratingMockConfig({
+        workflows: [
+          {
+            runId: 'wf_running',
+            status: 'running',
+            meta: { name: 'build' },
+            startTime: 1_000,
+          },
+        ],
+        startingWorkflows: ['wf_starting'],
+      }),
+    );
+    expect(summary?.lines).toHaveLength(2);
+    expect(summary!.lines[0]).toContain('[wf_running]');
+    expect(summary!.lines[1]).toBe('  [wf_starting] (starting)');
+  });
+
+  it('does not send /clear to /workflows for a run it cannot show', () => {
+    const message = buildBackgroundWorkBlockedMessage(
+      createEnumeratingMockConfig({ startingWorkflows: ['wf_starting'] }),
+      'Cannot clear.',
+    );
+    expect(message).toContain('Cannot clear.');
+    expect(message).toContain('  [wf_starting] (starting)');
+    // `/workflows` reads registry.list(), which a reservation has not
+    // entered — pointing there would name a list that cannot show it.
+    expect(message).not.toContain('Use ');
+    expect(message).toContain('Retry once the run has finished starting.');
+  });
+
+  it('still points at /workflows when a registered run also blocks', () => {
+    const message = buildBackgroundWorkBlockedMessage(
+      createEnumeratingMockConfig({
+        workflows: [
+          {
+            runId: 'wf_running',
+            status: 'running',
+            meta: { name: 'build' },
+            startTime: 1_000,
+          },
+        ],
+        startingWorkflows: ['wf_starting'],
+      }),
+      'Cannot clear.',
+    );
+    expect(message).toContain('Use /workflows to inspect them, then retry.');
+    expect(message).toContain('Retry once the run has finished starting.');
+  });
+
+  it('keeps the starting-run hint when the starting row overflows', () => {
+    const shells = Array.from({ length: 10 }, (_, i) => ({
+      shellId: `shell_${i}`,
+      status: 'running',
+      command: `cmd ${i}`,
+      startTime: now - (10 - i) * 1_000,
+    }));
+    const message = buildBackgroundWorkBlockedMessage(
+      createEnumeratingMockConfig({
+        shells,
+        startingWorkflows: ['wf_starting'],
+      }),
+      'Cannot clear.',
+    );
+
+    expect(message).not.toContain('[wf_starting]');
+    expect(message).toContain('  …and 1 more');
+    expect(message).toContain('Retry once the run has finished starting.');
   });
 
   it('sorts lines by start time', () => {
@@ -398,6 +499,7 @@ describe('buildBackgroundWorkBlockedMessage (#8741)', () => {
     expect(message.startsWith(base)).toBe(true);
     expect(message).toContain('[shell_1]');
     expect(message).toContain('Use /tasks to inspect them, then retry.');
+    expect(message).not.toContain('Retry once the run has finished starting.');
   });
 
   it('points at /workflows when only workflow runs block', () => {

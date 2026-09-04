@@ -8,6 +8,7 @@ import {
   extractTodosFromToolCall,
   getAgentToolsForPlan,
   getFloatingTodos,
+  getSessionWorkflowTodos,
   getActiveTodosForPlanRevision,
   getTodoStatusIcon,
   getTodoWindow,
@@ -40,6 +41,7 @@ function todoWriteMessage(
   todos: TodoItem[],
   stats?: TodoStatsSnapshot,
   planId?: string,
+  sessionWorkflow = false,
 ): Message {
   const tool: ACPToolCall = {
     callId: `call-${id}`,
@@ -47,11 +49,12 @@ function todoWriteMessage(
     status: 'completed',
     kind: 'think',
     args: { todos },
-    ...(stats || planId
+    ...(stats || planId || sessionWorkflow
       ? {
           rawOutput: {
             ...(stats ? { stats } : {}),
             ...(planId ? { plan: { id: planId } } : {}),
+            ...(sessionWorkflow ? { sessionWorkflow: true } : {}),
           },
         }
       : {}),
@@ -236,6 +239,28 @@ describe('getFloatingTodos', () => {
     expect(state.todos).toHaveLength(2);
     expect(state.allCompleted).toBe(true);
     expect(state.sourceMessageId).toBe('p1');
+  });
+});
+
+describe('getSessionWorkflowTodos', () => {
+  it('retains the latest workflow after a later user message', () => {
+    const state = getSessionWorkflowTodos([
+      todoWriteMessage(
+        'done',
+        [todo('first', 'completed'), todo('second', 'completed')],
+        undefined,
+        'plan-1',
+        true,
+      ),
+      userMessage('follow-up'),
+      todoWriteMessage('ordinary', [todo('unrelated', 'pending')]),
+      assistantMessage('reply'),
+    ]);
+
+    expect(state.todos.map((todo) => todo.id)).toEqual(['first', 'second']);
+    expect(state.planId).toBe('plan-1');
+    expect(state.allCompleted).toBe(true);
+    expect(state.sourceMessageId).toBe('done');
   });
 });
 

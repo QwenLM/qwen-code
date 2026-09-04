@@ -14,6 +14,16 @@ const audio = new HostAudioEngine(
       ipcRenderer.send('live:audio:diagnostic', { event, details });
     }
   },
+  () => {
+    if (currentPlaybackEpoch !== undefined) {
+      ipcRenderer.send('live:audio:playback-started', currentPlaybackEpoch);
+    }
+  },
+  () => {
+    if (currentPlaybackEpoch !== undefined) {
+      ipcRenderer.send('live:audio:playback-completed', currentPlaybackEpoch);
+    }
+  },
 );
 
 const invoke = (channel: string, ...args: unknown[]): Promise<void> =>
@@ -85,14 +95,19 @@ ipcRenderer.on(
 ipcRenderer.on('live:audio:set-output-muted', (_event, muted: boolean) => {
   audio.setOutputMuted(muted);
 });
-ipcRenderer.on('live:audio:play', (_event, frame: Uint8Array) => {
-  void audio.play(frame).catch(() => {
-    audio.clearOutput();
-    ipcRenderer.send('live:audio:output-error', {
-      code: 'audio_output_unavailable',
+let currentPlaybackEpoch: number | undefined;
+ipcRenderer.on(
+  'live:audio:play',
+  (_event, payload: { audio: Uint8Array; epoch: number }) => {
+    currentPlaybackEpoch = payload.epoch;
+    void audio.play(payload.audio).catch(() => {
+      audio.clearOutput();
+      ipcRenderer.send('live:audio:output-error', {
+        code: 'audio_output_unavailable',
+      });
     });
-  });
-});
+  },
+);
 ipcRenderer.on('live:audio:clear', () => audio.clearOutput());
 
 let lastPointerInteractive = false;

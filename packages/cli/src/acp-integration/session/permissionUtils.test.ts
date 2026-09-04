@@ -158,6 +158,39 @@ describe('permissionUtils', () => {
         }),
       );
     });
+
+    it('keeps one-shot and always-allow options on edit approvals', () => {
+      const options = toPermissionOptions({
+        type: 'edit',
+        title: 'Confirm edit',
+        fileName: 'a.txt',
+        filePath: '/tmp/a.txt',
+        fileDiff: 'diff',
+        originalContent: 'a',
+        newContent: 'b',
+        onConfirm: async () => undefined,
+      });
+
+      // Both kinds must stay present and in this wire order: the web-shell
+      // native Accept path selects by kind preference (allow_once first), so
+      // a missing allow_once would escalate a single Accept into
+      // "Allow All Edits".
+      expect(options).toEqual([
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedAlways,
+          name: 'Allow All Edits',
+          kind: 'allow_always',
+        }),
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+          kind: 'allow_once',
+        }),
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.Cancel,
+          kind: 'reject_once',
+        }),
+      ]);
+    });
   });
 
   describe('interactionMetaFields', () => {

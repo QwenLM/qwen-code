@@ -13,7 +13,7 @@ import {
 } from './schemas.js';
 import type {
   DialectV1,
-  InstanceConfigV1,
+  InstanceConfigV2,
   RuntimeConfiguration,
   ScopeLocation,
 } from './types.js';
@@ -21,10 +21,9 @@ import type {
 const CONFIG_ENV = 'QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG';
 const MAX_CONFIG_BYTES = 64 * 1024;
 
-export async function loadRuntimeConfiguration(options: {
-  presets: ReadonlyMap<string, unknown>;
-  env?: NodeJS.ProcessEnv;
-}): Promise<RuntimeConfiguration> {
+export async function loadRuntimeConfiguration(
+  options: { env?: NodeJS.ProcessEnv } = {},
+): Promise<RuntimeConfiguration> {
   const env = options.env ?? process.env;
   const configPath = readRequiredEnvironment(env, CONFIG_ENV);
   if (!isAbsolute(configPath)) {
@@ -33,15 +32,17 @@ export async function loadRuntimeConfiguration(options: {
     );
   }
 
-  const instance = parseInstanceConfig(await readConfigFile(configPath));
-  const preset = options.presets.get(instance.preset);
-  if (preset === undefined) {
-    throw new ConfigurationError('Mem0 extension preset is unknown.');
+  const instance = parseInstanceConfig(
+    await readConfigFile(configPath, 'instance'),
+  );
+  if (!isAbsolute(instance.dialectPath)) {
+    throw new ConfigurationError(
+      'Mem0 extension dialect path must be absolute.',
+    );
   }
-  const dialect = parseDialect(preset);
-  if (dialect.id !== instance.preset) {
-    throw new ConfigurationError('Mem0 extension preset is invalid.');
-  }
+  const dialect = parseDialect(
+    await readConfigFile(instance.dialectPath, 'dialect'),
+  );
 
   validateInstance(instance, dialect);
   return {
@@ -51,7 +52,10 @@ export async function loadRuntimeConfiguration(options: {
   };
 }
 
-async function readConfigFile(path: string): Promise<unknown> {
+async function readConfigFile(
+  path: string,
+  kind: 'instance' | 'dialect',
+): Promise<unknown> {
   let source: Buffer;
   let file: FileHandle | undefined;
   try {
@@ -71,23 +75,27 @@ async function readConfigFile(path: string): Promise<unknown> {
     source = source.subarray(0, offset);
   } catch {
     throw new ConfigurationError(
-      'Mem0 extension configuration is unavailable.',
+      `Mem0 extension ${kind} configuration is unavailable.`,
     );
   } finally {
     await file?.close().catch(() => undefined);
   }
   if (source.byteLength > MAX_CONFIG_BYTES) {
-    throw new ConfigurationError('Mem0 extension configuration is invalid.');
+    throw new ConfigurationError(
+      `Mem0 extension ${kind} configuration is invalid.`,
+    );
   }
   try {
     return JSON.parse(source.toString('utf8')) as unknown;
   } catch {
-    throw new ConfigurationError('Mem0 extension configuration is invalid.');
+    throw new ConfigurationError(
+      `Mem0 extension ${kind} configuration is invalid.`,
+    );
   }
 }
 
 function validateInstance(
-  instance: InstanceConfigV1,
+  instance: InstanceConfigV2,
   dialect: DialectV1,
 ): void {
   validateEndpoint(instance);
@@ -97,7 +105,7 @@ function validateInstance(
   validateScope(instance, dialect);
 }
 
-function validateEndpoint(instance: InstanceConfigV1): void {
+function validateEndpoint(instance: InstanceConfigV2): void {
   let origin: URL;
   try {
     origin = new URL(instance.endpoint.origin);
@@ -157,11 +165,11 @@ function validateDialectSemantics(dialect: DialectV1): void {
     dialect.search.appIdLocation,
   ];
   if (locations.some((location) => location.startsWith('json'))) {
-    throw new ConfigurationError('Mem0 extension preset is invalid.');
+    throw new ConfigurationError('Mem0 extension dialect is invalid.');
   }
 }
 
-function validateScope(instance: InstanceConfigV1, dialect: DialectV1): void {
+function validateScope(instance: InstanceConfigV2, dialect: DialectV1): void {
   requireScopeValue(instance.scope.userId, dialect.search.userIdLocation);
   requireScopeValue(instance.scope.agentId, dialect.search.agentIdLocation);
   requireScopeValue(instance.scope.appId, dialect.search.appIdLocation);
@@ -180,14 +188,14 @@ function readRequiredEnvironment(env: NodeJS.ProcessEnv, name: string): string {
   const trimmed = value?.trim();
   if (!value || !trimmed || trimmed === '${' + name + '}') {
     throw new ConfigurationError(
-      'Mem0 extension configuration is unavailable.',
+      'Mem0 extension instance configuration is unavailable.',
     );
   }
   return value;
 }
 
 export function buildSearchUrl(
-  instance: InstanceConfigV1,
+  instance: InstanceConfigV2,
   dialect: DialectV1,
 ): URL {
   const url = new URL(instance.endpoint.origin);

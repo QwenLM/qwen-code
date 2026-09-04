@@ -4356,7 +4356,7 @@ SOFTWARE.
 
 
 ============================================================
-fast-uri@3.1.5
+fast-uri@3.1.7
 (git+https://github.com/fastify/fast-uri.git)
 
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -5052,7 +5052,7 @@ THE SOFTWARE.
 
 
 ============================================================
-qs@6.15.2
+qs@6.16.0
 (https://github.com/ljharb/qs.git)
 
 BSD 3-Clause License
@@ -5087,7 +5087,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ============================================================
-side-channel@1.1.0
+side-channel@1.1.1
 (git+https://github.com/ljharb/side-channel.git)
 
 MIT License
@@ -5141,7 +5141,7 @@ SOFTWARE.
 
 
 ============================================================
-side-channel-list@1.0.0
+side-channel-list@1.0.1
 (git+https://github.com/ljharb/side-channel-list.git)
 
 MIT License

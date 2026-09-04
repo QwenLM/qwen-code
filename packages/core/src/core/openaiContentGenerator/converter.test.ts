@@ -67,6 +67,26 @@ describe('OpenAIContentConverter', () => {
     };
   }
 
+  function withQwen3TaggedThinkingStreamParser(): RequestContext {
+    return {
+      ...withStreamParser(),
+      model: 'qwen3.8-max',
+      responseParsingOptions: {
+        contentOnlyThinkingTagLeaks: true,
+        taggedThinkingTagsAfterReasoning: true,
+      },
+    };
+  }
+
+  function openAIStreamChunk(
+    delta: Record<string, unknown>,
+    finishReason: string | null = null,
+  ): OpenAI.Chat.ChatCompletionChunk {
+    return {
+      choices: [{ index: 0, delta, finish_reason: finishReason }],
+    } as unknown as OpenAI.Chat.ChatCompletionChunk;
+  }
+
   function hasOpenAIToolCalls(
     message: OpenAI.Chat.ChatCompletionMessageParam,
   ): message is OpenAI.Chat.ChatCompletionAssistantMessageParam & {
@@ -5844,6 +5864,172 @@ describe('OpenAIContentConverter', () => {
       expect(chunk.candidates?.[0]?.content?.parts).toEqual([
         { text: 'answer ' },
         { text: 'still thinking', thought: true },
+      ]);
+    });
+
+    it('should stream ordinary Qwen3 reasoning and content immediately', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      const reasoningChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const contentChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'answer' }),
+        context,
+      );
+
+      expect(reasoningChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 1', thought: true },
+      ]);
+      expect(contentChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should parse a balanced Qwen3 thinking block after reasoning', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const openingChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: '<thi' }),
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'nking>step 2</thinking>answer' }, 'stop'),
+        context,
+      );
+
+      expect(openingChunk.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'step 2', thought: true },
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should reject an unclosed Qwen3 thinking block after reasoning', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToLlm(
+          openAIStreamChunk({ content: '<thinking>step 2' }, 'stop'),
+          context,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('should suppress a replayed short Qwen3 thinking block', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const block = '<think>x</think>';
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      const firstBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const replayedBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+
+      expect(firstBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+      ]);
+      expect(replayedBlock.candidates?.[0]?.content?.parts).toEqual([]);
+    });
+
+    it('should suppress a replayed short Qwen3 thinking opener', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const opener = '<think>';
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: opener }),
+        context,
+      );
+      const replayedOpener = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: opener }),
+        context,
+      );
+      const finalChunk = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: 'x</think>answer' }, 'stop'),
+        context,
+      );
+
+      expect(replayedOpener.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+        { text: 'answer' },
+      ]);
+    });
+
+    it('should suppress a replayed Qwen3 snapshot beyond the detection window', () => {
+      const context = withQwen3TaggedThinkingStreamParser();
+      const block = `<thinking>${'x'.repeat(1200)}</thinking>answer`;
+
+      converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ reasoning_content: 'step 1' }),
+        context,
+      );
+      for (let offset = 0; offset < block.length; offset += 100) {
+        converter.convertOpenAIChunkToLlm(
+          openAIStreamChunk({ content: block.slice(offset, offset + 100) }),
+          context,
+        );
+      }
+
+      const replay = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const rewind = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block.slice(0, -1) }),
+        context,
+      );
+      const extension = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: `${block}!` }),
+        context,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(rewind.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(extension.candidates?.[0]?.content?.parts).toEqual([
+        { text: '!' },
+      ]);
+    });
+
+    it('should preserve repeated short blocks for eager tagged parsing', () => {
+      const context = withTaggedThinkingStreamParser();
+      const block = '<think>x</think>';
+
+      const firstBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+      const secondBlock = converter.convertOpenAIChunkToLlm(
+        openAIStreamChunk({ content: block }),
+        context,
+      );
+
+      expect(firstBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
+      ]);
+      expect(secondBlock.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'x', thought: true },
       ]);
     });
   });

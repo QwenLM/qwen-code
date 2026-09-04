@@ -8,6 +8,7 @@ export default defineConfig({
       'packages/vscode-ide-companion',
       'packages/sdk-typescript',
       'packages/node-repl',
+      'packages/qwen-live',
       'packages/channels/base',
       'packages/channels/dingtalk',
       'packages/channels/dws',

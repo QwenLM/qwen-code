@@ -15,6 +15,11 @@ import { EOL } from 'node:os';
 import * as pty from '@lydell/node-pty';
 import stripAnsi from 'strip-ansi';
 import type { FakeOpenAIServerOptions } from './fake-openai-server.js';
+import {
+  e2eRendererEnv,
+  pickE2eRenderer,
+  resolveE2eCliCommand,
+} from './renderer-matrix.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -195,6 +200,7 @@ export class TestRig {
   testName?: string;
   _lastRunStdout?: string;
   _interactiveOutput = '';
+  private readonly interactiveProcesses: pty.IPty[] = [];
 
   constructor() {
     this.bundlePath = join(__dirname, '..', 'dist/cli.js');
@@ -488,6 +494,17 @@ export class TestRig {
   }
 
   async cleanup() {
+    // A session a test never closed keeps its CLI child forwarding PTY bytes
+    // into this worker's stdout; after vitest tears the worker down those
+    // writes EPIPE and fail an otherwise all-green run (#10969).
+    for (const ptyProcess of this.interactiveProcesses.splice(0)) {
+      try {
+        ptyProcess.kill();
+      } catch {
+        // Process may have already exited
+      }
+    }
+
     // Clean up test directory
     if (this.testDir && !env['KEEP_OUTPUT']) {
       try {
@@ -903,7 +920,16 @@ export class TestRig {
     ptyProcess: pty.IPty;
     promise: Promise<{ exitCode: number; signal?: number; output: string }>;
   } {
-    const { command, initialArgs } = this._getCommandAndArgs(['--yolo']);
+    const renderer = pickE2eRenderer();
+    const { command: cliCommand, initialArgs } = this._getCommandAndArgs([
+      '--yolo',
+    ]);
+    // The renderer matrix swaps node for bun only when driving the repo
+    // bundle directly; installed-release runs keep their own launcher and
+    // still get the pinned QWEN_TUI_RENDERER below.
+    const isNpmRelease =
+      process.env.INTEGRATION_TEST_USE_INSTALLED_GEMINI === 'true';
+    const command = isNpmRelease ? cliCommand : resolveE2eCliCommand(renderer);
     const commandArgs = [...initialArgs, ...args];
 
     this._interactiveOutput = ''; // Reset output for the new run
@@ -913,8 +939,12 @@ export class TestRig {
       cols: 80,
       rows: 30,
       cwd: this.testDir!,
-      env: process.env as { [key: string]: string },
+      env: {
+        ...process.env,
+        ...e2eRendererEnv(renderer),
+      } as { [key: string]: string },
     });
+    this.interactiveProcesses.push(ptyProcess);
 
     ptyProcess.onData((data) => {
       this._interactiveOutput += data;

@@ -85,6 +85,8 @@ describe('toSnapshot', () => {
     const s = toSnapshot(
       task({
         description: 'Review and fix',
+        toolUseId: 'workflow-call-1',
+        workflowName: 'review-and-fix',
         sourceRunId: 'wf_source',
         startMode: 'rerun',
       }),
@@ -98,6 +100,8 @@ describe('toSnapshot', () => {
     expect(s.result).toEqual({ answer: 42 });
     expect(s).toMatchObject({
       description: 'Review and fix',
+      toolUseId: 'workflow-call-1',
+      workflowName: 'review-and-fix',
       sourceRunId: 'wf_source',
       startMode: 'rerun',
     });
@@ -165,10 +169,14 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
 
   it('round-trips a snapshot through disk', async () => {
     const config = fakeConfig(projectDir);
-    await writeWorkflowSnapshot(config, task({ runId: 'wf_rt' }));
+    await writeWorkflowSnapshot(
+      config,
+      task({ runId: 'wf_rt', toolUseId: 'workflow-call-1' }),
+    );
     const list = await listWorkflowSnapshots(config);
     expect(list).toHaveLength(1);
     expect(list[0].runId).toBe('wf_rt');
+    expect(list[0].toolUseId).toBe('workflow-call-1');
     expect(list[0].perPhaseTokens).toEqual([
       ['Plan', 200],
       [null, 50],

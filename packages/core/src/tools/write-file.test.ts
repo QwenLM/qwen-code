@@ -35,7 +35,10 @@ import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
-const rootDir = path.resolve(os.tmpdir(), 'qwen-code-test-root');
+// A unique per-run root: a fixed path under os.tmpdir() breaks whenever a
+// previous run by another user (e.g. a sandboxed root run on a shared CI
+// runner) leaves the directory behind, EACCES-ing every write into it.
+const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-test-root-'));
 
 // --- MOCKS ---
 vi.mock('../core/client.js');

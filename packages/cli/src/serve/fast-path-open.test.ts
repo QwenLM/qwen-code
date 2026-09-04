@@ -110,7 +110,13 @@ describe('serve fast path --open import boundary', () => {
       '--no-web',
     ]);
 
-    await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1));
+    // The chain before runQwenServe is called spans dynamic imports
+    // (fast-path-settings.js, run-qwen-serve.js) and fs-bound settings/trust
+    // bootstrap; vi.waitFor's 1s default expires under CI contention before
+    // the chain reaches the call. Give the poll a real wall-clock budget.
+    await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1), {
+      timeout: 10_000,
+    });
     expect(runQwenServe).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({ deferRuntimeUntilFirstHealth: false }),
@@ -119,7 +125,9 @@ describe('serve fast path --open import boundary', () => {
     expect(serveCommandImported).toBe(false);
 
     resolveRuntime?.();
-    await vi.waitFor(() => expect(openBrowser).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(openBrowser).toHaveBeenCalledTimes(1), {
+      timeout: 10_000,
+    });
     expect(serveCommandImported).toBe(true);
   });
 
@@ -300,7 +308,9 @@ describe('serve fast path --open import boundary', () => {
       '--no-web',
     ]);
 
-    await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(runQwenServe).toHaveBeenCalledTimes(1), {
+      timeout: 10_000,
+    });
     expect(runQwenServe).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({ deferRuntimeUntilFirstHealth: false }),

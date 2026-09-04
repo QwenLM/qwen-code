@@ -22,6 +22,7 @@ import {
   TOP_LEVEL_HELP_OPTIONS,
   TOP_LEVEL_USAGE,
 } from './config/top-level-options.js';
+import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
@@ -491,6 +492,17 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  // Before ANY route can start a child: an inherited messaging pair names
+  // an ancestor session's inbox plus a token that authenticates to it, and
+  // no route here consumes it — a session that binds its own inbox
+  // re-exports its own pair from PeerMessaging.start. Leaving it in place
+  // hands the capability to, among others, the npm lifecycle scripts of a
+  // managed update (which spawns with the full environment), letting
+  // third-party code inject into the running session. Same boundary and
+  // same reason as the guard-token scrub below; that one needs a serve
+  // carve-out, this one does not.
+  clearInheritedPeerMessagingEnv();
+
   const managedUpdateVersion =
     process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
   if (managedUpdateVersion) {

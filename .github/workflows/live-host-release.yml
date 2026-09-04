@@ -278,6 +278,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: 'write'
+      id-token: 'write'
     env:
       GH_REPO: '${{ github.repository }}'
     steps:
@@ -344,6 +345,63 @@ jobs:
             gh release upload "$FEED_TAG" "${stable_assets[@]}" --clobber
           else
             gh release create "$FEED_TAG" "${stable_assets[@]}" --title 'Qwen Live Host latest' --notes 'Stable Qwen Live Host installer feed.' --latest=false
+          fi
+
+      - name: 'Checkout source for qwen-live npm publish'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version-file: '.nvmrc'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 'Install dependencies'
+        run: 'npm install --ignore-scripts'
+
+      - name: 'Build dependency chain (core → acp-bridge → sdk → qwen-live)'
+        run: |-
+          npm run build --workspace @qwen-code/qwen-code-core
+          npm run build --workspace @qwen-code/acp-bridge
+          npm run build --workspace @qwen-code/sdk
+          npm run build --workspace @qwen-code/qwen-live
+
+      - name: 'Publish @qwen-code/qwen-live'
+        working-directory: 'packages/qwen-live'
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.version }}'
+          NPM_TAG: "${{ inputs.prerelease == true && 'preview' || 'latest' }}"
+        run: |
+          set -euo pipefail
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          # Align the package version with the Host release version.
+          npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
+          # Rewrite the file: dependency on @qwen-code/sdk to a versioned
+          # specifier — npm publish ships package.json verbatim, and
+          # "file:../sdk-typescript" is a monorepo-local link that does
+          # not exist for consumers. Use ^0.1.8 (the sdk's current
+          # published version range).
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            if (pkg.dependencies && pkg.dependencies['@qwen-code/sdk']) {
+              pkg.dependencies['@qwen-code/sdk'] = '^0.1.8';
+              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+              console.log('Rewrote @qwen-code/sdk dependency to ^0.1.8');
+            }
+          "
+          if npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          # Check if the package exists at all — provenance requires an
+          # existing package, so the first publish omits it.
+          if npm view "${PACKAGE_NAME}" version >/dev/null 2>&1; then
+            npm publish --access public --provenance --tag "$NPM_TAG"
+          else
+            echo "::notice::First publish of ${PACKAGE_NAME}; omitting --provenance"
+            npm publish --access public --tag "$NPM_TAG"
           fi
 
       - name: 'Publish release summary'

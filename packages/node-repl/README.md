@@ -1,7 +1,7 @@
 # @qwen-code/node-repl-mcp
 
 A standalone [Model Context Protocol](https://modelcontextprotocol.io) server that
-exposes a **session-persistent Node.js REPL** as three MCP tools. It runs a real
+exposes a **session-persistent Node.js REPL** as five MCP tools. It runs a real
 Node.js kernel in a dedicated child process; top-level bindings, closures, and
 module state persist across calls within a session.
 
@@ -10,11 +10,13 @@ client (Qwen Code via `mcpServers`, Claude, Codex, etc.) can run it.
 
 ## Tools
 
-| Tool                            | Description                                                                                                      |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `node_repl`                     | Execute JavaScript. `{ code, timeout_ms?, title? }`. Bindings persist across calls; top-level `await` supported. |
-| `node_repl_reset`               | Terminate the kernel process and discard all bindings/module state.                                              |
-| `node_repl_add_node_module_dir` | Register an extra `node_modules` directory for bare-package resolution.                                          |
+| Tool                            | Description                                                                                                        |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `node_repl`                     | Start one JavaScript cell. `{ code, timeout_ms?, yield_time_ms?, title? }`; yields a cell ID if it remains active. |
+| `node_repl_wait`                | Wait for the active cell by ID without cancelling it.                                                              |
+| `node_repl_cancel`              | Cancel the active cell by ID without replacing the kernel.                                                         |
+| `node_repl_reset`               | Terminate the kernel process and discard all bindings/module state.                                                |
+| `node_repl_add_node_module_dir` | Register an extra `node_modules` directory for bare-package resolution.                                            |
 
 ### Cell semantics
 
@@ -28,8 +30,9 @@ client (Qwen Code via `mcpServers`, Claude, Codex, etc.) can run it.
 - Node builtins are importable except `process`/`node:process`. Use
   `(await import('node:module')).createRequire(import.meta.url)` for CommonJS or
   native (N-API) addons.
-- Timeout, cancellation, `node_repl_reset`, or a crash replaces the kernel process
-  and discards all bindings.
+- Timeout and cancellation stop only the active cell. Earlier bindings and the
+  kernel process remain available, while new bindings from that cell are not
+  committed. `node_repl_reset` or a real process crash discards all bindings.
 
 > Isolation note: the VM context provides lifecycle/namespace isolation, **not** an
 > OS security sandbox. Imported packages and builtins run with ordinary Node.js

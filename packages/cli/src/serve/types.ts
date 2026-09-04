@@ -321,12 +321,19 @@ export interface ServeOptions {
    * Per-SSE-connection idle deadline.
    */
   writerIdleTimeoutMs?: number;
-  /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
+  /** ACP child auto-reap delay. Keepalive windows may extend it. */
   channelIdleTimeoutMs?: number;
   /** Session reaper scan interval in ms. 0 = disabled. Default: 60000. */
   sessionReapIntervalMs?: number;
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
+  /**
+   * Grace period after a prompt settles before an otherwise-idle session may
+   * be auto-closed, in ms. 0 = disabled (original behavior). Set to a value
+   * greater than the client's max SSE poll interval to prevent session rebuilds
+   * for poll-based clients. Default: 0.
+   */
+  sessionPromptSettledCloseGraceMs?: number;
   /**
    * ACP child request timeout, including the `initialize` handshake,
    * in ms. Must be a positive
@@ -442,6 +449,7 @@ export interface CapabilitiesEnvelope {
     displayName?: string;
     primary: boolean;
     trusted: boolean;
+    workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';
   }>;

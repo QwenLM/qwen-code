@@ -1044,30 +1044,130 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'kills timed-out and cancelled generations without replaying source',
+    'interrupts timed-out and cancelled cells without replacing the kernel',
     async () => {
-      await run('const oldBinding = "gone";');
-      const timeoutPid = manager.getKernelPid();
-      const timedOut = await run('while (true) {}', 500);
+      await run(
+        'globalThis.oldObject = { value: "retained", afterBarrier: false, caughtAfterCancel: false, finallyAfterCancel: false }; const oldBinding = globalThis.oldObject;',
+      );
+      const timeoutPid = manager.getKernelPid()!;
+      const generation = manager.getGeneration();
+      const timedOut = await run(
+        'setTimeout(() => { oldBinding.value = "timeout-late"; }, 100); while (true) {}',
+        500,
+      );
       expect(timedOut.status).toBe('timeout');
-      expect(timedOut.stats.kernelReplaced).toBe(true);
-      expect(manager.getKernelPid()).toBeNull();
+      expect(timedOut.stats.kernelReplaced).toBe(false);
+      expect(manager.getKernelPid()).toBe(timeoutPid);
+      expect(manager.getGeneration()).toBe(generation);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      expect(texts(await run('nodeRepl.write(oldBinding.value);'))).toEqual([
+        'retained',
+      ]);
 
       const controller = new AbortController();
       const pending = manager.exec({
-        code: 'await new Promise((resolve) => setTimeout(resolve, 60_000));',
+        code: 'const { setTimeout: sleepAfterCancel } = await import("node:timers/promises"); setTimeout(() => nodeRepl.write("late-cancel"), 500); try { await sleepAfterCancel(400); } catch { oldBinding.caughtAfterCancel = true; } finally { oldBinding.finallyAfterCancel = true; } oldBinding.value = "cancel-late"; const mustNotCommit = true;',
         timeoutMs: 120_000,
         signal: controller.signal,
       });
       setTimeout(() => controller.abort(), 200);
       const cancelled = await pending;
       expect(cancelled.status).toBe('cancelled');
-      expect(cancelled.stats.kernelReplaced).toBe(true);
-      expect(cancelled.stats.pid).not.toBe(timeoutPid);
+      expect(cancelled.stats.kernelReplaced).toBe(false);
+      expect(cancelled.stats.pid).toBe(timeoutPid);
+      expect(manager.getKernelPid()).toBe(timeoutPid);
+      expect(manager.getGeneration()).toBe(generation);
 
-      const recovered = await run('nodeRepl.write(typeof oldBinding);');
-      expect(texts(recovered)).toEqual(['undefined']);
-      expect(recovered.stats.pid).not.toBe(cancelled.stats.pid);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+
+      const recovered = await run(
+        'nodeRepl.write(`${oldBinding === globalThis.oldObject}|${oldBinding.value}|${oldBinding.caughtAfterCancel}|${oldBinding.finallyAfterCancel}|${typeof mustNotCommit}`);',
+      );
+      expect(texts(recovered)).toEqual(['true|retained|false|false|undefined']);
+      expect(texts(recovered)).not.toContain('late-cancel');
+      expect(recovered.stats.pid).toBe(timeoutPid);
+
+      await run(
+        'setTimeout(async () => { const { setTimeout: sleepInTimer } = await import("node:timers/promises"); await sleepInTimer(20); oldBinding.value = "background-await-completed"; }, 20);',
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(texts(await run('nodeRepl.write(oldBinding.value);'))).toEqual([
+        'background-await-completed',
+      ]);
+      await run('oldBinding.value = "retained";');
+
+      const iterableController = new AbortController();
+      const iterableCell = manager.exec({
+        code: 'const guardedStream = { [Symbol.asyncIterator]() { return this; }, next() { return import("node:timers/promises").then(({ setTimeout: sleep }) => sleep(400)).then(() => ({ done: false, value: 1 })); } }; for await (const value of guardedStream) { oldBinding.value = `iterable-${value}`; break; }',
+        timeoutMs: 30_000,
+        signal: iterableController.signal,
+      });
+      setTimeout(() => iterableController.abort(), 50);
+      expect((await iterableCell).status).toBe('cancelled');
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(texts(await run('nodeRepl.write(oldBinding.value);'))).toEqual([
+        'retained',
+      ]);
+
+      const barrierController = new AbortController();
+      let barrierSettled = false;
+      const barrierCell = manager
+        .exec({
+          code: 'const { setTimeout: sleep } = await import("node:timers/promises"); await nodeRepl.signal.waitUntil(sleep(400)); oldBinding.afterBarrier = true; const barrierBinding = true;',
+          timeoutMs: 30_000,
+          signal: barrierController.signal,
+        })
+        .finally(() => {
+          barrierSettled = true;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      barrierController.abort();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(barrierSettled).toBe(false);
+      const barrierCancelled = await barrierCell;
+      expect(barrierCancelled.status).toBe('cancelled');
+      expect(barrierCancelled.stats.pid).toBe(timeoutPid);
+      expect(manager.getGeneration()).toBe(generation);
+      expect(
+        texts(
+          await run(
+            'nodeRepl.write(`${typeof barrierBinding}|${oldBinding.afterBarrier}`);',
+          ),
+        ),
+      ).toEqual(['undefined|false']);
+
+      const operationModule = path.join(workDir, 'terminal-operation.mjs');
+      fs.writeFileSync(
+        operationModule,
+        [
+          'import { setTimeout as sleep } from "node:timers/promises";',
+          'export async function dispatch(signal, state) {',
+          '  await signal.waitUntil(sleep(400));',
+          '  const result = "committed";',
+          '  state.operation = result;',
+          '  return result;',
+          '}',
+        ].join('\n'),
+      );
+      await run(
+        'globalThis.nativeLifecycle = { operation: "dispatched", userContinuation: false };',
+      );
+      const nativeController = new AbortController();
+      const nativeCell = manager.exec({
+        code: `const { dispatch } = await import(${JSON.stringify(pathToFileURL(operationModule).href)}); await dispatch(nodeRepl.signal, nativeLifecycle); nativeLifecycle.userContinuation = true;`,
+        timeoutMs: 30_000,
+        signal: nativeController.signal,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      nativeController.abort();
+      expect((await nativeCell).status).toBe('cancelled');
+      expect(
+        texts(
+          await run(
+            'nodeRepl.write(`${nativeLifecycle.operation}|${nativeLifecycle.userContinuation}`);',
+          ),
+        ),
+      ).toEqual(['committed|false']);
     },
     TEST_TIMEOUT,
   );
@@ -1174,7 +1274,7 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'revokes a cold kernel if cancellation lands during startup',
+    'retains a cold kernel if cancellation lands during startup',
     async () => {
       const controller = new AbortController();
       const pending = manager.exec({
@@ -1186,9 +1286,12 @@ describe('NodeReplKernelManager', () => {
       const cancelled = await pending;
       expect(cancelled.status).toBe('cancelled');
       expect(cancelled.events).toEqual([]);
-      expect(cancelled.stats.kernelReplaced).toBe(true);
-      expect(manager.getKernelPid()).toBeNull();
-      expect(texts(await run('nodeRepl.write("alive");'))).toEqual(['alive']);
+      expect(cancelled.stats.kernelReplaced).toBe(false);
+      const pid = manager.getKernelPid();
+      expect(pid).not.toBeNull();
+      const alive = await run('nodeRepl.write("alive");');
+      expect(texts(alive)).toEqual(['alive']);
+      expect(alive.stats.pid).toBe(pid);
     },
     TEST_TIMEOUT,
   );

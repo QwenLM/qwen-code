@@ -65,6 +65,22 @@ const qwen38MandatoryReasoningConfigOptions = (currentValue = 'xhigh') => [
   },
 ];
 
+const toggleOnlyReasoningConfigOptions = (currentValue = 'default') => [
+  {
+    id: 'reasoning_effort',
+    name: 'Reasoning effort',
+    type: 'select',
+    currentValue,
+    options: [
+      { value: 'none', name: 'Thinking off' },
+      { value: 'default', name: 'Thinking on' },
+    ],
+    _meta: {
+      'qwenCode/reasoning': { toggleOnly: true },
+    },
+  },
+];
+
 test('loads replayed transcript and connects to fake daemon @smoke', async ({
   page,
 }, testInfo) => {
@@ -266,7 +282,11 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
   expect(
     requestBodyRecord(firstRequest(daemon.configOptionRequests())),
-  ).toEqual({ configId: 'reasoning_effort', value: 'medium' });
+  ).toEqual({
+    configId: 'reasoning_effort',
+    value: 'medium',
+    persist: true,
+  });
   await expect(medium).toHaveAttribute('aria-pressed', 'true');
   await expect(modelButton).toContainText('Medium');
 
@@ -275,20 +295,25 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   expect(requestBodyRecord(daemon.configOptionRequests()[1]!)).toEqual({
     configId: 'reasoning_effort',
     value: 'none',
+    persist: true,
   });
   await expect(thinking).not.toBeChecked();
   await expect(medium).toBeDisabled();
-  await expect(medium).toHaveAttribute('aria-pressed', 'true');
+  await expect(medium).toHaveAttribute('aria-pressed', 'false');
+  await expect(
+    controls.locator('[data-web-shell-effort="xhigh"]'),
+  ).toHaveAttribute('aria-pressed', 'true');
   await expect(modelButton).toContainText('Thinking Off');
 
   await thinking.click();
   await expect.poll(() => daemon.configOptionRequests().length).toBe(3);
   expect(requestBodyRecord(daemon.configOptionRequests()[2]!)).toEqual({
     configId: 'reasoning_effort',
-    value: 'medium',
+    value: 'default',
+    persist: true,
   });
   await expect(thinking).toBeChecked();
-  await expect(modelButton).toContainText('Medium');
+  await expect(modelButton).toContainText('Extra High');
 
   await modelSubmenu.click();
   await expect(page.locator('[data-web-shell-model-submenu]')).toBeVisible();
@@ -330,7 +355,11 @@ test('keeps mandatory qwen3.8-max effort switchable after messages and while run
   await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
   expect(
     requestBodyRecord(firstRequest(daemon.configOptionRequests())),
-  ).toEqual({ configId: 'reasoning_effort', value: 'medium' });
+  ).toEqual({
+    configId: 'reasoning_effort',
+    value: 'medium',
+    persist: true,
+  });
 
   await page.keyboard.press('Escape');
   await fillComposer(page, 'Keep switching while this prompt runs');
@@ -344,6 +373,7 @@ test('keeps mandatory qwen3.8-max effort switchable after messages and while run
   expect(requestBodyRecord(daemon.configOptionRequests()[1]!)).toEqual({
     configId: 'reasoning_effort',
     value: 'low',
+    persist: true,
   });
   await expect(modelButton).toContainText('Low');
 });
@@ -413,7 +443,8 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   });
   const daemon = await installScenario(page, scenario, testInfo);
 
-  await gotoEmptyMobileWelcomeHarness(page);
+  await page.goto('/');
+  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
 
   const modelButton = page.locator('[data-web-shell-model-button]');
   await expect(modelButton).toContainText('qwen3.8-max · Extra High');
@@ -439,12 +470,15 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   await thinking.click();
   await expect(thinking).not.toBeChecked();
   await expect(medium).toBeDisabled();
-  await expect(medium).toHaveAttribute('aria-pressed', 'true');
+  await expect(medium).toHaveAttribute('aria-pressed', 'false');
+  await expect(
+    controls.locator('[data-web-shell-effort="xhigh"]'),
+  ).toHaveAttribute('aria-pressed', 'true');
   await expect(modelButton).toContainText('qwen3.8-max · Thinking Off');
   await thinking.click();
   await expect(thinking).toBeChecked();
   await expect(medium).toBeEnabled();
-  await expect(modelButton).toContainText('qwen3.8-max · Medium');
+  await expect(modelButton).toContainText('qwen3.8-max · Extra High');
   expect(daemon.configOptionRequests()).toHaveLength(0);
   expect(
     daemon.requests.filter(
@@ -481,6 +515,9 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
     .locator('[data-web-shell-toolbar-popover]:visible')
     .getByRole('button', { name: 'qwen3.8-max', exact: true })
     .click();
+  await expect(modelButton).toContainText('qwen3.8-max · Extra High');
+  await modelButton.click();
+  await page.locator('[data-web-shell-effort="medium"]').click();
   await expect(modelButton).toContainText('qwen3.8-max · Medium');
   expect(
     daemon.requests.filter(
@@ -489,6 +526,12 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   ).toHaveLength(0);
 
   await page.keyboard.press('Escape');
+  scenario.providersDelayMs = 500;
+  const staleProvidersResponse = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'GET' &&
+      new URL(response.url()).pathname === '/workspace/providers',
+  );
   await fillComposer(page, 'Create the lazy session');
   await page.locator('[data-web-shell-composer-submit]').click();
   await expect
@@ -505,8 +548,14 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   ).toEqual({
     configId: 'reasoning_effort',
     value: 'medium',
+    persist: true,
   });
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  await daemon.sendEvent(
+    turnCompleteEvent('persisted-reasoning-prompt', { id: 1 }),
+  );
+  await staleProvidersResponse;
+  await page.waitForTimeout(50);
   const configRequestIndex = daemon.requests.findIndex(
     (request) =>
       request.method === 'POST' &&
@@ -533,6 +582,24 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   await expect(
     page.locator('[data-web-shell-effort="medium"]'),
   ).toHaveAttribute('aria-pressed', 'true');
+
+  const qualifiedProviderRequestCount = () =>
+    daemon.requests.filter(
+      (request) =>
+        request.method === 'GET' &&
+        /^\/workspaces\/[^/]+\/providers\/?$/.test(request.path),
+    ).length;
+  const providersBeforeClear = qualifiedProviderRequestCount();
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe('/');
+  await expect(modelButton).toContainText('qwen3.8-max · Medium');
+  expect(qualifiedProviderRequestCount()).toBe(providersBeforeClear);
+  expect(
+    daemon.requests.filter(
+      (request) => request.method === 'POST' && request.path === '/session',
+    ),
+  ).toHaveLength(1);
 });
 
 test('keeps mandatory qwen3.8-max effort switchable before lazy session creation @smoke', async ({
@@ -597,16 +664,23 @@ test('keeps mandatory qwen3.8-max effort switchable before lazy session creation
   await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
   expect(
     requestBodyRecord(firstRequest(daemon.configOptionRequests())),
-  ).toEqual({ configId: 'reasoning_effort', value: 'medium' });
+  ).toEqual({
+    configId: 'reasoning_effort',
+    value: 'medium',
+    persist: true,
+  });
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
 });
 
-test('does not apply a model-bound welcome effort after switching models @smoke', async ({
+test('discards an incompatible welcome effort when switching away and back @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
     currentModel: 'qwen3.8-max',
-    state: { configOptions: [], models: undefined },
+    state: {
+      configOptions: qwen38ReasoningConfigOptions('medium'),
+      models: undefined,
+    },
     providers: {
       providers: [
         {
@@ -621,7 +695,7 @@ test('does not apply a model-bound welcome effort after switching models @smoke'
               name: 'qwen3.8-max',
               isCurrent: true,
               isRuntime: false,
-              configOptions: qwen38ReasoningConfigOptions(),
+              configOptions: qwen38ReasoningConfigOptions('medium'),
             },
             {
               modelId: 'qwen-plus',
@@ -640,8 +714,8 @@ test('does not apply a model-bound welcome effort after switching models @smoke'
   await gotoEmptyMobileWelcomeHarness(page);
 
   const modelButton = page.locator('[data-web-shell-model-button]');
+  await expect(modelButton).toContainText('qwen3.8-max · Medium');
   await modelButton.click();
-  await page.locator('[data-web-shell-effort="medium"]').click();
   await page.locator('[data-web-shell-model-submenu-trigger]').click();
   await page
     .locator('[data-web-shell-model-submenu]')
@@ -650,12 +724,39 @@ test('does not apply a model-bound welcome effort after switching models @smoke'
   await expect(modelButton).toContainText('qwen-plus');
   await expect(modelButton).not.toContainText('Medium');
 
+  await modelButton.click();
+  await page
+    .locator('[data-web-shell-toolbar-popover]:visible')
+    .getByRole('button', { name: 'qwen3.8-max', exact: true })
+    .click();
+  await expect(modelButton).toContainText('qwen3.8-max · Extra High');
+  await expect(modelButton).not.toContainText('Medium');
+
   await page.keyboard.press('Escape');
-  await fillComposer(page, 'Use the non-reasoning model');
+  await fillComposer(page, 'Use the reset model default');
   await page.locator('[data-web-shell-composer-submit]').click();
 
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
-  expect(daemon.configOptionRequests()).toHaveLength(0);
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  expect(
+    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
+  ).toEqual({
+    configId: 'reasoning_effort',
+    value: 'default',
+    persist: true,
+  });
+  const configRequestIndex = daemon.requests.findIndex(
+    (request) =>
+      request.method === 'POST' &&
+      /\/session\/[^/]+\/config-option$/.test(request.path),
+  );
+  const promptRequestIndex = daemon.requests.findIndex(
+    (request) =>
+      request.method === 'POST' &&
+      /\/session\/[^/]+\/prompt\/?$/.test(request.path),
+  );
+  expect(configRequestIndex).toBeGreaterThanOrEqual(0);
+  expect(configRequestIndex).toBeLessThan(promptRequestIndex);
 });
 
 test('cancels the first prompt when live reasoning capability is missing @smoke', async ({
@@ -710,6 +811,7 @@ test('cancels the first prompt when live reasoning capability is missing @smoke'
   expect(requestBodyRecord(daemon.configOptionRequests()[1]!)).toEqual({
     configId: 'reasoning_effort',
     value: 'medium',
+    persist: true,
   });
   await expect.poll(() => daemon.promptRequests().length).toBe(1);
 });
@@ -836,21 +938,7 @@ test('toggles reasoning without effort tiers for qwen3.7-plus @smoke', async ({
   const scenario = createWebShellDaemonScenario({
     currentModel: 'qwen3.7-plus',
     state: {
-      configOptions: [
-        {
-          id: 'reasoning_effort',
-          name: 'Reasoning effort',
-          type: 'select',
-          currentValue: 'default',
-          options: [
-            { value: 'none', name: 'Thinking off' },
-            { value: 'default', name: 'Thinking on' },
-          ],
-          _meta: {
-            'qwenCode/reasoning': { toggleOnly: true },
-          },
-        },
-      ],
+      configOptions: toggleOnlyReasoningConfigOptions(),
     },
   });
   const daemon = await installScenario(page, scenario, testInfo);
@@ -863,13 +951,19 @@ test('toggles reasoning without effort tiers for qwen3.7-plus @smoke', async ({
   await expect(controls).toBeVisible();
   await expect(thinking).toBeChecked();
   await expect(controls.locator('[data-web-shell-effort]')).toHaveCount(0);
+  await expect(controls.getByText('Effort', { exact: true })).toHaveCount(0);
+  await expect(controls.getByText('Default', { exact: true })).toHaveCount(0);
   await expect(modelButton).toContainText('Thinking');
 
   await thinking.click();
   await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
   expect(
     requestBodyRecord(firstRequest(daemon.configOptionRequests())),
-  ).toEqual({ configId: 'reasoning_effort', value: 'none' });
+  ).toEqual({
+    configId: 'reasoning_effort',
+    value: 'none',
+    persist: true,
+  });
   await expect(thinking).not.toBeChecked();
   await expect(modelButton).toContainText('Thinking Off');
 
@@ -878,9 +972,77 @@ test('toggles reasoning without effort tiers for qwen3.7-plus @smoke', async ({
   expect(requestBodyRecord(daemon.configOptionRequests()[1]!)).toEqual({
     configId: 'reasoning_effort',
     value: 'default',
+    persist: true,
   });
   await expect(thinking).toBeChecked();
   await expect(modelButton).toContainText('Thinking');
+});
+
+test('configures toggle-only reasoning on Welcome without creating an empty session @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.7-plus',
+    state: {
+      configOptions: toggleOnlyReasoningConfigOptions(),
+      models: undefined,
+    },
+    providers: {
+      providers: [
+        {
+          kind: 'model_provider',
+          status: 'ok',
+          authType: 'qwen-oauth',
+          current: true,
+          models: [
+            {
+              modelId: 'qwen3.7-plus',
+              baseModelId: 'qwen3.7-plus',
+              name: 'qwen3.7-plus',
+              isCurrent: true,
+              isRuntime: false,
+              configOptions: toggleOnlyReasoningConfigOptions(),
+            },
+          ],
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoEmptyMobileWelcomeHarness(page);
+
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  await modelButton.click();
+  const controls = page.locator('[data-web-shell-model-reasoning]');
+  const thinking = controls.locator('[data-web-shell-thinking-toggle]');
+  await expect(controls).toBeVisible();
+  await expect(controls.locator('[data-web-shell-effort]')).toHaveCount(0);
+  await expect(controls.getByText('Effort', { exact: true })).toHaveCount(0);
+  await expect(controls.getByText('Default', { exact: true })).toHaveCount(0);
+
+  await thinking.click();
+  await expect(thinking).not.toBeChecked();
+  await thinking.click();
+  await expect(thinking).toBeChecked();
+  expect(daemon.configOptionRequests()).toHaveLength(0);
+  expect(
+    daemon.requests.filter(
+      (request) => request.method === 'POST' && request.path === '/session',
+    ),
+  ).toHaveLength(0);
+
+  await page.keyboard.press('Escape');
+  await fillComposer(page, 'Create the toggle-only session');
+  await page.locator('[data-web-shell-composer-submit]').click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  expect(
+    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
+  ).toEqual({
+    configId: 'reasoning_effort',
+    value: 'default',
+    persist: true,
+  });
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
 });
 
 test('uploads an Extension archive from the manager @smoke', async ({

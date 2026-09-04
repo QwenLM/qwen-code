@@ -56,6 +56,23 @@ export function useHistory(): UseHistoryManagerReturn {
 
   const loadHistory = useCallback((newHistory: HistoryItem[]) => {
     setHistory(newHistory);
+    // Restored transcripts stamp items with IDs relative to their own load
+    // timestamp (base + 1..N, see buildResumedHistoryItems). Advance the ID
+    // counter past the highest loaded ID so a subsequent addItem — which
+    // computes Date.now() + ++counter — cannot land inside the restored
+    // range and duplicate a React key in the <Static> transcript. The next
+    // getNextMessageId call increments again, so equality here still yields
+    // maxLoadedId + 1 at the earliest.
+    let maxLoadedId = 0;
+    for (const item of newHistory) {
+      if (item.id > maxLoadedId) {
+        maxLoadedId = item.id;
+      }
+    }
+    messageIdCounterRef.current = Math.max(
+      messageIdCounterRef.current,
+      maxLoadedId - Date.now(),
+    );
   }, []);
 
   // Adds a new item to the history state with a unique ID.

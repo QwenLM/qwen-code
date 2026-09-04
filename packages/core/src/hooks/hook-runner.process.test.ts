@@ -14,6 +14,21 @@ import { HookRunner } from './hookRunner.js';
 import { HookEventName, HooksConfigSource, HookType } from './types.js';
 import type { HookInput } from './types.js';
 
+// The tests here spawn real processes — `node --import=tsx/esm` where the
+// fixture imports HookRunner's TypeScript source, plain node over `node:`
+// builtins otherwise — and then wait on a wall-clock deadline. Process
+// startup is not something a smarter wait can speed up, so on a shared
+// runner these deadlines are a coin flip rather than a signal: size them for
+// the busiest host, not the median one. The budgets below are sized for the
+// tsx path, which pays seconds of loader startup the plain-node fixtures do
+// not, so they are generous rather than tight for those.
+// A genuine hang still fails, just later. The per-test timeouts below are
+// widened to match; they stay numeric literals so the call shape, and the
+// diff, stay unchanged.
+const PROCESS_STARTUP_TIMEOUT_MS = 30_000;
+const PROCESS_REAP_TIMEOUT_MS = 15_000;
+const HOOK_GROUP_TIMEOUT_MS = 5000;
+
 const waitFor = async (
   predicate: () => boolean | Promise<boolean>,
   timeoutMs: number,
@@ -136,7 +151,7 @@ setInterval(() => {}, 1000);
             (await readFile(descendantReadyPath, 'utf8').catch(() => '')) ===
               'ready'
           );
-        }, 5000);
+        }, PROCESS_STARTUP_TIMEOUT_MS);
 
         controller.abort();
         const result = await resultPromise;
@@ -173,7 +188,7 @@ setInterval(() => {}, 1000);
         }
         await rm(tempDir, { recursive: true, force: true });
       }
-    }, 15_000);
+    }, 90_000);
 
     it.each([
       ['synchronous', 'process-exit', false],
@@ -291,7 +306,7 @@ setInterval(() => {}, 1000);
               (await readFile(driverReadyPath, 'utf8').catch(() => '')) ===
                 'ready'
             );
-          }, 5000);
+          }, PROCESS_STARTUP_TIMEOUT_MS);
           if (exitMode !== 'process-exit') {
             process.kill(driverPid as number, 'SIGTERM');
           }
@@ -313,7 +328,7 @@ setInterval(() => {}, 1000);
             () =>
               !isRunning(rootPid as number) &&
               !isRunning(descendantPid as number),
-            3000,
+            PROCESS_REAP_TIMEOUT_MS,
           );
         } finally {
           if (driverPid && isRunning(driverPid)) {
@@ -340,7 +355,7 @@ setInterval(() => {}, 1000);
           await rm(tempDir, { recursive: true, force: true });
         }
       },
-      15_000,
+      90_000,
     );
 
     it.each([
@@ -479,7 +494,7 @@ writeFileSync(process.argv[3], 'completed');
               hookPid !== undefined &&
               (await readFile(readyPath, 'utf8').catch(() => '')) === 'ready'
             );
-          }, 5000);
+          }, PROCESS_STARTUP_TIMEOUT_MS);
           const readyAt = Date.now();
           expect(await driverExit).toEqual({ code: 0, signal: null });
           expect(await readFile(completedPath, 'utf8').catch(() => '')).toBe(
@@ -513,7 +528,7 @@ writeFileSync(process.argv[3], 'completed');
           await rm(tempDir, { recursive: true, force: true });
         }
       },
-      10_000,
+      90_000,
     );
 
     it('enforces a surviving hook timeout after the parent exits', async () => {
@@ -533,7 +548,7 @@ const { HookRunner } = await import(process.argv[2]);
 const [tempDir, fixturePath, readyPath, pidPath] = process.argv.slice(3);
 const runner = new HookRunner();
 void runner.executeHook(
-  { type: 'command', command: \`exec \${JSON.stringify(process.execPath)} \${JSON.stringify(fixturePath)} \${JSON.stringify(readyPath)} \${JSON.stringify(pidPath)}\`, source: 'project', shell: 'bash', timeout: 300 },
+  { type: 'command', command: \`exec \${JSON.stringify(process.execPath)} \${JSON.stringify(fixturePath)} \${JSON.stringify(readyPath)} \${JSON.stringify(pidPath)}\`, source: 'project', shell: 'bash', timeout: ${HOOK_GROUP_TIMEOUT_MS} },
   'StopFailure',
   { session_id: 'surviving-timeout-test', transcript_path: \`\${tempDir}/transcript.jsonl\`, cwd: tempDir, hook_event_name: 'StopFailure', timestamp: new Date().toISOString() },
 );
@@ -585,7 +600,10 @@ setInterval(() => {}, 1000);
         hookPid = await readPid(pidPath);
         expect(hookPid).toBeDefined();
         expect(isRunning(hookPid as number)).toBe(true);
-        await waitFor(() => !isRunning(hookPid as number), 4000);
+        await waitFor(
+          () => !isRunning(hookPid as number),
+          PROCESS_REAP_TIMEOUT_MS,
+        );
       } finally {
         if (hookPid && isRunning(hookPid)) {
           try {
@@ -596,7 +614,7 @@ setInterval(() => {}, 1000);
         }
         await rm(tempDir, { recursive: true, force: true });
       }
-    }, 10_000);
+    }, 90_000);
 
     it('preserves a surviving hook exit code 124 before its deadline', async () => {
       const runner = new HookRunner();
@@ -620,7 +638,7 @@ setInterval(() => {}, 1000);
 
       expect(result).toMatchObject({ success: false, exitCode: 124 });
       expect(result.error).toBeUndefined();
-    }, 10_000);
+    }, 90_000);
 
     it('preserves a prompt exit 124 when the parent event loop is delayed past the deadline', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-exit-124-'));
@@ -664,7 +682,7 @@ setInterval(() => {}, 1000);
       } finally {
         await rm(tempDir, { recursive: true, force: true });
       }
-    }, 10_000);
+    }, 90_000);
 
     it('isolates the supervisor from hook NODE_OPTIONS', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-node-options-'));
@@ -699,7 +717,7 @@ setInterval(() => {}, 1000);
       } finally {
         await rm(tempDir, { recursive: true, force: true });
       }
-    }, 10_000);
+    }, 90_000);
 
     it('forwards abort through a surviving hook supervisor', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-abort-'));
@@ -747,14 +765,17 @@ setInterval(() => {}, 1000);
             hookPid !== undefined &&
             (await readFile(readyPath, 'utf8').catch(() => '')) === 'ready'
           );
-        }, 5000);
+        }, PROCESS_STARTUP_TIMEOUT_MS);
         controller.abort();
         const result = await resultPromise;
 
         expect(result.error?.message).toBe(
           'Hook execution cancelled (aborted)',
         );
-        await waitFor(() => !isRunning(hookPid as number), 3000);
+        await waitFor(
+          () => !isRunning(hookPid as number),
+          PROCESS_REAP_TIMEOUT_MS,
+        );
       } finally {
         controller.abort();
         if (hookPid && isRunning(hookPid)) {
@@ -766,7 +787,7 @@ setInterval(() => {}, 1000);
         }
         await rm(tempDir, { recursive: true, force: true });
       }
-    }, 10_000);
+    }, 90_000);
 
     it('reaps a surviving hook when its supervisor is stopped before abort', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-stopped-'));
@@ -818,7 +839,7 @@ setInterval(() => {}, 1000);
             supervisorPid !== undefined &&
             (await readFile(readyPath, 'utf8').catch(() => '')) === 'ready'
           );
-        }, 5000);
+        }, PROCESS_STARTUP_TIMEOUT_MS);
 
         process.kill(supervisorPid as number, 'SIGSTOP');
         controller.abort();
@@ -847,7 +868,7 @@ setInterval(() => {}, 1000);
         }
         await rm(tempDir, { recursive: true, force: true });
       }
-    }, 15_000);
+    }, 90_000);
 
     it('keeps supervising a surviving hook group after its root exits', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-descendant-'));
@@ -896,19 +917,32 @@ setInterval(() => {}, 1000);
             command,
             source: HooksConfigSource.Project,
             shell: 'bash',
-            timeout: 300,
+            // The root exits as soon as the descendant has written its pid;
+            // the supervisor then keeps the surviving descendant on the
+            // clock until this deadline and kills the group. That kill is
+            // what ends the test, so the deadline must outlast a node
+            // process starting on a loaded host — at 300ms the descendant
+            // could be killed before it ever wrote the pid, and no amount
+            // of waiting for the file afterwards could recover it.
+            timeout: HOOK_GROUP_TIMEOUT_MS,
           },
           HookEventName.SessionDelete,
           input,
         );
 
-        descendantPid = await readPid(descendantPidPath);
+        await waitFor(async () => {
+          descendantPid = await readPid(descendantPidPath);
+          return descendantPid !== undefined;
+        }, PROCESS_STARTUP_TIMEOUT_MS);
         expect(descendantPid).toBeDefined();
         expect(result).toMatchObject({
           success: false,
-          error: { message: 'Hook timed out after 300ms' },
+          error: { message: `Hook timed out after ${HOOK_GROUP_TIMEOUT_MS}ms` },
         });
-        await waitFor(() => !isRunning(descendantPid as number), 3000);
+        await waitFor(
+          () => !isRunning(descendantPid as number),
+          PROCESS_REAP_TIMEOUT_MS,
+        );
       } finally {
         if (descendantPid && isRunning(descendantPid)) {
           try {
@@ -919,7 +953,7 @@ setInterval(() => {}, 1000);
         }
         await rm(tempDir, { recursive: true, force: true });
       }
-    }, 10_000);
+    }, 90_000);
 
     it('delivers complete large input after the parent exits', async () => {
       const tempDir = await mkdtemp(join(tmpdir(), 'qwen-hook-input-'));
@@ -1028,6 +1062,6 @@ writeFileSync(process.argv[2], JSON.stringify({ bytes: Buffer.byteLength(input),
         }
         await rm(tempDir, { recursive: true, force: true });
       }
-    }, 10_000);
+    }, 90_000);
   },
 );

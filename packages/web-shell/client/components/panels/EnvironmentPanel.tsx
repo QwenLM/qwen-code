@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import type {
   DaemonSessionAgentTaskStatus,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import {
   BotIcon,
   ChevronRightIcon,
   CircleCheckIcon,
+  CirclePauseIcon,
   CircleStopIcon,
   CircleXIcon,
   FileDiffIcon,
@@ -16,9 +17,11 @@ import {
   LoaderCircleIcon,
   SquareActivityIcon,
   SquareTerminalIcon,
+  WorkflowIcon,
 } from 'lucide-react';
 import type { WebShellEnvironmentPanelItem } from '../../customization';
 import { useI18n } from '../../i18n';
+import { isComposerTask } from '../../utils/composerTasks';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import styles from './EnvironmentPanel.module.css';
 
@@ -30,13 +33,13 @@ interface EnvironmentPanelProps {
   gitCwd?: string;
   branch?: string;
   gitStatus?: DaemonWorkspaceGitStatus;
-  tasks: readonly DaemonSessionTaskStatus[];
+  tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
   agentTasks?: readonly EnvironmentAgentTask[];
   items?: readonly WebShellEnvironmentPanelItem[];
   onOpenGitDiff?: () => void;
   onOpenGitCommit?: () => void;
   onOpenAgent?: (task: DaemonSessionAgentTaskStatus) => void;
-  onOpenTask: (task: DaemonSessionTaskStatus) => void;
+  onOpenTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
   onDismiss?: () => void;
 }
 
@@ -57,7 +60,7 @@ const AGENT_COLORS: Readonly<Record<string, string>> = {
   cyan: '#0e9888',
 };
 
-function taskLabel(task: DaemonSessionTaskStatus): string {
+function taskLabel(task: DaemonSessionTaskWithWorkflowStatus): string {
   switch (task.kind) {
     case 'agent':
       return task.label;
@@ -65,10 +68,12 @@ function taskLabel(task: DaemonSessionTaskStatus): string {
       return task.command;
     case 'monitor':
       return task.description;
+    case 'workflow':
+      return task.label;
   }
 }
 
-function taskIcon(task: DaemonSessionTaskStatus) {
+function taskIcon(task: DaemonSessionTaskWithWorkflowStatus) {
   switch (task.kind) {
     case 'agent':
       return <BotIcon />;
@@ -76,20 +81,23 @@ function taskIcon(task: DaemonSessionTaskStatus) {
       return <SquareTerminalIcon />;
     case 'monitor':
       return <SquareActivityIcon />;
+    case 'workflow':
+      return <WorkflowIcon />;
   }
 }
 
-function taskStatusKey(status: DaemonSessionTaskStatus['status']) {
+function taskStatusKey(status: DaemonSessionTaskWithWorkflowStatus['status']) {
   return `tasks.${status}` as const;
 }
 
-function taskStatusIcon(status: DaemonSessionTaskStatus['status']) {
+function taskStatusIcon(status: DaemonSessionTaskWithWorkflowStatus['status']) {
   if (status === 'completed') return <CircleCheckIcon />;
-  if (status === 'running') {
+  if (status === 'running' || status === 'pausing') {
     return <LoaderCircleIcon className={styles.statusRunning} />;
   }
   if (status === 'failed') return <CircleXIcon />;
   if (status === 'cancelled') return <CircleStopIcon />;
+  if (status === 'paused') return <CirclePauseIcon />;
   return null;
 }
 
@@ -130,7 +138,9 @@ export function EnvironmentPanel({
     tasks.filter(
       (task): task is DaemonSessionAgentTaskStatus => task.kind === 'agent',
     );
-  const backgroundTasks = tasks.filter((task) => task.kind !== 'agent');
+  // Live background state only — retained workflow runs belong to history,
+  // not to this session's Tasks section.
+  const backgroundTasks = tasks.filter(isComposerTask);
   const [environmentExpanded, setEnvironmentExpanded] = useState(true);
   const [agentsExpanded, setAgentsExpanded] = useState(false);
   const [tasksExpanded, setTasksExpanded] = useState(false);

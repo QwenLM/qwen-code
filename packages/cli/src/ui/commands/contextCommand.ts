@@ -182,7 +182,11 @@ export async function collectContextData(
 
   const skillManager = config.getSkillManager();
   const skillConfigs = skillManager ? await skillManager.listSkills() : [];
-  const disabledSkillNames = config.getDisabledSkillNames();
+  const enabledSkillNames = new Set(
+    skillConfigs
+      .filter((skill) => config.isSkillEnabled(skill))
+      .map((skill) => skill.name.toLowerCase()),
+  );
   let loadedBodiesTokens = 0;
   const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
     const listingTokens = estimateContextTextTokens(
@@ -373,8 +377,8 @@ export async function collectContextData(
     mcpTools: showDetails ? detailMcpTools : [],
     memoryFiles: showDetails ? detailMemoryFiles : [],
     skills: showDetails
-      ? detailSkills.filter(
-          (skill) => !disabledSkillNames.has(skill.name.toLowerCase()),
+      ? detailSkills.filter((skill) =>
+          enabledSkillNames.has(skill.name.toLowerCase()),
         )
       : [],
     isEstimated,

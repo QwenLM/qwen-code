@@ -574,15 +574,19 @@ describe('e2e.yml e2e-test-linux runner routing', () => {
     assert.match(job.steps[heal].run, /chown -R .* "\$GITHUB_WORKSPACE"/);
     assert.match(job.steps[heal].run, /chmod -R u\+rwX/);
     assert.ok(heal < checkout, 'the heal must precede the checkout');
-    // Dangling-only prune at the end: always(), docker leg, pool only —
-    // and never a form that could remove tagged images other jobs use.
+    // Cleanup at the end: always(), docker leg, pool only. Tagged cleanup is
+    // restricted to old workflow-owned images; the general cleanup remains
+    // dangling-only so it cannot remove images from unrelated jobs.
     assert.ok(prune !== -1, 'the dangling prune must exist');
     assert.match(job.steps[prune].if, /always\(\)/);
     assert.match(job.steps[prune].if, /sandbox:docker/);
     assert.match(job.steps[prune].if, /runner\.environment == 'self-hosted'/);
+    assert.match(
+      job.steps[prune].run,
+      /docker image prune --all --force --filter 'label=org\.qwen-code\.ci\.sandbox=true' --filter 'until=24h'/,
+    );
     assert.match(job.steps[prune].run, /docker image prune --force/);
     assert.match(job.steps[prune].run, /until=24h/);
-    assert.doesNotMatch(job.steps[prune].run, /--all|-a\b/);
     // A failing prune must stay diagnosable: surface a warning instead of a
     // silent `|| true`, and keep the daemon's error out of /dev/null.
     assert.match(job.steps[prune].run, /\|\| echo "::warning::/);

@@ -983,6 +983,32 @@ describe('loadEnvironment', () => {
     expect(process.env['NODE_EXTRA_CA_CERTS']).toBeUndefined();
   });
 
+  // The review prebuild opt-in is an operator decision (PR #10423 R12-1):
+  // prebuildRequested()'s read-time provenance check consults a per-process
+  // registry an inherited value never enters, so the only closure is here —
+  // the key must not reach process.env from repository content at all.
+  // User-level files stay exempt (operator opt-in), like the keys above;
+  // CI's workflow sets a real step env, which this load never touches.
+  it('never applies the review prebuild opt-in from a project .env', () => {
+    const saved = process.env['QWEN_REVIEW_PREBUILD'];
+    delete process.env['QWEN_REVIEW_PREBUILD'];
+    try {
+      const workspace = makeWorkspace();
+      fs.writeFileSync(
+        path.join(workspace, '.env'),
+        'QWEN_REVIEW_PREBUILD=1\n',
+      );
+      loadEnvironment(testSettings({}), workspace);
+      expect(process.env['QWEN_REVIEW_PREBUILD']).toBeUndefined();
+    } finally {
+      if (saved === undefined) {
+        delete process.env['QWEN_REVIEW_PREBUILD'];
+      } else {
+        process.env['QWEN_REVIEW_PREBUILD'] = saved;
+      }
+    }
+  });
+
   // Windows env lookup is case-insensitive, so exact-case membership would
   // let case variants through every application gate on that platform.
   it('rejects entrypoint and trust-anchor keys regardless of case', () => {

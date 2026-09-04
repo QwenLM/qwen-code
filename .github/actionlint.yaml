@@ -1,11 +1,12 @@
 self-hosted-runner:
   labels:
     - 'ecs-qwen'
+    - 'ecs-qwen-hk4-host'
     - 'ecs-win'
-    - 'ecs-update-sg'
-    - 'ecs-update-64c'
     - 'ecs-update-hk-1'
     - 'ecs-update-hk-2'
     - 'ecs-update-hk-3'
+    - 'ecs-update-hk-4'
+    - 'ecs-update-hk-5'
 
 config-variables: null

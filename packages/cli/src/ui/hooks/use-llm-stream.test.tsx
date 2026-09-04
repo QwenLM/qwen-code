@@ -3,12 +3,16 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { useLlmStream } from './use-llm-stream.js';
+import {
+  INTERIM_MONITOR_MIN_TURN_INTERVAL_MS,
+  useLlmStream,
+} from './use-llm-stream.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
 import type {
   TrackedToolCall,
@@ -3527,6 +3531,9 @@ describe('useLlmStream', () => {
       await waitFor(() => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
       });
+      expect(mockSendMessageStream.mock.calls[1]?.[3]).toEqual(
+        expect.objectContaining({ isConcurrentSideQuery: true }),
+      );
 
       // History scans, in call order: (1) the accept settlement captures
       // the pushed boundary entry for the debt fingerprint; (2) the
@@ -12162,6 +12169,107 @@ describe('useLlmStream', () => {
         });
       });
 
+      // Reproduction of #10818: a monitor whose command prints on every poll
+      // emits one interim notification per line; without a session-level
+      // minimum interval each pulse starts its own model turn, so a ~0.5 Hz
+      // pulse stream keeps the session permanently busy — Esc cancels the
+      // in-flight turn but the next pulse immediately starts another, and
+      // typed input never finds a clean idle edge.
+      it('rate-limits interim monitor pulses to one turn per interval', async () => {
+        vi.useFakeTimers();
+        try {
+          renderTestHook();
+          const callback = mockMonitorRegistry.setNotificationCallback.mock
+            .calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { monitorId: string; status: string },
+          ) => void;
+          mockSendMessageStream.mockClear();
+
+          await act(async () => {
+            callback(
+              'Monitor "checks" event #1',
+              '<task-notification>pulse-1</task-notification>',
+              { monitorId: 'mon_1', status: 'running' },
+            );
+            // Let the first turn finish so the session is idle again.
+            await vi.advanceTimersByTimeAsync(100);
+          });
+          // The first pulse drains immediately (no prior notification turn).
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+          await act(async () => {
+            callback(
+              'Monitor "checks" event #2',
+              '<task-notification>pulse-2</task-notification>',
+              { monitorId: 'mon_1', status: 'running' },
+            );
+            callback(
+              'Monitor "checks" event #3',
+              '<task-notification>pulse-3</task-notification>',
+              { monitorId: 'mon_1', status: 'running' },
+            );
+            await vi.advanceTimersByTimeAsync(100);
+          });
+          // Inside the cooldown window the pulses must queue instead of each
+          // starting its own turn (pre-fix this is 3: one turn per pulse).
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+          await act(async () => {
+            await vi.advanceTimersByTimeAsync(
+              INTERIM_MONITOR_MIN_TURN_INTERVAL_MS,
+            );
+          });
+          // When the window elapses the accumulated pulses batch into a
+          // single catch-up turn — no update is lost.
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+          const catchUp = mockSendMessageStream.mock.calls[1];
+          expect(JSON.stringify(catchUp[0])).toContain('pulse-2');
+          expect(JSON.stringify(catchUp[0])).toContain('pulse-3');
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('does not delay terminal notifications behind the interim cooldown', async () => {
+        vi.useFakeTimers();
+        try {
+          renderTestHook();
+          const callback = mockMonitorRegistry.setNotificationCallback.mock
+            .calls[0][0] as (
+            displayText: string,
+            modelText: string,
+            meta: { monitorId: string; status: string },
+          ) => void;
+          mockSendMessageStream.mockClear();
+
+          await act(async () => {
+            callback(
+              'Monitor "checks" event #1',
+              '<task-notification>pulse-1</task-notification>',
+              { monitorId: 'mon_1', status: 'running' },
+            );
+            await vi.advanceTimersByTimeAsync(100);
+          });
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+          await act(async () => {
+            callback(
+              'Monitor "checks" finished',
+              '<task-notification>done</task-notification>',
+              { monitorId: 'mon_1', status: 'completed' },
+            );
+            await vi.advanceTimersByTimeAsync(100);
+          });
+          // Terminal notifications are one-off signals and stay prompt even
+          // inside the interim-pulse cooldown window.
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       // Regression for #7156: progress setState calls issued from inside a
       // background subagent's AsyncLocalStorage frame can batch with the
       // notification trigger into one React commit, so the drain effect
@@ -13588,6 +13696,47 @@ describe('useLlmStream', () => {
           text: expect.stringContaining('compressed from: ~100 to 50 tokens'),
         }),
       ]);
+    });
+
+    // Issue #10380: 413-driven compactions fire below the token threshold;
+    // the notice must attribute the compaction to the request-body limit,
+    // not to an input token limit the request never approached.
+    it('attributes the notice to the request-body limit for payload-overflow compactions', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerLlmEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 100,
+              newTokenCount: 50,
+              triggerReason: 'payload_overflow',
+            },
+          };
+          yield {
+            type: ServerLlmEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('test payload overflow compression');
+      });
+
+      const infoItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter((item) => item.type === 'info');
+      expect(infoItems).toEqual([
+        expect.objectContaining({
+          text: expect.stringContaining(
+            'exceeded the endpoint request-body limit',
+          ),
+        }),
+      ]);
+      expect((infoItems[0] as HistoryItem).text).not.toContain(
+        'approached the input token limit',
+      );
     });
 
     it('renders unknown counts when the auto-compaction event value is null', async () => {

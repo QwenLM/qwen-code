@@ -131,6 +131,36 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(second.current?.modelId).toBe('model-b(openai)');
   });
 
+  it('treats a non-positive contextWindowSize as unset in the catalog', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'model-zero' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'model-zero',
+            name: 'Model Zero',
+            generationConfig: { contextWindowSize: 0 },
+          },
+          {
+            id: 'model-big',
+            name: 'Model Big',
+            generationConfig: { contextWindowSize: 8192 },
+          },
+        ],
+      },
+    });
+
+    const status = await provider(workspace, false);
+    const models = status.providers.flatMap((entry) => entry.models);
+    const zero = models.find((model) => model.baseModelId === 'model-zero');
+    const big = models.find((model) => model.baseModelId === 'model-big');
+
+    expect(zero?.contextLimit).toBeGreaterThan(0);
+    expect(big?.contextLimit).toBe(8192);
+  });
+
   it('returns the workspace approval mode', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
@@ -315,6 +345,60 @@ describe('createWorkspaceProvidersStatusProvider', () => {
         .every((model) => model.configOptions === undefined),
     ).toBe(true);
   });
+
+  it.each([
+    {
+      persisted: 'medium' as const,
+      thinkingMandatory: false,
+      currentValue: 'medium',
+    },
+    {
+      persisted: 'none' as const,
+      thinkingMandatory: false,
+      currentValue: 'none',
+    },
+    {
+      persisted: 'max' as const,
+      thinkingMandatory: false,
+      currentValue: 'xhigh',
+    },
+    {
+      persisted: 'none' as const,
+      thinkingMandatory: true,
+      currentValue: 'xhigh',
+    },
+  ])(
+    'projects persisted reasoning $persisted as $currentValue when mandatory=$thinkingMandatory',
+    async ({ persisted, thinkingMandatory, currentValue }) => {
+      const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+      await writeUserSettings({
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'qwen3.8-max', reasoningEffort: persisted },
+        modelProviders: {
+          openai: [
+            {
+              id: 'qwen3.8-max',
+              name: 'Qwen 3.8 Max',
+              generationConfig: { thinkingMandatory },
+            },
+          ],
+        },
+      });
+
+      const result = await provider(workspace, false);
+      const stable = result.providers
+        .flatMap((entry) => entry.models)
+        .find((model) => model.baseModelId === 'qwen3.8-max');
+      expect(stable?.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'reasoning_effort',
+            currentValue,
+          }),
+        ]),
+      );
+    },
+  );
 
   it('does not project reasoning preview onto opaque route models', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });

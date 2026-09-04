@@ -5,7 +5,7 @@
  */
 
 import type { ChannelPlugin } from '@qwen-code/channel-base';
-import { DwsChannel } from './dws-channel.js';
+import { DEFAULT_START_REACTION, DwsChannel } from './dws-channel.js';
 
 export { DwsChannel };
 export { DwsClient, DwsCommandError, parseDwsImEvent } from './dws-client.js';
@@ -14,7 +14,9 @@ export type {
   DwsClientLike,
   DwsClientOptions,
   DwsIdentity,
+  DwsImDispatch,
   DwsImMessage,
+  DwsImMessageResult,
   DwsImSource,
   DwsImTarget,
   DwsMessageHistoryPage,
@@ -86,6 +88,20 @@ export const plugin: ChannelPlugin = {
         description:
           'Poll pending todos assigned to this DWS account and run newly assigned or changed tasks',
       },
+      {
+        key: 'startReaction',
+        label: 'Start Reaction',
+        kind: 'string',
+        default: DEFAULT_START_REACTION,
+        description: `DingTalk reaction emoji or name added while a task is running. Leave empty to use ${DEFAULT_START_REACTION}`,
+      },
+      {
+        key: 'endReaction',
+        label: 'End Reaction',
+        kind: 'string',
+        description:
+          'DingTalk reaction emoji or name added after a task ends. Leave empty to disable it',
+      },
     ],
     validateConfig: (config) => {
       if (
@@ -109,6 +125,11 @@ export const plugin: ChannelPlugin = {
         typeof config['watchTodos'] !== 'boolean'
       ) {
         return 'DWS watchTodos must be a boolean.';
+      }
+      for (const field of ['startReaction', 'endReaction'] as const) {
+        if (config[field] !== undefined && typeof config[field] !== 'string') {
+          return `DWS ${field} must be a string.`;
+        }
       }
       return undefined;
     },

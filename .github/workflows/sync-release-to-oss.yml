@@ -30,7 +30,7 @@ jobs:
 
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ env.RELEASE_TAG }}'
 
@@ -74,8 +74,14 @@ jobs:
           gh release download "${RELEASE_TAG}" --dir dist/standalone --pattern '*.tar.gz' --pattern '*.zip' --pattern 'SHA256SUMS'
 
       - name: 'Verify Downloaded Release Assets'
+        env:
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
         run: |-
-          npm run verify:installation-release -- --dir dist/standalone
+          PREVIEW_ARGS=""
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+            PREVIEW_ARGS="--include-opentui-preview"
+          fi
+          npm run verify:installation-release -- --dir dist/standalone ${PREVIEW_ARGS}
 
       - name: 'Package Hosted Installation Assets'
         if: |-
@@ -135,10 +141,15 @@ jobs:
         env:
           ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
           RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
         run: |-
           set -euo pipefail
 
-          mapfile -t release_assets < <(node scripts/verify-installation-release.js --dir dist/standalone --list-release-asset-paths)
+          PREVIEW_ARGS=""
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+            PREVIEW_ARGS="--include-opentui-preview"
+          fi
+          mapfile -t release_assets < <(node scripts/verify-installation-release.js --dir dist/standalone --list-release-asset-paths ${PREVIEW_ARGS})
           node scripts/upload-aliyun-oss-assets.js \
             --bucket "${ALIYUN_OSS_BUCKET}" \
             --config "${RUNNER_TEMP}/.ossutilconfig" \
@@ -149,10 +160,15 @@ jobs:
         env:
           ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
           RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
         run: |-
           set -euo pipefail
 
-          npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"
+          PREVIEW_ARGS=""
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+            PREVIEW_ARGS="--include-opentui-preview"
+          fi
+          npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}" ${PREVIEW_ARGS}
 
       - name: 'Sync Hosted Installation Assets to Aliyun OSS'
         if: |-

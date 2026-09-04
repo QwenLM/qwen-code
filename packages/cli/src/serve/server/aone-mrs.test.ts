@@ -20,7 +20,6 @@ import {
   A1_MAX_BUFFER,
   A1_TIMEOUT_MS,
   A1_VERSION_TIMEOUT_MS,
-  AONE_BACKFILL_PAGES_PER_STATE,
   AoneCliUnavailableError,
   AoneCommandError,
   isAoneDetailUrlForRepo,
@@ -443,7 +442,7 @@ describe('the a1 exec layer', () => {
 
     const entries = await listAoneMergeRequests('g/p', {
       state: 'opened',
-      pages: AONE_BACKFILL_PAGES_PER_STATE,
+      pages: 3,
     });
 
     expect(entries).toEqual([

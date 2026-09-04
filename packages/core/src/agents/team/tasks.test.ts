@@ -24,6 +24,7 @@ import {
   notifyTasksUpdated,
   TaskOwnershipError,
   RECIPROCAL_CALLER,
+  normalizeTaskId,
 } from './tasks.js';
 import { mockCompromisedLock } from '../../test-utils/mock-compromised-lock.js';
 
@@ -52,6 +53,23 @@ function setMockDir(dir: string): void {
     }
   ).__setMockGlobalDir(dir);
 }
+
+describe('normalizeTaskId', () => {
+  it('trims whitespace and strips one leading #', () => {
+    expect(normalizeTaskId(' 1 ')).toBe('1');
+    expect(normalizeTaskId('#1')).toBe('1');
+    expect(normalizeTaskId(' #42 ')).toBe('42');
+    // Only one leading # is stripped.
+    expect(normalizeTaskId('##1')).toBe('#1');
+  });
+
+  it('returns undefined when nothing remains', () => {
+    expect(normalizeTaskId('')).toBeUndefined();
+    expect(normalizeTaskId('   ')).toBeUndefined();
+    expect(normalizeTaskId('#')).toBeUndefined();
+    expect(normalizeTaskId(' # ')).toBeUndefined();
+  });
+});
 
 describe('tasks', () => {
   let tmpDir: string;

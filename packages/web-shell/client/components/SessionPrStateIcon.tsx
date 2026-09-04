@@ -4,8 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonSessionPrInfo } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionIssueInfo,
+  DaemonSessionPrInfo,
+} from '@qwen-code/sdk/daemon';
 import {
+  CircleCheckIcon,
+  CircleDotIcon,
+  CircleSlashIcon,
   GitMergeIcon,
   GitPullRequestClosedIcon,
   GitPullRequestIcon,
@@ -62,4 +68,50 @@ export function sessionPrStateLabel(
 ): string | undefined {
   if (state !== 'merged' && state !== 'closed') return undefined;
   return t(STATE_ICONS[state].labelKey);
+}
+
+const ISSUE_STATE_ICONS = {
+  open: { Icon: CircleDotIcon, className: styles.sessionIssueStateOpen },
+  completed: {
+    Icon: CircleCheckIcon,
+    className: styles.sessionIssueStateCompleted,
+    labelKey: 'sidebar.sessionIssueStateCompleted',
+  },
+  not_planned: {
+    Icon: CircleSlashIcon,
+    className: styles.sessionIssueStateNotPlanned,
+    labelKey: 'sidebar.sessionIssueStateNotPlanned',
+  },
+} as const satisfies Record<
+  NonNullable<DaemonSessionIssueInfo['state']>,
+  { Icon: typeof CircleDotIcon; className: string; labelKey?: string }
+>;
+
+/**
+ * GitHub-style issue state icon for the issues a bound PR closes:
+ * open=green circle-dot, completed=purple check, not planned=muted slash. A
+ * state-less issue renders the neutral circle-dot glyph.
+ */
+export function SessionIssueStateIcon({
+  state,
+}: {
+  state?: DaemonSessionIssueInfo['state'];
+}) {
+  const entry = state ? ISSUE_STATE_ICONS[state] : undefined;
+  const Icon = entry?.Icon ?? CircleDotIcon;
+  return (
+    <Icon
+      aria-hidden="true"
+      {...(entry ? { className: entry.className } : {})}
+    />
+  );
+}
+
+/** Issue counterpart of {@link sessionPrStateLabel}; open reads as bare. */
+export function sessionIssueStateLabel(
+  t: (key: string) => string,
+  state?: DaemonSessionIssueInfo['state'],
+): string | undefined {
+  if (state !== 'completed' && state !== 'not_planned') return undefined;
+  return t(ISSUE_STATE_ICONS[state].labelKey);
 }

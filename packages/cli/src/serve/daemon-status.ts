@@ -195,6 +195,7 @@ interface DaemonStatusLimits {
   writerIdleTimeoutMs: number | null;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
+  sessionPromptSettledCloseGraceMs: number;
   acpConnectionCap: number | null;
   acpPreAttachMaxFramesPerStream: number | null;
   acpPreAttachMaxFramesPerConnection: number | null;
@@ -988,6 +989,8 @@ export async function buildDaemonStatusResponse(
       writerIdleTimeoutMs: positiveFiniteOrNull(input.opts.writerIdleTimeoutMs),
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
+      sessionPromptSettledCloseGraceMs:
+        bridgeSnapshot.limits.sessionPromptSettledCloseGraceMs,
       acpConnectionCap: acpSnapshot?.connectionCap ?? null,
       acpPreAttachMaxFramesPerStream:
         acpSnapshot !== undefined ? ACP_PRE_ATTACH_MAX_FRAMES_PER_STREAM : null,

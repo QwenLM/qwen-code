@@ -10,6 +10,7 @@ import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../../utils/clipboard';
+import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import type { DaemonSessionGenerationEvent } from '@qwen-code/sdk/daemon';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -39,7 +40,7 @@ export const AssistantMessage = memo(function AssistantMessage({
 }: AssistantMessageProps) {
   const { t } = useI18n();
   const { renderAssistantTurnFooter } = useWebShellCustomization();
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
   const showFooter = !!content && !isStreaming && showFooterActions;
   const customFooter = useMemo(
@@ -63,11 +64,10 @@ export const AssistantMessage = memo(function AssistantMessage({
   const handleCopy = useCallback(() => {
     void writeClipboardText(content)
       .then(() => {
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 2000);
+        flashCopied();
       })
       .catch(warnClipboardWriteFailure);
-  }, [content]);
+  }, [content, flashCopied]);
   return (
     <div className={styles.message}>
       {content && (

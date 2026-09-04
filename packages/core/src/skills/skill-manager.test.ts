@@ -1397,6 +1397,32 @@ Review content`;
       expect(sibling).toHaveBeenCalled();
     });
 
+    it.each(['level', 'listener'])(
+      'reports %s failures only for strict skill refreshes while still awaiting siblings',
+      async (failure) => {
+        vi.mocked(fs.readdir).mockResolvedValue(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+        if (failure === 'level') {
+          vi.spyOn(mockConfig, 'getActiveExtensions').mockImplementation(() => {
+            throw new Error('extension cache unavailable');
+          });
+        } else {
+          manager.addChangeListener(() =>
+            Promise.reject(new Error('listener failed')),
+          );
+        }
+        const sibling = vi.fn();
+        manager.addChangeListener(sibling);
+        await expect(
+          manager.refreshCache({ throwOnError: true }),
+        ).rejects.toThrow('Skill cache refresh failed');
+        expect(sibling).toHaveBeenCalledExactlyOnceWith({ throwOnError: true });
+        await expect(manager.refreshCache()).resolves.toBeUndefined();
+        expect(sibling).toHaveBeenLastCalledWith();
+      },
+    );
+
     it('clears the per-listener timeout once the race settles', async () => {
       // Regression: the 30s timeout was previously only `unref`d, leaving
       // a pending timer on every fast-resolving listener. Under

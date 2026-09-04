@@ -120,6 +120,7 @@ const HIDDEN_SETTING_KEYS = new Set([
   // carries the retired setting, so keep it hidden from the panel.
   'ui.compactMode',
   'mcpServers',
+  'model.reasoningEffort',
 ]);
 const LIVE_SETTING_KEYS = new Set([
   'experimental.liveVoice.enabled',

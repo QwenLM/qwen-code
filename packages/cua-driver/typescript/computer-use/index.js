@@ -10,8 +10,6 @@ const ACCESSIBILITY_SERIALIZER_VERSION = "accessibility-render-v1";
 const ACCESSIBILITY_PROJECTION_VERSION = "full-tree-v1";
 const DEFAULT_EXPLICIT_SESSION_TTL_SECONDS = 60 * 60;
 const DEFAULT_EXPLICIT_IDLE_TTL_SECONDS = 5 * 60;
-const DEFAULT_CALL_TIMEOUT_MS = 25_000;
-const MAX_CALL_TIMEOUT_MS = 29_000;
 const RECONNECTABLE_SESSION_CODES = new Set([
   "authorization_context_expired",
   "session_unavailable",
@@ -30,7 +28,7 @@ export class ComputerUseError extends Error {
   }
 }
 
-function unwrapToolResult(tool, result) {
+function unwrapToolResult(tool, result, operation) {
   let structured;
   if (typeof result.structuredJson === "string" && result.structuredJson !== "") {
     try {
@@ -42,14 +40,15 @@ function unwrapToolResult(tool, result) {
   if (result.isError) {
     const code =
       (structured && typeof structured.code === "string" && structured.code) ||
-      (structured &&
-        typeof structured.refusal?.code === "string" &&
-        structured.refusal.code) ||
+      (structured && typeof structured.refusal?.code === "string" && structured.refusal.code) ||
       result.errorCode ||
       undefined;
     throw new ComputerUseError(result.text || `${tool} failed`, {
       code,
-      details: structured,
+      details:
+        structured && typeof structured === "object"
+          ? { ...structured, operation }
+          : { result: structured, operation },
     });
   }
   return {
@@ -60,12 +59,17 @@ function unwrapToolResult(tool, result) {
     verification: result.verification,
     degraded: result.degraded === true,
     rawJson: result.rawJson,
+    operation,
   };
 }
 
 function actionResult(result) {
   const value = result.structured ?? { text: result.text };
-  return result.action === undefined ? value : { ...value, action: result.action };
+  return {
+    ...value,
+    ...(result.action === undefined ? {} : { action: result.action }),
+    operation: result.operation,
+  };
 }
 
 function verificationResult(result) {
@@ -91,88 +95,75 @@ function requireIntegerRange(name, value, minimum, maximum) {
   return value;
 }
 
-function requireCallTimeoutMs(value) {
-  return requireIntegerRange("callTimeoutMs", value, 1, MAX_CALL_TIMEOUT_MS);
-}
-
-async function waitWithSignal(promise, signal) {
-  if (!signal) return promise;
-  if (signal.aborted) throw signal.reason;
-  let cancel;
-  const cancelled = new Promise((_resolve, reject) => {
-    cancel = () => reject(signal.reason);
-    signal.addEventListener("abort", cancel, { once: true });
-  });
-  try {
-    return await Promise.race([promise, cancelled]);
-  } finally {
-    signal.removeEventListener("abort", cancel);
-  }
-}
-
-async function runWithCallDeadline(
-  method,
-  { signal, callTimeoutMs },
-  operation,
-) {
-  const timeoutMs = requireCallTimeoutMs(callTimeoutMs);
+function requireAbortSignal(signal) {
   if (signal !== undefined && !(signal instanceof AbortSignal)) {
     throw new ComputerUseError("signal must be an AbortSignal");
   }
-  if (signal?.aborted) {
-    throw new ComputerUseError(`${method} was cancelled before dispatch`, {
-      code: "call_cancelled",
-      details: { method },
-    });
-  }
+  return signal;
+}
 
-  const controller = new AbortController();
-  let timedOut = false;
-  const cancel = () => controller.abort(signal?.reason);
-  signal?.addEventListener("abort", cancel, { once: true });
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort(new Error(`${method} exceeded ${timeoutMs}ms`));
-  }, timeoutMs);
-  timer.unref?.();
+function operationSnapshot(operation) {
+  return Object.freeze({
+    id: operation.id,
+    state: operation.state,
+    dispatched: operation.dispatched,
+    committed: operation.committed,
+    cancellationRequested: operation.cancellationRequested,
+  });
+}
+
+function beginOperation(method, signal) {
+  requireAbortSignal(signal);
+  const operation = {
+    id: randomUUID(),
+    method,
+    state: "accepted",
+    dispatched: false,
+    committed: false,
+    cancellationRequested: signal?.aborted === true,
+  };
+  const onAbort = () => {
+    operation.cancellationRequested = true;
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  return {
+    operation,
+    release: () => signal?.removeEventListener("abort", onAbort),
+  };
+}
+
+function cancelledBeforeDispatch(method, operation) {
+  operation.state = "completed";
+  throw new ComputerUseError(`${method} was cancelled before dispatch`, {
+    code: "call_cancelled",
+    details: { method, operation: operationSnapshot(operation) },
+  });
+}
+
+function requireDispatchableSignal(method, signal) {
+  const lifecycle = beginOperation(method, signal);
   try {
-    return await operation(controller.signal, timeoutMs);
-  } catch (error) {
-    if (timedOut) {
-      throw new ComputerUseError(
-        `${method} exceeded the ${timeoutMs}ms native deadline`,
-        {
-          code: "call_timeout",
-          details: { method, timeoutMs },
-        },
-      );
+    if (lifecycle.operation.cancellationRequested) {
+      cancelledBeforeDispatch(method, lifecycle.operation);
     }
-    if (signal?.aborted) {
-      throw new ComputerUseError(`${method} was cancelled`, {
-        code: "call_cancelled",
-        details: { method },
-      });
-    }
-    throw error;
   } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", cancel);
+    lifecycle.release();
   }
 }
 
-function createTrustedSessionAsync(sdk, owner, options, signal) {
+function awaitNativeTerminal(value, signal) {
+  const promise = Promise.resolve(value);
+  const waitUntil = signal?.waitUntil;
+  return typeof waitUntil === "function" ? waitUntil.call(signal, promise) : promise;
+}
+
+function createTrustedSessionAsync(sdk, owner, options) {
   if (typeof sdk.createTrustedSessionAsync !== "function") {
-    throw new ComputerUseError(
-      "typed CUA SDK lacks asynchronous session binding",
-      {
-        code: "typed_sdk_method_unavailable",
-      },
-    );
+    throw new ComputerUseError("typed CUA SDK lacks asynchronous session binding", {
+      code: "typed_sdk_method_unavailable",
+    });
   }
-  return waitWithSignal(
-    sdk.createTrustedSessionAsync(owner, options, { signal }),
-    signal,
-  );
+  return sdk.createTrustedSessionAsync(owner, options);
 }
 
 function requirePid(value) {
@@ -181,9 +172,7 @@ function requirePid(value) {
 
 function requireStringList(name, value) {
   if (!Array.isArray(value)) throw new ComputerUseError(`${name} must be an array`);
-  return value.map((entry, index) =>
-    requireNonEmptyString(`${name}[${index}]`, entry),
-  );
+  return value.map((entry, index) => requireNonEmptyString(`${name}[${index}]`, entry));
 }
 
 function requireNonEmptyString(name, value) {
@@ -206,8 +195,7 @@ function exactWindow(pid, windowId) {
 
 function sessionOptions(sdk, options) {
   const finiteLifetimeRequested =
-    options.sessionTtlSeconds !== undefined ||
-    options.idleTtlSeconds !== undefined;
+    options.sessionTtlSeconds !== undefined || options.idleTtlSeconds !== undefined;
   const ttlSeconds = requirePositiveInteger(
     "sessionTtlSeconds",
     finiteLifetimeRequested
@@ -217,9 +205,7 @@ function sessionOptions(sdk, options) {
   );
   const idleTtlSeconds = requirePositiveInteger(
     "idleTtlSeconds",
-    finiteLifetimeRequested
-      ? (options.idleTtlSeconds ?? DEFAULT_EXPLICIT_IDLE_TTL_SECONDS)
-      : 0,
+    finiteLifetimeRequested ? (options.idleTtlSeconds ?? DEFAULT_EXPLICIT_IDLE_TTL_SECONDS) : 0,
     { allowZero: !finiteLifetimeRequested },
   );
   if (idleTtlSeconds > ttlSeconds) {
@@ -276,13 +262,11 @@ async function destroyOwner(owner) {
   if (failure) throw failure;
 }
 
-async function destroySessionHandle(session, signal) {
+async function destroySessionHandle(session) {
   let failure;
   if (typeof session?.closeAsync === "function") {
     try {
-      const closeSignal = signal ?? new AbortController().signal;
-      const close = session.closeAsync({ signal: closeSignal });
-      await waitWithSignal(close, signal);
+      await session.closeAsync();
     } catch (error) {
       failure = error;
     }
@@ -310,7 +294,6 @@ export class ComputerUse {
   #ownsSession;
   #publicSession;
   #sessionFactory;
-  #callTimeoutMs;
   #reconnectPromise;
   #connectionGeneration = 1;
   #forceFullObservation = false;
@@ -320,14 +303,7 @@ export class ComputerUse {
   /** Internal injection seam for hermetic tests. Use create/connect in applications. */
   constructor(
     driver,
-    {
-      owner = driver,
-      sdk = {},
-      ownsSession = false,
-      publicSession,
-      sessionFactory,
-      callTimeoutMs = DEFAULT_CALL_TIMEOUT_MS,
-    } = {},
+    { owner = driver, sdk = {}, ownsSession = false, publicSession, sessionFactory } = {},
   ) {
     if (!driver || typeof driver.getWindowState !== "function") {
       throw new ComputerUseError("ComputerUse requires a typed driver session");
@@ -338,37 +314,31 @@ export class ComputerUse {
     this.#ownsSession = ownsSession;
     this.#publicSession = publicSession;
     this.#sessionFactory = sessionFactory;
-    this.#callTimeoutMs = requireCallTimeoutMs(callTimeoutMs);
   }
 
   /** Create a same-process configured runtime and one bound standard session. */
   static async create(options = {}) {
-    const callTimeoutMs = requireCallTimeoutMs(
-      options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
-    );
+    const signal = options.signal;
+    requireDispatchableSignal("createTrustedSession", signal);
     const sdk = await loadCuaDriver();
     const configured = configuredDriverOptions(sdk, options);
     const owner = sdk.CuaDriver.createConfigured(configured.driver);
     try {
-      const session = await runWithCallDeadline(
-        "createTrustedSession",
-        { callTimeoutMs },
-        (signal) =>
-          createTrustedSessionAsync(sdk, owner, configured.session, signal),
+      requireDispatchableSignal("createTrustedSession", signal);
+      const session = await awaitNativeTerminal(
+        createTrustedSessionAsync(sdk, owner, configured.session),
+        signal,
       );
       return new ComputerUse(session, {
         owner,
         sdk,
         ownsSession: true,
         publicSession: configured.session.publicSession,
-        sessionFactory: (signal, publicSession) =>
-          createTrustedSessionAsync(
-            sdk,
-            owner,
-            { ...configured.session, publicSession },
-            signal,
-          ),
-        callTimeoutMs,
+        sessionFactory: (publicSession) =>
+          createTrustedSessionAsync(sdk, owner, {
+            ...configured.session,
+            publicSession,
+          }),
       });
     } catch (error) {
       await destroyOwner(owner);
@@ -378,32 +348,27 @@ export class ComputerUse {
 
   /** Connect to a caller-selected daemon and bind a transport-owned session. */
   static async connect(options = {}) {
-    const callTimeoutMs = requireCallTimeoutMs(
-      options.callTimeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
-    );
+    const signal = options.signal;
+    requireDispatchableSignal("createTrustedSession", signal);
     const sdk = await loadCuaDriver();
     const configured = configuredDriverOptions(sdk, options);
     const owner = sdk.CuaDriver.connect(options.socketPath);
     try {
-      const session = await runWithCallDeadline(
-        "createTrustedSession",
-        { callTimeoutMs },
-        (signal) =>
-          createTrustedSessionAsync(sdk, owner, configured.session, signal),
+      requireDispatchableSignal("createTrustedSession", signal);
+      const session = await awaitNativeTerminal(
+        createTrustedSessionAsync(sdk, owner, configured.session),
+        signal,
       );
       return new ComputerUse(session, {
         owner,
         sdk,
         ownsSession: true,
         publicSession: configured.session.publicSession,
-        sessionFactory: (signal, publicSession) =>
-          createTrustedSessionAsync(
-            sdk,
-            owner,
-            { ...configured.session, publicSession },
-            signal,
-          ),
-        callTimeoutMs,
+        sessionFactory: (publicSession) =>
+          createTrustedSessionAsync(sdk, owner, {
+            ...configured.session,
+            publicSession,
+          }),
       });
     } catch (error) {
       await destroyOwner(owner);
@@ -415,94 +380,93 @@ export class ComputerUse {
     if (this.#closed) throw new ComputerUseError("ComputerUse instance is closed");
   }
 
-  async #withCallDeadline(
-    method,
-    { signal, callTimeoutMs = this.#callTimeoutMs } = {},
-    operation,
-  ) {
+  async #call(method, input, { signal, mutating = false, onDispatch } = {}) {
     this.#requireOpen();
-    return runWithCallDeadline(method, { signal, callTimeoutMs }, operation);
+    const lifecycle = beginOperation(method, signal);
+    const { operation } = lifecycle;
+    try {
+      const reconnect = this.#reconnectPromise;
+      if (reconnect) await reconnect;
+      this.#requireOpen();
+      if (!this.#driver && typeof this.#sessionFactory === "function") {
+        await this.#reconnect(this.#connectionGeneration, { signal });
+      }
+      if (operation.cancellationRequested) {
+        cancelledBeforeDispatch(method, operation);
+      }
+      const driver = this.#driver;
+      const call = driver?.[method];
+      if (typeof call !== "function") {
+        throw new ComputerUseError(`typed CuaDriver method ${method} is unavailable`, {
+          code: "typed_sdk_method_unavailable",
+        });
+      }
+      onDispatch?.(this.#connectionGeneration);
+      if (operation.cancellationRequested) {
+        cancelledBeforeDispatch(method, operation);
+      }
+      operation.state = "dispatched";
+      operation.dispatched = true;
+
+      // Do not hand caller cancellation to UniFFI after dispatch. UniFFI drops
+      // the Rust future immediately, while platform work may continue. Awaiting
+      // the native terminal result is what prevents ambiguous late actions.
+      const value = await awaitNativeTerminal(call.call(driver, input), signal);
+      const refusedEffect = this.#sdk.ActionEffect?.Refused ?? 4;
+      const refused =
+        value?.action?.effect === refusedEffect || value?.action?.effect === "refused";
+      if (mutating && !refused && (value?.action !== undefined || value?.isError !== true)) {
+        operation.state = "committed";
+        operation.committed = true;
+      }
+      operation.state = "completed";
+      return { value, operation: operationSnapshot(operation) };
+    } catch (error) {
+      if (operation.state !== "completed") operation.state = "completed";
+      if (operation.dispatched && operation.cancellationRequested) {
+        throw new ComputerUseError(
+          `${method} failed after dispatch; cancellation did not establish that the action was uncommitted`,
+          {
+            code: error?.code,
+            details: { cause: error, operation: operationSnapshot(operation) },
+          },
+        );
+      }
+      throw error;
+    } finally {
+      lifecycle.release();
+    }
   }
 
-  async #call(
-    method,
-    input,
-    { signal, callTimeoutMs, onDispatch } = {},
-  ) {
-    return this.#withCallDeadline(
-      method,
-      { signal, callTimeoutMs },
-      async (activeSignal) => {
-        const reconnect = this.#reconnectPromise;
-        if (reconnect) await waitWithSignal(reconnect, activeSignal);
-        this.#requireOpen();
-        if (!this.#driver && typeof this.#sessionFactory === "function") {
-          await this.#reconnect(this.#connectionGeneration, {
-            signal: activeSignal,
-            callTimeoutMs,
-          });
+  async #invoke(method, input, { readOnly = false, afterReconnect, signal, onDispatch } = {}) {
+    let activeInput = input;
+    let retried = false;
+    while (true) {
+      let dispatchedGeneration;
+      try {
+        const { value, operation } = await this.#call(method, activeInput, {
+          signal,
+          mutating: !readOnly,
+          onDispatch: (generation) => {
+            dispatchedGeneration = generation;
+            onDispatch?.(generation);
+          },
+        });
+        return unwrapToolResult(method, value, operation);
+      } catch (error) {
+        if (
+          !readOnly ||
+          retried ||
+          !RECONNECTABLE_SESSION_CODES.has(error?.code) ||
+          typeof this.#sessionFactory !== "function"
+        ) {
+          throw error;
         }
-        const driver = this.#driver;
-        const call = driver?.[method];
-        if (typeof call !== "function") {
-          throw new ComputerUseError(`typed CuaDriver method ${method} is unavailable`, {
-            code: "typed_sdk_method_unavailable",
-          });
-        }
-        onDispatch?.(this.#connectionGeneration);
-        return call.call(driver, input, { signal: activeSignal });
-      },
-    );
-  }
-
-  async #invoke(
-    method,
-    input,
-    {
-      readOnly = false,
-      afterReconnect,
-      signal,
-      callTimeoutMs,
-      onDispatch,
-    } = {},
-  ) {
-    return this.#withCallDeadline(
-      method,
-      { signal, callTimeoutMs },
-      async (operationSignal, timeoutMs) => {
-        let activeInput = input;
-        let retried = false;
-        while (true) {
-          let dispatchedGeneration;
-          try {
-            const result = await this.#call(method, activeInput, {
-              signal: operationSignal,
-              callTimeoutMs: timeoutMs,
-              onDispatch: (generation) => {
-                dispatchedGeneration = generation;
-                onDispatch?.(generation);
-              },
-            });
-            return unwrapToolResult(method, result);
-          } catch (error) {
-            if (
-              !readOnly ||
-              retried ||
-              !RECONNECTABLE_SESSION_CODES.has(error?.code) ||
-              typeof this.#sessionFactory !== "function"
-            ) {
-              throw error;
-            }
-            await this.#reconnect(dispatchedGeneration, {
-              signal: operationSignal,
-              callTimeoutMs: timeoutMs,
-            });
-            activeInput = afterReconnect ? await afterReconnect() : input;
-            retried = true;
-          }
-        }
-      },
-    );
+        await this.#reconnect(dispatchedGeneration, { signal });
+        activeInput = afterReconnect ? await afterReconnect() : input;
+        retried = true;
+      }
+    }
   }
 
   get connectionGeneration() {
@@ -510,61 +474,58 @@ export class ComputerUse {
   }
 
   async sessionInfo(options = {}) {
-    return this.#call("getSession", {}, options);
+    const { value } = await this.#call("getSession", {}, options);
+    return value;
   }
 
-  async reconnect() {
+  async reconnect(options = {}) {
     this.#requireOpen();
     if (!this.#ownsSession || typeof this.#sessionFactory !== "function") {
       throw new ComputerUseError("this ComputerUse instance cannot reconnect", {
         code: "reconnect_unavailable",
       });
     }
-    return this.#reconnect(this.#connectionGeneration, {
-      callTimeoutMs: this.#callTimeoutMs,
-    });
+    return this.#reconnect(this.#connectionGeneration, options);
   }
 
-  async #reconnect(expectedGeneration, { signal, callTimeoutMs } = {}) {
+  async #reconnect(expectedGeneration, { signal } = {}) {
     this.#requireOpen();
     if (expectedGeneration !== this.#connectionGeneration) {
       return { connectionGeneration: this.#connectionGeneration };
     }
     if (this.#reconnectPromise) {
-      return signal
-        ? waitWithSignal(this.#reconnectPromise, signal)
-        : this.#reconnectPromise;
+      return this.#reconnectPromise;
     }
 
     const previous = this.#driver;
-    const operation = this.#withCallDeadline(
-      "reconnect",
-      { signal, callTimeoutMs: callTimeoutMs ?? this.#callTimeoutMs },
-      async (reconnectSignal) => {
-        await destroySessionHandle(previous, reconnectSignal);
+    const lifecycle = beginOperation("reconnect", signal);
+    const operation = (async () => {
+      try {
+        if (lifecycle.operation.cancellationRequested) {
+          cancelledBeforeDispatch("reconnect", lifecycle.operation);
+        }
+        lifecycle.operation.state = "dispatched";
+        lifecycle.operation.dispatched = true;
+        await destroySessionHandle(previous);
         this.#driver = undefined;
         let replacement;
         const replacementPublicSession =
           this.#publicSession === undefined ? undefined : randomUUID();
         try {
-          replacement = await this.#sessionFactory(
-            reconnectSignal,
-            replacementPublicSession,
+          replacement = await awaitNativeTerminal(
+            this.#sessionFactory(replacementPublicSession),
+            signal,
           );
         } catch (error) {
           if (this.#closed) throw new ComputerUseError("ComputerUse instance is closed");
-          if (error?.code === "call_timeout" || reconnectSignal.aborted) throw error;
-          throw new ComputerUseError(
-            "failed to create a replacement CUA session",
-            {
-              code: "reconnect_failed",
-              details: { cause: error },
-            },
-          );
+          throw new ComputerUseError("failed to create a replacement CUA session", {
+            code: "reconnect_failed",
+            details: { cause: error },
+          });
         }
 
         if (this.#closed || expectedGeneration !== this.#connectionGeneration) {
-          await destroySessionHandle(replacement, reconnectSignal);
+          await destroySessionHandle(replacement);
           if (this.#closed) throw new ComputerUseError("ComputerUse instance is closed");
           return { connectionGeneration: this.#connectionGeneration };
         }
@@ -575,15 +536,26 @@ export class ComputerUse {
         this.#connectionGeneration += 1;
         this.#revisionSupport = undefined;
         this.#forceFullObservation = true;
-        return { connectionGeneration: this.#connectionGeneration };
-      },
-    );
+        lifecycle.operation.state = "committed";
+        lifecycle.operation.committed = true;
+        lifecycle.operation.state = "completed";
+        return {
+          connectionGeneration: this.#connectionGeneration,
+          operation: operationSnapshot(lifecycle.operation),
+        };
+      } finally {
+        if (lifecycle.operation.state !== "completed") {
+          lifecycle.operation.state = "completed";
+        }
+        lifecycle.release();
+      }
+    })();
     this.#reconnectPromise = operation;
     const clearReconnect = () => {
       if (this.#reconnectPromise === operation) this.#reconnectPromise = undefined;
     };
     void operation.then(clearReconnect, clearReconnect);
-    return signal ? waitWithSignal(operation, signal) : operation;
+    return operation;
   }
 
   #clickButton(value) {
@@ -675,24 +647,32 @@ export class ComputerUse {
       const owner = this.#owner;
       const listTools = owner?.listToolsJson;
       if (typeof listTools === "function") {
+        const lifecycle = beginOperation("listToolsJson", options.signal);
         try {
+          if (lifecycle.operation.cancellationRequested) {
+            cancelledBeforeDispatch("listToolsJson", lifecycle.operation);
+          }
+          lifecycle.operation.state = "dispatched";
+          lifecycle.operation.dispatched = true;
           const listing = JSON.parse(
-            await this.#withCallDeadline(
-              "listToolsJson",
-              options,
-              (signal) => listTools.call(owner, { signal }),
-            ),
+            await awaitNativeTerminal(listTools.call(owner), options.signal),
           );
+          lifecycle.operation.state = "completed";
           const tools = Array.isArray(listing?.tools) ? listing.tools : [];
           const entry = tools.find((tool) => tool?.name === "get_window_state");
           advertised =
             Array.isArray(entry?.capabilities) &&
             entry.capabilities.includes(OBSERVATION_REVISION_CAPABILITY);
         } catch (error) {
-          if (error?.code === "call_timeout" || error?.code === "call_cancelled") {
+          if (error?.code === "call_cancelled") {
             throw error;
           }
           advertised = false;
+        } finally {
+          if (lifecycle.operation.state !== "completed") {
+            lifecycle.operation.state = "completed";
+          }
+          lifecycle.release();
         }
       }
       this.#revisionSupport = advertised;
@@ -705,32 +685,33 @@ export class ComputerUse {
   }
 
   async listApps(options = {}) {
-    const { structured } = await this.#invoke("listApps", {}, {
-      readOnly: true,
-      signal: options.signal,
-      callTimeoutMs: options.callTimeoutMs,
-    });
+    const { structured } = await this.#invoke(
+      "listApps",
+      {},
+      {
+        readOnly: true,
+        signal: options.signal,
+      },
+    );
     return structured?.apps ?? structured ?? [];
   }
 
-  async listWindows({ pid, onScreenOnly, signal, callTimeoutMs } = {}) {
+  async listWindows({ pid, onScreenOnly, signal } = {}) {
     const input = {};
     if (pid !== undefined) input.pid = requirePid(pid);
     if (onScreenOnly !== undefined) input.onScreenOnly = Boolean(onScreenOnly);
     const { structured } = await this.#invoke("listWindows", input, {
       readOnly: true,
       signal,
-      callTimeoutMs,
     });
     return structured?.windows ?? structured ?? [];
   }
 
-  async getWindow({ pid, windowId, signal, callTimeoutMs }) {
+  async getWindow({ pid, windowId, signal }) {
     const target = exactWindow(pid, windowId);
-    const windows = await this.listWindows({ pid: target.pid, signal, callTimeoutMs });
+    const windows = await this.listWindows({ pid: target.pid, signal });
     const found = windows.find(
-      (window) =>
-        String(window.window_id ?? window.windowId) === String(target.windowId),
+      (window) => String(window.window_id ?? window.windowId) === String(target.windowId),
     );
     if (!found) {
       throw new ComputerUseError(`window ${windowId} for pid ${pid} was not found`, {
@@ -751,7 +732,6 @@ export class ComputerUse {
       maxElements,
       maxDepth,
       signal,
-      callTimeoutMs,
     } = options ?? {};
     const target = exactWindow(pid, windowId);
     const input = {
@@ -764,138 +744,111 @@ export class ComputerUse {
       input.maxElements = requirePositiveInteger("maxElements", maxElements);
     }
     if (maxDepth !== undefined) input.maxDepth = requirePositiveInteger("maxDepth", maxDepth);
-    return this.#withCallDeadline(
-      "getWindowState",
-      { signal, callTimeoutMs },
-      async (operationSignal, timeoutMs) => {
-        if (
-          await this.#supportsObservationRevision({
-            signal: operationSignal,
-            callTimeoutMs: timeoutMs,
-          })
-        ) {
-          input.observationRevision = {
-            version: 1,
-            serializerVersion: ACCESSIBILITY_SERIALIZER_VERSION,
-            projectionVersion: ACCESSIBILITY_PROJECTION_VERSION,
-          };
-          if (baseRevisionId !== undefined && !this.#forceFullObservation) {
-            input.observationRevision.baseRevisionId = requireNonEmptyString(
-              "baseRevisionId",
-              baseRevisionId,
-            );
-          }
-          if (forceFull !== undefined || this.#forceFullObservation) {
-            input.observationRevision.forceFull =
-              this.#forceFullObservation || Boolean(forceFull);
-          }
-        }
-        let observedGeneration;
-        const { text, structured, images } = await this.#invoke(
-          "getWindowState",
-          input,
-          {
-            readOnly: true,
-            signal: operationSignal,
-            callTimeoutMs: timeoutMs,
-            afterReconnect: () => {
-              if (!input.observationRevision) return input;
-              return {
-                ...input,
-                observationRevision: {
-                  ...input.observationRevision,
-                  baseRevisionId: undefined,
-                  forceFull: true,
-                },
-              };
-            },
-            onDispatch: (generation) => {
-              observedGeneration = generation;
-            },
-          },
+    if (await this.#supportsObservationRevision({ signal })) {
+      input.observationRevision = {
+        version: 1,
+        serializerVersion: ACCESSIBILITY_SERIALIZER_VERSION,
+        projectionVersion: ACCESSIBILITY_PROJECTION_VERSION,
+      };
+      if (baseRevisionId !== undefined && !this.#forceFullObservation) {
+        input.observationRevision.baseRevisionId = requireNonEmptyString(
+          "baseRevisionId",
+          baseRevisionId,
         );
-        if (observedGeneration === this.#connectionGeneration) {
-          this.#forceFullObservation = false;
-        }
-        const envelope = structured?.observation_revision;
+      }
+      if (forceFull !== undefined || this.#forceFullObservation) {
+        input.observationRevision.forceFull = this.#forceFullObservation || Boolean(forceFull);
+      }
+    }
+    let observedGeneration;
+    const { text, structured, images } = await this.#invoke("getWindowState", input, {
+      readOnly: true,
+      signal,
+      afterReconnect: () => {
+        if (!input.observationRevision) return input;
         return {
-          pid,
-          windowId,
-          revisionSupported: Boolean(envelope),
-          mode: envelope?.mode ?? "full",
-          revisionId: envelope?.revision_id,
-          lineageId: envelope?.lineage_id,
-          baseRevisionId: envelope?.base_revision_id ?? undefined,
-          serializerVersion: envelope?.serializer_version,
-          projectionVersion: envelope?.projection_version,
-          resyncReason: envelope?.resync_reason ?? undefined,
-          stableElementIds: envelope?.stable_element_ids === true,
-          selectedBytes: envelope?.selected_bytes,
-          fullBytes: envelope?.full_bytes,
-          estimatedTokens: envelope?.estimated_tokens,
-          serializerDurationUs: envelope?.serializer_duration_us,
-          cacheEstimateBytes: envelope?.cache_estimate_bytes,
-          text: structured?.tree_markdown ?? text,
-          elements: structured?.elements ?? [],
-          screenshot:
-            structured?.screenshot_width !== undefined ||
-            structured?.screenshot_file_path
-              ? {
-                  width: structured?.screenshot_width,
-                  height: structured?.screenshot_height,
-                  mimeType: structured?.screenshot_mime_type,
-                  filePath: structured?.screenshot_file_path,
-                  images,
-                }
-              : undefined,
-          structured,
+          ...input,
+          observationRevision: {
+            ...input.observationRevision,
+            baseRevisionId: undefined,
+            forceFull: true,
+          },
         };
       },
-    );
+      onDispatch: (generation) => {
+        observedGeneration = generation;
+      },
+    });
+    if (observedGeneration === this.#connectionGeneration) {
+      this.#forceFullObservation = false;
+    }
+    const envelope = structured?.observation_revision;
+    return {
+      pid,
+      windowId,
+      revisionSupported: Boolean(envelope),
+      mode: envelope?.mode ?? "full",
+      revisionId: envelope?.revision_id,
+      lineageId: envelope?.lineage_id,
+      baseRevisionId: envelope?.base_revision_id ?? undefined,
+      serializerVersion: envelope?.serializer_version,
+      projectionVersion: envelope?.projection_version,
+      resyncReason: envelope?.resync_reason ?? undefined,
+      stableElementIds: envelope?.stable_element_ids === true,
+      selectedBytes: envelope?.selected_bytes,
+      fullBytes: envelope?.full_bytes,
+      estimatedTokens: envelope?.estimated_tokens,
+      serializerDurationUs: envelope?.serializer_duration_us,
+      cacheEstimateBytes: envelope?.cache_estimate_bytes,
+      text: structured?.tree_markdown ?? text,
+      elements: structured?.elements ?? [],
+      screenshot:
+        structured?.screenshot_width !== undefined || structured?.screenshot_file_path
+          ? {
+              width: structured?.screenshot_width,
+              height: structured?.screenshot_height,
+              mimeType: structured?.screenshot_mime_type,
+              filePath: structured?.screenshot_file_path,
+              images,
+            }
+          : undefined,
+      structured,
+    };
   }
 
   async verifyState(options) {
-    const {
-      pid,
-      windowId,
-      expect,
-      timeoutMs,
-      stableSamples,
-      includeScreenshot,
-      signal,
-      callTimeoutMs,
-    } = options ?? {};
+    const { pid, windowId, expect, timeoutMs, stableSamples, includeScreenshot, signal } =
+      options ?? {};
     const target = exactWindow(pid, windowId);
     if (!Array.isArray(expect) || expect.length === 0) {
       throw new ComputerUseError("expect must contain at least one predicate");
     }
-    const input = { pid: BigInt(target.pid), windowId: target.windowId, expect };
+    const input = {
+      pid: BigInt(target.pid),
+      windowId: target.windowId,
+      expect,
+    };
     if (timeoutMs !== undefined) {
       input.timeoutMs = BigInt(requireIntegerRange("timeoutMs", timeoutMs, 0, 10000));
     }
     if (stableSamples !== undefined) {
-      input.stableSamples = BigInt(
-        requireIntegerRange("stableSamples", stableSamples, 1, 5),
-      );
+      input.stableSamples = BigInt(requireIntegerRange("stableSamples", stableSamples, 1, 5));
     }
     if (includeScreenshot !== undefined) input.includeScreenshot = includeScreenshot;
     const result = await this.#invoke("verifyState", input, {
       readOnly: true,
       signal,
-      callTimeoutMs,
     });
     return verificationResult(result);
   }
 
   async click(options) {
     const input = this.#windowAddress(options);
-    const { button, count, deliveryMode, signal, callTimeoutMs } = options ?? {};
+    const { button, count, deliveryMode, signal } = options ?? {};
     if (button !== undefined) input.button = this.#clickButton(button);
     if (count !== undefined) input.count = requireIntegerRange("count", count, 1, 3);
     if (deliveryMode !== undefined) input.deliveryMode = this.#deliveryMode(deliveryMode);
-    return actionResult(
-      await this.#invoke("windowClick", input, { signal, callTimeoutMs }),
-    );
+    return actionResult(await this.#invoke("windowClick", input, { signal }));
   }
 
   async doubleClick(options) {
@@ -906,7 +859,6 @@ export class ComputerUse {
     return actionResult(
       await this.#invoke("doubleClick", input, {
         signal: options?.signal,
-        callTimeoutMs: options?.callTimeoutMs,
       }),
     );
   }
@@ -922,7 +874,6 @@ export class ComputerUse {
     return actionResult(
       await this.#invoke("rightClick", input, {
         signal: options?.signal,
-        callTimeoutMs: options?.callTimeoutMs,
       }),
     );
   }
@@ -941,7 +892,6 @@ export class ComputerUse {
       button,
       modifier,
       signal,
-      callTimeoutMs,
     } = options ?? {};
     const target = exactWindow(pid, windowId);
     for (const [name, value] of Object.entries({ fromX, fromY, toX, toY })) {
@@ -956,9 +906,7 @@ export class ComputerUse {
       windowId: target.windowId,
     };
     if (durationMs !== undefined) {
-      input.durationMs = BigInt(
-        requireIntegerRange("durationMs", durationMs, 0, 10000),
-      );
+      input.durationMs = BigInt(requireIntegerRange("durationMs", durationMs, 0, 10000));
     }
     if (steps !== undefined) {
       input.steps = BigInt(requireIntegerRange("steps", steps, 1, 200));
@@ -966,9 +914,7 @@ export class ComputerUse {
     if (deliveryMode !== undefined) input.deliveryMode = this.#deliveryMode(deliveryMode);
     if (button !== undefined) input.button = this.#clickButton(button);
     if (modifier !== undefined) input.modifier = requireStringList("modifier", modifier);
-    return actionResult(
-      await this.#invoke("windowDrag", input, { signal, callTimeoutMs }),
-    );
+    return actionResult(await this.#invoke("windowDrag", input, { signal }));
   }
 
   async scroll(options) {
@@ -984,19 +930,20 @@ export class ComputerUse {
     return actionResult(
       await this.#invoke("windowScroll", input, {
         signal: options?.signal,
-        callTimeoutMs: options?.callTimeoutMs,
       }),
     );
   }
 
   async setValue(options) {
-    const input = this.#windowAddress(options, { coordinates: false, tokenRequired: true });
+    const input = this.#windowAddress(options, {
+      coordinates: false,
+      tokenRequired: true,
+    });
     input.value = typeof options?.value === "string" ? options.value : undefined;
     if (input.value === undefined) throw new ComputerUseError("value must be a string");
     return actionResult(
       await this.#invoke("setValue", input, {
         signal: options?.signal,
-        callTimeoutMs: options?.callTimeoutMs,
       }),
     );
   }
@@ -1016,7 +963,6 @@ export class ComputerUse {
     return actionResult(
       await this.#invoke("windowTypeText", input, {
         signal: options.signal,
-        callTimeoutMs: options.callTimeoutMs,
       }),
     );
   }
@@ -1033,7 +979,6 @@ export class ComputerUse {
     return actionResult(
       await this.#invoke("windowPressKey", input, {
         signal: options?.signal,
-        callTimeoutMs: options?.callTimeoutMs,
       }),
     );
   }
@@ -1050,18 +995,19 @@ export class ComputerUse {
     return actionResult(
       await this.#invoke("windowHotkey", input, {
         signal: options?.signal,
-        callTimeoutMs: options?.callTimeoutMs,
       }),
     );
   }
 
   async performSecondaryAction(options) {
-    const input = this.#windowAddress(options, { coordinates: false, tokenRequired: true });
+    const input = this.#windowAddress(options, {
+      coordinates: false,
+      tokenRequired: true,
+    });
     input.action = requireNonEmptyString("action", options?.action);
     return actionResult(
       await this.#invoke("performSecondaryAction", input, {
         signal: options?.signal,
-        callTimeoutMs: options?.callTimeoutMs,
       }),
     );
   }
@@ -1075,8 +1021,7 @@ export class ComputerUse {
     const admissibleEffect = ["confirmed", "partial", "unverifiable"].includes(
       actionOutcome?.effect,
     );
-    const verified =
-      verification?.status === "satisfied" && verification?.stable === true;
+    const verified = verification?.status === "satisfied" && verification?.stable === true;
     if (!admissibleEffect || !verified) {
       throw new ComputerUseError("the action postcondition was not stably satisfied", {
         code: "postcondition_not_satisfied",

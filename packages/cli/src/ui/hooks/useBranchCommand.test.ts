@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -50,6 +51,7 @@ describe('useBranchCommand', () => {
   let workflowRunRegistry: {
     hasRunningEntries: ReturnType<typeof vi.fn>;
     list: ReturnType<typeof vi.fn>;
+    listStartingRunIds: ReturnType<typeof vi.fn>;
     reset: ReturnType<typeof vi.fn>;
     abortAll: ReturnType<typeof vi.fn>;
   };
@@ -126,6 +128,7 @@ describe('useBranchCommand', () => {
     workflowRunRegistry = {
       hasRunningEntries: vi.fn().mockReturnValue(false),
       list: vi.fn().mockReturnValue([]),
+      listStartingRunIds: vi.fn().mockReturnValue([]),
       reset: vi.fn(),
       abortAll: vi.fn(),
     };

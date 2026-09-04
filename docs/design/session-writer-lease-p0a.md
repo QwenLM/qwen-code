@@ -1,5 +1,14 @@
 # Session writer lease P0a
 
+> **Proposed Conversations-runtime update (2026-09-02):**
+> [Relaxed Standalone Daemon Ownership](./2026-09-02-relaxed-standalone-daemon-ownership.md)
+> for [Issue #10810](https://github.com/QwenLM/qwen-code/issues/10810) proposes
+> forcing this lease for every writer hosted by the Conversations runtime,
+> independent of the experimental setting. It also hardens stale recovery to the
+> same local identity domain, including boot and PID-namespace identity on Linux,
+> before selecting that policy for managed Conversations writers. Other ACP,
+> interactive, and headless gates remain unchanged.
+
 ## Problem
 
 A persisted session can currently be loaded by a second Qwen process while the original process is still producing and recording a turn. Both recorders cache the same parent UUID. When they append independently, the JSONL transcript gains two unmarked children from that parent. Resume follows the physical tail and can therefore hide the first process's complete answer.

@@ -30,6 +30,7 @@ import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
+import { parseSlashCommand } from '../commands/commands.js';
 import { StreamingState } from '../types.js';
 import {
   ApprovalMode,
@@ -1426,10 +1427,28 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       };
 
-      // If the command is a perfect match, pressing enter should execute it.
+      // The buffer updates synchronously, but completion is render-derived and
+      // can still describe the previous keystroke when Enter arrives.
+      const isSubmit = keyMatchers[Command.SUBMIT](key);
+      let isLiveSlashCommand = false;
+      if (isSubmit && buffer.text.startsWith('/') && !/\s$/.test(buffer.text)) {
+        const { commandToExecute, args, canonicalPath } = parseSlashCommand(
+          buffer.text,
+          slashCommands,
+        );
+        const commandPartCount = buffer.text.slice(1).split(/\s+/).length;
+        isLiveSlashCommand =
+          commandToExecute?.action !== undefined &&
+          args.length === 0 &&
+          canonicalPath.length === commandPartCount;
+      }
+
       // Use SUBMIT (which requires shift: false) instead of RETURN to avoid
       // intercepting Shift+Enter as submit when the user wants a newline.
-      if (completion.isPerfectMatch && keyMatchers[Command.SUBMIT](key)) {
+      const isCurrentPerfectMatch = buffer.text.startsWith('/')
+        ? isLiveSlashCommand
+        : completion.isPerfectMatch;
+      if (isSubmit && isCurrentPerfectMatch) {
         if (
           showCompletionSuggestions &&
           exportCompletion.navigatedRef.current &&
@@ -1874,6 +1893,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       focus,
       buffer,
       completion,
+      slashCommands,
       shellModeActive,
       setShellModeActive,
       onClearScreen,

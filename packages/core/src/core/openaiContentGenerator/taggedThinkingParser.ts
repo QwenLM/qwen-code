@@ -65,6 +65,10 @@ export class TaggedThinkingParser {
   private mode: ParserMode = 'text';
   private buffer = '';
 
+  hasUnclosedThought(): boolean {
+    return this.mode === 'thought';
+  }
+
   parse(chunk: string, final = false): Part[] {
     this.buffer += chunk;
 

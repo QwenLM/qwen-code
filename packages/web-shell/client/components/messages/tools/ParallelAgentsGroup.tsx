@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronRightIcon } from 'lucide-react';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { hasActiveAgents } from '../../../adapters/toolClassification';
+import { useWebShellCustomization } from '../../../customization';
 import { useI18n } from '../../../i18n';
 import { useSubagentDetails } from '../../../subagentDetailsContext';
 import { formatElapsed, formatLiveElapsed, truncateText } from './toolDisplay';
@@ -116,6 +117,7 @@ export function ParallelAgentsGroup({
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
   const subagentDetails = useSubagentDetails();
+  const { hostOwnsEditDiffPreview } = useWebShellCustomization();
   const [groupExpanded, setGroupExpanded] = useState(false);
   const [automaticCollapseAnimating, setAutomaticCollapseAnimating] =
     useState(false);
@@ -553,7 +555,16 @@ export function ParallelAgentsGroup({
                       )}
                       {!subagentDetails && isExpanded && (
                         <div className={styles.detail}>
-                          <SubAgentPanel tool={agent} hideHeader />
+                          <SubAgentPanel
+                            tool={agent}
+                            approval={
+                              hostOwnsEditDiffPreview &&
+                              approvalAgent?.callId === agent.callId
+                                ? pendingApproval
+                                : undefined
+                            }
+                            hideHeader
+                          />
                         </div>
                       )}
                     </div>

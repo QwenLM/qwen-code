@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { act, renderHook } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';

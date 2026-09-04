@@ -53,6 +53,8 @@ function makeContext(opts: {
       config: {
         getSkillManager: () => skillManager,
         getDisabledSkillNames: () => disabledSet,
+        isSkillEnabled: (skill: { name: string }) =>
+          !disabledSet.has(skill.name.toLowerCase()),
       } as never,
       settings: {
         isTrusted,

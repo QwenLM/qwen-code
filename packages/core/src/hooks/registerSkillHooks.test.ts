@@ -372,3 +372,44 @@ describe('registerSkillHooks', () => {
     expect(registerSkillHooks(sessionHooksManager, sessionId, skill)).toBe(2);
   });
 });
+
+describe('registerSkillHooks — the trust gate travels with the entry', () => {
+  const hooks: NonNullable<SkillConfig['hooks']> = {
+    [HookEventName.PreToolUse]: [
+      {
+        matcher: 'Bash',
+        hooks: [{ type: HookType.Command, command: './x.sh' }],
+      },
+    ],
+  };
+
+  it("marks a project skill's hooks trust-gated, so the handler re-checks folder trust at fire time", () => {
+    const manager = new SessionHooksManager();
+    registerSkillHooks(manager, 's1', {
+      name: 'repo-skill',
+      description: 'repo',
+      level: 'project',
+      filePath: '/repo/.qwen/skills/repo-skill/SKILL.md',
+      skillRoot: '/repo/.qwen/skills/repo-skill',
+      body: '',
+      hooks,
+    });
+    const [entry] = manager.getHooksForEvent('s1', HookEventName.PreToolUse);
+    expect(entry.trustGated).toBe(true);
+  });
+
+  it("leaves a user skill's hooks ungated — they are not repository-controlled", () => {
+    const manager = new SessionHooksManager();
+    registerSkillHooks(manager, 's1', {
+      name: 'home-skill',
+      description: 'home',
+      level: 'user',
+      filePath: '/home/u/.qwen/skills/home-skill/SKILL.md',
+      skillRoot: '/home/u/.qwen/skills/home-skill',
+      body: '',
+      hooks,
+    });
+    const [entry] = manager.getHooksForEvent('s1', HookEventName.PreToolUse);
+    expect(entry.trustGated).toBeUndefined();
+  });
+});

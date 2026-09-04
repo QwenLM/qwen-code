@@ -51,6 +51,7 @@ import {
 interface FindingAnchor {
   path: string;
   line: number;
+  startLine?: number;
   /**
    * Ledger id (`R<round>-<n>`) — carried-forward findings ONLY. The
    * orchestrator omits it on fresh findings of the current round: a fresh id
@@ -131,6 +132,7 @@ interface RawComment {
   body?: string;
   path?: string;
   line?: number;
+  start_line?: number;
   commit_id?: string;
   in_reply_to_id?: number;
   user?: { login?: string };
@@ -243,7 +245,12 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
     ) {
       return null;
     }
-    const e = entry as { path: string; line?: unknown; id?: unknown };
+    const e = entry as {
+      path: string;
+      line?: unknown;
+      start_line?: unknown;
+      id?: unknown;
+    };
     // Same fail-safe as `path`: an `id` of the wrong type or shape is a
     // malformed file, and silently ignoring it would let a carried re-post
     // read as a fresh duplicate at the very location it belongs (a typo'd
@@ -261,6 +268,7 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
     out.push({
       path: e.path,
       line: typeof e.line === 'number' ? e.line : 0,
+      ...(typeof e.start_line === 'number' ? { startLine: e.start_line } : {}),
       ...(typeof e.id === 'string' ? { id: e.id } : {}),
     });
   }
@@ -646,7 +654,6 @@ function classifyExistingComments(
     CommentSummary[]
   > = { stale: [], resolved: [], overlap: [], repost: [], noConflict: [] };
 
-  const newFindingKeys = new Set(newFindings.map((f) => `${f.path}:${f.line}`));
   // Location → carried ids of the findings anchored there. Only findings with
   // an id participate, and the orchestrator writes ids ONLY on carried
   // findings (SKILL.md — the findings file): a fresh `R<this-round>-<n>`
@@ -693,6 +700,20 @@ function classifyExistingComments(
   }
 
   for (const c of qwenComments) {
+    const commentLine = c.line ?? 0;
+    const commentStartLine = c.start_line ?? commentLine;
+    const commentRangeStart = Math.min(commentStartLine, commentLine);
+    const commentRangeEnd = Math.max(commentStartLine, commentLine);
+    const overlapsNewFinding = newFindings.some((finding) => {
+      if (finding.path !== (c.path ?? '')) return false;
+      const findingStartLine = finding.startLine ?? finding.line;
+      const findingRangeStart = Math.min(findingStartLine, finding.line);
+      const findingRangeEnd = Math.max(findingStartLine, finding.line);
+      return (
+        findingRangeStart <= commentRangeEnd &&
+        commentRangeStart <= findingRangeEnd
+      );
+    });
     const summary: CommentSummary = {
       id: c.id,
       path: c.path ?? '',
@@ -706,13 +727,13 @@ function classifyExistingComments(
       buckets.stale.push(summary);
     } else if (repliedToIds.has(c.id)) {
       buckets.resolved.push(summary);
-    } else if (newFindingKeys.has(`${c.path}:${c.line}`)) {
-      // Overlap stays location-based: a same-line finding with a DIFFERENT
-      // claim is still dropped (the drop log now names this comment so the
-      // false positive is visible — #9208). Repost is the additional, id-based
-      // bucket: a Step 6 ledger re-post lands on the original thread's line by
-      // construction and carries the original id in its prefix, so an id match
-      // marks the re-post target and exempts that finding from the drop.
+    } else if (overlapsNewFinding) {
+      // Overlap stays location-based: an intersecting same-file finding with
+      // a DIFFERENT claim is still dropped (the drop log names this comment so
+      // the false positive is visible — #9208). Repost remains exact-line and
+      // id-based: a Step 6 ledger re-post lands on the original thread's line
+      // by construction and carries the original id in its prefix, so an id
+      // match marks the re-post target and exempts that finding from the drop.
       buckets.overlap.push(summary);
       const wantedIds = carriedIdsByLocation.get(`${c.path}:${c.line}`);
       // Ledger ids are per-account — two reviewers of the same PR keep two

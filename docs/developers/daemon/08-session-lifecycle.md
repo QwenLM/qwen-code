@@ -320,20 +320,28 @@ normally; it must not trigger a resync loop.
 
 ### ACP Child Preheat
 
-`bridge.preheat()` warms the ACP child process before the first session so that
-the first real session avoids cold-start latency. It pairs with
-`channelIdleTimeoutMs`, which keeps the ACP child alive after the last session
-closes, and skip-relaunch behavior, which reuses an already idle child when a
-new session arrives.
+`bridge.preheat()` remains available to explicit embedders, but `qwen serve`
+also attempts to preheat the trusted primary child after startup for
+compatibility. A failed preheat is non-fatal and the next runtime command or
+Session retries; trusted secondaries start on first use. The Workspace Runtime
+owns the child while work is active. After all Session and management leases
+drain, an omitted or zero `channelIdleTimeoutMs` reaps the child immediately;
+plain preheat itself is preserved for first use and does not arm that reaper.
+A positive configured delay or active keepalive keeps the child reusable for
+the longer remaining window. The public Workspace Runtime `ensure`
+command adds a renewable ten-minute workspace lease; each successful call
+resets that window, including when the channel was already live.
 
 ## Configuration
 
 - `BridgeOptions.maxSessions` (default 32) — cap.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
-- `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP `initialize` handshake.
+- `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP child startup
+  deadline (Channel factory + `initialize` handshake) and default request
+  timeout.
 - `BridgeOptions.sessionRestoreTimeoutMs` (default 60s) — ACP `loadSession` / `unstable_resumeSession` deadline. Defaults to 60s; an explicitly configured initialize timeout can raise it, but never lower it.
-- `BridgeOptions.channelIdleTimeoutMs` (default 0; reap the ACP child immediately).
-- Capability tags: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_status`, `non_blocking_prompt`.
+- `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps after runtime work drains, except that plain preheat is preserved for first use; a positive value or active keepalive delays reaping, and the longer delay wins).
+- Capability tags: `session_create`, `session_id_override`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_monitor_tool_correlation`, `session_stats`, `session_lsp`, `session_resources`, `session_status`, `non_blocking_prompt`.
 
 ### Stateless generation (`session_generation` capability tag)
 

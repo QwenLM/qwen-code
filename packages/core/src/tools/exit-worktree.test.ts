@@ -82,6 +82,19 @@ describe('ExitWorktreeTool', () => {
       ).not.toBeNull();
     });
 
+    it('accepts the reserved pr-<number> shape of a PR-backed worktree', () => {
+      // `--worktree=#<N>` creates `pr-<N>` worktrees; exit_worktree never
+      // CREATES slugs, so the reservation must not lock users out of
+      // leaving or removing one of those worktrees.
+      const tool = new ExitWorktreeTool(makeMockConfig());
+      expect(
+        tool.validateToolParams({ name: 'pr-42', action: 'keep' }),
+      ).toBeNull();
+      expect(
+        tool.validateToolParams({ name: 'pr-42', action: 'remove' }),
+      ).toBeNull();
+    });
+
     it('rejects discard_changes when it is not a boolean', () => {
       const tool = new ExitWorktreeTool(makeMockConfig());
       expect(

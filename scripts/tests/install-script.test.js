@@ -692,16 +692,18 @@ describe('standalone release packaging', () => {
     expect(releaseScript).toContain('https://nodejs.org/dist/v${nodeVersion}');
     expect(releaseScript).toContain('SHASUMS256.txt');
     expect(releaseScript).toContain('verifyNodeArchive');
+    // Archive names come from the shared standaloneArchiveName() helper so the
+    // -opentui-preview flavor suffix stays consistent across release scripts.
     expect(releaseScript).toContain(
-      'EXPECTED_ARCHIVE_COUNT = RELEASE_TARGETS.length',
+      'standaloneArchiveName(qwenTarget, runtime)',
     );
     expect(releaseScript).toContain('nodeArchiveExtension');
     expect(releaseScript).toContain('fs.createReadStream');
     expect(releaseScript).toContain('expectedArchiveNames');
-    expect(releaseScript).toContain('qwen-code-${qwenTarget}');
     expect(releaseScript).toContain('scripts/create-standalone-package.js');
     expect(releaseScript).toContain('--skip-checksums');
     expect(releaseScript).toContain('writeSha256Sums(outDir)');
+    expect(releaseScript).toContain('--include-opentui-preview');
 
     const hostedInstallScript = readScript(
       'scripts/build-hosted-installation-assets.js',
@@ -884,6 +886,31 @@ describe('standalone release packaging', () => {
         path.join(tmpDir, 'SHA256SUMS'),
         `${lines.join('\n')}\n${'b'.repeat(64)}  qwen-code-extra.tar.gz\n`,
       );
+      expect(() => assertStandaloneOutput(tmpDir)).toThrow(/Extra/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts opentui-preview archives only for a dual-flavor build', async () => {
+    const { assertStandaloneOutput, RELEASE_TARGETS } = await import(
+      standaloneReleaseScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-release-test-'));
+
+    try {
+      const lines = RELEASE_TARGETS.flatMap(({ qwenTarget }) => {
+        const extension = qwenTarget === 'win-x64' ? 'zip' : 'tar.gz';
+        return [
+          `${'a'.repeat(64)}  qwen-code-${qwenTarget}.${extension}`,
+          `${'b'.repeat(64)}  qwen-code-${qwenTarget}-opentui-preview.${extension}`,
+        ];
+      });
+      writeFileSync(path.join(tmpDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
+
+      expect(() =>
+        assertStandaloneOutput(tmpDir, ['node', 'bun']),
+      ).not.toThrow();
       expect(() => assertStandaloneOutput(tmpDir)).toThrow(/Extra/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
@@ -1315,6 +1342,48 @@ describe('standalone release packaging', () => {
       mkdirSync(path.join(tmpDir, EXPECTED_STANDALONE_ARCHIVE_NAMES[0]));
       await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
         /Release asset is not a regular file: qwen-code-/,
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('gates opentui-preview archives behind the preview flag', async () => {
+    const { standaloneArchiveNames, verifyReleaseDirectory } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-release-preview-'));
+
+    try {
+      writeStandaloneReleaseAssets(
+        tmpDir,
+        standaloneArchiveNames({ includeOpentuiPreview: true }),
+      );
+      await expect(
+        verifyReleaseDirectory(tmpDir, {
+          archiveNames: standaloneArchiveNames({ includeOpentuiPreview: true }),
+        }),
+      ).resolves.not.toThrow();
+      await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
+        /Unexpected release asset checksum: qwen-code-darwin-arm64-opentui-preview\.tar\.gz/,
+      );
+
+      const output = execFileSync(
+        process.execPath,
+        [
+          'scripts/verify-installation-release.js',
+          '--dir',
+          tmpDir,
+          '--list-release-asset-paths',
+          '--include-opentui-preview',
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(output.trim().split('\n')).toEqual(
+        [
+          ...standaloneArchiveNames({ includeOpentuiPreview: true }),
+          'SHA256SUMS',
+        ].map((assetName) => path.join(tmpDir, assetName)),
       );
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
@@ -2083,6 +2152,171 @@ describe('standalone release packaging', () => {
     }
   });
 
+  itOnUnix(
+    'packages the bun flavor as an opentui-preview archive with a renderer-default shim',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+      try {
+        const bunOutDir = path.join(tmpDir, 'out-bun');
+        mkdirSync(bunOutDir, { recursive: true });
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            'linux-x64',
+            '--node-archive',
+            createFakeBunArchive(tmpDir),
+            '--out-dir',
+            bunOutDir,
+            '--version',
+            '0.0.0-smoke',
+            '--runtime',
+            'bun',
+          ],
+          { stdio: 'pipe' },
+        );
+
+        const archive = path.join(
+          bunOutDir,
+          'qwen-code-linux-x64-opentui-preview.tar.gz',
+        );
+        const extractDir = path.join(tmpDir, 'extract');
+        mkdirSync(extractDir, { recursive: true });
+        execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+          stdio: 'ignore',
+        });
+
+        const packageRoot = path.join(extractDir, 'qwen-code');
+        const shim = readScript(path.join(packageRoot, 'bin', 'qwen'));
+        expect(shim).toContain(
+          'export QWEN_TUI_RENDERER="${QWEN_TUI_RENDERER:-opentui}"',
+        );
+        expect(shim).toContain('exec "$ROOT/bun/bin/bun"');
+        expect(readScript(path.join(packageRoot, 'manifest.json'))).toContain(
+          '"runtime": "bun"',
+        );
+        // Installer-compat mirror stays a regular file at the Node layout path.
+        const compatNode = path.join(packageRoot, 'node', 'bin', 'node');
+        expect(existsSync(compatNode)).toBe(true);
+        expect(lstatSync(compatNode).isSymbolicLink()).toBe(false);
+        expect(readScript(path.join(bunOutDir, 'SHA256SUMS'))).toContain(
+          'qwen-code-linux-x64-opentui-preview.tar.gz',
+        );
+
+        // The classic flavor keeps a renderer-neutral shim.
+        const nodeArchive = packageFakeStandalone(tmpDir);
+        expect(nodeArchive).toContain('qwen-code-linux-x64.tar.gz');
+        const nodeExtractDir = path.join(tmpDir, 'extract-node');
+        mkdirSync(nodeExtractDir, { recursive: true });
+        execFileSync('tar', ['-xzf', nodeArchive, '-C', nodeExtractDir], {
+          stdio: 'ignore',
+        });
+        expect(
+          readScript(path.join(nodeExtractDir, 'qwen-code', 'bin', 'qwen')),
+        ).not.toContain('QWEN_TUI_RENDERER');
+      } finally {
+        restoreMinimalDist(createdDist);
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('ships a thin opentui-preview installer pair', () => {
+    const previewInstallShell = readScript(
+      'scripts/installation/install-opentui-preview.sh',
+    );
+    expect(previewInstallShell).toContain('-opentui-preview.tar.gz');
+    expect(previewInstallShell).toContain(
+      'https://github.com/${REPO}/releases/download/${tag}',
+    );
+    expect(previewInstallShell).toContain('SHA256SUMS');
+    expect(previewInstallShell).toContain('sha256sum');
+    expect(previewInstallShell).toContain('shasum -a 256');
+    expect(previewInstallShell).toContain('tar -xzf');
+    expect(previewInstallShell).toContain(
+      'linux-x64 | linux-arm64 | darwin-arm64 | darwin-x64',
+    );
+    // Scratch-directory install only: never touches PATH or the hosted
+    // installer chain.
+    expect(previewInstallShell).not.toContain('PATH=');
+    expect(previewInstallShell).not.toContain('install-qwen-standalone');
+
+    const previewInstallPs1 = readScript(
+      'scripts/installation/install-opentui-preview.ps1',
+    );
+    expect(previewInstallPs1).toContain('-opentui-preview.zip');
+    expect(previewInstallPs1).toContain('releases/download');
+    expect(previewInstallPs1).toContain('Get-FileHash -Algorithm SHA256');
+    expect(previewInstallPs1).toContain('Expand-Archive');
+    expect(previewInstallPs1).not.toContain('$env:PATH');
+  });
+
+  itOnUnix('installs a local preview archive with the thin installer', () => {
+    const installer = 'scripts/installation/install-opentui-preview.sh';
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-preview-install-'));
+
+    try {
+      const archiveRoot = path.join(tmpDir, 'pkg');
+      mkdirSync(path.join(archiveRoot, 'qwen-code', 'bin'), {
+        recursive: true,
+      });
+      writeFileSync(
+        path.join(archiveRoot, 'qwen-code', 'bin', 'qwen'),
+        '#!/usr/bin/env sh\n',
+      );
+      const archive = path.join(
+        tmpDir,
+        'qwen-code-linux-x64-opentui-preview.tar.gz',
+      );
+      execFileSync('tar', ['-czf', archive, '-C', archiveRoot, 'qwen-code'], {
+        env: { ...process.env, LC_ALL: 'C' },
+        stdio: 'ignore',
+      });
+
+      const installDir = path.join(tmpDir, 'install');
+      const output = execFileSync(
+        'sh',
+        [installer, '--archive', archive, '--dir', installDir],
+        { encoding: 'utf8' },
+      );
+      expect(output).toContain(`run: ${installDir}/qwen-code/bin/qwen`);
+      expect(
+        existsSync(path.join(installDir, 'qwen-code', 'bin', 'qwen')),
+      ).toBe(true);
+
+      // Reinstalling over an existing directory replaces it cleanly.
+      execFileSync(
+        'sh',
+        [installer, '--archive', archive, '--dir', installDir],
+        {
+          stdio: 'ignore',
+        },
+      );
+      expect(
+        existsSync(path.join(installDir, 'qwen-code', 'bin', 'qwen')),
+      ).toBe(true);
+
+      // Malformed tags/targets are rejected before any network access.
+      const badTag = spawnSync('sh', [installer, '--tag', '../evil'], {
+        encoding: 'utf8',
+      });
+      expect(badTag.status).not.toBe(0);
+      expect(badTag.stderr).toContain('--tag must look like');
+      const badTarget = spawnSync(
+        'sh',
+        [installer, '--tag', 'v0.0.1', '--target', 'win-x64'],
+        { encoding: 'utf8' },
+      );
+      expect(badTarget.status).not.toBe(0);
+      expect(badTarget.stderr).toContain('unsupported --target');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   itOnUnix('rejects incomplete explicit clipboard staging', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
@@ -2227,6 +2461,8 @@ describe('standalone release packaging', () => {
     expect(releaseWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
+    expect(releaseWorkflow).toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
+    expect(releaseWorkflow).toContain('--include-opentui-preview');
     expect(releaseWorkflow).not.toContain('package:installation-assets');
     expect(releaseWorkflow).not.toContain('verify_node_checksum()');
     expect(releaseWorkflow).not.toContain('download_node()');
@@ -2252,6 +2488,8 @@ describe('standalone release packaging', () => {
     expect(ossWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
+    expect(ossWorkflow).toContain('vars.OPENTUI_PREVIEW_RELEASE_ENABLED');
+    expect(ossWorkflow).toContain('--include-opentui-preview');
     expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
     expect(ossWorkflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_SECRET');
     expect(ossWorkflow).toContain('vars.ALIYUN_OSS_BUCKET');
@@ -4427,6 +4665,27 @@ function createFakeNodeArchive(tmpDir, options = {}) {
   execFileSync(
     'tar',
     ['-czf', archive, '-C', tmpDir, path.basename(fakeNodeDir)],
+    {
+      env: { ...process.env, LC_ALL: 'C' },
+      stdio: 'ignore',
+    },
+  );
+  return archive;
+}
+
+function createFakeBunArchive(tmpDir) {
+  const fakeBunDir = path.join(tmpDir, 'bun-linux-x64');
+  mkdirSync(path.join(fakeBunDir, 'bin'), { recursive: true });
+  writeFileSync(
+    path.join(fakeBunDir, 'bin', 'bun'),
+    '#!/usr/bin/env sh\necho 1.3.14\n',
+  );
+  chmodSync(path.join(fakeBunDir, 'bin', 'bun'), 0o755);
+
+  const archive = path.join(tmpDir, 'bun-linux-x64.tar.gz');
+  execFileSync(
+    'tar',
+    ['-czf', archive, '-C', tmpDir, path.basename(fakeBunDir)],
     {
       env: { ...process.env, LC_ALL: 'C' },
       stdio: 'ignore',

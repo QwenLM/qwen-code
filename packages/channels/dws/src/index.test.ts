@@ -19,6 +19,8 @@ describe('DWS channel plugin', () => {
       'senderPolicy',
       'allowedUsers',
       'watchTodos',
+      'startReaction',
+      'endReaction',
     ]);
   });
 
@@ -45,6 +47,29 @@ describe('DWS channel plugin', () => {
       plugin.management?.fields.find((field) => field.key === 'watchTodos')
         ?.default,
     ).toBeUndefined();
+  });
+
+  it('exposes configurable task reactions', () => {
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'startReaction')
+        ?.default,
+    ).toBe('🤔');
+    expect(
+      plugin.management?.fields.find((field) => field.key === 'endReaction')
+        ?.default,
+    ).toBeUndefined();
+    expect(
+      plugin.management?.validateConfig?.({
+        startReaction: '👏',
+        endReaction: '赞',
+      }),
+    ).toBeUndefined();
+    expect(plugin.management?.validateConfig?.({ startReaction: 1 })).toContain(
+      'startReaction must be a string',
+    );
+    expect(
+      plugin.management?.validateConfig?.({ endReaction: false }),
+    ).toContain('endReaction must be a string');
   });
 
   it('ignores removed source settings', () => {

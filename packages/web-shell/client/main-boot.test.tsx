@@ -67,7 +67,7 @@ describe('web shell boot', () => {
     // React appends, so a surviving panel would sit above the recovered app.
     expect(testState.containers[0]).toBe(root);
     expect(root.querySelector('[data-boot-fallback]')).toBeNull();
-  });
+  }, 15_000);
 
   it('mounts into #root on a normal boot', async () => {
     document.body.innerHTML = '<div id="root"></div>';

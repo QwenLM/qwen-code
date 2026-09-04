@@ -32,7 +32,10 @@ describe('PlanEmitter', () => {
         { id: '3', content: 'Third task', status: 'completed' },
       ];
 
-      await emitter.emitPlan({ planId: 'plan-1', todos }, 'call-1');
+      await emitter.emitPlan(
+        { planId: 'plan-1', sessionWorkflow: true, todos },
+        'call-1',
+      );
 
       expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
       expect(sendUpdateSpy).toHaveBeenCalledWith({
@@ -58,6 +61,7 @@ describe('PlanEmitter', () => {
           },
         ],
         _meta: {
+          qwenSessionWorkflow: true,
           qwenTodoPlan: { id: 'plan-1' },
           qwenTranscript: { planToolCallId: 'call-1' },
         },

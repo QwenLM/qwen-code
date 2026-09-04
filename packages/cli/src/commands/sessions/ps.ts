@@ -107,8 +107,11 @@ async function handlePs(argv: PsArgs): Promise<void> {
       // with none of the table path's terminal sanitization. That keeps
       // the output honest data for tooling (and matches the sibling
       // `sessions list --json`); consumers that RENDER these values in a
-      // terminal own the sanitization.
-      writeStdoutLine(JSON.stringify(record));
+      // terminal own the sanitization. The inbox token is the one
+      // exception — a credential, not data: tooling that really needs it
+      // can read the record file, but it must not spill into logs and
+      // pipelines by default.
+      writeStdoutLine(JSON.stringify({ ...record, ipcToken: undefined }));
     }
     return;
   }

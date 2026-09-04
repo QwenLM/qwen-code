@@ -401,6 +401,19 @@ const STREAM_PENDING_COMMIT_RESERVE_ROWS = 5;
 const STREAM_PENDING_COMPOSER_RESERVE_ROWS = 12;
 const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 
+/**
+ * Minimum interval between model turns triggered by interim (status
+ * 'running') monitor notifications (#10818). A monitor whose command prints on
+ * every poll emits one <task-notification> per line; without a session-level
+ * minimum interval each pulse starts its own model turn, so a ~0.5 Hz pulse
+ * stream keeps the session permanently busy — Esc cancels the in-flight turn
+ * but the next pulse starts another immediately, and typed input never finds
+ * a clean idle edge. Only interim monitor pulses are gated; terminal
+ * notifications and cron fires stay prompt. Queued pulses still batch-drain
+ * into a single catch-up turn once the window elapses, so no update is lost.
+ */
+export const INTERIM_MONITOR_MIN_TURN_INTERVAL_MS = 10_000;
+
 type BufferedStreamEvent =
   | { kind: 'content'; value: string }
   | { kind: 'image'; value: InlineImageData }
@@ -2350,7 +2363,9 @@ export const useLlmStream = (
       const reasonClause =
         eventValue?.triggerReason === 'image_overflow'
           ? `accumulated enough tool screenshots to trigger compaction for ${activeModel}`
-          : `approached the input token limit for ${activeModel}`;
+          : eventValue?.triggerReason === 'payload_overflow'
+            ? `exceeded the endpoint request-body limit for ${activeModel}`
+            : `approached the input token limit for ${activeModel}`;
       const warningSuffix = eventValue?.warning
         ? `\n⚠️ ${eventValue.warning}`
         : '';
@@ -3912,6 +3927,9 @@ export const useLlmStream = (
             todoWorkChainId: metadata?.todoWorkChainId,
             modelOverride: modelOverrideRef.current,
             steerInput: metadata?.steerInput,
+            ...(allowConcurrentBtwDuringResponse
+              ? { isConcurrentSideQuery: true }
+              : {}),
             ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
             ...(!allowConcurrentBtwDuringResponse &&
             !isDetachedToolContinuation &&
@@ -5936,6 +5954,9 @@ export const useLlmStream = (
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+  // Last time an interim-monitor-led notification batch started a model turn
+  // (#10818 cooldown).
+  const lastInterimMonitorTurnAtRef = useRef(0);
   const goalQueuePendingCount =
     goalQueueRef?.current?.getPendingSubmissionCount?.() ?? 0;
   const claimSystemGoalTurn = useCallback((): {
@@ -6160,10 +6181,38 @@ export const useLlmStream = (
   // intact and the effect will re-fire when streamingState returns to Idle.
   useEffect(() => {
     if (
-      streamingState === StreamingState.Idle &&
-      !isSubmittingQueryRef.current &&
-      notificationQueueRef.current.length > 0
+      streamingState !== StreamingState.Idle ||
+      isSubmittingQueryRef.current ||
+      notificationQueueRef.current.length === 0
     ) {
+      return undefined;
+    }
+    {
+      // #10818: interim monitor pulses arrive at whatever rate the monitored
+      // command prints; without a session-level minimum interval each pulse
+      // starts its own model turn and the session never returns to idle (Esc
+      // cancels the in-flight turn, the next pulse starts another). Gate only
+      // interim (status 'running') monitor-led batches; terminal notifications
+      // and cron fires stay prompt. Checking queue[0] before the cancelled-
+      // monitor prune inside is conservative in the right direction.
+      const leading = notificationQueueRef.current[0]!;
+      if (
+        leading.sendMessageType === SendMessageType.Notification &&
+        leading.monitor?.status === 'running'
+      ) {
+        const elapsed = Date.now() - lastInterimMonitorTurnAtRef.current;
+        if (elapsed < INTERIM_MONITOR_MIN_TURN_INTERVAL_MS) {
+          // Re-fire this effect when the window elapses so queued pulses
+          // still batch into a single catch-up turn even if the monitor
+          // goes quiet in the meantime.
+          const timer = setTimeout(
+            () => setNotificationTrigger((n) => n + 1),
+            INTERIM_MONITOR_MIN_TURN_INTERVAL_MS - elapsed,
+          );
+          return () => clearTimeout(timer);
+        }
+      }
+
       // Consumer-side guard for #7156: this effect can run on a render pass
       // that React batched together with progress setState calls issued from
       // INSIDE a subagent's AsyncLocalStorage frame, in which case the whole
@@ -6233,6 +6282,9 @@ export const useLlmStream = (
           splitIdx++;
         }
         const batch = queue.splice(0, splitIdx);
+        if (batch[0]?.monitor?.status === 'running') {
+          lastInterimMonitorTurnAtRef.current = Date.now();
+        }
 
         const now = Date.now();
         for (const item of batch) {
@@ -6262,6 +6314,7 @@ export const useLlmStream = (
           debugLogger.warn('Failed to admit background notification', error);
         });
       });
+      return undefined;
     }
   }, [
     streamingState,

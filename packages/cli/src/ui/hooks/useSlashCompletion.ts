@@ -614,6 +614,7 @@ export interface UseSlashCompletionProps {
 export function useSlashCompletion(props: UseSlashCompletionProps): {
   completionStart: number;
   completionEnd: number;
+  isPerfectMatch: boolean;
 } {
   const {
     enabled,
@@ -786,5 +787,6 @@ export function useSlashCompletion(props: UseSlashCompletionProps): {
   return {
     completionStart,
     completionEnd,
+    isPerfectMatch,
   };
 }

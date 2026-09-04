@@ -14,13 +14,11 @@ export interface ComputerUseOptions {
   sessionTtlSeconds?: number;
   /** Opt into a finite idle lifetime. Omit both TTL fields for owner-lifetime persistence. */
   idleTtlSeconds?: number;
-  callTimeoutMs?: number;
+  signal?: AbortSignal;
 }
 
 export interface CallOptions {
   signal?: AbortSignal;
-  /** Native-call deadline. Must be from 1 through 29000 milliseconds. */
-  callTimeoutMs?: number;
 }
 
 export interface DeliveryOptions {
@@ -51,9 +49,7 @@ export interface CoordinateRef extends WindowRef {
 }
 
 export type PointOrElementRef = CoordinateRef | ElementRef;
-export type ExactActionRef =
-  | (WindowRef & { elementToken?: never })
-  | ElementRef;
+export type ExactActionRef = (WindowRef & { elementToken?: never }) | ElementRef;
 
 export interface ComputerUseElement {
   [key: string]: unknown;
@@ -115,14 +111,18 @@ export interface VerifyStateOptions extends WindowRef, CallOptions {
   includeScreenshot?: boolean;
 }
 
-export type ClickOptions = PointOrElementRef & CallOptions & DeliveryOptions & {
-  button?: "left" | "right" | "middle";
-  count?: number;
-};
+export type ClickOptions = PointOrElementRef &
+  CallOptions &
+  DeliveryOptions & {
+    button?: "left" | "right" | "middle";
+    count?: number;
+  };
 
-export type RightClickOptions = PointOrElementRef & CallOptions & DeliveryOptions & {
-  modifier?: string[];
-};
+export type RightClickOptions = PointOrElementRef &
+  CallOptions &
+  DeliveryOptions & {
+    modifier?: string[];
+  };
 
 export interface DragOptions extends WindowRef, CallOptions, DeliveryOptions {
   fromX: number;
@@ -135,40 +135,43 @@ export interface DragOptions extends WindowRef, CallOptions, DeliveryOptions {
   modifier?: string[];
 }
 
-export type ScrollOptions = PointOrElementRef & CallOptions & DeliveryOptions & {
-  direction: "up" | "down" | "left" | "right";
-  by?: "line" | "page";
-  amount?: number;
-};
+export type ScrollOptions = PointOrElementRef &
+  CallOptions &
+  DeliveryOptions & {
+    direction: "up" | "down" | "left" | "right";
+    by?: "line" | "page";
+    amount?: number;
+  };
 
 export interface ElementValueOptions extends ElementRef, CallOptions {
   value: string;
 }
 
-export type TextOptions = ExactActionRef & CallOptions & DeliveryOptions & {
-  text: string;
-  delayMs?: number;
-};
+export type TextOptions = ExactActionRef &
+  CallOptions &
+  DeliveryOptions & {
+    text: string;
+    delayMs?: number;
+  };
 
-export type KeyOptions = ExactActionRef & CallOptions & DeliveryOptions & {
-  key: string;
-  modifiers?: string[];
-};
+export type KeyOptions = ExactActionRef &
+  CallOptions &
+  DeliveryOptions & {
+    key: string;
+    modifiers?: string[];
+  };
 
-export type HotkeyOptions = ExactActionRef & CallOptions & DeliveryOptions & {
-  keys: string[];
-};
+export type HotkeyOptions = ExactActionRef &
+  CallOptions &
+  DeliveryOptions & {
+    keys: string[];
+  };
 
 export interface SecondaryActionOptions extends ElementRef, CallOptions {
   action: string;
 }
 
-export type ActionEffect =
-  | "confirmed"
-  | "partial"
-  | "unverifiable"
-  | "suspected_noop"
-  | "refused";
+export type ActionEffect = "confirmed" | "partial" | "unverifiable" | "suspected_noop" | "refused";
 export type ActionRoute =
   | "accessibility"
   | "synthetic_events"
@@ -176,6 +179,14 @@ export type ActionRoute =
   | "system_api"
   | "dom"
   | "trusted_input";
+
+export interface ComputerUseOperationResult {
+  id: string;
+  state: "accepted" | "dispatched" | "committed" | "completed";
+  dispatched: boolean;
+  committed: boolean;
+  cancellationRequested: boolean;
+}
 
 export interface ComputerUseActionResult {
   effect: ActionEffect;
@@ -194,6 +205,8 @@ export interface ComputerUseActionResult {
       | "suspected_noop"
       | "permission_required";
   };
+  /** Terminal lifecycle evidence for the one native action dispatch. */
+  operation: ComputerUseOperationResult;
   /** The generated UniFFI record returned alongside the JSON projection. */
   action?: NativeActionResult;
 }
@@ -224,9 +237,7 @@ export interface ComputerUseVerificationResult {
 
 export interface ActAndVerifyOptions {
   action: () => Promise<ComputerUseActionResult>;
-  verify: (
-    action: ComputerUseActionResult,
-  ) => Promise<ComputerUseVerificationResult>;
+  verify: (action: ComputerUseActionResult) => Promise<ComputerUseVerificationResult>;
 }
 
 export interface ActAndVerifyResult {
@@ -249,12 +260,17 @@ export class ComputerUse {
 
   supportsObservationRevision(): Promise<boolean>;
   sessionInfo(options?: CallOptions): Promise<NativeSessionOutput>;
-  reconnect(): Promise<{ connectionGeneration: number }>;
+  reconnect(options?: CallOptions): Promise<{
+    connectionGeneration: number;
+    operation?: ComputerUseOperationResult;
+  }>;
   listApps(options?: CallOptions): Promise<JsonObject[]>;
-  listWindows(options?: CallOptions & {
-    pid?: number;
-    onScreenOnly?: boolean;
-  }): Promise<JsonObject[]>;
+  listWindows(
+    options?: CallOptions & {
+      pid?: number;
+      onScreenOnly?: boolean;
+    },
+  ): Promise<JsonObject[]>;
   getWindow(options: WindowRef & CallOptions): Promise<JsonObject>;
   observeWindow(options: ObserveWindowOptions): Promise<WindowObservation>;
   verifyState(options: VerifyStateOptions): Promise<ComputerUseVerificationResult>;
@@ -269,9 +285,7 @@ export class ComputerUse {
   typeText(options: TextOptions): Promise<ComputerUseActionResult>;
   pressKey(options: KeyOptions): Promise<ComputerUseActionResult>;
   hotkey(options: HotkeyOptions): Promise<ComputerUseActionResult>;
-  performSecondaryAction(
-    options: SecondaryActionOptions,
-  ): Promise<ComputerUseActionResult>;
+  performSecondaryAction(options: SecondaryActionOptions): Promise<ComputerUseActionResult>;
   actAndVerify(options: ActAndVerifyOptions): Promise<ActAndVerifyResult>;
   close(): Promise<void>;
 }

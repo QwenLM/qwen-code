@@ -47,6 +47,7 @@ import {
   unarchiveDaemonSessions,
   DaemonDrainingError,
 } from './session-archive.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 describe('assertSessionLoadable', () => {
   let runtimeDir: string;
@@ -722,7 +723,7 @@ describe('archiveDaemonSessions', () => {
         expect(result.errors[0]?.error).toBeInstanceOf(
           SessionStorageEntryError,
         );
-        expect(Date.now() - startedAt).toBeLessThan(400);
+        expectWithinLatencyBudget(Date.now() - startedAt, 400);
       } finally {
         clearTimeout(unblock);
         if (writer !== undefined) fs.closeSync(writer);
@@ -1813,6 +1814,7 @@ describe('deleteDaemonSessions', () => {
     writeSessionFile(workspaceDir, sessionId, 'active');
     const service = new SessionService(workspaceDir);
     const acquire = vi.spyOn(service, 'acquireSessionWriterLease');
+    const deleteSessionAttachments = vi.fn().mockResolvedValue(undefined);
 
     await expect(
       deleteDaemonSessionIfOrphan({
@@ -1821,11 +1823,13 @@ describe('deleteDaemonSessions', () => {
         bridge: {
           killSession: vi.fn().mockResolvedValue(false),
           markSessionCatalogChanged: vi.fn(),
+          deleteSessionAttachments,
         },
         coordinator: new SessionArchiveCoordinator(),
       }),
     ).resolves.toBe(false);
     expect(acquire).not.toHaveBeenCalled();
+    expect(deleteSessionAttachments).not.toHaveBeenCalled();
     expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
       true,
     );
@@ -1858,6 +1862,7 @@ describe('deleteDaemonSessions', () => {
     writeSessionFile(workspaceDir, sessionId, 'active');
     const service = new SessionService(workspaceDir);
     const markSessionCatalogChanged = vi.fn();
+    const deleteSessionAttachments = vi.fn().mockResolvedValue(undefined);
 
     await expect(
       deleteDaemonSessionIfOrphan({
@@ -1866,6 +1871,7 @@ describe('deleteDaemonSessions', () => {
         bridge: {
           killSession: vi.fn().mockResolvedValue(true),
           markSessionCatalogChanged,
+          deleteSessionAttachments,
         },
         coordinator: new SessionArchiveCoordinator(),
       }),
@@ -1874,6 +1880,10 @@ describe('deleteDaemonSessions', () => {
       false,
     );
     expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+    // The reaped orphan is never looked up again; its attachment bytes must
+    // go with the persisted row.
+    expect(deleteSessionAttachments).toHaveBeenCalledTimes(1);
+    expect(deleteSessionAttachments).toHaveBeenCalledWith(sessionId);
   });
 
   it('returns true when task maintenance fails after orphan deletion', async () => {
@@ -1902,6 +1912,7 @@ describe('deleteDaemonSessions', () => {
         bridge: {
           killSession: vi.fn().mockResolvedValue(true),
           markSessionCatalogChanged,
+          deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
         },
         coordinator: new SessionArchiveCoordinator(),
       }),
@@ -1927,6 +1938,7 @@ describe('deleteDaemonSessions', () => {
             .fn()
             .mockRejectedValue(new SessionNotFoundError(sessionId)),
           markSessionCatalogChanged,
+          deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
         },
         coordinator: new SessionArchiveCoordinator(),
       }),
@@ -1955,6 +1967,7 @@ describe('deleteDaemonSessions', () => {
         bridge: {
           killSession: vi.fn().mockResolvedValue(true),
           markSessionCatalogChanged: vi.fn(),
+          deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
         },
         coordinator: new SessionArchiveCoordinator(),
       }),

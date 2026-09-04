@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, expect, it, vi } from 'vitest';
 import { InputFormat } from '@qwen-code/qwen-code-core';

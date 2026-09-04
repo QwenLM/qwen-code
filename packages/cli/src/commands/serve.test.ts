@@ -55,7 +55,11 @@ function buildParser(): Argv {
 
 describe('serve command args', () => {
   it('documents the complete IPv4 loopback range', async () => {
-    expect(await buildParser().getHelp()).toContain('127.0.0.0/8');
+    // Remove whitespace before checking so a long option name forcing yargs
+    // to wrap the description does not split the CIDR literal across lines.
+    expect((await buildParser().getHelp()).replace(/\s/g, '')).toContain(
+      '127.0.0.0/8',
+    );
   });
 
   it('defaults authenticated open to disabled', () => {

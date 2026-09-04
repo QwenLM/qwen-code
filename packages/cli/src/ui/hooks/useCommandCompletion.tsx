@@ -232,7 +232,7 @@ export function useCommandCompletion(
     visibleStartIndex,
     showSuggestions,
     isLoadingSuggestions,
-    isPerfectMatch,
+    isPerfectMatch: publishedIsPerfectMatch,
     dismissed,
 
     setSuggestions,
@@ -271,6 +271,10 @@ export function useCommandCompletion(
     setIsLoadingSuggestions,
     setIsPerfectMatch,
   });
+  const isPerfectMatch =
+    completionMode === CompletionMode.SLASH
+      ? slashCompletionRange.isPerfectMatch
+      : publishedIsPerfectMatch;
 
   useEffect(() => {
     setActiveSuggestionIndex(suggestions.length > 0 ? 0 : -1);

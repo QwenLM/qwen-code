@@ -45,6 +45,7 @@ describe('Mem0 extension startup', () => {
 
     await import('./main.js');
 
+    expect(loadRuntimeConfiguration).toHaveBeenCalledWith();
     expect(createRequestEngine).toHaveBeenCalledWith(runtime);
     expect(createMem0McpServer).toHaveBeenCalledWith({
       instance: runtime.instance,

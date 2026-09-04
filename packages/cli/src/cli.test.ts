@@ -678,6 +678,8 @@ describe('runCliEntry', () => {
       process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
     QWEN_CODE_MANAGED_NPM_UPDATE_VERSION:
       process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'],
+    QWEN_CODE_MESSAGING_SOCKET: process.env['QWEN_CODE_MESSAGING_SOCKET'],
+    QWEN_CODE_MESSAGING_TOKEN: process.env['QWEN_CODE_MESSAGING_TOKEN'],
   };
 
   let stdout: string[];
@@ -727,6 +729,16 @@ describe('runCliEntry', () => {
       process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] =
         savedEnv.QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN;
     }
+    for (const name of [
+      'QWEN_CODE_MESSAGING_SOCKET',
+      'QWEN_CODE_MESSAGING_TOKEN',
+    ] as const) {
+      if (savedEnv[name] === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = savedEnv[name];
+      }
+    }
     vi.restoreAllMocks();
   });
 
@@ -754,6 +766,40 @@ describe('runCliEntry', () => {
     expect(mocks.installManagedNpmUpdate).toHaveBeenCalledWith('2.0.0');
     expect(process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION']).toBeUndefined();
     expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('scrubs an inherited messaging pair before the managed update spawns npm', async () => {
+    // The pair names an ancestor session's inbox and authenticates to it.
+    // installManagedNpmUpdate spawns npm with the full environment, so a
+    // pair surviving to here reaches the installed package's lifecycle
+    // scripts — third-party code able to inject into the live session.
+    // This route never reaches main(), so the entry-level scrub is the
+    // only thing standing between them.
+    process.env['QWEN_CODE_MESSAGING_SOCKET'] = '/tmp/ancestor.sock';
+    process.env['QWEN_CODE_MESSAGING_TOKEN'] = 'ancestor-token';
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+    mocks.installManagedNpmUpdate.mockImplementationOnce(async () => {
+      expect(process.env['QWEN_CODE_MESSAGING_SOCKET']).toBeUndefined();
+      expect(process.env['QWEN_CODE_MESSAGING_TOKEN']).toBeUndefined();
+    });
+
+    await runCliEntry([]);
+
+    expect(mocks.installManagedNpmUpdate).toHaveBeenCalledWith('2.0.0');
+  });
+
+  it('scrubs an inherited messaging pair on the fast paths that never reach main', async () => {
+    // serve and mcp dispatch without main(), and both hand the full
+    // environment to the children they start.
+    for (const argv of [['mcp'], ['serve']]) {
+      process.env['QWEN_CODE_MESSAGING_SOCKET'] = '/tmp/ancestor.sock';
+      process.env['QWEN_CODE_MESSAGING_TOKEN'] = 'ancestor-token';
+
+      await runCliEntry(argv);
+
+      expect(process.env['QWEN_CODE_MESSAGING_SOCKET']).toBeUndefined();
+      expect(process.env['QWEN_CODE_MESSAGING_TOKEN']).toBeUndefined();
+    }
   });
 
   it('falls back to getCliVersion when CLI_VERSION is unset', async () => {

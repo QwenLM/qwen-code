@@ -12,6 +12,7 @@ import {
   getBuiltInOutputStyle,
   getOutputStyleTurnReminder,
   renderOutputStyleSection,
+  resolveEffectiveOutputStyle,
   type OutputStyleDefinition,
 } from './output-styles.js';
 
@@ -81,6 +82,14 @@ describe('built-in output styles', () => {
     );
   });
 
+  it('falls back to the generic reminder for a style with an empty one', () => {
+    // Style files arrive in the follow-up PR; an empty `turnReminder:` key
+    // must not render a reminder with no guidance in it.
+    expect(getOutputStyleTurnReminder({ ...LAYERED, turnReminder: '' })).toBe(
+      `Layered output style is active. ${DEFAULT_OUTPUT_STYLE_TURN_REMINDER}`,
+    );
+  });
+
   it('has no duplicate names', () => {
     const names = BUILT_IN_OUTPUT_STYLES.map((style) =>
       style.name.toLowerCase(),
@@ -136,5 +145,33 @@ describe('applyOutputStyle', () => {
     expect(applyOutputStyle('BASE', REPLACING)).toBe(
       'BASE\n\n# Output Style: Replacing\nStyle body.',
     );
+  });
+});
+
+describe('resolveEffectiveOutputStyle', () => {
+  const learning = getBuiltInOutputStyle('Learning')!;
+  const concise = getBuiltInOutputStyle('Concise')!;
+
+  it('returns undefined when no style is active', () => {
+    expect(
+      resolveEffectiveOutputStyle(undefined, 'interactive'),
+    ).toBeUndefined();
+    expect(resolveEffectiveOutputStyle(null, 'headless')).toBeUndefined();
+  });
+
+  it('drops Learning in headless mode, where its handoff can never be answered', () => {
+    expect(resolveEffectiveOutputStyle(learning, 'headless')).toBeUndefined();
+  });
+
+  it('keeps Learning where a reply can arrive', () => {
+    expect(resolveEffectiveOutputStyle(learning, 'interactive')).toBe(learning);
+    expect(resolveEffectiveOutputStyle(learning, 'acp')).toBe(learning);
+  });
+
+  it('keeps every other style in every mode', () => {
+    for (const mode of ['interactive', 'headless', 'acp'] as const) {
+      expect(resolveEffectiveOutputStyle(concise, mode)).toBe(concise);
+      expect(resolveEffectiveOutputStyle(LAYERED, mode)).toBe(LAYERED);
+    }
   });
 });

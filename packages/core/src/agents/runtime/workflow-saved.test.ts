@@ -157,6 +157,7 @@ describe('workflow-saved', () => {
       );
       expect(resolved.script).toBe(`return 'custom';`);
       expect(resolved.name).toBe('custom');
+      expect(resolved.savedWorkflowName).toBe('custom');
     });
 
     it('throws a clear error for a missing path under a saved dir', async () => {
@@ -207,6 +208,7 @@ describe('workflow-saved', () => {
       );
       expect(resolved.script).toBe(`return 'generated';`);
       expect(resolved.name).toBe('qwen-review-1a2b3c');
+      expect(resolved.savedWorkflowName).toBeUndefined();
     });
 
     it('trusts the whole subtree, so a writer may nest per session', async () => {

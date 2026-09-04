@@ -69,6 +69,7 @@ export type {
   BridgeSessionLifecycle,
   BridgeSessionLifecycleEvent,
   BridgeOptions,
+  BridgeRuntimeEpochSource,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 
@@ -105,6 +106,7 @@ export type {
   BridgeDaemonStatusLimits,
   BridgeDaemonSessionDiagnostic,
   BridgeDaemonStatusSnapshot,
+  BridgeWorkspaceRuntimeLifecycleSnapshot,
   BridgeShutdownOptions,
   WorkspaceEventPublisher,
   WorkspaceEventBridge,
@@ -133,6 +135,7 @@ export {
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
+  McpAuthenticationInProgressError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionBusyError,

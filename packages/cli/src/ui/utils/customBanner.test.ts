@@ -15,6 +15,7 @@ import type {
   CustomAsciiArtSetting,
   Settings,
 } from '../../config/settingsSchema.js';
+import { expectWithinLatencyBudget } from '../../test-utils/latency-budget.js';
 
 function makeSettings(opts: {
   workspaceUi?: Settings['ui'];
@@ -253,7 +254,7 @@ describe('resolveCustomBanner', () => {
     // resolver ever regresses to opening a FIFO read-only, this assertion
     // will catch it because the open would block until a writer connects
     // (we never start one) and the test would hang well past 1s.
-    expect(elapsedMs).toBeLessThan(1000);
+    expectWithinLatencyBudget(elapsedMs, 1000);
     expect(out.asciiArt.small).toBeUndefined();
     expect(out.asciiArt.large).toBeUndefined();
   });

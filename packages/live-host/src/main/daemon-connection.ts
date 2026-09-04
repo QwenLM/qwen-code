@@ -458,6 +458,14 @@ export class LiveDaemonConnection {
     return true;
   }
 
+  sendPlaybackStarted(epoch: number): boolean {
+    return this.sendControl({ type: 'host.playback_started', epoch });
+  }
+
+  sendPlaybackCompleted(epoch: number): boolean {
+    return this.sendControl({ type: 'host.playback_completed', epoch });
+  }
+
   private async captureScreenContext(
     requestId: string,
     epoch: number,

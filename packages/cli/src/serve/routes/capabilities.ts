@@ -18,7 +18,10 @@ import {
   type CapabilitiesEnvelope,
   type ServeOptions,
 } from '../types.js';
-import type { WorkspaceRegistry } from '../workspace-registry.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
 
 interface RegisterCapabilitiesRoutesDeps {
   qwenCodeVersion?: string;
@@ -32,6 +35,23 @@ interface RegisterCapabilitiesRoutesDeps {
   maxPendingPromptsPerSession: ServeOptions['maxPendingPromptsPerSession'];
   sessionRestoreTimeoutMs: number;
   languageCodes: string[];
+  daemonEnv: Readonly<NodeJS.ProcessEnv>;
+}
+
+function workflowsEnabledForRuntime(
+  runtime: WorkspaceRuntime | undefined,
+  daemonEnv: Readonly<NodeJS.ProcessEnv>,
+): boolean {
+  if (!runtime || !runtime.trusted) return false;
+  const env =
+    runtime.env.mode === 'runtime-overlay'
+      ? (runtime.env.effectiveEnv ?? {})
+      : (runtime.env.effectiveEnv ?? daemonEnv);
+  if (env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
+  return (
+    env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1' ||
+    runtime.env.workflowsEnabledBySettings === true
+  );
 }
 
 export function registerCapabilitiesRoutes(
@@ -103,6 +123,10 @@ export function registerCapabilitiesRoutes(
         primary: entry.primary,
         trusted:
           entry.state === 'active' && entry.current?.runtime.trusted === true,
+        workflowsEnabled: workflowsEnabledForRuntime(
+          entry.state === 'active' ? entry.current?.runtime : undefined,
+          deps.daemonEnv,
+        ),
         ...(runtimeRemoval ? { removable: entry.removable } : {}),
         ...(entry.current?.runtime.provenance === 'live-conversation'
           ? { kind: 'live' as const }

@@ -179,6 +179,7 @@ export default {
   'toolDisplayName.TodoList': '任務清單',
   'toolDisplayName.Goal': '目標',
   'toolDisplayName.UpdateGoal': '更新目標',
+  'toolDisplayName.ProposeGoal': '提議目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
@@ -2026,6 +2027,8 @@ export default {
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
+  'Choose the output style that shapes how responses are written ({{styles}}).':
+    '選擇用於塑造回答表達方式的輸出風格（{{styles}}）。',
   'Set a goal — keep working until the condition is met':
     '設定目標 — 持續工作直到條件滿足',
   'Set or control a session goal': '設定或控制工作階段目標',

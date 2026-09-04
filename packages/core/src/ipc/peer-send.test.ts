@@ -167,6 +167,37 @@ describe('sendToPeer', () => {
     });
   });
 
+  it('authenticates with the target token and offers its own for receipts', async () => {
+    readOwnSessionRecord.mockResolvedValue({ ...SELF, ipcToken: 'own-token' });
+    listMessageablePeers.mockResolvedValue([
+      { ...peer('s1', 'app-ab'), ipcToken: 'target-token' },
+    ]);
+
+    await sendToPeer({
+      target: 'app-ab',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    const [, frame, options] = sendPeerFrame.mock.calls[0];
+    expect(frame).toMatchObject({ replyToken: 'own-token' });
+    expect(options).toEqual({ authToken: 'target-token' });
+  });
+
+  it('omits tokens for records written before tokens existed', async () => {
+    listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
+
+    await sendToPeer({
+      target: 'app-ab',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    const [, frame, options] = sendPeerFrame.mock.calls[0];
+    expect(frame).not.toHaveProperty('replyToken');
+    expect(options).toEqual({});
+  });
+
   it('asserts bypass when this session no longer reviews its actions', async () => {
     listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
     for (const mode of [
@@ -657,14 +688,42 @@ describe('settleSentPeerMessage', () => {
     }
   });
 
+  it('reports a refusal, and only from pending', async () => {
+    const id = await sendOne();
+    expect(settleSentPeerMessage(id, 'refused')).toMatchObject({
+      previous: 'pending',
+    });
+
+    // A message already parked was not turned away, so a 'refused'
+    // receipt after a hold is a peer contradicting itself.
+    const held = await sendOne();
+    expect(settleSentPeerMessage(held, 'held')).toBeDefined();
+    expect(settleSentPeerMessage(held, 'refused')).toBeUndefined();
+
+    // Nor after delivery. Any process that can reach this session's
+    // socket can write a receipt for any id, so a contradicting peer
+    // must not be able to flip a delivered message into "does not accept
+    // messages -- don't re-send it" and have the model abandon a send
+    // the recipient already has.
+    const delivered = await sendOne();
+    expect(settleSentPeerMessage(delivered, 'delivered')).toBeDefined();
+    expect(settleSentPeerMessage(delivered, 'refused')).toBeUndefined();
+  });
+
   it('treats a terminal state as final', async () => {
-    for (const terminal of ['denied', 'expired', 'misaddressed'] as const) {
+    for (const terminal of [
+      'denied',
+      'refused',
+      'expired',
+      'misaddressed',
+    ] as const) {
       const id = await sendOne();
       expect(settleSentPeerMessage(id, terminal)).toBeDefined();
       for (const next of [
         'held',
         'delivered',
         'denied',
+        'refused',
         'expired',
         'misaddressed',
       ] as const) {

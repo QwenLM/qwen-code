@@ -911,6 +911,7 @@ export function createSubSessionLauncher(
             info.name ?? info.prompt,
             !isScheduledTaskRunSource(info),
           ),
+          titleSource: 'auto',
         });
       } catch (err) {
         log.debug('sub-session: updateSessionMetadata failed', sessionId, err);

@@ -57,6 +57,7 @@ export interface ResolvedSavedWorkflow {
   name: string;
   scriptPath: string;
   script: string;
+  savedWorkflowName?: string;
 }
 
 /** Result of a {@link saveWorkflowScript} attempt. */
@@ -199,6 +200,31 @@ async function readWorkflowFileSecurely(
   return fs.readFile(real, 'utf8');
 }
 
+async function resolveSavedWorkflowNameForPath(
+  scriptPath: string,
+  config: Config,
+): Promise<string | undefined> {
+  const realScriptPath = await fs.realpath(scriptPath);
+  for (const { dir } of getSavedWorkflowDirs(config)) {
+    if (await isSymlinkedRoot(dir)) continue;
+    let realDir: string;
+    try {
+      realDir = await fs.realpath(dir);
+    } catch {
+      continue;
+    }
+    if (
+      realScriptPath !== realDir &&
+      !realScriptPath.startsWith(realDir + path.sep)
+    ) {
+      continue;
+    }
+    const name = path.basename(realScriptPath).replace(/\.js$/, '');
+    return WORKFLOW_NAME_PATTERN.test(name) ? name : undefined;
+  }
+  return undefined;
+}
+
 /**
  * Enumerate all saved workflows across both scopes. Project entries shadow
  * same-named user entries (project wins). Sorted by name for stable
@@ -254,7 +280,16 @@ export async function resolveSavedWorkflowScript(
       );
     }
     const name = path.basename(scriptPath).replace(/\.js$/, '');
-    return { name, scriptPath, script };
+    const savedWorkflowName = await resolveSavedWorkflowNameForPath(
+      scriptPath,
+      config,
+    );
+    return {
+      name,
+      scriptPath,
+      script,
+      ...(savedWorkflowName ? { savedWorkflowName } : {}),
+    };
   }
 
   if (typeof nameOrRef !== 'string') {
@@ -276,7 +311,7 @@ export async function resolveSavedWorkflowScript(
     const scriptPath = path.join(dir, `${name}.js`);
     try {
       const script = await readWorkflowFileSecurely(scriptPath, config);
-      return { name, scriptPath, script };
+      return { name, scriptPath, script, savedWorkflowName: name };
     } catch {
       // Not in this scope (absent or rejected) — try the next.
     }

@@ -80,6 +80,45 @@ describe('workspace Git branch routes', () => {
     expect(response.body.error).toBe('invalid_rebase');
   });
 
+  it('rejects a wrong-typed stash with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/pull')
+      .send({ stash: 'yes' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_stash');
+  });
+
+  it('rejects a wrong-typed force with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/pull')
+      .send({ force: 1 });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_force');
+  });
+
+  it('rejects combining stash and force with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/pull')
+      .send({ stash: true, force: true });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_stash_force');
+  });
+
+  it.each([{ stash: true }, { force: true }])(
+    'rejects combining fetchOnly with %o with 400',
+    async (extra) => {
+      const response = await request(app())
+        .post('/workspace/git/pull')
+        .send({ fetchOnly: true, ...extra });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('invalid_fetch_only_combination');
+    },
+  );
+
   it('rejects a checkout with a missing ref with 400', async () => {
     const response = await request(app())
       .post('/workspace/git/checkout')
@@ -176,6 +215,38 @@ function makeRepo(): string {
   return dir;
 }
 
+/**
+ * Give `dir` a bare upstream plus a second clone that stands in for another
+ * developer; `pull.rebase` is pinned so a diverged pull merges regardless of
+ * the host's git policy.
+ */
+function makeUpstream(dir: string): string {
+  const remote = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
+  );
+  tmpRoots.push(remote);
+  git(remote, 'init', '-q', '--bare');
+  git(dir, 'remote', 'add', 'origin', remote);
+  git(dir, 'config', 'pull.rebase', 'false');
+  git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+  const clone = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-clone-')),
+  );
+  tmpRoots.push(clone);
+  git(clone, 'clone', '-q', remote, '.');
+  git(clone, 'config', 'user.email', 'other@example.com');
+  git(clone, 'config', 'user.name', 'Other');
+  git(clone, 'config', 'commit.gpgsign', 'false');
+  return clone;
+}
+
+function commitAndPush(cwd: string, file: string, content: string): void {
+  fs.writeFileSync(path.join(cwd, file), content);
+  git(cwd, 'add', '.');
+  git(cwd, 'commit', '-q', '-m', `edit ${file}`);
+  git(cwd, 'push', '-q', 'origin', 'HEAD');
+}
+
 function appWithWorkspace(cwd: string) {
   const app = express();
   app.use(express.json());
@@ -243,6 +314,197 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
 
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('no_upstream');
+  });
+
+  it('classifies a plain pull on a dirty tree as dirty_working_tree', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'a.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({});
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+  });
+
+  it('updates a dirty tree and restores the local changes with stash', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'remote-only.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.success).toBe(true);
+    expect(response.body.stashRestoreConflict).toBeUndefined();
+    expect(fs.readFileSync(path.join(dir, 'remote-only.txt'), 'utf8')).toBe(
+      'remote\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('local\n');
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('reports stashRestoreConflict when the stash restore conflicts', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'a.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.stashRestoreConflict).toBe(true);
+    expect(response.body.stashSha).toBe(
+      git(dir, 'rev-parse', 'refs/stash').trim(),
+    );
+    expect(git(dir, 'stash', 'list')).toContain('auto-stash before pull');
+  });
+
+  it('maps a recovered stash pull failure to 409 pull_failed with the path redacted', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'a.txt', 'remote\n');
+    // A conflicting local commit so the merge stops, plus untracked work
+    // the auto-stash has to bring back.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local commit\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('pull_failed');
+    expect(response.body.message).toContain('restored');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+    expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
+      'untracked\n',
+    );
+    expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(false);
+  });
+
+  it('discards the local changes and updates with force', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'remote-only.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ force: true });
+
+    expect(response.status).toBe(200);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('one\n');
+    expect(fs.existsSync(path.join(dir, 'b.txt'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+  });
+
+  it('maps the force refusal on a diverged branch to 409 diverged', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'remote-only.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ force: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('diverged');
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('local\n');
+  });
+
+  it('maps the subdirectory force refusal to 409 force_unsupported without discarding', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'remote-only.txt', 'remote\n');
+    const sub = path.join(dir, 'packages', 'app');
+    fs.mkdirSync(sub, { recursive: true });
+    fs.writeFileSync(path.join(sub, 'index.txt'), 'app\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'app');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'outside edit\n');
+    fs.writeFileSync(path.join(sub, 'index.txt'), 'inside edit\n');
+
+    const response = await request(appWithWorkspace(sub))
+      .post('/workspace/git/pull')
+      .send({ force: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('force_unsupported');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'outside edit\n',
+    );
+    expect(fs.readFileSync(path.join(sub, 'index.txt'), 'utf8')).toBe(
+      'inside edit\n',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'redacts the repository path from a successful pull whose restore failed',
+    async () => {
+      const dir = makeRepo();
+      const clone = makeUpstream(dir);
+      commitAndPush(clone, 'remote-only.txt', 'remote\n');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local\n');
+      // Wedge refs/stash after the merge so dropping the restored entry
+      // fails with git's "Unable to create '<abs path>.lock'" notice.
+      git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
+      const hook = path.join(dir, '.git', 'hooks', 'post-merge');
+      fs.writeFileSync(hook, '#!/bin/sh\n: > .git/refs/stash.lock\n');
+      fs.chmodSync(hook, 0o755);
+
+      const response = await request(appWithWorkspace(dir))
+        .post('/workspace/git/pull')
+        .send({ stash: true });
+
+      expect(response.status).toBe(200);
+      expect(response.body.output).toContain('could not be dropped');
+      // The kept entry is named by SHA, not only by its volatile slot.
+      expect(response.body.output).toContain(
+        git(dir, 'rev-parse', 'refs/stash').trim(),
+      );
+      expect(response.body.output).toContain('<workspace>');
+      expect(JSON.stringify(response.body)).not.toContain(dir);
+    },
+  );
+
+  it('maps an in-progress merge to 409 operation_in_progress', async () => {
+    const dir = makeRepo();
+    const clone = makeUpstream(dir);
+    commitAndPush(clone, 'a.txt', 'remote\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local commit\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local');
+    git(dir, 'fetch', '-q');
+    expect(() => git(dir, 'merge', '--no-edit', '@{upstream}')).toThrow();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'resolved\n');
+    git(dir, 'add', 'a.txt');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('operation_in_progress');
+    expect(response.body.message).toContain('merge');
+    expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(true);
   });
 
   it('does not misclassify a non-dirty error when the workspace path contains "dirty"', async () => {

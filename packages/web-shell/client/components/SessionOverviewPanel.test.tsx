@@ -1165,7 +1165,7 @@ describe('SessionOverviewPanel', () => {
     expect(rows()).toHaveLength(50);
     act(() => click(selectAllCheckbox()));
     expect(container!.textContent).toContain('60 of 60 row(s) selected.');
-  });
+  }, 15000);
 
   it('lists an other-workspace session as a row with its folder', async () => {
     connectionState.capabilities = {

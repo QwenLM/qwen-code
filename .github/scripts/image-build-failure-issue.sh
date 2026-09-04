@@ -30,23 +30,18 @@ fi
 marker="image-build-failure:${version}"
 marker_html="<!-- ${marker} -->"
 
-# Dedup by an exact body marker, matched CLIENT-side: GitHub search
-# tokenizes the colon out of the marker, so a search-based lookup
-# never finds the issues this job files.
-issues_file="${RUNNER_TEMP}/open-issues.json"
-gh issue list \
-  --repo "${REPO}" \
-  --state open \
-  --label "${DEDUP_LABEL}" \
-  --json number,body \
-  --limit 200 \
-  > "${issues_file}"
+# Dedup by an exact body marker. The lookup is shared with the sibling
+# reporter that files into the same `scope/ci-cd` label space — see
+# find-marked-issue.sh for why the marker is matched client-side, why a
+# null body cannot abort the lookup, and why the listing is a ceiling
+# rather than a newest-first window.
+# Degrade rather than abort: a transient failure of the lookup must not take
+# the whole report down under `set -e` — a rare duplicate issue costs far less
+# than the silence this job exists to break.
 existing="$(
-  jq -r --arg marker_html "${marker_html}" \
-    '.[] | select(.body | contains($marker_html)) | .number' \
-    "${issues_file}" \
-  | head -n 1
-)"
+  MARKER_HTML="${marker_html}" \
+    bash "$(dirname "${BASH_SOURCE[0]}")/find-marked-issue.sh"
+)" || existing=''
 
 # The machine-owned recurrence block: every recorded failed run is a bullet
 # under this marker, newest first. On recurrence ONLY this block is rebuilt —

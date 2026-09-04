@@ -181,6 +181,36 @@ describe('HttpHookRunner', () => {
       expect(result.output?.continue).toBe(true);
     });
 
+    it('should not follow redirects: a 3xx is a non-blocking error and the target is never contacted', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 302,
+        statusText: 'Found',
+        headers: new Headers({
+          location: 'http://169.254.169.254/latest/meta-data',
+        }),
+      });
+
+      const config = createMockConfig();
+      const input = createMockInput();
+
+      const result = await httpRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.output?.continue).toBe(true);
+      // Exactly one request, to the validated URL, with redirects disabled
+      // so the whitelist and SSRF checks cannot be bypassed by a 30x.
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.example.com/hook',
+        expect.objectContaining({ redirect: 'manual' }),
+      );
+    });
+
     it('should handle timeout as non-blocking error', async () => {
       // Per Claude Code spec: Timeout is a non-blocking error
       // Execution continues with success: true

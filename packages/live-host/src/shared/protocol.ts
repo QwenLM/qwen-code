@@ -1,4 +1,4 @@
-export const LIVE_PROTOCOL_VERSION = 6;
+export const LIVE_PROTOCOL_VERSION = 7;
 export const LIVE_HOST_BUNDLE_ID = 'com.alibaba.qwen-code.live-host';
 export const MAX_CONTROL_FRAME_BYTES = 64 * 1024;
 export const MAX_INPUT_AUDIO_FRAME_BYTES = 64 * 1024;
@@ -112,7 +112,9 @@ export type HostControlMessage =
       requestId: string;
       success: false;
       error: string;
-    };
+    }
+  | { type: 'host.playback_started'; epoch: number }
+  | { type: 'host.playback_completed'; epoch: number };
 
 export type DaemonControlMessage =
   | {

@@ -492,6 +492,7 @@ async function setupAttachedProvider(options?: {
   context?: unknown;
 }) {
   let messageHandler: WebViewMessageHandler | undefined;
+  const viewDisposeListeners: Array<() => void> = [];
 
   const postMessage = vi.fn();
   const webview = {
@@ -521,12 +522,21 @@ async function setupAttachedProvider(options?: {
       webview,
       visible: true,
       onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
-      onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      onDidDispose: vi.fn((listener: () => void) => {
+        viewDisposeListeners.push(listener);
+        return { dispose: vi.fn() };
+      }),
     } as never,
     'qwen-code.chatView.sidebar',
   );
 
-  return { webview, postMessage, provider, messageHandler };
+  return {
+    webview,
+    postMessage,
+    provider,
+    messageHandler,
+    viewDisposeListeners,
+  };
 }
 
 beforeEach(() => {
@@ -2399,5 +2409,170 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         (message as { type?: string }).type === 'webShellBootstrapError',
     );
     expect(firstErrors).toHaveLength(0);
+  });
+});
+
+describe('WebViewProvider web-shell permission bridge', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockMessageHandlerInstances.length = 0;
+    mockQwenAgentManagerInstances.length = 0;
+    mockGetPanel.mockReturnValue(null);
+    mockConfigGet.mockImplementation(
+      (_key: string, defaultValue: unknown) => defaultValue,
+    );
+    vi.spyOn(
+      WebViewProvider.prototype as unknown as {
+        initializeAgentConnection: () => Promise<void>;
+      },
+      'initializeAgentConnection',
+    ).mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  async function setupPendingWebShellPermission(requestId = 'req-1') {
+    const setup = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId },
+    });
+    return setup;
+  }
+
+  function decisionCalls(postMessage: ReturnType<typeof vi.fn>) {
+    return postMessage.mock.calls.filter(
+      ([message]) =>
+        (message as { type?: string }).type === 'webShellPermissionDecision',
+    );
+  }
+
+  it('routes accept to the request-owner webview', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+    const activePostMessage = vi.fn();
+    mockGetPanel.mockReturnValue({
+      webview: { postMessage: activePostMessage },
+    } as never);
+
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-1',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'webShellPermissionDecision',
+      data: { decision: 'allow', requestId: 'req-1' },
+    });
+    expect(decisionCalls(activePostMessage)).toHaveLength(0);
+  });
+
+  it('routes cancel as a reject decision', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.respondToPendingPermission('cancel', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-1',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'webShellPermissionDecision',
+      data: { decision: 'reject', requestId: 'req-1' },
+    });
+  });
+
+  it('does not vote when a diff command has no exact request id', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+    });
+
+    expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('does not route an unknown request id to the active webview', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+    const activePostMessage = vi.fn();
+    mockGetPanel.mockReturnValue({
+      webview: { postMessage: activePostMessage },
+    } as never);
+
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-not-yet-mapped',
+    });
+
+    expect(decisionCalls(postMessage)).toHaveLength(0);
+    expect(decisionCalls(activePostMessage)).toHaveLength(0);
+  });
+
+  it('does not vote when the trigger is the original workspace file', async () => {
+    const { postMessage, provider } = await setupPendingWebShellPermission();
+
+    // qwen.diff.isVisible is also true on the user's own file while a diff
+    // is open, so Ctrl+S there invokes qwen.diff.accept with a file: uri.
+    // That must not resolve an approval the user may never have looked at.
+    provider.respondToPendingPermission('allow', {
+      fromDiffEditor: false,
+      permissionRequestId: 'req-1',
+    });
+    provider.respondToPendingPermission('allow');
+
+    expect(decisionCalls(postMessage)).toHaveLength(0);
+  });
+
+  it('does not vote before permission ownership state arrives', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    setup.provider.respondToPendingPermission('allow', {
+      fromDiffEditor: true,
+      permissionRequestId: 'req-1',
+    });
+
+    expect(decisionCalls(setup.postMessage)).toHaveLength(0);
+  });
+
+  it('reports hasPendingPermission from the webview-pushed state', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    // The extension command gate consults hasPendingPermission() before
+    // asking the provider to vote; it must track the state the webview
+    // pushes, not only the legacy ACP resolver.
+    expect(setup.provider.hasPendingPermission()).toBe(false);
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-1' },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(true);
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: false },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(false);
+  });
+
+  it('clears the pending flag when the hosting view is disposed', async () => {
+    const setup = await setupAttachedProvider({ captureMessageHandler: true });
+
+    await setup.messageHandler?.({
+      type: 'webShellPermissionState',
+      data: { pending: true, requestId: 'req-1' },
+    });
+    expect(setup.provider.hasPendingPermission()).toBe(true);
+
+    for (const listener of setup.viewDisposeListeners) listener();
+
+    // Without a webview there is no route for the decision; leaving the
+    // ownership entry would let a diff-editor accept find hasPendingPermission()
+    // true, skip the vote, and close the diff while the daemon stays
+    // blocked. The panel dispose path already resets it; the view-hosted
+    // path must too.
+    expect(setup.provider.hasPendingPermission()).toBe(false);
   });
 });

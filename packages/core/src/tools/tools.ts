@@ -642,6 +642,7 @@ export interface AgentResultDisplay {
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
+  skills?: string[];
   /** Real-time output-token count during execution, accumulated across subagent rounds. */
   tokenCount?: number;
 

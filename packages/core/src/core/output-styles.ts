@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { SystemPromptInteractionMode } from './prompts.js';
+
 /**
  * Where an output style came from. Only `built-in` is populated today; the
  * remaining sources exist so that user/project markdown files and extension
@@ -141,6 +143,28 @@ export function getBuiltInOutputStyle(
 }
 
 /**
+ * The style that actually applies for a given interaction mode.
+ *
+ * Learning hands the user a piece of code and then waits for their reply; a
+ * headless run cannot receive one, so the style is dropped there. This is the
+ * single source of truth for that rule: the system prompt and the per-turn
+ * reminder consult it together, so a session is never reminded about a style
+ * its prompt does not carry.
+ */
+export function resolveEffectiveOutputStyle(
+  style: OutputStyleDefinition | null | undefined,
+  interactionMode: SystemPromptInteractionMode,
+): OutputStyleDefinition | undefined {
+  if (!style) {
+    return undefined;
+  }
+  if (interactionMode === 'headless' && style.name === 'Learning') {
+    return undefined;
+  }
+  return style;
+}
+
+/**
  * Renders the style section as it appears in the system prompt.
  *
  * The `# Output Style: <name>` wrapper is the contract a custom style file
@@ -162,7 +186,7 @@ export function getOutputStyleTurnReminder(
   style: OutputStyleDefinition,
 ): string {
   return `${style.name} output style is active. ${
-    style.turnReminder ?? DEFAULT_OUTPUT_STYLE_TURN_REMINDER
+    style.turnReminder || DEFAULT_OUTPUT_STYLE_TURN_REMINDER
   }`;
 }
 

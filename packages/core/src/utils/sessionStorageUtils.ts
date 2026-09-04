@@ -12,26 +12,12 @@
  */
 
 import fs from 'node:fs';
+import { _recoverObjectsFromLine } from './jsonl-utils.js';
+
+import { openSyncNoFollow } from './no-follow-open.js';
 
 /** Size of the head/tail buffer for lite metadata reads (64KB). */
 export const LITE_READ_BUF_SIZE = 64 * 1024;
-
-/**
- * Flags used when opening session files for metadata reads. `O_NOFOLLOW`
- * refuses to follow symlinks — defense in depth so a symlink planted in
- * `~/.qwen/tmp/<hash>/chats/` (by another local user or an extension with
- * filesystem access) can't redirect a metadata read to an unrelated file.
- * Falls back to plain read-only when the flag isn't available (e.g. Windows
- * doesn't expose O_NOFOLLOW; the constant is `undefined` there).
- *
- * Computed lazily so tests that stub out `fs` don't blow up at module-init
- * time trying to read `fs.constants.O_RDONLY`.
- */
-function getReadOpenFlags(): number {
-  const constants = fs.constants;
-  if (!constants) return 0;
-  return (constants.O_RDONLY ?? 0) | (constants.O_NOFOLLOW ?? 0);
-}
 
 function readLatestTailIfGrown(
   fd: number,
@@ -219,6 +205,280 @@ export function extractLastJsonStringFields(
 }
 
 /**
+ * The outcome of scanning for a field on the LAST line carrying a marker.
+ * Distinguishes "the newest record omits this field" from "no such record
+ * was in view" — a difference `extractLastJsonStringField` erases, because
+ * it keeps looking at older lines until some line does carry the field.
+ */
+export interface LastMatchingLineField {
+  /** A line containing the marker was found in the scanned text. */
+  matched: boolean;
+  /** The field's value on that line — `undefined` when the line omits it. */
+  value: string | undefined;
+}
+
+export type MatchingRecordFieldReader = (
+  record: unknown,
+) => LastMatchingLineField;
+
+/**
+ * Outcome of {@link readLastMatchingLineFieldSync}. A miss is not one thing:
+ * only `absent` proves the record does not exist, and callers that would
+ * otherwise fall back to a weaker source need to tell the three apart.
+ */
+export type LastMatchingLineScan =
+  | { matched: true; value: string | undefined }
+  | {
+      matched: false;
+      /**
+       * - `absent` — the whole file was scanned and carries no such line.
+       * - `out-of-window` — the file is larger than the scan window and the
+       *   line is not in the tail; a newer record may exist out of reach.
+       * - `unreadable` — the file could not be stat'ed, opened, or read.
+       */
+      reason: 'absent' | 'out-of-window' | 'unreadable';
+    };
+
+/**
+ * Reads `key` from the LAST line containing `lineContains`, instead of the
+ * last occurrence of `key` across every matching line.
+ *
+ * For lifecycle records this is the only correct reading. A record set where
+ * a later entry legitimately drops the field — a `goal_state` record for a
+ * cleared Goal carries `goal: null` and no `objective` — must not be read as
+ * "the field is still whatever the previous record said". `matched: true`
+ * with `value: undefined` is that answer, and it is different from
+ * `matched: false`, which means no such record was in view at all.
+ * A crash-truncated line that starts the field but never closes its string is
+ * skipped; a well-formed matching line that omits the field remains decisive.
+ *
+ * A leading partial line contributes only a complete suffix record. Its
+ * truncated outer record cannot win, but a later record glued onto that
+ * prefix remains recoverable.
+ *
+ * `readRecordField` lets lifecycle callers interpret complete candidates
+ * with their authoritative parser. When that parser is present, a malformed
+ * newest marker is decisive and cannot expose an older lifecycle value.
+ */
+export function extractJsonStringFieldFromLastMatchingLine(
+  text: string,
+  lineContains: string,
+  key: string,
+  wholeLines = false,
+  recordMatches?: (record: unknown) => boolean,
+  readRecordField?: MatchingRecordFieldReader,
+): LastMatchingLineField {
+  const canStartRecoveredSuffix = (line: string, recordStart: number) => {
+    const previous = line.slice(0, recordStart).trimEnd().at(-1);
+    if (previous === '[' || previous === ',' || previous === ':') return false;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = 0; i < recordStart; i++) {
+      const char = line[i];
+      if (escape) {
+        escape = false;
+      } else if (inString) {
+        if (char === '\\') escape = true;
+        else if (char === '"') inString = false;
+      } else if (char === '"') {
+        inString = true;
+      } else if (char === '{' || char === '[') {
+        depth++;
+      } else if (char === '}' || char === ']') {
+        depth = Math.max(0, depth - 1);
+      }
+    }
+    return inString || depth === 0;
+  };
+
+  const readParsedRecord = (
+    parsed: unknown,
+    record: string,
+  ): LastMatchingLineField | undefined => {
+    if (readRecordField) {
+      const field = readRecordField(parsed);
+      return field.matched ? field : undefined;
+    }
+    if (recordMatches && !recordMatches(parsed)) return undefined;
+    return {
+      matched: true,
+      value: extractJsonStringField(record, key),
+    };
+  };
+
+  let searchFrom = text.length;
+  while (searchFrom > 0) {
+    const hit = text.lastIndexOf(lineContains, searchFrom - 1);
+    if (hit < 0) break;
+    const lineStart = text.lastIndexOf('\n', hit) + 1;
+    const eol = text.indexOf('\n', hit);
+    const line = text.slice(lineStart, eol < 0 ? text.length : eol);
+    const leadingPartial = !wholeLines && lineStart === 0;
+    if (!leadingPartial) {
+      try {
+        const parsed = JSON.parse(line);
+        const field = readParsedRecord(parsed, line);
+        if (field) return field;
+        searchFrom = lineStart;
+        continue;
+      } catch {
+        // Recover complete records from a malformed physical line below.
+      }
+    }
+
+    let markerOffset = line.lastIndexOf(lineContains);
+    let authoritativeMarkerOffset = markerOffset;
+    while (markerOffset >= 0) {
+      const recordStart = line.lastIndexOf('{', markerOffset);
+      if (recordStart >= 0 && canStartRecoveredSuffix(line, recordStart)) {
+        try {
+          const parsed = JSON.parse(line.slice(recordStart));
+          const record = JSON.stringify(parsed);
+          if (record.includes(lineContains)) {
+            const field = readParsedRecord(parsed, record);
+            if (field) return field;
+          }
+        } catch {
+          // The marker does not belong to a complete suffix record.
+        }
+      }
+      markerOffset =
+        markerOffset === 0
+          ? -1
+          : line.lastIndexOf(lineContains, markerOffset - 1);
+    }
+
+    if (!leadingPartial) {
+      const recovered = _recoverObjectsFromLine<unknown>(line);
+      for (let i = recovered.length - 1; i >= 0; i--) {
+        const parsed = recovered[i];
+        const record = JSON.stringify(parsed);
+        if (record.includes(lineContains)) {
+          if (readRecordField) {
+            const recordOffset = line.lastIndexOf(record);
+            if (
+              recordOffset < 0 ||
+              recordOffset + record.lastIndexOf(lineContains) !==
+                authoritativeMarkerOffset
+            ) {
+              continue;
+            }
+          }
+          const field = readParsedRecord(parsed, record);
+          if (field) return field;
+          if (readRecordField) {
+            authoritativeMarkerOffset = line.lastIndexOf(
+              lineContains,
+              authoritativeMarkerOffset - 1,
+            );
+          }
+        }
+      }
+    }
+
+    if (readRecordField) {
+      return { matched: true, value: undefined };
+    }
+
+    searchFrom = lineStart;
+  }
+  return { matched: false, value: undefined };
+}
+
+/**
+ * File-level counterpart of
+ * {@link extractJsonStringFieldFromLastMatchingLine}: reads the marker's
+ * last line from the tail window only.
+ *
+ * There is deliberately no head-window fallback. {@link
+ * readLastJsonStringFieldSync} can fall back because a title read only ever
+ * gets *staler*, never wrong: the head copy of a title is a title the
+ * session really had. A lifecycle field is different — a head-window hit on
+ * a file larger than the window means an unknown number of later records,
+ * including the one that cleared the state, are unreadable, so the value
+ * cannot be trusted. `reason: 'absent'` reports that the scan saw the whole
+ * file, which is what lets a caller tell "no such record exists" from "no
+ * such record was reachable".
+ *
+ * Worst-case I/O: 1 × LITE_READ_BUF_SIZE per file (plus one re-read when a
+ * concurrent writer grows the file, matching the sibling reader's bound).
+ */
+export function readLastMatchingLineFieldSync(
+  filePath: string,
+  lineContains: string,
+  key: string,
+  scratchBuffer?: Buffer,
+  recordMatches?: (record: unknown) => boolean,
+  readRecordField?: MatchingRecordFieldReader,
+): LastMatchingLineScan {
+  let fd: number | undefined;
+  try {
+    const stats = fs.statSync(filePath);
+    const fileSize = stats.size;
+    if (fileSize === 0) return { matched: false, reason: 'absent' };
+
+    fd = openSyncNoFollow(filePath);
+    const buffer =
+      scratchBuffer && scratchBuffer.length >= LITE_READ_BUF_SIZE
+        ? scratchBuffer
+        : Buffer.alloc(LITE_READ_BUF_SIZE);
+
+    const scanTail = (tail: {
+      text: string;
+      size: number;
+    }): LastMatchingLineScan => {
+      const hit = extractJsonStringFieldFromLastMatchingLine(
+        tail.text,
+        lineContains,
+        key,
+        tail.size <= LITE_READ_BUF_SIZE,
+        recordMatches,
+        readRecordField,
+      );
+      if (hit.matched) return { matched: true, value: hit.value };
+      return tail.size <= LITE_READ_BUF_SIZE
+        ? { matched: false, reason: 'absent' }
+        : { matched: false, reason: 'out-of-window' };
+    };
+
+    const firstTail = readLatestTailIfGrown(fd, 0, buffer);
+    if (!firstTail) return { matched: false, reason: 'unreadable' };
+    const fromTail = scanTail(firstTail);
+    if (fromTail.matched) return fromTail;
+
+    // A concurrent writer may have appended a newer lifecycle record between
+    // the stat and the read; one bounded re-read catches it.
+    const grownTail = readLatestTailIfGrown(fd, firstTail.size, buffer);
+    if (grownTail) {
+      const fromGrownTail = scanTail(grownTail);
+      if (fromGrownTail.matched) return fromGrownTail;
+      if (
+        fromTail.reason === 'absent' &&
+        fromGrownTail.reason === 'out-of-window' &&
+        grownTail.size - firstTail.size <= LITE_READ_BUF_SIZE
+      ) {
+        return { matched: false, reason: 'absent' };
+      }
+      return fromGrownTail;
+    }
+
+    return fromTail;
+  } catch {
+    return { matched: false, reason: 'unreadable' };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // best-effort: the result is already decided
+      }
+    }
+  }
+}
+
+/**
  * Like extractJsonStringField but finds the LAST occurrence.
  * Useful for fields that are appended (customTitle, aiTitle, etc.)
  * where the most recent entry should win.
@@ -315,7 +575,11 @@ export function readLastJsonStringFieldSync(
     const fileSize = stats.size;
     if (fileSize === 0) return undefined;
 
-    fd = fs.openSync(filePath, getReadOpenFlags());
+    // O_NOFOLLOW (or the compensating identity check where the flag does
+    // not exist, e.g. Windows) refuses a symlink planted over the session
+    // file — defense in depth so a planted link can't redirect a metadata
+    // read to an unrelated file (#8227).
+    fd = openSyncNoFollow(filePath);
 
     // Phase 1: tail window — fast path. This is where every well-behaved
     // session keeps its current title (ChatRecordingService re-anchors
@@ -418,7 +682,11 @@ export function readLastJsonStringFieldsSync(
     const fileSize = stats.size;
     if (fileSize === 0) return emptyResult;
 
-    fd = fs.openSync(filePath, getReadOpenFlags());
+    // O_NOFOLLOW (or the compensating identity check where the flag does
+    // not exist, e.g. Windows) refuses a symlink planted over the session
+    // file — defense in depth so a planted link can't redirect a metadata
+    // read to an unrelated file (#8227).
+    fd = openSyncNoFollow(filePath);
 
     // Phase 1: tail window fast path. See the single-field variant for
     // the head-or-tail invariant and buffer-pool semantics.

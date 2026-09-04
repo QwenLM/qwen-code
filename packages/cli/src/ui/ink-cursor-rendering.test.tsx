@@ -4,10 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, useState, type ReactNode } from 'react';
+import { act, useRef, useState, type ReactNode } from 'react';
 import ansiEscapes from 'ansi-escapes';
-import { Box, render, Static, Text, type Instance, useCursor } from 'ink';
+import {
+  Box,
+  render,
+  Static,
+  Text,
+  type DOMElement,
+  type Instance,
+  useBoxMetrics,
+  useCursor,
+} from 'ink';
 import { afterEach, describe, expect, it } from 'vitest';
+import { getPhysicalCursorPosition } from './components/BaseTextInput.js';
 
 const SHOW_CURSOR = '\u001B[?25h';
 const mountedApps = new Set<Instance>();
@@ -102,6 +112,28 @@ async function unmount(app: Instance): Promise<void> {
   mountedApps.delete(app);
 }
 
+function LazyCursorOwner() {
+  const ref = useRef<DOMElement | null>(null);
+  const { hasMeasured } = useBoxMetrics(ref);
+  useCursor().setCursorPosition(
+    getPhysicalCursorPosition(ref.current, {
+      hasMeasured,
+      showCursor: true,
+      cursorVisualRow: 0,
+      cursorVisualCol: 0,
+      scrollVisualRow: 0,
+      linesToRender: [''],
+      prefixWidth: 2,
+    }),
+  );
+  return (
+    <Box ref={ref} flexDirection="column">
+      <Text>border</Text>
+      <Text>input</Text>
+    </Box>
+  );
+}
+
 describe.each([false, true])(
   'Ink cursor rendering (incrementalRendering: %s)',
   (incrementalRendering) => {
@@ -137,6 +169,63 @@ describe.each([false, true])(
 
       expect(cursorRenderCount).toBe(1);
       expect(capture.read()).toContain(expectedCursorSuffix(3));
+      await unmount(app);
+    });
+
+    it('resolves lazy cursor coordinates once per output flush', async () => {
+      const capture = createTestStdout();
+      let updateFooter!: () => void;
+      let xReads = 0;
+      let yReads = 0;
+      let cursorRenderCount = 0;
+
+      function CursorOwner() {
+        cursorRenderCount++;
+        const position = useRef({
+          get x() {
+            xReads++;
+            return 2;
+          },
+          get y() {
+            yReads++;
+            return 0;
+          },
+        }).current;
+        useCursor().setCursorPosition(position);
+        return <Text>input</Text>;
+      }
+
+      function Footer() {
+        const [version, setVersion] = useState(0);
+        updateFooter = () => setVersion((value) => value + 1);
+        return <Text>footer-{version}</Text>;
+      }
+
+      const app = await mount(
+        <Box flexDirection="column">
+          <CursorOwner />
+          <Footer />
+        </Box>,
+        capture.stdout,
+        incrementalRendering,
+      );
+      expect(cursorRenderCount).toBe(1);
+      xReads = 0;
+      yReads = 0;
+
+      await updateAndFlush(app, updateFooter);
+
+      expect(xReads).toBe(1);
+      expect(yReads).toBe(1);
+      expect(cursorRenderCount).toBe(1);
+      xReads = 0;
+      yReads = 0;
+
+      await updateAndFlush(app, updateFooter);
+
+      expect(xReads).toBe(1);
+      expect(yReads).toBe(1);
+      expect(cursorRenderCount).toBe(1);
       await unmount(app);
     });
 
@@ -218,6 +307,42 @@ describe.each([false, true])(
       // Fullscreen mode (output >= terminal rows) omits the trailing newline,
       // so the cursor starts one line higher: moveUp = visibleLines - 1 - y.
       expect(capture.read()).toContain(expectedCursorSuffix(2));
+      await unmount(app);
+    });
+
+    it('positions a lazy cursor after content above it shrinks out of fullscreen', async () => {
+      const capture = createTestStdout(6);
+      let shrinkHistory!: () => void;
+
+      function History() {
+        const [multiline, setMultiline] = useState(true);
+        shrinkHistory = () => setMultiline(false);
+        return <Text>{multiline ? 'history-a\nhistory-b' : 'history'}</Text>;
+      }
+
+      const app = await mount(
+        <Box flexDirection="column">
+          <History />
+          <LazyCursorOwner />
+          <Text>{'footer-a\nfooter-b'}</Text>
+        </Box>,
+        capture.stdout,
+        incrementalRendering,
+      );
+      capture.reset();
+
+      await updateAndFlush(app, shrinkHistory);
+
+      const output = capture.read();
+      expect(output).toContain(ansiEscapes.clearTerminal);
+      expect(output).not.toContain(
+        'history\nborder\ninput\nfooter-a\nfooter-b\n' +
+          expectedCursorSuffix(2),
+      );
+      expect(output).toContain(
+        'history\nborder\ninput\nfooter-a\nfooter-b\n' +
+          expectedCursorSuffix(3),
+      );
       await unmount(app);
     });
 
@@ -359,6 +484,41 @@ describe.each([false, true])(
       expect(capture.read()).toContain(expectedCursorSuffix(3, 4));
       await unmount(app);
     });
+
+    it.each([
+      { direction: 'grows', initiallyMultiline: false, staleCursorUp: 3 },
+      { direction: 'shrinks', initiallyMultiline: true, staleCursorUp: 1 },
+    ])(
+      'does not show a stale cursor when content above the input $direction',
+      async ({ initiallyMultiline, staleCursorUp }) => {
+        const capture = createTestStdout();
+        let updateHistory!: () => void;
+
+        function History() {
+          const [multiline, setMultiline] = useState(initiallyMultiline);
+          updateHistory = () => setMultiline(!initiallyMultiline);
+          return <Text>{multiline ? 'history-a\nhistory-b' : 'history'}</Text>;
+        }
+
+        const app = await mount(
+          <Box flexDirection="column">
+            <History />
+            <LazyCursorOwner />
+            <Text>footer</Text>
+          </Box>,
+          capture.stdout,
+          incrementalRendering,
+        );
+        capture.reset();
+
+        await updateAndFlush(app, updateHistory);
+
+        const output = capture.read();
+        expect(output).not.toContain(expectedCursorSuffix(staleCursorUp));
+        expect(output).toContain(expectedCursorSuffix(2));
+        await unmount(app);
+      },
+    );
 
     it('does not write when a sibling rerenders identical output', async () => {
       const capture = createTestStdout();
