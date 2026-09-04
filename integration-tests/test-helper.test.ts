@@ -20,6 +20,10 @@ function isProcessAlive(pid: number): boolean {
 /** Emitted by the stand-in CLI below; nothing else in the run writes it. */
 const FORWARD_CANARY = 'PTY_FORWARD_CANARY_11002';
 
+/** npm-bundle verification mode: spawns the installed CLI, drops bundlePath. */
+const INSTALLED_RELEASE_MODE =
+  process.env['INTEGRATION_TEST_USE_INSTALLED_GEMINI'] === 'true';
+
 describe('TestRig', () => {
   const originalKeepOutput = process.env['KEEP_OUTPUT'];
 
@@ -94,7 +98,8 @@ describe('TestRig', () => {
 
   // Skipped on Windows: node-pty's kill() terminates the child unconditionally
   // there, so it cannot outlive cleanup() and the premise below does not hold.
-  it.skipIf(process.platform === 'win32')(
+  // Skipped in installed-release mode: the stand-in below is never spawned.
+  it.skipIf(process.platform === 'win32' || INSTALLED_RELEASE_MODE)(
     "detaches a session's output forwarding during cleanup",
     async () => {
       // KEEP_OUTPUT is what the OpenTUI leg sets, and it is what makes the rig
