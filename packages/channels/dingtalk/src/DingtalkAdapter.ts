@@ -825,6 +825,7 @@ type DingtalkChannelConfig = ChannelConfig & {
 };
 
 interface BackgroundResponseAggregation {
+  key: string;
   sessionId: string;
   target: SessionTarget;
   sourceLabel?: string;
@@ -847,6 +848,7 @@ interface BackgroundResponseAggregation {
 
 /** A terminal marker that raced the first segment's target resolution. */
 interface PendingBackgroundResponseTerminal {
+  resolvers: number;
   turnComplete?: boolean;
   status?: string;
   label?: string;
@@ -859,7 +861,9 @@ interface BackgroundResponseDelivery {
   parts: string[];
   partial: boolean;
   attempts: number;
+  composedTurnComplete?: boolean;
   proactivePlan?: ProactiveTextDelivery;
+  replyPlan?: ReplyTextDelivery;
   /**
    * Reply-path body whose `[FILE: ...]` markers were already delivered. A
    * retry must reuse it: `prepareReplyOutput` sends the file messages, so
@@ -874,6 +878,13 @@ interface ProactiveTextDelivery {
   nextChunk: number;
 }
 
+interface ReplyTextDelivery {
+  title: string;
+  chunks: string[];
+  nextChunk: number;
+  atUserId?: string;
+}
+
 class ProactiveTextDeliveryError extends Error {
   readonly retryable?: boolean;
 
@@ -885,6 +896,15 @@ class ProactiveTextDeliveryError extends Error {
     if (cause instanceof DingtalkCardRequestError) {
       this.retryable = cause.retryable;
     }
+  }
+}
+
+class ReplyTextDeliveryError extends Error {
+  constructor(
+    readonly plan: ReplyTextDelivery,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
   }
 }
 
@@ -948,6 +968,8 @@ export class DingtalkChannel extends ChannelBase {
     string,
     BackgroundResponseAggregation
   >();
+  private readonly detachedBackgroundResponseAggregations =
+    new Set<BackgroundResponseAggregation>();
   private readonly pendingBackgroundResponseTerminals = new Map<
     string,
     PendingBackgroundResponseTerminal
@@ -1571,6 +1593,23 @@ export class DingtalkChannel extends ChannelBase {
       ? text
       : await this.prepareReplyOutput(chatId, text);
     if (!outgoingText.trim()) return;
+    const plan = this.createReplyTextDelivery(
+      outgoingText,
+      atUserId,
+      sourceLabel,
+    );
+    try {
+      await this.deliverReplyText(chatId, plan);
+    } catch (error) {
+      throw new ReplyTextDeliveryError(plan, error);
+    }
+  }
+
+  private createReplyTextDelivery(
+    outgoingText: string,
+    atUserId?: string,
+    sourceLabel?: string,
+  ): ReplyTextDelivery {
     const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
     const sourcePrefix =
       sourceLabel && outgoingText.trim().length > 0
@@ -1585,18 +1624,31 @@ export class DingtalkChannel extends ChannelBase {
       (chunk, index) =>
         `${index === 0 ? mentionPrefix : ''}${sourcePrefix}${chunk}`,
     );
-    const title = extractTitle(outgoingText);
+    return {
+      title: extractTitle(outgoingText),
+      chunks,
+      nextChunk: 0,
+      ...(atUserId ? { atUserId } : {}),
+    };
+  }
 
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i]!;
-      const isMention = i === 0 && atUserId !== undefined;
+  private async deliverReplyText(
+    chatId: string,
+    plan: ReplyTextDelivery,
+  ): Promise<void> {
+    const webhook = this.webhooks.get(chatId);
+    if (!webhook) return;
+    while (plan.nextChunk < plan.chunks.length) {
+      const index = plan.nextChunk;
+      const chunk = plan.chunks[index]!;
+      const isMention = index === 0 && plan.atUserId !== undefined;
       const body = {
         msgtype: 'markdown',
         markdown: {
-          title: i === 0 ? title : `${title} (cont.)`,
+          title: index === 0 ? plan.title : `${plan.title} (cont.)`,
           text: chunk,
         },
-        ...(isMention ? { at: { atUserIds: [atUserId] } } : {}),
+        ...(isMention ? { at: { atUserIds: [plan.atUserId!] } } : {}),
       };
 
       let resp: Response;
@@ -1642,6 +1694,7 @@ export class DingtalkChannel extends ChannelBase {
           `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
         );
       }
+      plan.nextChunk++;
     }
   }
 
@@ -2441,6 +2494,15 @@ export class DingtalkChannel extends ChannelBase {
     const key = JSON.stringify([sessionId, context.taskId]);
     let current = this.backgroundResponseAggregations.get(key);
     let parked = this.pendingBackgroundResponseTerminals.get(key);
+    if (
+      current?.turnComplete === true &&
+      context.turnComplete === false &&
+      text.trim().length > 0
+    ) {
+      this.detachedBackgroundResponseAggregations.add(current);
+      this.backgroundResponseAggregations.delete(key);
+      current = undefined;
+    }
     if (!current && text.trim().length === 0) {
       // The first segment's target resolution can suspend (named-session owner
       // lock), so a turn's terminal marker may arrive before the aggregation
@@ -2458,8 +2520,9 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
     if (!current) {
-      parked ??= {};
+      parked ??= { resolvers: 0 };
       this.pendingBackgroundResponseTerminals.set(key, parked);
+      parked.resolvers++;
       try {
         const delivery =
           await this.resolveBackgroundResponseDelivery(sessionId);
@@ -2476,7 +2539,10 @@ export class DingtalkChannel extends ChannelBase {
             delivery.sourceLabel,
           );
       } finally {
-        this.pendingBackgroundResponseTerminals.delete(key);
+        parked.resolvers--;
+        if (parked.resolvers === 0) {
+          this.pendingBackgroundResponseTerminals.delete(key);
+        }
       }
     }
 
@@ -2511,6 +2577,7 @@ export class DingtalkChannel extends ChannelBase {
     }
     if (current.timeoutTimer) clearTimeout(current.timeoutTimer);
     current.timeoutTimer = undefined;
+    this.refreshBackgroundResponseDelivery(current);
     await this.flushBackgroundResponseAggregation(key, current);
   }
 
@@ -2519,7 +2586,8 @@ export class DingtalkChannel extends ChannelBase {
     aggregation: BackgroundResponseAggregation,
   ): Promise<void> {
     if (
-      this.backgroundResponseAggregations.get(key) !== aggregation ||
+      (this.backgroundResponseAggregations.get(key) !== aggregation &&
+        !this.detachedBackgroundResponseAggregations.has(aggregation)) ||
       aggregation.flushing
     ) {
       return;
@@ -2533,7 +2601,11 @@ export class DingtalkChannel extends ChannelBase {
         // A turn whose text was already drained by the bounded wait still owes
         // the user its completion: the last card it saw reads `（部分）`.
         if (!this.owesTerminalBackgroundResponseCard(aggregation)) {
-          this.backgroundResponseAggregations.delete(key);
+          if (aggregation.retiring || aggregation.turnComplete) {
+            this.removeBackgroundResponseAggregation(key, aggregation);
+          } else {
+            this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
+          }
           return;
         }
       }
@@ -2549,6 +2621,7 @@ export class DingtalkChannel extends ChannelBase {
           parts.length,
         ),
         attempts: 0,
+        composedTurnComplete: aggregation.turnComplete === true,
       };
       aggregation.delivery = delivery;
     }
@@ -2561,6 +2634,11 @@ export class DingtalkChannel extends ChannelBase {
         await this.deliverProactiveText(
           aggregation.target,
           delivery.proactivePlan,
+        );
+      } else if (delivery.replyPlan) {
+        await this.deliverReplyText(
+          aggregation.target.chatId,
+          delivery.replyPlan,
         );
       } else if (
         this.supportsProactiveSend() &&
@@ -2591,6 +2669,8 @@ export class DingtalkChannel extends ChannelBase {
       error = caught;
       if (caught instanceof ProactiveTextDeliveryError) {
         delivery.proactivePlan = caught.plan;
+      } else if (caught instanceof ReplyTextDeliveryError) {
+        delivery.replyPlan = caught.plan;
       }
     } finally {
       aggregation.flushing = false;
@@ -2599,7 +2679,11 @@ export class DingtalkChannel extends ChannelBase {
     if (error === undefined) {
       aggregation.delivery = undefined;
       aggregation.delivered = true;
-      if (aggregation.turnComplete && !aggregation.retiring) {
+      if (
+        delivery.composedTurnComplete === true &&
+        aggregation.turnComplete &&
+        !aggregation.retiring
+      ) {
         aggregation.completionDelivered = true;
       }
       if (aggregation.retiring || aggregation.turnComplete) {
@@ -2626,7 +2710,11 @@ export class DingtalkChannel extends ChannelBase {
       aggregation.delivery = undefined;
       aggregation.dropped = true;
       if (aggregation.parts.length === 0) {
-        this.backgroundResponseAggregations.delete(key);
+        if (aggregation.retiring || aggregation.turnComplete) {
+          this.removeBackgroundResponseAggregation(key, aggregation);
+        } else {
+          this.scheduleBackgroundResponseAggregationFlush(key, aggregation);
+        }
       } else if (aggregation.retiring || aggregation.turnComplete) {
         await this.flushBackgroundResponseAggregation(key, aggregation);
       } else {
@@ -2679,8 +2767,44 @@ export class DingtalkChannel extends ChannelBase {
     );
   }
 
+  private refreshBackgroundResponseDelivery(
+    aggregation: BackgroundResponseAggregation,
+  ): void {
+    const delivery = aggregation.delivery;
+    if (!delivery || aggregation.flushing) return;
+    const plan = delivery.proactivePlan ?? delivery.replyPlan;
+    if (plan && plan.nextChunk > 0) return;
+
+    const body = this.formatBackgroundResponseAggregation(delivery);
+    const header = body.split('\n', 1)[0]!;
+    const replaceHeader = (text: string) =>
+      text.replace(/## (?:✅|❌|⏹️) Agent · [^\n]+/, header);
+    if (plan) {
+      plan.title = extractTitle(body);
+      plan.chunks[0] = replaceHeader(plan.chunks[0]!);
+    }
+    if (delivery.preparedReplyBody) {
+      delivery.preparedReplyBody = replaceHeader(delivery.preparedReplyBody);
+    }
+    delivery.composedTurnComplete = aggregation.turnComplete === true;
+  }
+
+  private removeBackgroundResponseAggregation(
+    key: string,
+    aggregation: BackgroundResponseAggregation,
+  ): void {
+    if (this.backgroundResponseAggregations.get(key) === aggregation) {
+      this.backgroundResponseAggregations.delete(key);
+    }
+    this.detachedBackgroundResponseAggregations.delete(aggregation);
+  }
+
   private drainBackgroundResponseAggregations(sessionId?: string): void {
-    for (const [key, aggregation] of this.backgroundResponseAggregations) {
+    const aggregations = new Set([
+      ...this.backgroundResponseAggregations.values(),
+      ...this.detachedBackgroundResponseAggregations,
+    ]);
+    for (const aggregation of aggregations) {
       if (sessionId !== undefined && aggregation.sessionId !== sessionId) {
         continue;
       }
@@ -2692,7 +2816,10 @@ export class DingtalkChannel extends ChannelBase {
       aggregation.turnComplete = true;
       aggregation.completionPartial = true;
       if (!aggregation.flushing) {
-        void this.flushBackgroundResponseAggregation(key, aggregation);
+        void this.flushBackgroundResponseAggregation(
+          aggregation.key,
+          aggregation,
+        );
       }
     }
   }
@@ -2705,6 +2832,7 @@ export class DingtalkChannel extends ChannelBase {
     sourceLabel?: string,
   ): BackgroundResponseAggregation {
     const aggregation: BackgroundResponseAggregation = {
+      key,
       sessionId,
       target,
       sourceLabel,
