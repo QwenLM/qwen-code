@@ -125,20 +125,23 @@ export function validateModelOutput(
 }
 
 // The CLI traps SIGHUP and exits only once `runExitCleanup()` has drained, a
-// chain it bounds at 5s (packages/cli/src/utils/cleanup.ts). Waiting longer
-// than that bound is what makes cleanup() return with the child actually gone.
-const INTERACTIVE_EXIT_GRACE_MS = 10_000;
+// chain it bounds at 5s (packages/cli/src/utils/cleanup.ts), so the grace has
+// to outlast that. It also has to stay inside the 10s hookTimeout vitest
+// defaults to, because cleanup() runs in afterEach hooks: a grace that eats
+// the whole hook budget is reported as a generic "Hook timed out" instead of
+// naming the child that never exited.
+export const INTERACTIVE_EXIT_GRACE_MS = 8_000;
 
-// Resolves when `promise` settles, or after `ms` if it never does. The timer
-// is cleared and unrefed so a won race leaves no handle holding the worker's
-// event loop open.
-function settleWithin(promise: Promise<unknown>, ms: number): Promise<void> {
+// Resolves true when `promise` settles, false when `ms` elapses first. The
+// timer is cleared and unrefed so a won race leaves no handle holding the
+// worker's event loop open.
+function settleWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
+    const timer = setTimeout(() => resolve(false), ms);
     timer.unref();
     const settle = () => {
       clearTimeout(timer);
-      resolve();
+      resolve(true);
     };
     void promise.then(settle, settle);
   });
@@ -528,7 +531,12 @@ export class TestRig {
       } catch {
         // Process may have already exited
       }
-      await settleWithin(exited, INTERACTIVE_EXIT_GRACE_MS);
+      if (!(await settleWithin(exited, INTERACTIVE_EXIT_GRACE_MS))) {
+        console.warn(
+          `interactive CLI child (pid ${ptyProcess.pid}) did not exit within ` +
+            `${INTERACTIVE_EXIT_GRACE_MS}ms; continuing cleanup`,
+        );
+      }
     }
 
     // Clean up test directory
