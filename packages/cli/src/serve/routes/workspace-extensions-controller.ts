@@ -104,6 +104,16 @@ export type ExtensionMutationEvent = {
   updated?: boolean;
   reason?: string;
   states?: Record<string, string>;
+  resourceStates?: {
+    skills: Array<{
+      name: string;
+      defaultEnabled: boolean;
+      workspaceEnabled: boolean | null;
+      effectiveEnabled: boolean;
+      disabledReason?: 'hard' | 'default' | 'inactive_extension';
+      lockedScope?: 'system' | 'user' | 'systemDefaults';
+    }>;
+  };
   results?: Array<
     | {
         name: string;
@@ -256,6 +266,7 @@ export interface ExtensionsController {
       reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
+      skillsOnly?: boolean;
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
@@ -471,6 +482,7 @@ export function createExtensionsController(
       reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
+      skillsOnly?: boolean;
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
@@ -702,6 +714,9 @@ export function createExtensionsController(
                         result:
                           await runtime.bridge.refreshExtensionsForAllSessions(
                             bridgeMutationEvent(event),
+                            ...(options.skillsOnly
+                              ? [{ skillsOnly: true }]
+                              : []),
                           ),
                         elapsedMs: Date.now() - startedAt,
                       };
@@ -791,6 +806,7 @@ export function createExtensionsController(
               try {
                 const result = await bridge.refreshExtensionsForAllSessions(
                   bridgeMutationEvent(event),
+                  ...(options.skillsOnly ? [{ skillsOnly: true }] : []),
                 );
                 return { result, elapsedMs: Date.now() - startedAt };
               } finally {

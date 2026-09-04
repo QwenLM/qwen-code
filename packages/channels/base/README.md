@@ -74,7 +74,7 @@ Channel adapters can run in two host modes:
 - `qwen channel start [name]` is the standalone service. It uses `AcpBridge` over a `qwen-code --acp` child process and remains the default channel command.
 - `qwen serve --channel <name>` and `qwen serve --channel all` are experimental daemon-managed modes. Named channels are grouped by owning workspace and `qwen serve` starts one out-of-process worker per owning runtime. Each worker connects back to the daemon through the SDK, and adapters receive a `DaemonChannelBridge`-backed `ChannelAgentBridge` facade. `--channel all` stays primary-only.
 
-In daemon-managed mode, every named channel's `cwd` must resolve to exactly one registered, trusted workspace. Its worker receives that runtime's cwd and environment overlay; an ambiguous or untrusted selection fails instead of using primary. The optional `shellCommand` method is exposed to adapters only when the daemon advertises the `session_shell_command` capability.
+In daemon-managed mode, every named channel's `cwd` must resolve to exactly one registered, trusted workspace. Its worker receives that runtime's cwd and environment overlay; an ambiguous or untrusted selection fails instead of using primary. The optional `btw` and `shellCommand` methods are exposed to adapters only when the daemon advertises the `session_btw` and `session_shell_command` capabilities, respectively.
 
 ## Architecture
 
@@ -115,6 +115,7 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | -------------------- | ------------------------------------------------------------------------ |
 | `Attachment`         | Structured file/image/audio/video attachment                             |
 | `AvailableCommand`   | Agent command advertised through the bridge                              |
+| `ChannelBtwResult`   | BTW result `{ sessionId, answer }`; `answer` can be `null`               |
 | `ChannelAgentBridge` | Adapter-facing bridge contract used by `ChannelBase` and `SessionRouter` |
 | `ChannelConfig`      | Channel configuration from `settings.json`                               |
 | `ChannelPlugin`      | Plugin factory interface (what you export)                               |
@@ -144,14 +145,14 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 
 **Provided methods:**
 
-| Method                                            | Description                                                                                                                       |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `handleInbound(envelope)`                         | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler. |
-| `setBridge(bridge)`                               | Replace the agent bridge after crash recovery                                                                                     |
-| `registerCommand(name, handler)`                  | Register a custom slash command (e.g. `/mycommand`)                                                                               |
-| `onToolCall(chatId, event)`                       | Hook called on agent tool invocations — override to show indicators                                                               |
-| `onResponseChunk(chatId, chunk, sessionId)`       | Hook called per streaming text chunk — override for progressive display (default: no-op)                                          |
-| `onResponseComplete(chatId, fullText, sessionId)` | Hook called when full response is ready — override to customize delivery (default: `sendMessage()`)                               |
+| Method                                                     | Description                                                                                                                                           |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `handleInbound(envelope)`                                  | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler.                     |
+| `setBridge(bridge)`                                        | Replace the agent bridge after crash recovery                                                                                                         |
+| `registerCommand(name, handler)`                           | Register a custom slash command (e.g. `/mycommand`)                                                                                                   |
+| `onToolCall(chatId, event)`                                | Hook called on agent tool invocations — override to show indicators                                                                                   |
+| `onResponseChunk(chatId, chunk, sessionId, segment)`       | Hook called per streaming text chunk — override for progressive display while preserving immutable `segment.sourceLabel` attribution (default: no-op) |
+| `onResponseComplete(chatId, fullText, sessionId, segment)` | Hook called when full response is ready — override to customize delivery (default: attributes delivery with `segment.sourceLabel` in named-task mode) |
 
 **Block streaming:** When `blockStreaming: "on"` is set in the channel config, the base class automatically splits the agent's streaming response into multiple messages at paragraph boundaries. See [Block Streaming](#block-streaming) below.
 
@@ -169,7 +170,7 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 
 `ChannelAgentBridge` is the adapter-facing contract. Channel adapters, channel plugins, `ChannelBase`, and `SessionRouter` should depend on this type instead of a concrete bridge implementation.
 
-`shellCommand` is optional. Adapters should check for it before enabling `!cmd`-style features because daemon-managed hosts expose it only when the connected daemon supports shell execution.
+`btw` and `shellCommand` are optional. Adapters should check for each before enabling the feature it backs — a BTW side question, or `!cmd`-style shell execution — because daemon-managed hosts expose them only when the connected daemon advertises the matching capability (`session_btw`, `session_shell_command`).
 
 ```typescript
 interface ChannelAgentBridge {
@@ -203,6 +204,11 @@ interface ChannelAgentBridge {
       imageMimeType?: string; // legacy fallback (first image only)
     },
   ): Promise<string>;
+  btw?(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult>;
   cancelSession(sessionId: string): Promise<void>;
   shellCommand?(
     sessionId: string,

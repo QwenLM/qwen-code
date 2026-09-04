@@ -250,6 +250,7 @@ export interface ChannelUserInputRequestContext {
   runId: string;
   owner: ChannelPromptOwner;
   target: SessionTarget;
+  sourceLabel?: string;
   precedingSegmentId?: string;
   questions: ChannelUserQuestion[];
   submitOptionId: string;
@@ -264,6 +265,7 @@ export interface ChannelOutputSegmentContext {
   segmentId: string;
   owner: ChannelPromptOwner;
   target: SessionTarget;
+  sourceLabel?: string;
   messageId?: string;
 }
 

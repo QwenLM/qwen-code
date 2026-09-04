@@ -5,8 +5,10 @@
  */
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -18,6 +20,8 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { parse } from 'yaml';
 
 import {
   buildComment,
@@ -202,7 +206,10 @@ function runHostingBlock(
     runAttempt = '1',
   } = {},
 ) {
-  const dir = mkdtempSync(join(tmpdir(), 'visuals-hosting-'));
+  const scopeRoot = mkdtempSync(join(tmpdir(), 'visuals-hosting-scope-'));
+  const dir = join(scopeRoot, 'fixture');
+  writeFileSync(join(scopeRoot, 'package.json'), '{"type":"commonjs"}\n');
+  mkdirSync(dir);
   try {
     return runHostingBlockIn(dir, hasImages, {
       publicBaseUrl,
@@ -213,7 +220,7 @@ function runHostingBlock(
   } finally {
     // The fixture used to leak a mkdtemp dir per call; capture everything
     // the assertions need inside, then tear it down.
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(scopeRoot, { recursive: true, force: true });
   }
 }
 
@@ -230,6 +237,7 @@ function runHostingBlockIn(
   mkdirSync(runnerTemp, { recursive: true });
   mkdirSync(stage, { recursive: true });
   mkdirSync(join(work, 'scripts'), { recursive: true });
+  writeFileSync(join(work, 'package.json'), '{"type":"module"}\n');
   // The block installs its job-private ossutil copy from here; the stub
   // uploader never executes it, but the install must succeed.
   writeFileSync(join(runnerTemp, 'ossutil'), 'fake ossutil\n');
@@ -240,9 +248,8 @@ function runHostingBlockIn(
   writeFileSync(
     join(work, 'scripts', 'upload-aliyun-oss-assets.js'),
     [
-      "'use strict';",
-      "const { copyFileSync, mkdirSync, writeFileSync } = require('node:fs');",
-      "const { basename, join } = require('node:path');",
+      "import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';",
+      "import { basename, join } from 'node:path';",
       "if (process.env.OSS_STUB_FAIL === '1') process.exit(1);",
       "const opts = { bucket: '', config: '', prefix: '' };",
       'const assets = [];',
@@ -309,10 +316,15 @@ function runHostingBlockIn(
     ? JSON.parse(readFileSync(recordPath, 'utf8'))
     : null;
   const hostedFiles = listFiles(stubRoot).sort();
+  const hostingStatusPath = join(runnerTemp, 'visuals-hosting-status.txt');
+  const hostingStatus = existsSync(hostingStatusPath)
+    ? readFileSync(hostingStatusPath, 'utf8').trim()
+    : null;
   return {
     res,
     record,
     hostedFiles,
+    hostingStatus,
     pr,
     headSha,
     runId,
@@ -326,6 +338,7 @@ test('hosting block uploads staged images to the exact prefix RAW_BASE promises'
     res,
     record,
     hostedFiles,
+    hostingStatus,
     pr,
     headSha,
     runId,
@@ -333,6 +346,7 @@ test('hosting block uploads staged images to the exact prefix RAW_BASE promises'
     runnerTemp,
   } = runHostingBlock(true);
   assert.equal(res.status, 0, res.stderr);
+  assert.equal(hostingStatus, 'success');
   // Flag wiring: the uploader gets the bucket, the credential file the
   // configure step writes, and the prefix the comment URLs are built from.
   const prefix = `pr-assets/web-shell-visuals/${pr}/${headSha}/${runId}/${runAttempt}`;
@@ -411,18 +425,23 @@ test('hosting block gives re-run attempts of the SAME run distinct prefixes', ()
 });
 
 test('hosting block skips the uploader entirely on the no-change arm', () => {
-  const { res, record } = runHostingBlock(false);
+  const { res, record, hostingStatus } = runHostingBlock(false);
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /^RAW_BASE=$/m); // empty -> image-less comment
   assert.doesNotMatch(res.stdout, /hosted at/);
   assert.equal(record, null); // the uploader never ran
+  assert.equal(hostingStatus, 'success');
 });
 
-test('hosting block aborts without publishing a URL when upload fails', () => {
-  const { res, record } = runHostingBlock(true, { uploadFails: true });
-  assert.notEqual(res.status, 0);
-  assert.doesNotMatch(res.stdout, /^RAW_BASE=/m);
+test('hosting block records failure and continues without publishing a URL', () => {
+  const { res, record, hostingStatus } = runHostingBlock(true, {
+    uploadFails: true,
+  });
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /^RAW_BASE=$/m);
+  assert.match(res.stdout, /Failed to host web-shell visuals/);
   assert.equal(record, null);
+  assert.equal(hostingStatus, 'failure');
 });
 
 test('hosting block strips a trailing slash from the public base URL', () => {
@@ -439,6 +458,125 @@ test('hosting block strips a trailing slash from the public base URL', () => {
   );
   assert.doesNotMatch(res.stdout, /assets\.example\.test\/\/pr-assets/);
 });
+
+const publishWorkflow = () =>
+  readFileSync(
+    new URL('../workflows/web-shell-visuals-publish.yml', import.meta.url),
+    'utf8',
+  );
+const publishScriptPath = fileURLToPath(
+  new URL('./web-shell-visuals-publish.mjs', import.meta.url),
+);
+const publishStep = () => {
+  const workflow = parse(publishWorkflow());
+  return workflow.jobs.publish.steps.find(
+    (step) => step.name === 'Publish visuals to the PR',
+  ).run;
+};
+
+const writeExecutable = (path, source) => {
+  writeFileSync(path, source);
+  chmodSync(path, 0o755);
+};
+
+const ghStubSource = `#!/usr/bin/env node
+const args = process.argv.slice(2);
+process.getBuiltinModule('node:fs').appendFileSync(process.env.CALL_LOG, args.join(' ') + '\\n');
+const endpoint = args[1] ?? '';
+if (endpoint === 'user') {
+  process.stdout.write('qwen-code-bot\\n');
+} else if (endpoint.endsWith('/pulls/7')) {
+  process.stdout.write(JSON.stringify({
+    state: 'open',
+    head: {
+      sha: process.env.RUN_HEAD_SHA,
+      repo: { full_name: process.env.RUN_HEAD_REPO },
+      ref: process.env.RUN_HEAD_BRANCH,
+    },
+  }));
+} else if (endpoint.endsWith('/issues/7/comments') && args.includes('--method')) {
+  process.stdout.write('[]\\n');
+}
+`;
+
+const runPublishStep = ({
+  uploadSucceeds,
+  script = publishStep(),
+  ghStub = ghStubSource,
+}) => {
+  const root = mkdtempSync(join(tmpdir(), 'web-shell-visuals-workflow-'));
+  try {
+    const workspace = join(root, 'workspace');
+    const runnerTemp = join(root, 'runner');
+    const bin = join(root, 'bin');
+    const callLog = join(root, 'calls.log');
+    const scriptDir = join(workspace, '.github', 'scripts');
+    mkdirSync(join(workspace, 'visuals', 'screenshots'), { recursive: true });
+    mkdirSync(join(workspace, 'visuals', 'gifs'), { recursive: true });
+    mkdirSync(scriptDir, { recursive: true });
+    mkdirSync(runnerTemp);
+    mkdirSync(bin);
+    // Force ESM scope onto the extensionless `gh` stub so a `require()`
+    // regression in it is caught here on every host (#10736).
+    writeFileSync(join(bin, 'package.json'), '{"type":"module"}\n');
+    writeFileSync(join(workspace, 'visuals', 'pr.txt'), '7\n');
+    writeFileSync(
+      join(workspace, 'visuals', 'screenshots', 'home-light.png'),
+      Buffer.from(PNG, 'hex'),
+    );
+    writeFileSync(join(workspace, 'visuals', 'render-status.txt'), 'success\n');
+    copyFileSync(
+      publishScriptPath,
+      join(scriptDir, 'web-shell-visuals-publish.mjs'),
+    );
+    mkdirSync(join(workspace, 'scripts'), { recursive: true });
+    writeFileSync(
+      join(workspace, 'scripts', 'upload-aliyun-oss-assets.js'),
+      "process.exit(process.env.UPLOAD_SUCCEEDS === '1' ? 0 : 1);\n",
+    );
+    writeExecutable(join(runnerTemp, 'ossutil'), '#!/bin/sh\nexit 0\n');
+    writeExecutable(join(bin, 'gh'), ghStub);
+    writeExecutable(join(bin, 'sleep'), '#!/bin/sh\nexit 0\n');
+
+    const result = spawnSync('bash', ['-c', script], {
+      cwd: workspace,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        CALL_LOG: callLog,
+        UPLOAD_SUCCEEDS: uploadSucceeds ? '1' : '0',
+        GH_TOKEN: 'test-token',
+        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+        GITHUB_WORKSPACE: workspace,
+        RUNNER_TEMP: runnerTemp,
+        RUN_ID: '99',
+        RUN_ATTEMPT: '2',
+        RUN_URL: 'https://run.example/99',
+        RUN_HEAD_SHA: '1234567890abcdef',
+        RUN_HEAD_REPO: 'fork/qwen-code',
+        RUN_HEAD_BRANCH: 'fix/visuals',
+        ALIYUN_OSS_BUCKET: 'assets-bucket',
+        ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+        OSS_UPLOAD_ATTEMPT_TIMEOUT_MS: '120000',
+      },
+    });
+    const bodyPath = join(runnerTemp, 'visuals-comment.md');
+    const hostingStatusPath = join(runnerTemp, 'visuals-hosting-status.txt');
+    // A stub that dies at startup ends the step at the bot-identity check:
+    // it exits 0 BEFORE any of these artifacts exist, so they are optional.
+    return {
+      ...result,
+      body: existsSync(bodyPath) ? readFileSync(bodyPath, 'utf8') : null,
+      calls: existsSync(callLog) ? readFileSync(callLog, 'utf8') : '',
+      hostingStatus: existsSync(hostingStatusPath)
+        ? readFileSync(hostingStatusPath, 'utf8').trim()
+        : null,
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+};
 
 test('sanitizeName preserves the extension (regression: a trailing char broke the .png filter)', () => {
   assert.equal(
@@ -577,6 +715,66 @@ test('buildComment lists a lone composite as one wide image (no light/dark table
   assert.doesNotMatch(body, /<table>/); // composites are a flat list now
   // A lone light shot no longer needs a dark-pair placeholder cell.
   assert.doesNotMatch(body, /<td>/);
+});
+
+test('buildComment: hosting failure reports rendered assets without broken image links', () => {
+  const body = buildComment(['home-light.png', 'model-switch.gif'], {
+    hostingFailed: true,
+    runUrl: 'https://run.example/7',
+  });
+  assert.match(body, /failed to host/i);
+  assert.match(body, /home-light\.png/);
+  assert.match(body, /model-switch\.gif/);
+  assert.match(body, /\[workflow run\]\(https:\/\/run\.example\/7\)/);
+  assert.doesNotMatch(body, /failed to render/i);
+  assert.doesNotMatch(body, /<img /);
+});
+
+test('buildComment: hosting failure preserves render-failure caveat', () => {
+  const body = buildComment(['home-light.png', 'model-switch.gif'], {
+    hostingFailed: true,
+    renderIncomplete: true,
+    runUrl: 'https://run.example/7',
+  });
+  assert.match(body, /failed to render/i);
+  assert.match(body, /failed to host/i);
+  assert.match(body, /\[workflow run\]\(https:\/\/run\.example\/7\)/);
+  assert.doesNotMatch(body, /<img /);
+});
+
+test('comment CLI reads hosting failure status from the eighth argument', () => {
+  const root = mkdtempSync(join(tmpdir(), 'web-shell-visuals-'));
+  try {
+    const stageDir = join(root, 'stage');
+    const bodyFile = join(root, 'body.md');
+    const changedPathsFile = join(root, 'paths.txt');
+    const renderStatusFile = join(root, 'render-status.txt');
+    const hostingStatusFile = join(root, 'hosting-status.txt');
+    mkdirSync(stageDir);
+    writeFileSync(join(stageDir, 'home-light.png'), '');
+    writeFileSync(changedPathsFile, '');
+    writeFileSync(renderStatusFile, 'success\n');
+    writeFileSync(hostingStatusFile, 'failure\n');
+
+    execFileSync(process.execPath, [
+      publishScriptPath,
+      'comment',
+      stageDir,
+      'https://assets.example/pr',
+      'abc1234',
+      'https://run.example/7',
+      bodyFile,
+      changedPathsFile,
+      renderStatusFile,
+      hostingStatusFile,
+    ]);
+
+    const body = readFileSync(bodyFile, 'utf8');
+    assert.match(body, /failed to host/i);
+    assert.doesNotMatch(body, /<img /);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 // --- Empty-preview triage (coverage gap vs. genuinely no visual effect) ---
@@ -755,4 +953,59 @@ test('buildComment: render-failure note omits the run link when runUrl is absent
   const body = buildComment([], { renderIncomplete: true });
   assert.match(body, /failed to render/i);
   assert.doesNotMatch(body, /\[workflow run\]/); // no dangling empty link
+});
+
+test('publish workflow carries a hosting failure into the posted body', () => {
+  const renamedSection = publishStep().replace(
+    '# --- Post or update the PR comment',
+    '# Write the PR comment',
+  );
+  const result = runPublishStep({
+    uploadSucceeds: false,
+    script: renamedSection,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.hostingStatus, 'failure');
+  assert.match(result.body, /failed to host/i);
+  assert.doesNotMatch(result.body, /<img /);
+  assert.match(
+    result.calls,
+    /api repos\/QwenLM\/qwen-code\/issues\/7\/comments -F body=@/,
+  );
+});
+
+test('publish workflow keeps successful hosting out of the failure path', () => {
+  const result = runPublishStep({ uploadSucceeds: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.hostingStatus, 'success');
+  assert.doesNotMatch(result.body, /failed to host/i);
+  assert.match(
+    result.body,
+    /https:\/\/assets\.example\.test\/pr-assets\/web-shell-visuals\/7\/1234567890abcdef\/99\/2\/home-light\.png/,
+  );
+  assert.match(
+    result.calls,
+    /api repos\/QwenLM\/qwen-code\/issues\/7\/comments -F body=@/,
+  );
+});
+
+// Witness for the bin/package.json pin in runPublishStep: without it this
+// suite cannot observe a `require()` regression in the stub (#10736).
+test('publish workflow fixture forces ESM scope onto the gh stub', () => {
+  // The pre-#10736 stub line is legal CJS but dies at startup once the
+  // fixture's pin forces ESM scope onto the extensionless stub, so the
+  // bot-identity lookup fails and the step skips commenting. It still exits
+  // 0 (`if [ -z "${BOT_LOGIN}" ]; then ... exit 0; fi` in the workflow), so
+  // the witness is the missing artifacts, not the status. Deleting the pin
+  // lets this stub parse as CJS on standard hosts and turns this test red.
+  const result = runPublishStep({
+    uploadSucceeds: true,
+    ghStub: ghStubSource.replace(
+      "process.getBuiltinModule('node:fs')",
+      "require('node:fs')",
+    ),
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.body, null); // the comment body was never written
+  assert.equal(result.calls, ''); // no gh call was logged
 });

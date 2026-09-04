@@ -28,6 +28,22 @@ export async function loadSkillsFromDir(
     debugLogger.debug(`Found ${entries.length} entries in ${baseDir}`);
 
     for (const entry of entries) {
+      // Skip transient install artifacts (backup / staging dirs left behind
+      // by a crashed reinstall). Without this filter a stale `.backup-*`
+      // sibling with a valid SKILL.md would be loaded as a duplicate skill,
+      // and a "deleted" skill could reappear from its backup sibling.
+      // Match only the actual artifact shape (`.backup-<pid>-<timestamp>` /
+      // `.installing-<pid>-<timestamp>`, anchored at the end of the entry
+      // name) so that legitimate skill dirs whose names merely contain
+      // `.backup-` or `.installing-` (e.g. `db.backup-2024`) are not skipped.
+      if (
+        /\.backup-\d+-\d+$/.test(entry.name) ||
+        /\.installing-\d+-\d+$/.test(entry.name)
+      ) {
+        debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
+        continue;
+      }
+
       // Process directories and symlinks that resolve to directories.
       // Plain files are silently skipped (each skill must be a directory).
       const isDirectory = entry.isDirectory();

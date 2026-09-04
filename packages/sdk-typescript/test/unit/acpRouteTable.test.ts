@@ -460,6 +460,77 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/session/s17/tasks', 'GET');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/tasks');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+      new URLSearchParams('includeWorkflows=true'),
+    );
+    expect(params).toEqual({ sessionId: 's17', includeWorkflows: true });
+  });
+
+  it('POST /session/:id/tasks/:taskId/cancel maps to _qwen/session/tasks/cancel', () => {
+    const result = matchRoute('/session/s17/tasks/task%2F1/cancel', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/tasks/cancel');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { kind: 'workflow' },
+      'POST',
+    );
+    expect(params).toEqual({
+      sessionId: 's17',
+      taskId: 'task/1',
+      kind: 'workflow',
+    });
+  });
+
+  it('POST /session/:id/tasks/:taskId/workflow-action maps to _qwen/session/tasks/workflow_action', () => {
+    const result = matchRoute(
+      '/session/s17/tasks/workflow%201/workflow-action',
+      'POST',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/tasks/workflow_action');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { action: 'retry' },
+      'POST',
+    );
+    expect(params).toEqual({
+      sessionId: 's17',
+      taskId: 'workflow 1',
+      action: 'retry',
+    });
+  });
+
+  it('GET /session/:id/agents maps to _qwen/session/agents', () => {
+    const result = matchRoute('/session/s17/agents', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/agents');
+  });
+
+  it('GET /session/:id/agent-trace maps its optional root filter', () => {
+    const result = matchRoute('/session/s17/agent-trace', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/agent_trace');
+    expect(
+      result!.mapping.extractParams(
+        result!.segments,
+        undefined,
+        'GET',
+        new URLSearchParams('rootAgentId=root-1'),
+      ),
+    ).toEqual({ sessionId: 's17', rootAgentId: 'root-1' });
+  });
+
+  it('GET /session/:id/attachments maps to _qwen/session/attachments', () => {
+    const result = matchRoute('/session/s17/attachments', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/attachments');
+    expect(
+      result!.mapping.extractParams(result!.segments, undefined, 'GET'),
+    ).toEqual({ sessionId: 's17' });
   });
 
   it('GET /session/:id/lsp maps to _qwen/session/lsp', () => {
@@ -472,6 +543,21 @@ describe('acpRouteTable – matchRoute', () => {
       'GET',
     );
     expect(params).toEqual({ sessionId: 's18' });
+  });
+
+  it('GET /session/:id/saved-workflows/:name maps to _qwen/session/saved_workflow', () => {
+    const result = matchRoute(
+      '/session/s19/saved-workflows/deep%20review',
+      'GET',
+    );
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/saved_workflow');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ sessionId: 's19', name: 'deep review' });
   });
 
   // ---- Granular workspace routes ----------------------------------------
