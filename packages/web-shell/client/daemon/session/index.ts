@@ -18,12 +18,23 @@ export {
   useDaemonSessionNotices,
   useDaemonStreamingState,
   useDaemonSession,
+  useDaemonSessionTurnIndex,
   useDaemonTranscriptBlocks,
   useDaemonTranscriptHistory,
   useDaemonTranscriptState,
   useDaemonTranscriptStore,
+  useDaemonTurnLocator,
 } from './DaemonSessionProvider.js';
-export type { DaemonTranscriptHistory } from './DaemonSessionProvider.js';
+export type {
+  DaemonSessionTurnIndex,
+  DaemonTranscriptHistory,
+} from './DaemonSessionProvider.js';
+export type {
+  LiveTurnEntry,
+  SessionTurnIndexState,
+  SessionTurnIndexStatus,
+  TurnIndexPageCacheEntry,
+} from './turnIndexStore.js';
 export type {
   DaemonCommandInfo,
   DaemonConnectionState,

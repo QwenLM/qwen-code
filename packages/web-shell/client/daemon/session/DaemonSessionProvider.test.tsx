@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   DaemonEvent,
   NonBlockingPromptAccepted,
+  DaemonSessionTurnIndexPage,
   DaemonSseConnectReason,
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
@@ -32,6 +33,7 @@ import {
   useDaemonActions,
   useDaemonConnection,
   useDaemonSessionNotices,
+  useDaemonSessionTurnIndex,
   useDaemonPendingPermissions,
   useDaemonPromptStatus,
   useDaemonStreamingState,
@@ -114,6 +116,7 @@ interface MockSession {
     partial?: true;
     replayError?: string;
   }>;
+  getTurnIndexPage: (opts: unknown) => Promise<DaemonSessionTurnIndexPage>;
   replaySnapshot: {
     compactedReplay: DaemonEvent[];
     liveJournal: DaemonEvent[];
@@ -182,6 +185,10 @@ interface MockClient {
     sessionId: string,
     opts: unknown,
   ) => Promise<unknown>;
+  getSessionTurnIndexPage: (
+    sessionId: string,
+    opts: unknown,
+  ) => Promise<unknown>;
 }
 
 const sdkMocks = vi.hoisted(() => {
@@ -216,6 +223,7 @@ const sdkMocks = vi.hoisted(() => {
   const removeMidTurnMessage = vi.fn();
   const branchSession = vi.fn();
   const getSessionTranscriptPage = vi.fn();
+  const getSessionTurnIndexPage = vi.fn();
 
   class MockDaemonClient {
     constructor(opts: unknown) {
@@ -254,6 +262,7 @@ const sdkMocks = vi.hoisted(() => {
     removeMidTurnMessage = removeMidTurnMessage;
     branchSession = branchSession;
     getSessionTranscriptPage = getSessionTranscriptPage;
+    getSessionTurnIndexPage = getSessionTurnIndexPage;
     dispose = vi.fn();
   }
 
@@ -327,6 +336,7 @@ const sdkMocks = vi.hoisted(() => {
     removeMidTurnMessage,
     branchSession,
     getSessionTranscriptPage,
+    getSessionTurnIndexPage,
     reset() {
       sessions.length = 0;
       daemonClientOptions.length = 0;
@@ -441,6 +451,7 @@ const sdkMocks = vi.hoisted(() => {
         displayName: 'Branch Session',
       });
       getSessionTranscriptPage.mockReset();
+      getSessionTurnIndexPage.mockReset();
       MockDaemonSessionClient.createOrAttach.mockReset();
       MockDaemonSessionClient.createOrAttach.mockImplementation(
         async (client: unknown, _req: unknown): Promise<MockSession> =>
@@ -17392,6 +17403,175 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
   }
+
+  describe('session turn index', () => {
+    function turnEntries(
+      from: number,
+      count: number,
+    ): DaemonSessionTurnIndexPage['turns'] {
+      return Array.from({ length: count }, (_, offset) => ({
+        ordinal: from + offset,
+        turnId: `record-${from + offset}`,
+        kind: 'prompt' as const,
+        label: `Turn ${from + offset}`,
+      }));
+    }
+
+    function turnIndexPage(
+      overrides: Partial<DaemonSessionTurnIndexPage> = {},
+    ): DaemonSessionTurnIndexPage {
+      return {
+        v: 1,
+        sessionId: 'session-turn-index',
+        snapshot: 'snapshot-1',
+        totalTurns: 2,
+        start: 0,
+        turns: turnEntries(0, 2),
+        ...overrides,
+      };
+    }
+
+    function pushSession(sessionId: string) {
+      const session = createMockSession({ sessionId });
+      sdkMocks.sessions.push(session);
+      return session;
+    }
+
+    async function renderIndexHarness(features: string[]) {
+      sdkMocks.capabilities.mockResolvedValue({
+        workspaceCwd: '/mock-workspace',
+        features,
+      });
+      let index: ReturnType<typeof useDaemonSessionTurnIndex> | undefined;
+      function Harness() {
+        index = useDaemonSessionTurnIndex();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      return () => index;
+    }
+
+    it('stays disabled and sends nothing without the capability', async () => {
+      pushSession('session-turn-index-off');
+      const getIndex = await renderIndexHarness([
+        'session_transcript_pagination',
+      ]);
+      // No partial enablement: without the capability there is no anchored
+      // read, so there is no random access to expose and nothing to fetch.
+      expect(sdkMocks.getSessionTurnIndexPage).not.toHaveBeenCalled();
+      expect(getIndex()).toMatchObject({ status: 'disabled', totalTurns: 0 });
+    });
+
+    it('seeds the newest metadata page once the capability is advertised', async () => {
+      const session = pushSession('session-turn-index');
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      const getIndex = await renderIndexHarness(['session_turn_navigation']);
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledTimes(1);
+      // The seed omits `snapshot` and `start`: the client has no snapshot yet,
+      // and the daemon chooses the newest window's start itself.
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledWith(
+        session.sessionId,
+        { limit: 200, clientId: session.clientId },
+      );
+      expect(getIndex()).toMatchObject({
+        status: 'ready',
+        sessionId: session.sessionId,
+        snapshot: 'snapshot-1',
+        totalTurns: 2,
+      });
+      expect([...(getIndex()?.pages.keys() ?? [])]).toEqual([0]);
+    });
+
+    it('latches unsupported when the transcript is above the indexing ceiling', async () => {
+      pushSession('session-turn-index-ceiling');
+      sdkMocks.getSessionTurnIndexPage.mockRejectedValue(
+        new DaemonHttpError(
+          413,
+          { code: 'transcript_too_large' },
+          'transcript too large',
+        ),
+      );
+      const getIndex = await renderIndexHarness(['session_turn_navigation']);
+      // Terminal for the session: the rail falls back and no retry can help.
+      expect(getIndex()?.status).toBe('unsupported');
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports a transient failure without hammering the daemon', async () => {
+      pushSession('session-turn-index-flaky');
+      sdkMocks.getSessionTurnIndexPage.mockRejectedValue(
+        new Error('daemon offline'),
+      );
+      const getIndex = await renderIndexHarness(['session_turn_navigation']);
+      expect(getIndex()?.status).toBe('error');
+      // The retry sits on a backoff timer rather than looping in place, and it
+      // never fails session load: the provider reached a rendered state.
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledTimes(1);
+    });
+
+    it('fetches only the uncovered slice for an ordinal outside the seed page', async () => {
+      const session = pushSession('session-turn-index-sparse');
+      sdkMocks.getSessionTurnIndexPage
+        .mockResolvedValueOnce(
+          turnIndexPage({
+            sessionId: session.sessionId,
+            totalTurns: 400,
+            start: 200,
+            turns: turnEntries(200, 200),
+          }),
+        )
+        .mockResolvedValueOnce(
+          turnIndexPage({
+            sessionId: session.sessionId,
+            totalTurns: 400,
+            start: 0,
+            turns: turnEntries(0, 200),
+          }),
+        );
+      const getIndex = await renderIndexHarness(['session_turn_navigation']);
+      expect(getIndex()?.totalTurns).toBe(400);
+
+      await act(async () => {
+        await getIndex()?.ensurePage(50);
+        await flushPromises();
+      });
+
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenLastCalledWith(
+        session.sessionId,
+        {
+          snapshot: 'snapshot-1',
+          start: 0,
+          limit: 200,
+          clientId: session.clientId,
+        },
+      );
+      expect(
+        [...(getIndex()?.pages.keys() ?? [])].sort((a, b) => a - b),
+      ).toEqual([0, 200]);
+    });
+
+    it('does not refetch an ordinal the seed page already covers', async () => {
+      const session = pushSession('session-turn-index-covered');
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      const getIndex = await renderIndexHarness(['session_turn_navigation']);
+      await act(async () => {
+        await getIndex()?.ensurePage(1);
+        await flushPromises();
+      });
+      expect(sdkMocks.getSessionTurnIndexPage).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 function requireActions<T>(actions: T | undefined): T {
@@ -17587,6 +17767,15 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
           partial?: true;
           replayError?: string;
         };
+      }),
+    getTurnIndexPage:
+      opts.getTurnIndexPage ??
+      vi.fn(async (pageOpts: unknown) => {
+        if (!session.client) throw new Error('Session client is unavailable');
+        return (await session.client.getSessionTurnIndexPage(
+          session.sessionId,
+          pageOpts,
+        )) as DaemonSessionTurnIndexPage;
       }),
     replaySnapshot: opts.replaySnapshot ?? {
       compactedReplay: [],
