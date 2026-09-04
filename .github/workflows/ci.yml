@@ -829,7 +829,7 @@ jobs:
     # OUTCOME — no vitest unit-test run, whose flake was measured failing
     # 41% of post-merge runs in the week of the split — not lightness: the
     # bundle-closure check builds and bundles the CLI, the helper-suite
-    # steps execute the 23-file HELPER_TESTS battery (most spawn
+    # steps execute the 24-file HELPER_TESTS battery (most spawn
     # subprocesses), and the lane runs on the same contended pool as
     # everything else, which is what the routed 90/45 ceiling below prices.
     # One honest limit, recorded so the required-check follow-up is argued
