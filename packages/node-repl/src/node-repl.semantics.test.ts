@@ -314,6 +314,23 @@ describe('binding semantics through the real kernel', () => {
     expect(viaBytes.events.some((e) => e.type === 'image')).toBe(true);
   });
 
+  it('carries structured image metadata across the kernel boundary', async () => {
+    const manager = makeManager();
+    const png =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const result = await manager.exec({
+      code: `await nodeRepl.emitImage({ bytes: Uint8Array.from(atob("${png}"), (c) => c.charCodeAt(0)), mimeType: "image/png", metadata: { width: 1, height: 1, coordinateSpace: "css-pixels" } });`,
+      timeoutMs: 30_000,
+    });
+
+    expect(result.status).toBe('ok');
+    expect(result.events.find((event) => event.type === 'image')).toMatchObject(
+      {
+        metadata: '{"width":1,"height":1,"coordinateSpace":"css-pixels"}',
+      },
+    );
+  });
+
   it('caps live sandbox timers instead of letting one cell saturate the loop', async () => {
     const manager = makeManager();
     const r = await manager.exec({

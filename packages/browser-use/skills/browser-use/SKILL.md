@@ -80,16 +80,8 @@ await tab.playwright.expectNavigation(
 Render screenshots with:
 
 ```js
-{
-  const image = await tab.screenshot();
-  const png = new DataView(image.buffer, image.byteOffset, image.byteLength);
-  nodeRepl.write({ width: png.getUint32(16), height: png.getUint32(20) });
-  await nodeRepl.emitImage(image);
-}
+await nodeRepl.emitImage(await tab.screenshot());
 ```
-
-Coordinate CUA uses the original PNG's CSS-pixel coordinates. If the displayed
-preview is resized, scale positions to the reported intrinsic dimensions.
 
 Use `tab.dev.logs()` for bounded console diagnostics. Arm
 `tab.playwright.waitForEvent('download' | 'filechooser')` before the action that

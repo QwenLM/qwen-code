@@ -73,6 +73,30 @@ describe('convertOutcomeToMcpResult', () => {
     expect(image?.data).toBe(PNG_BASE64);
   });
 
+  it('places image metadata immediately before the image', () => {
+    const result = convertOutcomeToMcpResult(
+      outcome({
+        status: 'ok',
+        events: [
+          {
+            type: 'image',
+            data: PNG_BASE64,
+            mimeType: 'image/png',
+            metadata: '{"width":1,"height":1,"coordinateSpace":"css-pixels"}',
+          },
+        ],
+      }),
+    );
+
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: '[image metadata] {"width":1,"height":1,"coordinateSpace":"css-pixels"}\n',
+      },
+      { type: 'image', data: PNG_BASE64, mimeType: 'image/png' },
+    ]);
+  });
+
   it('rejects an image whose bytes do not match the declared MIME', () => {
     const result = convertOutcomeToMcpResult(
       outcome({

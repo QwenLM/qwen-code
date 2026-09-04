@@ -40,6 +40,7 @@ const MAX_RAW_IMAGE_CHARS = 128 * 1024 * 1024;
 // forged frame cannot carry an unbounded string that bypasses the image byte
 // budget and is later interpolated into (and tokenized within) a notice.
 const MAX_IMAGE_MIME_CHARS = 255;
+const MAX_IMAGE_METADATA_CHARS = 4 * 1024;
 const CONSOLE_LEVELS = new Set(['log', 'info', 'warn', 'error', 'debug']);
 
 export interface NodeReplTextEvent {
@@ -53,6 +54,7 @@ export interface NodeReplImageEvent {
   type: 'image';
   data: string;
   mimeType: string;
+  metadata?: string;
 }
 
 export type NodeReplOutputEvent = NodeReplTextEvent | NodeReplImageEvent;
@@ -655,12 +657,22 @@ export class NodeReplKernelManager {
           typeof message.execId !== 'string' ||
           typeof message.data !== 'string' ||
           typeof message.mimeType !== 'string' ||
-          message.mimeType.length > MAX_IMAGE_MIME_CHARS
+          message.mimeType.length > MAX_IMAGE_MIME_CHARS ||
+          !(
+            message.metadata === undefined ||
+            (typeof message.metadata === 'string' &&
+              message.metadata.length <= MAX_IMAGE_METADATA_CHARS)
+          )
         ) {
           this.handleProtocolError(handle, new Error('invalid image frame'));
           return;
         }
-        this.collectImage(message.execId, message.data, message.mimeType);
+        this.collectImage(
+          message.execId,
+          message.data,
+          message.mimeType,
+          message.metadata,
+        );
         return;
       case 'execResult':
         this.handleExecResult(handle, message as ExecResultMessage);
@@ -786,7 +798,12 @@ export class NodeReplKernelManager {
     });
   }
 
-  private collectImage(execId: string, data: string, mimeType: string): void {
+  private collectImage(
+    execId: string,
+    data: string,
+    mimeType: string,
+    metadata?: string,
+  ): void {
     const inflight = this.inflight;
     if (!inflight || inflight.execId !== execId) {
       if (inflight) inflight.droppedStaleFrames++;
@@ -801,7 +818,12 @@ export class NodeReplKernelManager {
     }
     inflight.imageCount++;
     inflight.imageChars += data.length;
-    inflight.events.push({ type: 'image', data, mimeType });
+    inflight.events.push({
+      type: 'image',
+      data,
+      mimeType,
+      ...(metadata === undefined ? {} : { metadata }),
+    });
   }
 
   /**

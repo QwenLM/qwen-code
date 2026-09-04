@@ -42,6 +42,7 @@ const MAX_BASE64_IMAGE_CHARS = Math.ceil(MAX_IMAGE_BYTES / 3) * 4;
 const MAX_PERCENT_ENCODED_IMAGE_CHARS = MAX_IMAGE_BYTES * 3;
 const MAX_RAW_IMAGES = 64;
 const MAX_RAW_IMAGE_CHARS = 128 * 1024 * 1024;
+const MAX_IMAGE_METADATA_CHARS = 4 * 1024;
 const IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype);
 const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(
@@ -359,7 +360,13 @@ function resolveImagePayload(payload) {
       );
     }
   }
-  return { data: buffer.toString('base64'), mimeType: sniffed };
+  return {
+    data: buffer.toString('base64'),
+    mimeType: sniffed,
+    ...(typeof payload.metadata === 'string'
+      ? { metadata: payload.metadata }
+      : {}),
+  };
 }
 
 function scheduleTimer(callback, delay, repeat) {
@@ -437,6 +444,7 @@ const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
 const intrinsicObjectDefineProperties = Object.defineProperties;
 const intrinsicArrayBufferIsView = ArrayBuffer.isView;
 const intrinsicJSONParse = JSON.parse;
+const intrinsicJSONStringify = JSON.stringify;
 const intrinsicReflectApply = Reflect.apply;
 const intrinsicWeakSetHas = WeakSet.prototype.has;
 const intrinsicWeakSetAdd = WeakSet.prototype.add;
@@ -490,12 +498,23 @@ const runtime = {
       };
     } else if (image && typeof image === 'object' && 'bytes' in image) {
       const bytes = image.bytes;
+      let metadata = null;
+      if ('metadata' in image && image.metadata !== undefined) {
+        metadata = intrinsicJSONStringify(image.metadata);
+        if (typeof metadata !== 'string') {
+          throw new TypeError('emitImage metadata must be JSON-serializable');
+        }
+        if (metadata.length > ${MAX_IMAGE_METADATA_CHARS}) {
+          throw new TypeError('emitImage metadata is too large');
+        }
+      }
       payload = {
         kind: 'bytes',
         bytes: intrinsicArrayBufferIsView(bytes)
           ? bytes
           : new intrinsicUint8Array(bytes),
         mimeType: typeof image.mimeType === 'string' ? image.mimeType : null,
+        metadata,
       };
     } else {
       throw new TypeError('unsupported emitImage input');

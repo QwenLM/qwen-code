@@ -19,7 +19,9 @@ client (Qwen Code via `mcpServers`, Claude, Codex, etc.) can run it.
 ### Cell semantics
 
 - Explicit output only: `nodeRepl.write(value)` for text, `nodeRepl.emitImage(png|jpeg|webp)`
-  for images; `console.*` is captured. Plain expression results are not returned.
+  for images; byte payloads may include JSON-serializable `metadata`, which is
+  returned immediately before the image. `console.*` is captured. Plain expression
+  results are not returned.
 - `nodeRepl.cwd` / `homeDir` / `tmpDir` and `nodeRepl.getHeapStatus()` are available.
 - Top-level static `import` is not allowed — use dynamic `await import()`.
 - Bare packages resolve from the session `cwd` `node_modules` plus any directory

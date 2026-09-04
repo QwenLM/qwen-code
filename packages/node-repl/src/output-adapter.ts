@@ -295,6 +295,9 @@ export function convertOutcomeToMcpResult(
     }
     validImages++;
     imageBytesEmitted += verdict.byteLength;
+    if (event.metadata !== undefined) {
+      addBudgetedText(`[image metadata] ${event.metadata}\n`);
+    }
     blocks.push({ type: 'image', data: event.data, mimeType: event.mimeType });
   }
 

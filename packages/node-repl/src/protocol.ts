@@ -78,6 +78,7 @@ export interface ImageMessage {
   execId: string | null;
   data: string;
   mimeType: string;
+  metadata?: string;
 }
 
 export interface ExecResultMessage {
