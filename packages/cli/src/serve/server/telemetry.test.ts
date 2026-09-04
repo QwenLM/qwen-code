@@ -454,6 +454,28 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     );
   });
 
+  it('attributes workspace turn-index reads to the target workspace and session', () => {
+    const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
+    const res = mockRes(200);
+
+    mw(
+      mockReq('GET', '/workspaces/ws-secondary/session/session%2F1/turn-index'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+
+    expect(coreMocks.withDaemonRequestSpan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: 'GET',
+        route: 'GET /workspaces/:workspace/session/:id/turn-index',
+        sessionId: 'session/1',
+        workspaceHash: 'hash:/workspace/secondary',
+      }),
+      expect.any(Function),
+    );
+  });
+
   it('attributes workspace session-info reads to the shared session-info route', () => {
     const mw = daemonTelemetryMiddleware(() => '/ws');
     const res = mockRes(200);
@@ -1068,17 +1090,17 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  it('contains 67 unique routes with the audited 65/2 attribution split', () => {
+  it('contains 68 unique routes with the audited 66/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(67);
-    expect(new Set(keys).size).toBe(67);
+    expect(keys).toHaveLength(68);
+    expect(new Set(keys).size).toBe(68);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(65);
+    ).toHaveLength(66);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',
