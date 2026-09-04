@@ -539,10 +539,19 @@ describe('PlanExecutionView', () => {
       '[data-plan-dependency="research"]',
     );
     expect(upstreamLink?.tagName).toBe('BUTTON');
+    // The host keyboard handlers isolate plan controls through this marker
+    // (ToolApproval/TasksStatusMessage early-return on it), so these buttons
+    // must carry it like every other control in the view.
+    expect(upstreamLink?.hasAttribute('data-plan-interactive')).toBe(true);
     expect(upstreamLink?.textContent).toBe('1Research');
     expect(
       details?.querySelector('[data-plan-dependency="verify"]')?.textContent,
     ).toBe('3Verify');
+    expect(
+      details
+        ?.querySelector('[data-plan-dependency="verify"]')
+        ?.hasAttribute('data-plan-interactive'),
+    ).toBe(true);
     expect(details?.textContent).not.toContain('Depends on: research');
     expect(details?.textContent).toContain('Subagents');
     expect(details?.textContent).toContain(
@@ -571,6 +580,47 @@ describe('PlanExecutionView', () => {
         .querySelector('[data-plan-node-id="research"]')
         ?.getAttribute('aria-pressed'),
     ).toBe('true');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('drops unresolvable dependency ids from the step-details controls', () => {
+    // blockedBy is model-authored todo_write output parsed without
+    // normalization, so it can name a step that does not exist. Such an id
+    // must not render as a control: clicking it would select a ghost id,
+    // empty selectedTodo, and hide the panel mid-navigation.
+    const ghostTodos = todos.map((todo) =>
+      todo.id === 'build'
+        ? { ...todo, blockedBy: ['research', 'ghost-step'] }
+        : todo,
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView todos={ghostTodos} tools={[]} tasks={[]} />
+        </I18nProvider>,
+      );
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-plan-node-id="build"]')
+        ?.click();
+    });
+    const details = container.querySelector('[data-plan-step-details]');
+    expect(details).not.toBeNull();
+    // The resolvable dependency stays a working control…
+    expect(
+      details?.querySelector('[data-plan-dependency="research"]'),
+    ).not.toBeNull();
+    // …while the ghost id renders none at all.
+    expect(
+      details?.querySelector('[data-plan-dependency="ghost-step"]'),
+    ).toBeNull();
+    expect(details?.textContent).not.toContain('ghost-step');
 
     act(() => root.unmount());
     container.remove();

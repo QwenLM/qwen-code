@@ -566,6 +566,7 @@ export function PlanExecutionView({
     activeAgentCount,
     attentionCount,
     topology,
+    dependencyIdsByTodo,
     topologyKey,
     dependencyCount,
     hasDependencies,
@@ -935,6 +936,12 @@ export function PlanExecutionView({
     : undefined;
   const selectedDependents = selectedTodo
     ? (dependentsByTodo.get(selectedTodo.id) ?? [])
+    : [];
+  // The same filtered projection the edges draw from: the topology builder
+  // drops ids that name no step (and self-references), so no control here
+  // can select a ghost id and hide this panel mid-navigation.
+  const selectedDependencies = selectedTodo
+    ? (dependencyIdsByTodo.get(selectedTodo.id) ?? [])
     : [];
   const detailsId = `plan-step-details-${graphId}`;
   const overallProgressId = `plan-overall-progress-${graphId}`;
@@ -1410,12 +1417,13 @@ export function PlanExecutionView({
               chips on the node face these references can be controls: each
               one selects the step it names, which is what makes the
               dependency list the graph's navigation. */}
-          {(selectedTodo.blockedBy?.length ?? 0) > 0 && (
+          {selectedDependencies.length > 0 && (
             <div className={styles.dependencies}>
               <span>{t('planExecution.dependsOn')}</span>
-              {selectedTodo.blockedBy!.map((id) => (
+              {selectedDependencies.map((id) => (
                 <button
                   className={styles.dependencyLink}
+                  data-plan-interactive
                   data-plan-dependency={id}
                   key={id}
                   onClick={() => updateSelectedTodoId(id)}
@@ -1436,6 +1444,7 @@ export function PlanExecutionView({
               {selectedDependents.map((id) => (
                 <button
                   className={styles.dependencyLink}
+                  data-plan-interactive
                   data-plan-dependency={id}
                   key={id}
                   onClick={() => updateSelectedTodoId(id)}
