@@ -198,10 +198,32 @@ export function assess(prs, options = {}) {
   ).toISOString();
   const results = [];
   const unanswered = [];
+  // The newest request in the window, whatever became of it — answered or
+  // not, on a PR still open or long since closed. It is NOT a signal that
+  // anything is wrong (it never feeds the alarm), only the latest moment the
+  // lane was asked to do something: a push from before it cannot show the
+  // lane can serve it. decide() floors the recovery barrier here, which is
+  // what covers the two ways the REMEMBERED barrier goes missing — a request
+  // whose PR closed before any tick saw it stale, and a marker someone
+  // deleted — for as long as the request itself is still in the window.
+  let newestRequest = null;
+  const isAnswerableRequest = (c) =>
+    c.user !== opts.bot &&
+    c.updated_at === c.created_at &&
+    ANSWERABLE_ASSOCIATIONS.has(c.author_association) &&
+    isRequest(c.body);
   for (const pr of prs) {
     const comments = [...pr.comments]
       .filter((c) => c.created_at >= windowStart)
       .sort((a, b) => a.created_at.localeCompare(b.created_at));
+    for (const c of comments) {
+      if (
+        isAnswerableRequest(c) &&
+        (!newestRequest || c.created_at > newestRequest)
+      ) {
+        newestRequest = c.created_at;
+      }
+    }
     const prResults = [];
     for (const c of comments) {
       // Only the bot posts result comments; a marker plus the right sentence
@@ -236,17 +258,10 @@ export function assess(prs, options = {}) {
     if (pr.state !== 'open') {
       continue;
     }
-    const requests = comments.filter(
-      (c) =>
-        c.user !== opts.bot &&
-        // The producer fires on comment creation only; a comment edited into
-        // request shape never ran and never gets a result comment.
-        c.updated_at === c.created_at &&
-        // ...and only from someone the producer would have served: see
-        // ANSWERABLE_ASSOCIATIONS.
-        ANSWERABLE_ASSOCIATIONS.has(c.author_association) &&
-        isRequest(c.body),
-    );
+    // Same predicate as the barrier scan above: the producer fires on comment
+    // creation only (so a comment edited into request shape never ran), and
+    // only for someone it would have served (ANSWERABLE_ASSOCIATIONS).
+    const requests = comments.filter(isAnswerableRequest);
     for (const req of requests) {
       // Any result after the request answers it. Runs on one PR are
       // serialised by the workflow's concurrency group, so a later result
@@ -293,6 +308,7 @@ export function assess(prs, options = {}) {
     infraInStreak: infra,
     pushFailedInStreak: pushFailed,
     unanswered,
+    newestRequest,
     latestAttempt: attempts.at(-1) ?? null,
     alarm:
       streak >= opts.threshold || unanswered.length >= opts.unansweredThreshold,
@@ -534,9 +550,24 @@ export function decide(assessment, existing, options = {}) {
     // manufacture a false close — the worst a forged, junked, wrong-typed or
     // deleted marker can do is drop the barrier back to this floor — while a
     // record the watch can still read keeps the stronger, later barrier.
+    // The barrier is the latest of three, so losing any one of them cannot
+    // certify a recovery that did not happen:
+    //   - what the watch REMEMBERS (the newest request it saw go unanswered,
+    //     carried in its own comments) — the strongest, and the only one that
+    //     outlives the window, but it lives on GitHub where a triage user can
+    //     delete the comments carrying it;
+    //   - what it can still SEE (the newest request in this window, answered
+    //     or not, open PR or closed) — needs no record at all, so it survives
+    //     deleted comments, and it covers a request whose PR closed before any
+    //     tick observed it stale, which never reached a marker in the first
+    //     place;
+    //   - and the issue's own creation time — unforgeable, always available,
+    //     and sound on its own terms: the issue exists because the lane was
+    //     failing then, so an earlier push cannot show it recovered.
     const recorded = stateOf(assessment, previous).newestUnanswered;
-    const barrier =
-      recorded && recorded > existing.createdAt ? recorded : existing.createdAt;
+    const barrier = [recorded, assessment.newestRequest, existing.createdAt]
+      .filter((t) => typeof t === 'string' && t)
+      .reduce((a, b) => (a > b ? a : b), '');
     if (latest && latest.kind === 'pushed' && latest.at > barrier) {
       // Comment-then-close is not atomic: if the close fails after the
       // comment lands, the `recovered` field the comment wrote keeps the

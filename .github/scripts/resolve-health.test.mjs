@@ -1437,6 +1437,99 @@ describe('resolve-health: decisions', () => {
     assert.deepEqual(decide(tick3, { number: 47, texts }), []);
   });
 
+  it('holds for a request no tick ever saw, because its PR closed first', () => {
+    // The remembered barrier only ever covers requests a tick observed stale
+    // on a still-open PR. A request whose PR closes inside the stale window
+    // is never observed, so it reaches no marker — and assess() then drops it
+    // by design. With the barrier resting on the record alone, the gate falls
+    // to the creation-time floor and closes on a push OLDER than that
+    // request: a false recovery needing no adversary. The window itself is
+    // the evidence — the request comment is still there to be read.
+    const filed = '2026-08-20T00:00:00Z';
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 60),
+    );
+    const push = result('2026-08-26T10:00:00Z', PUSHED, 60);
+    // Asked after the push, never served, and its PR closed within the 3h
+    // stale window — so no 6-hourly tick could ever have seen it stale.
+    const neverSeen = request('2026-08-26T11:00:00Z', 61);
+    const lane = [
+      { number: 60, state: 'open', comments: [...failures, push] },
+      { number: 61, state: 'closed', comments: [neverSeen] },
+    ];
+    const quiet = assess(lane, { now });
+    assert.equal(quiet.alarm, false);
+    assert.equal(quiet.unanswered.length, 0, 'a closed PR cannot be served');
+    assert.equal(quiet.latestAttempt.kind, 'pushed');
+    // The request is still visible in the window even though it counts for
+    // nothing, and that is what holds the barrier above the push.
+    assert.equal(quiet.newestRequest, '2026-08-26T11:00:00Z');
+    const held = decide(quiet, { number: 60, createdAt: filed, texts: [] });
+    // Refuses the close; records what it can see.
+    assert.deepEqual(
+      held.map((a) => a.type),
+      ['comment'],
+    );
+    assert.match(held[0].body, /State refresh:/);
+    // A push that postdates the request does close it.
+    const served = assess(
+      [
+        {
+          number: 60,
+          state: 'open',
+          comments: [...failures, result('2026-08-26T12:00:00Z', PUSHED, 60)],
+        },
+        lane[1],
+      ],
+      { now },
+    );
+    assert.deepEqual(
+      decide(served, { number: 60, createdAt: filed, texts: [] }).map(
+        (a) => a.type,
+      ),
+      ['comment', 'close'],
+    );
+  });
+
+  it("holds when the watch's own state comments are deleted", () => {
+    // Deleting the watch's comments (triage, no edit) erases the remembered
+    // barrier. It must not thereby certify a recovery: while the request that
+    // raised the barrier is still in the window, the watch can see it without
+    // any record at all, so the gate holds where it held before.
+    const filed = '2026-08-20T00:00:00Z';
+    const failures = [1, 2, 3, 4, 5].map((d) =>
+      result(`2026-08-2${d}T00:00:00Z`, AGENT_FAILED, 62),
+    );
+    const push = result('2026-08-26T10:00:00Z', PUSHED, 62);
+    const asked = request('2026-08-26T11:00:00Z', 63);
+    const lane = [
+      { number: 62, state: 'open', comments: [...failures, push] },
+      { number: 63, state: 'open', comments: [asked] },
+    ];
+    const quiet = assess(lane, { now });
+    assert.equal(quiet.alarm, false);
+    // With the watch's own record present, the barrier holds...
+    const recorded = decide(quiet, {
+      number: 62,
+      createdAt: filed,
+      texts: [],
+    })[0].body;
+    assert.equal(
+      readState([recorded]).newestUnanswered,
+      '2026-08-26T11:00:00Z',
+    );
+    const intact = { number: 62, createdAt: filed, texts: [recorded] };
+    assert.deepEqual(decide(quiet, intact), []);
+    // ...and with every watch comment deleted it still holds, because the
+    // request itself is still readable in the window.
+    const wiped = { number: 62, createdAt: filed, texts: [] };
+    assert.deepEqual(
+      decide(quiet, wiped).map((a) => a.type),
+      ['comment'],
+      'refuses the close and re-records rather than closing',
+    );
+  });
+
   it('falls back to the creation-time floor on a state it could not read', () => {
     // A marker this tick cannot read is not evidence that no barrier was ever
     // recorded — the comment carrying it can be edited into junk, and an
@@ -1705,6 +1798,17 @@ describe('resolve-health: the tracking issue feed', () => {
           ['99', 'stranger', b64(`${HEALTH_MARKER}\n${forgedState}`)].join(
             '\t',
           ),
+          // The watch's own, but NOT the tracking issue: same author, same
+          // label, no marker. Adopting it would point the watch's whole state
+          // feed — its comments — at an unrelated issue, and leave the real
+          // one never updated and never closed. Ordered before the genuine
+          // one so a missing marker check adopts this instead.
+          [
+            '98',
+            'github-actions[bot]',
+            '2026-08-21T00:00:00Z',
+            b64('unrelated bot issue'),
+          ].join('\t'),
           // The genuine issue, whose body a triage user has since edited.
           [
             '91',
