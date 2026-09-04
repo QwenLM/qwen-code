@@ -16,6 +16,8 @@ import {
   type LiveHostHello,
   type LiveHostShortcutResult,
   type LiveHostScreenContextResult,
+  type LiveHostPlaybackStarted,
+  type LiveHostPlaybackCompleted,
   type LiveHostStatus,
   type LiveHostMessage,
   type LiveMuteUpdate,
@@ -103,6 +105,8 @@ export interface LiveCallHandlers {
     callId: string;
     pcm16: Buffer;
   }) => boolean;
+  onPlaybackStarted?: (call: { epoch: number }) => void;
+  onPlaybackCompleted?: (call: { epoch: number }) => void;
 }
 
 export interface LiveHostCoordinatorOptions {
@@ -296,6 +300,18 @@ function parseHostMessage(text: string): LiveHostMessage | undefined {
         screenshotPath: value['screenshotPath'] as string,
       };
     }
+  }
+  if (
+    value['type'] === 'host.playback_started' &&
+    typeof value['epoch'] === 'number'
+  ) {
+    return { type: 'host.playback_started', epoch: value['epoch'] };
+  }
+  if (
+    value['type'] === 'host.playback_completed' &&
+    typeof value['epoch'] === 'number'
+  ) {
+    return { type: 'host.playback_completed', epoch: value['epoch'] };
   }
   return undefined;
 }
@@ -996,6 +1012,14 @@ export class LiveHostCoordinator {
       this.handleShortcutResult(message);
       return;
     }
+    if (message.type === 'host.playback_started') {
+      this.handlePlaybackStarted(message);
+      return;
+    }
+    if (message.type === 'host.playback_completed') {
+      this.handlePlaybackCompleted(message);
+      return;
+    }
     this.handleAction(message);
   }
 
@@ -1091,6 +1115,18 @@ export class LiveHostCoordinator {
       status: projectStatusForHost(status),
     });
     this.sendState(status);
+  }
+
+  private handlePlaybackStarted(message: LiveHostPlaybackStarted): void {
+    const call = this.call;
+    if (!call || call.epoch !== message.epoch) return;
+    this.handlers.onPlaybackStarted?.({ epoch: call.epoch });
+  }
+
+  private handlePlaybackCompleted(message: LiveHostPlaybackCompleted): void {
+    const call = this.call;
+    if (!call || call.epoch !== message.epoch) return;
+    this.handlers.onPlaybackCompleted?.({ epoch: call.epoch });
   }
 
   private handleAction(action: LiveHostAction): void {

@@ -151,6 +151,19 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/local-path-open.ts',
+    {
+      reason:
+        'Local-open availability probes process-scoped host session state ' +
+        '(SSH markers, display server, Windows session name, terminal ' +
+        'emulators on PATH), so embedded callers may omit the environment ' +
+        'argument; the win32 terminal fallback inherits the daemon ' +
+        'environment to hand the target directory to PowerShell via one ' +
+        'added variable.',
+      accesses: { whole: 4 },
+    },
+  ],
+  [
     'packages/cli/src/serve/native-directory-picker.ts',
     {
       reason:

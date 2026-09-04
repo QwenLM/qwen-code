@@ -37,21 +37,28 @@ import {
   type DaemonStreamingState,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
+  createDaemonTranscriptState,
   DaemonHttpError,
+  getSessionUpdatePayload,
   isDaemonTurnError,
   isStandaloneSessionNotFoundError,
   isStaleBranchPointError,
+  normalizeDaemonEvent,
+  reduceDaemonTranscriptEvents,
   STANDALONE_SESSIONS_CAPABILITY,
 } from '@qwen-code/sdk/daemon';
 import type {
+  DaemonAgentTrace,
+  DaemonEvent,
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
+  DaemonSessionAttachmentReference,
   DaemonSkillToggleMutation,
   DaemonTranscriptBlockChangeSummary,
   DaemonTranscriptBlock,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
-  DaemonSessionTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionArtifact,
   DaemonSessionSummary,
   DaemonStandaloneCreationRecovery,
@@ -76,11 +83,21 @@ import {
   WEB_SHELL_SIDE_TASK_SOURCE_TYPE,
 } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
-import { isRetryableTurnErrorKind } from './adapters/transcriptToMessages';
+import {
+  isRetryableTurnErrorKind,
+  transcriptBlocksToDaemonMessages,
+} from './adapters/transcriptToMessages';
 import { MessageList, type MessageListHandle } from './components/MessageList';
+import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
+import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
+import { isComposerTask } from './utils/composerTasks';
+import {
+  getTaskActivityKey,
+  hasActiveTaskActivity,
+} from './utils/taskActivity';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   loadVoiceProviders,
@@ -145,15 +162,20 @@ import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
+import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { SplitView } from './components/SplitView';
 import { GaugeIcon } from 'lucide-react';
 import type { PaneHeaderActionsRenderer } from './components/ChatPane';
 import {
   ArtifactPanel,
   type ArtifactPanelTab,
+  type ImageTabSource,
   type SideTaskListItem,
 } from './components/artifacts/ArtifactPanel';
-import { releaseWebTerminal } from './components/terminal/TerminalPanel';
+import {
+  releaseDetachedWebTerminal,
+  releaseWebTerminal,
+} from './components/terminal/TerminalPanel';
 import { Drawer, DrawerContent, DrawerTitle } from './components/ui/drawer';
 import type {
   TurnOutputFileChange,
@@ -186,6 +208,7 @@ import {
 } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
+import { WorkflowRunsPage } from './components/workflows/WorkflowRunsPage';
 import { parseWebShellGoalCommand } from './utils/goalCondition';
 import { buildGoalControlRequest } from './utils/goalControlRequest';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
@@ -235,6 +258,7 @@ import {
   useMessagesFromBlocks,
 } from './hooks/useMessages';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
+import { useSessionArtifactsChange } from './hooks/useSessionArtifactsChange';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
@@ -254,7 +278,10 @@ import {
   SLASH_COMMAND_PATTERN,
 } from './utils/slash-command-action';
 import { getModelDisplayName } from './utils/modelDisplay';
-import { isVisibleComposerModel } from './utils/composerModels';
+import {
+  isStandaloneModelPickerUnavailable,
+  isVisibleComposerModel,
+} from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
@@ -272,6 +299,7 @@ import {
   TasksStatusMessage,
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
+import { SessionWorkflowCockpit } from './components/workflow/SessionWorkflowCockpit';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import {
   serializeStatsMessage,
@@ -303,19 +331,18 @@ import type {
   Message,
   PermissionRequest,
 } from './adapters/types';
-import {
-  backgroundShellTaskId,
-  isBackgroundSubAgentToolCall,
-} from './adapters/toolClassification';
+import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import {
   computeTodoDetails,
   computeTodoTimeline,
   getAgentToolsForPlan,
   getFloatingTodos,
+  getSessionWorkflowTodos,
   getActiveTodosForPlanRevision,
   isExitPlanApprovalRequest,
   todoDetailSignature,
   todoTimelineSignature,
+  type FloatingTodosState,
   type TodoDetail,
   type TodoSnapshotDiff,
 } from './utils/todos';
@@ -364,6 +391,7 @@ import {
   type WebShellBottomStatusItem,
   type WebShellPreparedSubmit,
   type WebShellSubmitSnapshot,
+  type WebShellSessionArtifactsChange,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
@@ -441,6 +469,9 @@ const DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS = [
   'gitBranch',
 ] as const satisfies readonly ComposerToolbarAction[];
 const MAX_ARTIFACT_PANEL_SESSION_STATES = 20;
+// Malformed pagination stops at 250k events; add a targeted daemon lookup if
+// real sessions approach this ceiling.
+const MAX_ARTIFACT_PANEL_TRANSCRIPT_PAGES = 1_000;
 interface ArtifactPanelSessionState {
   open: boolean;
   tabs: ArtifactPanelTab[];
@@ -449,6 +480,7 @@ interface ArtifactPanelSessionState {
   selectedReviewPath: string | null;
   extraArtifacts: DaemonSessionArtifact[];
   width: number;
+  pendingRestore?: boolean;
 }
 interface PaneArtifactSnapshot {
   artifacts: readonly DaemonSessionArtifact[];
@@ -1121,6 +1153,8 @@ export interface WebShellProps {
    * at most once per animation frame during active generation.
    */
   onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
+  /** Called with the complete Artifact snapshot after restore or change. */
+  onSessionArtifactsChange?: (change: WebShellSessionArtifactsChange) => void;
   /**
    * Called when a critical error occurs (auth failure, session gone, etc).
    * Each distinct connection error value is reported once; reporting resets
@@ -1357,6 +1391,12 @@ const NON_WORKSPACE_BLOCKED_COMMANDS = new Set([
 ]);
 
 const EMPTY_BOTTOM_STATUS_ITEMS: readonly WebShellBottomStatusItem[] = [];
+const EMPTY_SESSION_WORKFLOW_TODOS: FloatingTodosState = {
+  todos: [],
+  planId: null,
+  allCompleted: false,
+  sourceMessageId: null,
+};
 const EMPTY_ADDITIONAL_SLASH_COMMANDS: readonly CommandInfo[] = [];
 const DEFAULT_CHAT_MAX_WIDTH = 1000;
 const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
@@ -1369,9 +1409,29 @@ const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
   'sideTask',
 ];
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
-  ['environment', 'subagents', 'backgroundTasks'];
+  ['environment', 'subagents', 'backgroundTasks', 'attachments', 'artifacts'];
+const ATTACHMENTS_REFRESH_INTERVAL_MS = 1000;
+const SESSION_AGENTS_REFRESH_INTERVAL_MS = 3000;
+const SESSION_AGENTS_MAX_RETRY_INTERVAL_MS = 30_000;
+const SESSION_AGENTS_FEATURE = 'session_agents';
+const SESSION_AGENT_TRACE_FEATURE = 'session_agent_trace';
+const SESSION_ATTACHMENT_LIST_FEATURE = 'session_attachment_list';
 const BOTTOM_PANEL_GAP_PX = 6;
 const BOTTOM_PANEL_FALLBACK_INSET_PX = 40;
+
+function setBoundedMapEntry<V>(
+  map: Map<string, V>,
+  key: string,
+  value: V,
+): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > MAX_ARTIFACT_PANEL_SESSION_STATES) {
+    const oldest = map.keys().next().value;
+    if (!oldest) break;
+    map.delete(oldest);
+  }
+}
 
 // One preview tab per image, keyed by its content, so opening several images
 // keeps a tab each while re-clicking the same image just focuses its tab.
@@ -1384,10 +1444,20 @@ function imageTabId(src: string): string {
 }
 
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
+type MainView =
+  | 'chat'
+  | 'cockpit'
+  | 'scheduledTasks'
+  | 'workflows'
+  | 'goals'
+  | 'split';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
+const ENVIRONMENT_PANEL_OPEN_STORAGE_KEY =
+  'qwen-code-web-shell-environment-panel-open';
+const RIGHT_PANEL_STATE_STORAGE_KEY = 'qwen-code-web-shell-right-panel-state';
 
 function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   enabled: boolean;
@@ -1453,6 +1523,598 @@ function writeSidebarCollapsed(collapsed: boolean): void {
     );
   } catch {
     // localStorage can be unavailable in private or embedded contexts.
+  }
+}
+
+function readStoredBooleanMap(key: string): Record<string, boolean> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const stored = window.localStorage.getItem(key);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    const storedStates = { ...(parsed as Record<string, unknown>) };
+    if (storedStates['v'] !== undefined && storedStates['v'] !== 1) return {};
+    delete storedStates['v'];
+    const result: Record<string, boolean> = {};
+    for (const [sessionKey, value] of Object.entries(storedStates).slice(
+      -MAX_ARTIFACT_PANEL_SESSION_STATES,
+    )) {
+      if (typeof value === 'boolean') result[sessionKey] = value;
+    }
+    return result;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return {};
+}
+
+function writeStoredBooleanMap(
+  key: string,
+  value: Record<string, boolean>,
+): void {
+  try {
+    while (Object.keys(value).length > MAX_ARTIFACT_PANEL_SESSION_STATES) {
+      const oldestSessionKey = Object.keys(value)[0];
+      if (!oldestSessionKey) break;
+      delete value[oldestSessionKey];
+    }
+    window.localStorage.setItem(key, JSON.stringify({ v: 1, ...value }));
+  } catch (error) {
+    console.warn(
+      '[web-shell] failed to persist environment panel state:',
+      error,
+    );
+  }
+}
+
+interface ArtifactPanelPersistedState {
+  open: boolean;
+  activeTabId: string | null;
+  tabs: PersistedArtifactPanelTab[];
+}
+
+type PersistedArtifactPanelTab =
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'review' }>,
+      | 'id'
+      | 'kind'
+      | 'title'
+      | 'workspaceCwd'
+      | 'workspaceId'
+      | 'selectedPath'
+      | 'sourceTurnId'
+      | 'sourceSessionId'
+      | 'sourceToolCallIds'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'file' }>,
+      | 'id'
+      | 'kind'
+      | 'title'
+      | 'workspacePath'
+      | 'workspaceCwd'
+      | 'workspaceId'
+      | 'previewMimeType'
+      | 'previewOnly'
+      | 'attachmentId'
+      | 'sourceSessionId'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'artifact' }>,
+      | 'id'
+      | 'kind'
+      | 'title'
+      | 'artifactId'
+      | 'workspaceCwd'
+      | 'workspaceId'
+      | 'sourceSessionId'
+    >
+  | {
+      id: string;
+      kind: 'scheduled_task';
+      title: string;
+      toolCallId: string;
+      sourceSessionId?: string;
+      workspaceCwd?: string;
+      workspaceId?: string;
+    }
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'image' }>,
+      'id' | 'kind' | 'title' | 'alt' | 'source'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'subagent' }>,
+      'id' | 'kind' | 'title' | 'sessionId' | 'rootToolCallId' | 'workspaceCwd'
+    >
+  | {
+      id: string;
+      kind: 'monitor' | 'shell';
+      title: string;
+      taskId: string;
+      sessionId?: string;
+    }
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'side_task' }>,
+      'id' | 'kind' | 'title' | 'sessionId' | 'parentSessionId' | 'workspaceCwd'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'terminal' }>,
+      'id' | 'kind' | 'title' | 'workspaceCwd'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'token_usage' }>,
+      'id' | 'kind' | 'title' | 'sessionId' | 'closeWithPane'
+    >
+  | Pick<
+      Extract<ArtifactPanelTab, { kind: 'workflow' }>,
+      'id' | 'kind' | 'title' | 'sessionId'
+    >;
+
+function parsePersistedArtifactPanelTab(
+  value: unknown,
+): PersistedArtifactPanelTab | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+  const tab = value as Record<string, unknown>;
+  if (typeof tab['id'] !== 'string' || typeof tab['title'] !== 'string') return;
+  const optionalStrings = [
+    'workspaceCwd',
+    'workspaceId',
+    'selectedPath',
+    'sourceTurnId',
+    'sourceSessionId',
+    'workspacePath',
+    'previewMimeType',
+    'attachmentId',
+    'artifactId',
+    'toolCallId',
+    'alt',
+    'sessionId',
+    'rootToolCallId',
+    'taskId',
+    'parentSessionId',
+  ];
+  if (
+    optionalStrings.some(
+      (key) => tab[key] !== undefined && typeof tab[key] !== 'string',
+    ) ||
+    (tab['previewOnly'] !== undefined &&
+      typeof tab['previewOnly'] !== 'boolean') ||
+    (tab['closeWithPane'] !== undefined &&
+      typeof tab['closeWithPane'] !== 'boolean') ||
+    (tab['sourceToolCallIds'] !== undefined &&
+      (!Array.isArray(tab['sourceToolCallIds']) ||
+        !tab['sourceToolCallIds'].every((id) => typeof id === 'string')))
+  ) {
+    return;
+  }
+  const common = { id: tab['id'], title: tab['title'] };
+  switch (tab['kind']) {
+    case 'review':
+      return {
+        ...common,
+        kind: 'review',
+        workspaceCwd: tab['workspaceCwd'],
+        workspaceId: tab['workspaceId'],
+        selectedPath: tab['selectedPath'],
+        sourceTurnId: tab['sourceTurnId'],
+        sourceSessionId: tab['sourceSessionId'],
+        sourceToolCallIds: tab['sourceToolCallIds'],
+      } as PersistedArtifactPanelTab;
+    case 'file':
+      if (typeof tab['workspacePath'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'file',
+        workspacePath: tab['workspacePath'],
+        workspaceCwd: tab['workspaceCwd'],
+        workspaceId: tab['workspaceId'],
+        previewMimeType: tab['previewMimeType'],
+        previewOnly: tab['previewOnly'],
+        attachmentId: tab['attachmentId'],
+        sourceSessionId: tab['sourceSessionId'],
+      } as PersistedArtifactPanelTab;
+    case 'artifact':
+      if (typeof tab['artifactId'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'artifact',
+        artifactId: tab['artifactId'],
+        workspaceCwd: tab['workspaceCwd'],
+        workspaceId: tab['workspaceId'],
+        sourceSessionId: tab['sourceSessionId'],
+      } as PersistedArtifactPanelTab;
+    case 'scheduled_task':
+      if (typeof tab['toolCallId'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'scheduled_task',
+        toolCallId: tab['toolCallId'],
+        sourceSessionId: tab['sourceSessionId'],
+        workspaceCwd: tab['workspaceCwd'],
+        workspaceId: tab['workspaceId'],
+      } as PersistedArtifactPanelTab;
+    case 'image': {
+      const source = tab['source'];
+      if (
+        !source ||
+        typeof source !== 'object' ||
+        Array.isArray(source) ||
+        (source as Record<string, unknown>)['kind'] !== 'attachment' ||
+        typeof (source as Record<string, unknown>)['attachmentId'] !==
+          'string' ||
+        ((source as Record<string, unknown>)['sessionId'] !== undefined &&
+          typeof (source as Record<string, unknown>)['sessionId'] !== 'string')
+      ) {
+        return;
+      }
+      const attachmentSource = source as Record<string, unknown>;
+      return {
+        ...common,
+        kind: 'image',
+        alt: tab['alt'],
+        source: {
+          kind: 'attachment',
+          attachmentId: attachmentSource['attachmentId'],
+          sessionId: attachmentSource['sessionId'],
+        },
+      } as PersistedArtifactPanelTab;
+    }
+    case 'subagent':
+      if (
+        typeof tab['sessionId'] !== 'string' ||
+        typeof tab['rootToolCallId'] !== 'string'
+      ) {
+        return;
+      }
+      return {
+        ...common,
+        kind: 'subagent',
+        sessionId: tab['sessionId'],
+        rootToolCallId: tab['rootToolCallId'],
+        workspaceCwd: tab['workspaceCwd'],
+      } as PersistedArtifactPanelTab;
+    case 'monitor':
+    case 'shell':
+      if (typeof tab['taskId'] !== 'string') return;
+      return {
+        ...common,
+        kind: tab['kind'],
+        taskId: tab['taskId'],
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
+    case 'side_task':
+      if (
+        typeof tab['sessionId'] !== 'string' ||
+        typeof tab['parentSessionId'] !== 'string'
+      ) {
+        return;
+      }
+      return {
+        ...common,
+        kind: 'side_task',
+        sessionId: tab['sessionId'],
+        parentSessionId: tab['parentSessionId'],
+        workspaceCwd: tab['workspaceCwd'],
+      } as PersistedArtifactPanelTab;
+    case 'terminal':
+      return {
+        ...common,
+        kind: 'terminal',
+        workspaceCwd: tab['workspaceCwd'],
+      } as PersistedArtifactPanelTab;
+    case 'token_usage':
+      if (typeof tab['sessionId'] !== 'string') return;
+      return {
+        ...common,
+        kind: 'token_usage',
+        sessionId: tab['sessionId'],
+        closeWithPane: tab['closeWithPane'],
+      } as PersistedArtifactPanelTab;
+    case 'workflow':
+      return {
+        ...common,
+        kind: 'workflow',
+        sessionId: tab['sessionId'],
+      } as PersistedArtifactPanelTab;
+    default:
+      return;
+  }
+}
+
+// localStorage holds only stable lookup keys. Runtime snapshots, transcript
+// content, Blobs, data URLs and live actions are rebuilt after session load.
+function serializeArtifactPanelTabs(
+  tabs: readonly ArtifactPanelTab[],
+): PersistedArtifactPanelTab[] {
+  return tabs.flatMap((tab): PersistedArtifactPanelTab[] => {
+    const { id, title } = tab;
+    switch (tab.kind) {
+      case 'review':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            workspaceCwd: tab.workspaceCwd,
+            workspaceId: tab.workspaceId,
+            selectedPath: tab.selectedPath,
+            sourceTurnId: tab.sourceTurnId,
+            sourceSessionId: tab.sourceSessionId,
+            sourceToolCallIds: tab.sourceToolCallIds,
+          },
+        ];
+      case 'file':
+        return tab.previewOnly && !tab.attachmentId
+          ? []
+          : [
+              {
+                id,
+                kind: tab.kind,
+                title,
+                workspacePath: tab.workspacePath,
+                workspaceCwd: tab.workspaceCwd,
+                workspaceId: tab.workspaceId,
+                previewMimeType: tab.previewMimeType,
+                previewOnly: tab.previewOnly,
+                attachmentId: tab.attachmentId,
+                sourceSessionId: tab.sourceSessionId,
+              },
+            ];
+      case 'artifact':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            artifactId: tab.artifactId,
+            workspaceCwd: tab.workspaceCwd,
+            workspaceId: tab.workspaceId,
+            sourceSessionId: tab.sourceSessionId,
+          },
+        ];
+      case 'scheduled_task':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            toolCallId: tab.task.toolCallId,
+            sourceSessionId: tab.sourceSessionId,
+            workspaceCwd: tab.workspaceCwd,
+            workspaceId: tab.workspaceId,
+          },
+        ];
+      case 'image':
+        return tab.source
+          ? [
+              {
+                id,
+                kind: tab.kind,
+                title,
+                alt: tab.alt,
+                source: tab.source,
+              },
+            ]
+          : [];
+      case 'subagent':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            sessionId: tab.sessionId,
+            rootToolCallId: tab.rootToolCallId,
+            workspaceCwd: tab.workspaceCwd,
+          },
+        ];
+      case 'monitor':
+      case 'shell':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            taskId: tab.task.id,
+            sessionId: tab.sessionId,
+          },
+        ];
+      case 'side_task':
+        return tab.sessionId
+          ? [
+              {
+                id,
+                kind: tab.kind,
+                title,
+                sessionId: tab.sessionId,
+                parentSessionId: tab.parentSessionId,
+                workspaceCwd: tab.workspaceCwd,
+              },
+            ]
+          : [];
+      case 'terminal':
+        return [
+          {
+            id,
+            kind: tab.kind,
+            title,
+            workspaceCwd: tab.workspaceCwd,
+          },
+        ];
+      case 'token_usage':
+        return tab.sessionId
+          ? [
+              {
+                id,
+                kind: tab.kind,
+                title,
+                sessionId: tab.sessionId,
+                closeWithPane: tab.closeWithPane,
+              },
+            ]
+          : [];
+      case 'workflow':
+        return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
+      case 'pending': {
+        const common = {
+          id,
+          title,
+        };
+        switch (tab.targetKind) {
+          case 'review':
+            return [
+              {
+                ...common,
+                kind: 'review',
+                sourceSessionId: tab.sourceSessionId,
+                sourceTurnId: tab.sourceTurnId,
+                sourceToolCallIds: tab.sourceToolCallIds,
+                selectedPath: tab.selectedPath,
+                workspaceCwd: tab.workspaceCwd,
+                workspaceId: tab.workspaceId,
+              },
+            ];
+          case 'artifact':
+            return tab.artifactId
+              ? [
+                  {
+                    ...common,
+                    kind: 'artifact',
+                    artifactId: tab.artifactId,
+                    sourceSessionId: tab.sourceSessionId,
+                    workspaceCwd: tab.workspaceCwd,
+                    workspaceId: tab.workspaceId,
+                  },
+                ]
+              : [];
+          case 'scheduled_task':
+            return tab.toolCallId
+              ? [
+                  {
+                    ...common,
+                    kind: 'scheduled_task',
+                    sourceSessionId: tab.sourceSessionId,
+                    toolCallId: tab.toolCallId,
+                    workspaceCwd: tab.workspaceCwd,
+                    workspaceId: tab.workspaceId,
+                  },
+                ]
+              : [];
+          case 'subagent':
+            return tab.rootToolCallId
+              ? [
+                  {
+                    id,
+                    kind: 'subagent',
+                    title,
+                    sessionId: tab.sourceSessionId,
+                    rootToolCallId: tab.rootToolCallId,
+                    workspaceCwd: tab.workspaceCwd,
+                  },
+                ]
+              : [];
+          case 'monitor':
+          case 'shell':
+            return tab.taskId
+              ? [
+                  {
+                    ...common,
+                    kind: tab.targetKind,
+                    taskId: tab.taskId,
+                    sessionId: tab.sourceSessionId,
+                  },
+                ]
+              : [];
+        }
+      }
+    }
+  });
+}
+
+function mergePersistedArtifactPanelTabs(
+  tabs: readonly PersistedArtifactPanelTab[],
+  retainedTabs: readonly PersistedArtifactPanelTab[],
+  previousOrder: readonly PersistedArtifactPanelTab[] = retainedTabs,
+): PersistedArtifactPanelTab[] {
+  const byId = new Map(retainedTabs.map((tab) => [tab.id, tab]));
+  for (const tab of tabs) byId.set(tab.id, tab);
+  const merged = previousOrder.flatMap((tab) => {
+    const current = byId.get(tab.id);
+    if (!current) return [];
+    byId.delete(tab.id);
+    return [current];
+  });
+  return [...merged, ...byId.values()];
+}
+
+function findReviewChangesByToolCallIds(
+  changesByTurn: ReadonlyMap<string, readonly TurnOutputFileChange[]>,
+  toolCallIds: readonly string[] | undefined,
+): readonly TurnOutputFileChange[] | undefined {
+  if (!toolCallIds?.length) return undefined;
+  const ids = new Set(toolCallIds);
+  return [...changesByTurn.values()].find((changes) =>
+    changes.some((change) => ids.has(change.toolCallId)),
+  );
+}
+
+function readStoredArtifactPanelStates(
+  key: string,
+): Record<string, ArtifactPanelPersistedState> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const stored = window.localStorage.getItem(key);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return {};
+    }
+    const storedStates = { ...(parsed as Record<string, unknown>) };
+    if (storedStates['v'] !== undefined && storedStates['v'] !== 1) return {};
+    delete storedStates['v'];
+    const result: Record<string, ArtifactPanelPersistedState> = {};
+    for (const [sessionKey, value] of Object.entries(storedStates).slice(
+      -MAX_ARTIFACT_PANEL_SESSION_STATES,
+    )) {
+      if (!value || typeof value !== 'object') continue;
+      const state = value as Record<string, unknown>;
+      if (typeof state['open'] !== 'boolean') continue;
+      result[sessionKey] = {
+        open: state['open'],
+        activeTabId:
+          typeof state['activeTabId'] === 'string'
+            ? state['activeTabId']
+            : null,
+        tabs: Array.isArray(state['tabs'])
+          ? state['tabs']
+              .map(parsePersistedArtifactPanelTab)
+              .filter((tab): tab is PersistedArtifactPanelTab => Boolean(tab))
+          : [],
+      };
+    }
+    return result;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return {};
+}
+
+function writeStoredArtifactPanelStates(
+  key: string,
+  states: Record<string, ArtifactPanelPersistedState>,
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    while (Object.keys(states).length > MAX_ARTIFACT_PANEL_SESSION_STATES) {
+      const oldestSessionKey = Object.keys(states)[0];
+      if (!oldestSessionKey) break;
+      delete states[oldestSessionKey];
+    }
+    window.localStorage.setItem(key, JSON.stringify({ v: 1, ...states }));
+  } catch (error) {
+    console.warn('[web-shell] failed to persist right panel state:', error);
   }
 }
 
@@ -1536,6 +2198,23 @@ function getInitialLanguage(): WebShellLanguage {
   return normalizeLanguage(
     params.get('language') ?? params.get('lang') ?? navigator.language,
   );
+}
+
+function cockpitViewRequested(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('view') === 'cockpit'
+  );
+}
+
+function updateCockpitLocation(open: boolean, replace = false): void {
+  const url = new URL(window.location.href);
+  if (open) {
+    url.searchParams.set('view', 'cockpit');
+  } else {
+    url.searchParams.delete('view');
+  }
+  window.history[replace ? 'replaceState' : 'pushState'](null, '', url);
 }
 
 function formatError(error: unknown, fallback: string): string {
@@ -1639,38 +2318,7 @@ function parseRenameArgument(
   return { type: 'manual', displayName: trimmed };
 }
 
-function isBackgroundTaskToolCall(tool: ACPToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  if (name === 'monitor') return true;
-  if (backgroundShellTaskId(tool) !== undefined) return true;
-  if (tool.args?.is_background !== true) return false;
-  return (
-    name === 'shell' ||
-    name === 'bash' ||
-    name === 'run_shell_command' ||
-    name === 'exec'
-  );
-}
-
-export function getTaskActivityKey(messages: readonly Message[]): string {
-  const parts: string[] = [];
-  const visit = (tools: readonly ACPToolCall[]) => {
-    for (const tool of tools) {
-      if (
-        isBackgroundTaskToolCall(tool) ||
-        isBackgroundSubAgentToolCall(tool)
-      ) {
-        parts.push(`${tool.callId}:${tool.status}`);
-      }
-      if (tool.subTools) visit(tool.subTools);
-    }
-  };
-  for (const message of messages) {
-    if (message.role !== 'tool_group') continue;
-    visit(message.tools);
-  }
-  return parts.join('|');
-}
+export { getTaskActivityKey } from './utils/taskActivity';
 
 export function mergeMonitorTaskSnapshot(
   current: DaemonSessionMonitorTaskStatus,
@@ -1744,7 +2392,7 @@ function agentTaskAsToolCall(task: DaemonSessionAgentTaskStatus): ACPToolCall {
         ? 'failed'
         : 'completed';
   return {
-    callId: task.id,
+    callId: task.toolUseId ?? task.id,
     toolName: 'agent',
     title: `Agent: ${task.label}`,
     status,
@@ -1792,7 +2440,7 @@ function derivedTaskIdForTool(tool: ACPToolCall): string | undefined {
 
 export function getEnvironmentAgentTasks(
   messages: readonly Message[],
-  sessionTasks: readonly DaemonSessionTaskStatus[],
+  sessionTasks: readonly DaemonSessionTaskWithWorkflowStatus[],
 ): EnvironmentAgentTask[] {
   const liveAgents = sessionTasks.filter(
     (task): task is DaemonSessionAgentTaskStatus => task.kind === 'agent',
@@ -1909,6 +2557,7 @@ export function getEnvironmentAgentTasks(
           liveTask
             ? {
                 ...liveTask,
+                toolUseId: tool.callId,
                 label,
                 description: taskDescription || liveTask.description,
                 ...(subagentType ? { subagentType } : {}),
@@ -1951,14 +2600,87 @@ export function getEnvironmentAgentTasks(
       continue;
     }
     const alreadyListed = agents.some(
-      (a) =>
-        (a.toolUseId != null && a.toolUseId === task.toolUseId) ||
-        (a.description !== '' && a.description === task.description),
+      (agent) =>
+        agent.id === task.id ||
+        (agent.toolUseId != null && agent.toolUseId === task.toolUseId),
     );
     if (alreadyListed) continue;
     agents.push(task);
   }
   return agents;
+}
+
+export function mergeAgentTrace(
+  liveAgents: readonly EnvironmentAgentTask[],
+  trace: DaemonAgentTrace | undefined,
+  now = Date.now(),
+): EnvironmentAgentTask[] {
+  if (!trace) return [...liveAgents];
+  const liveById = new Map(liveAgents.map((task) => [task.id, task]));
+  const liveByToolUseId = new Map(
+    liveAgents.flatMap((task) =>
+      task.toolUseId ? [[task.toolUseId, task] as const] : [],
+    ),
+  );
+  const tracedIds = new Set(trace.nodes.map((node) => node.agentId));
+  const tracedToolUseIds = new Set(
+    trace.nodes.flatMap((node) => (node.toolUseId ? [node.toolUseId] : [])),
+  );
+  const traced = [...trace.nodes]
+    .sort(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) ||
+        left.agentId.localeCompare(right.agentId),
+    )
+    .map((node): EnvironmentAgentTask => {
+      const live =
+        liveById.get(node.agentId) ??
+        (node.toolUseId ? liveByToolUseId.get(node.toolUseId) : undefined);
+      const {
+        parentAgentId: _liveParentAgentId,
+        depth: _liveDepth,
+        ...liveFields
+      } = live ?? {};
+      const startTime = Date.parse(node.createdAt) || live?.startTime || 0;
+      const status =
+        live?.status ??
+        (node.status === 'running' ? 'paused' : (node.status ?? 'completed'));
+      const persistedEndTime =
+        status !== 'running' && node.lastUpdatedAt
+          ? Date.parse(node.lastUpdatedAt) || undefined
+          : undefined;
+      const endTime = live?.endTime ?? persistedEndTime;
+      return {
+        ...liveFields,
+        kind: 'agent',
+        id: node.agentId,
+        isBackgrounded: live?.isBackgrounded ?? true,
+        label: live?.label ?? node.agentType,
+        description: live?.description ?? node.description,
+        status,
+        startTime,
+        runtimeMs:
+          live?.runtimeMs ??
+          (endTime !== undefined
+            ? Math.max(0, endTime - startTime)
+            : status === 'running'
+              ? Math.max(0, now - startTime)
+              : 0),
+        ...(endTime !== undefined ? { endTime } : {}),
+        ...(node.parentAgentId ? { parentAgentId: node.parentAgentId } : {}),
+        ...(node.depth !== undefined ? { depth: node.depth } : {}),
+        ...(node.toolUseId ? { toolUseId: node.toolUseId } : {}),
+        lineageState: node.lineageState,
+      };
+    });
+  return reorderChildrenUnderParents([
+    ...traced,
+    ...liveAgents.filter(
+      (task) =>
+        !tracedIds.has(task.id) &&
+        (!task.toolUseId || !tracedToolUseIds.has(task.toolUseId)),
+    ),
+  ]);
 }
 
 function findToolCall(
@@ -1984,8 +2706,21 @@ function findToolCall(
   return undefined;
 }
 
+function transcriptEventsToMessages(events: readonly DaemonEvent[]): Message[] {
+  const state = createDaemonTranscriptState({
+    maxBlocks: Math.max(2_000, events.length),
+    maxRetainedBytes: Number.POSITIVE_INFINITY,
+  });
+  return transcriptBlocksToDaemonMessages(
+    reduceDaemonTranscriptEvents(
+      state,
+      events.flatMap((event) => normalizeDaemonEvent(event)),
+    ).blocks,
+  );
+}
+
 function mapToWebShellTaskInfo(
-  task: DaemonSessionTaskStatus,
+  task: DaemonSessionTaskWithWorkflowStatus,
 ): WebShellTaskInfo {
   const base = {
     id: task.id,
@@ -2025,6 +2760,17 @@ function mapToWebShellTaskInfo(
         command: task.command,
         pid: task.pid,
         exitCode: task.exitCode,
+      };
+    case 'workflow':
+      return {
+        ...base,
+        kind: 'workflow',
+        status: task.status,
+        currentPhase: task.currentPhase ?? undefined,
+        agentsDispatched: task.agentsDispatched,
+        agentsCompleted: task.agentsCompleted,
+        tokensSpent: task.tokensSpent,
+        tokenBudgetTotal: task.tokenBudgetTotal ?? undefined,
       };
     default:
       return task satisfies never;
@@ -2175,6 +2921,7 @@ export function App({
   loadingPhrases,
   onAgentTasksChange,
   onTranscriptChange,
+  onSessionArtifactsChange,
   onToast,
   composerRef,
   onComposerReady,
@@ -2682,6 +3429,11 @@ export function App({
     [pendingSessionContext, settledSessionContext],
   );
   const workspaceContextActive = effectiveSessionContext?.kind === 'workspace';
+  // The composer picker chooses the target of the next session, so a
+  // projectless draft keeps it enabled: that is where "no workspace" is
+  // chosen. An attached projectless session hides it again.
+  const composerWorkspaceSelectEnabled =
+    workspaceContextActive || connection.sessionId === undefined;
   const pendingNonWorkspaceNavigation =
     pendingSessionContext !== undefined &&
     pendingSessionContext.kind !== 'workspace' &&
@@ -2767,6 +3519,8 @@ export function App({
   const [currentSessionSummary, setCurrentSessionSummary] = useState<
     DaemonSessionSummary | undefined
   >(undefined);
+  const currentSessionSummaryRef = useRef(currentSessionSummary);
+  currentSessionSummaryRef.current = currentSessionSummary;
   // Tracks the logical session from the latest effect run. In-flight fetches
   // compare their captured key against this ref on resolve: a match means
   // the response is still relevant and may set OR clear the worktree state;
@@ -2883,6 +3637,7 @@ export function App({
             setSessionStatusDisplayName(
               listedSession?.displayName ?? summary.displayName,
             );
+            setCurrentSessionSummary(listedSession ?? summary);
           })
           .catch(() => undefined);
       })
@@ -2932,6 +3687,13 @@ export function App({
     resolveWorkspaceMaintenanceTargetCwd,
     workspaceContextActive,
   ]);
+  const workspaceWorkflowsEnabled =
+    workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)
+      ?.workflowsEnabled ?? false;
+  const workflowsEnabled = connection.sessionId
+    ? (connection.supportedCommands?.workflowsEnabled ??
+      workspaceWorkflowsEnabled)
+    : workspaceWorkflowsEnabled;
   // Worktree sessions query git status with the worktree path (?cwd=
   // parameter); the chip prefers the live branch from that status, falling
   // back to the creation-time sessionWorktree.branch.
@@ -3186,7 +3948,11 @@ export function App({
     artifacts,
     loading: artifactsLoading,
     error: artifactsError,
+    refresh: refreshArtifacts,
+    hydrated: artifactsHydrated,
   } = useSessionArtifacts();
+  const artifactsRef = useRef(artifacts);
+  artifactsRef.current = artifacts;
   const [artifactPanelExtraArtifacts, setArtifactPanelExtraArtifacts] =
     useState<DaemonSessionArtifact[]>([]);
   const [paneArtifactSnapshots, setPaneArtifactSnapshots] = useState<
@@ -3312,6 +4078,18 @@ export function App({
       ),
     [displayMessages, artifacts, connection.workspaceCwd],
   );
+  useSessionArtifactsChange({
+    sessionId: connection.sessionId,
+    ready:
+      connection.status === 'connected' &&
+      !connection.loadingTranscript &&
+      !connection.catchingUp &&
+      !artifactsLoading,
+    hydrated: artifactsHydrated,
+    artifacts,
+    artifactsByTurn,
+    onChange: onSessionArtifactsChange,
+  });
   const fileChangesByTurn = useMemo(
     () =>
       getFileChangesByTurn(
@@ -3328,28 +4106,332 @@ export function App({
     }
     return latest;
   }, [fileChangesByTurn]);
+  const latestReviewTurnId = useMemo(() => {
+    let latest: string | undefined;
+    for (const [turnId, changes] of fileChangesByTurn) {
+      if (changes.length > 0) latest = turnId;
+    }
+    return latest;
+  }, [fileChangesByTurn]);
   const scheduledTasksByTurn = useMemo(
     () => getScheduledTasksByTurn(displayMessages),
     [displayMessages],
   );
+  const artifactPanelRestoreInputsRef = useRef({
+    displayMessages,
+    fileChangesByTurn,
+    latestReviewChanges,
+    scheduledTasksByTurn,
+  });
+  artifactPanelRestoreInputsRef.current = {
+    displayMessages,
+    fileChangesByTurn,
+    latestReviewChanges,
+    scheduledTasksByTurn,
+  };
   const visibleTurnOutputKinds = useMemo(
     () => new Set<TurnOutputKind>(messageTurnOutputs ?? TURN_OUTPUT_KINDS),
     [messageTurnOutputs],
   );
-  const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
-  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(false);
+  // The artifact panel's open state and restorable tabs survive reloads per
+  // session; tab content itself re-fetches from the daemon where possible.
+  const [initialArtifactPanelPersistedStates] = useState(() =>
+    readStoredArtifactPanelStates(RIGHT_PANEL_STATE_STORAGE_KEY),
+  );
+  const artifactPanelPersistedStatesRef = useRef(
+    initialArtifactPanelPersistedStates,
+  );
+  const initialArtifactPanelOpen = Boolean(
+    logicalSessionKey &&
+      initialArtifactPanelPersistedStates[logicalSessionKey]?.open,
+  );
+  const [artifactPanelOpen, setArtifactPanelOpen] = useState(
+    initialArtifactPanelOpen,
+  );
+  const [artifactPanelRestoring, setArtifactPanelRestoring] = useState(
+    initialArtifactPanelOpen,
+  );
+  // The environment panel's open state is per session: opening it in one
+  // session must not leak into another, while switching back restores it.
+  const [initialEnvironmentPanelOpenBySession] = useState(() =>
+    readStoredBooleanMap(ENVIRONMENT_PANEL_OPEN_STORAGE_KEY),
+  );
+  const environmentPanelOpenBySessionRef = useRef(
+    initialEnvironmentPanelOpenBySession,
+  );
+  const [environmentPanelOpen, setEnvironmentPanelOpen] = useState(() =>
+    environmentPanelReachable && logicalSessionKey
+      ? (environmentPanelOpenBySessionRef.current[logicalSessionKey] ?? false)
+      : false,
+  );
+  const environmentArtifactsOpenRef = useRef({
+    sessionKey: logicalSessionKey,
+    open: environmentPanelOpen,
+  });
   const preserveEnvironmentPanelOnArtifactOpenRef = useRef(false);
   useLayoutEffect(() => {
     preserveEnvironmentPanelOnArtifactOpenRef.current = false;
-    setEnvironmentPanelOpen(false);
-  }, [logicalSessionKey]);
+    const open =
+      environmentPanelReachable && logicalSessionKey
+        ? (environmentPanelOpenBySessionRef.current[logicalSessionKey] ?? false)
+        : false;
+    setEnvironmentPanelOpen(open);
+  }, [environmentPanelReachable, logicalSessionKey]);
+  const persistEnvironmentPanelOpen = useCallback(
+    (open: boolean) => {
+      if (!logicalSessionKey) return;
+      delete environmentPanelOpenBySessionRef.current[logicalSessionKey];
+      environmentPanelOpenBySessionRef.current[logicalSessionKey] = open;
+      writeStoredBooleanMap(
+        ENVIRONMENT_PANEL_OPEN_STORAGE_KEY,
+        environmentPanelOpenBySessionRef.current,
+      );
+    },
+    [logicalSessionKey],
+  );
+  useEffect(() => {
+    const previous = environmentArtifactsOpenRef.current;
+    environmentArtifactsOpenRef.current = {
+      sessionKey: logicalSessionKey,
+      open: environmentPanelOpen,
+    };
+    if (
+      previous.sessionKey === logicalSessionKey &&
+      !previous.open &&
+      environmentPanelOpen &&
+      environmentPanelItems.includes('artifacts')
+    ) {
+      void refreshArtifacts();
+    }
+  }, [
+    environmentPanelItems,
+    environmentPanelOpen,
+    logicalSessionKey,
+    refreshArtifacts,
+  ]);
+  const [, setSessionAttachments] = useState<
+    DaemonSessionAttachmentReference[]
+  >([]);
+  const [sessionAttachmentsLoading, setSessionAttachmentsLoading] =
+    useState(false);
+  const sessionAttachmentsOwnerRef = useRef(sessionOwnerGuard.capture());
+  if (!sessionAttachmentsOwnerRef.current.isCurrent()) {
+    sessionAttachmentsOwnerRef.current = sessionOwnerGuard.capture();
+  }
+  const sessionAttachmentsOwner = sessionAttachmentsOwnerRef.current;
+  const sessionAttachmentsBySessionRef = useRef(
+    new Map<string, DaemonSessionAttachmentReference[]>(),
+  );
+  const sessionAttachmentsSkeletonLoading =
+    environmentPanelReachable &&
+    environmentPanelItems.includes('attachments') &&
+    (sessionAttachmentsLoading ||
+      Boolean(
+        environmentPanelOpen &&
+          logicalSessionKey &&
+          !sessionAttachmentsBySessionRef.current.has(logicalSessionKey),
+      ));
+  const lastAttachmentsFetchRef = useRef({
+    sessionKey: '',
+    fetchedAt: 0,
+  });
+  const sessionAttachmentsRequestIdRef = useRef(0);
+  const attachmentRetryCountRef = useRef(new Map<string, number>());
+  const [attachmentRefreshNonce, setAttachmentRefreshNonce] = useState(0);
+  // The attachments panel is fed by the daemon's attachment store, never by
+  // parsing transcript blocks. Refetch while the panel is open whenever the
+  // transcript moves (a sent message is the only way the store gains
+  // attachments) — throttled so streaming appends do not hammer the route.
+  const transcriptRevision = blockChangeSummary?.revision ?? 0;
+  const sessionAttachmentsRequestEligibleRef = useRef(false);
+  sessionAttachmentsRequestEligibleRef.current =
+    environmentPanelReachable &&
+    environmentPanelItems.includes('attachments') &&
+    environmentPanelOpen &&
+    connection.status === 'connected' &&
+    Boolean(connection.sessionId && logicalSessionKey) &&
+    connection.capabilities?.features.includes(
+      SESSION_ATTACHMENT_LIST_FEATURE,
+    ) === true;
+  useEffect(() => {
+    const attachmentsSectionEnabled =
+      environmentPanelReachable &&
+      environmentPanelItems.includes('attachments');
+    const attachmentsSupported =
+      connection.capabilities?.features.includes(
+        SESSION_ATTACHMENT_LIST_FEATURE,
+      ) === true;
+    if (
+      !attachmentsSectionEnabled ||
+      !environmentPanelOpen ||
+      connection.status !== 'connected' ||
+      !connection.sessionId ||
+      !logicalSessionKey
+    ) {
+      if (logicalSessionKey) {
+        attachmentRetryCountRef.current.delete(logicalSessionKey);
+      }
+      setSessionAttachmentsLoading(false);
+      return;
+    }
+    if (!attachmentsSupported) {
+      attachmentRetryCountRef.current.delete(logicalSessionKey);
+      setBoundedMapEntry(
+        sessionAttachmentsBySessionRef.current,
+        logicalSessionKey,
+        [],
+      );
+      setSessionAttachments([]);
+      setSessionAttachmentsLoading(false);
+      return;
+    }
+    const firstLoad =
+      !sessionAttachmentsBySessionRef.current.has(logicalSessionKey);
+    if (connection.loadingTranscript) {
+      setSessionAttachmentsLoading(firstLoad);
+      return;
+    }
+    setSessionAttachmentsLoading(firstLoad);
+    const elapsed =
+      lastAttachmentsFetchRef.current.sessionKey === logicalSessionKey
+        ? Date.now() - lastAttachmentsFetchRef.current.fetchedAt
+        : ATTACHMENTS_REFRESH_INTERVAL_MS;
+    const delay = Math.max(0, ATTACHMENTS_REFRESH_INTERVAL_MS - elapsed);
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const timer = setTimeout(() => {
+      lastAttachmentsFetchRef.current = {
+        sessionKey: logicalSessionKey,
+        fetchedAt: Date.now(),
+      };
+      const requestId = ++sessionAttachmentsRequestIdRef.current;
+      const listing = sessionActions.listAttachments();
+      void listing
+        .then((attachments) => {
+          if (
+            sessionAttachmentsRequestIdRef.current === requestId &&
+            sessionAttachmentsOwner.isCurrent() &&
+            sessionAttachmentsRequestEligibleRef.current
+          ) {
+            attachmentRetryCountRef.current.delete(logicalSessionKey);
+            setBoundedMapEntry(
+              sessionAttachmentsBySessionRef.current,
+              logicalSessionKey,
+              attachments,
+            );
+            setSessionAttachments(attachments);
+            setSessionAttachmentsLoading(false);
+          }
+        })
+        .catch(() => {
+          if (!cancelled && sessionAttachmentsOwner.isCurrent()) {
+            if (firstLoad) {
+              const failures =
+                (attachmentRetryCountRef.current.get(logicalSessionKey) ?? 0) +
+                1;
+              if (failures < 3) {
+                setBoundedMapEntry(
+                  attachmentRetryCountRef.current,
+                  logicalSessionKey,
+                  failures,
+                );
+                retryTimer = setTimeout(
+                  () => setAttachmentRefreshNonce((nonce) => nonce + 1),
+                  ATTACHMENTS_REFRESH_INTERVAL_MS,
+                );
+                return;
+              }
+              attachmentRetryCountRef.current.delete(logicalSessionKey);
+              setBoundedMapEntry(
+                sessionAttachmentsBySessionRef.current,
+                logicalSessionKey,
+                [],
+              );
+              setSessionAttachments([]);
+            }
+            setSessionAttachmentsLoading(false);
+          }
+        });
+    }, delay);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      clearTimeout(retryTimer);
+    };
+  }, [
+    connection.capabilities,
+    connection.sessionId,
+    connection.loadingTranscript,
+    connection.status,
+    attachmentRefreshNonce,
+    environmentPanelOpen,
+    environmentPanelReachable,
+    environmentPanelItems,
+    logicalSessionKey,
+    transcriptRevision,
+    sessionActions,
+    sessionAttachmentsOwner,
+  ]);
   const artifactPanelOpenRef = useRef(artifactPanelOpen);
   artifactPanelOpenRef.current = artifactPanelOpen;
+  const artifactPanelTriggerRef = useRef<HTMLElement | null>(null);
+  const rememberArtifactPanelTrigger = useCallback(() => {
+    if (
+      !artifactPanelOpenRef.current &&
+      document.activeElement instanceof HTMLElement
+    ) {
+      artifactPanelTriggerRef.current = document.activeElement;
+    }
+  }, []);
   const [activeArtifactPanelTabId, setActiveArtifactPanelTabId] = useState<
     string | null
   >(null);
   const activeArtifactPanelTabIdRef = useRef(activeArtifactPanelTabId);
   activeArtifactPanelTabIdRef.current = activeArtifactPanelTabId;
+  const artifactPanelRestoredSessionKeyRef = useRef<string | undefined>(
+    undefined,
+  );
+  const artifactPanelDeferredPersistedTabsRef = useRef(
+    new Map<string, PersistedArtifactPanelTab[]>(),
+  );
+  useLayoutEffect(() => {
+    if (
+      !logicalSessionKey ||
+      artifactPanelRestoredSessionKeyRef.current !== logicalSessionKey
+    )
+      return;
+    const previousPersistedState =
+      artifactPanelPersistedStatesRef.current[logicalSessionKey];
+    delete artifactPanelPersistedStatesRef.current[logicalSessionKey];
+    const serializedTabs = serializeArtifactPanelTabs(artifactPanelTabs);
+    const deferredTabs =
+      artifactPanelDeferredPersistedTabsRef.current.get(logicalSessionKey) ??
+      [];
+    artifactPanelPersistedStatesRef.current[logicalSessionKey] = {
+      open: artifactPanelOpen,
+      activeTabId:
+        activeArtifactPanelTabId ??
+        (deferredTabs.some(
+          (tab) => tab.id === previousPersistedState?.activeTabId,
+        )
+          ? (previousPersistedState?.activeTabId ?? null)
+          : null),
+      tabs: mergePersistedArtifactPanelTabs(
+        serializedTabs,
+        deferredTabs,
+        previousPersistedState?.tabs,
+      ),
+    };
+    writeStoredArtifactPanelStates(
+      RIGHT_PANEL_STATE_STORAGE_KEY,
+      artifactPanelPersistedStatesRef.current,
+    );
+  }, [
+    activeArtifactPanelTabId,
+    artifactPanelOpen,
+    artifactPanelTabs,
+    logicalSessionKey,
+  ]);
   const [reviewChanges, setReviewChanges] = useState<
     readonly TurnOutputFileChange[]
   >([]);
@@ -3369,7 +4451,7 @@ export function App({
   const [
     suppressArtifactDockOpenAnimation,
     setSuppressArtifactDockOpenAnimation,
-  ] = useState(false);
+  ] = useState(initialArtifactPanelOpen);
   const [waitForSubagentPanelAnimation, setWaitForSubagentPanelAnimation] =
     useState(false);
   // In-tree portal target for the docked panel (display:contents keeps the
@@ -3395,62 +4477,6 @@ export function App({
     extraArtifacts: artifactPanelExtraArtifacts,
     width: artifactPanelWidth,
   };
-  useEffect(() => {
-    const previousSessionId = artifactPanelSessionIdRef.current;
-    if (previousSessionId) {
-      const currentState = artifactPanelSessionStateRef.current;
-      if (currentState) {
-        artifactPanelStateBySessionRef.current.set(
-          previousSessionId,
-          currentState,
-        );
-        if (
-          artifactPanelStateBySessionRef.current.size >
-          MAX_ARTIFACT_PANEL_SESSION_STATES
-        ) {
-          const oldestSessionId = artifactPanelStateBySessionRef.current
-            .keys()
-            .next().value;
-          if (oldestSessionId) {
-            const oldestState =
-              artifactPanelStateBySessionRef.current.get(oldestSessionId);
-            for (const tab of oldestState?.tabs ?? []) {
-              if (tab.kind === 'terminal') releaseWebTerminal(tab.id);
-            }
-            artifactPanelStateBySessionRef.current.delete(oldestSessionId);
-          }
-        }
-      }
-    }
-
-    const nextSessionId = logicalSessionKey;
-    artifactPanelSessionIdRef.current = nextSessionId;
-    const savedState = nextSessionId
-      ? artifactPanelStateBySessionRef.current.get(nextSessionId)
-      : undefined;
-    if (!savedState) {
-      setArtifactPanelOpen(false);
-      setArtifactPanelTabs([]);
-      setActiveArtifactPanelTabId(null);
-      setReviewChanges([]);
-      setSelectedReviewPath(null);
-      setArtifactPanelExtraArtifacts([]);
-      setPaneArtifactSnapshots(new Map());
-      setArtifactPanelWidth(DEFAULT_REVIEW_PANEL_WIDTH);
-      setArtifactPanelFullscreen(false);
-      return;
-    }
-
-    setArtifactPanelOpen(savedState.open);
-    setArtifactPanelTabs(savedState.tabs);
-    setActiveArtifactPanelTabId(savedState.activeTabId);
-    setReviewChanges(savedState.reviewChanges);
-    setSelectedReviewPath(savedState.selectedReviewPath);
-    setArtifactPanelExtraArtifacts(savedState.extraArtifacts);
-    setPaneArtifactSnapshots(new Map());
-    setArtifactPanelWidth(savedState.width);
-    setArtifactPanelFullscreen(false);
-  }, [logicalSessionKey]);
   const sideTasksAvailable =
     workspaceContextActive &&
     Boolean(connection.sessionId && connection.workspaceCwd) &&
@@ -3532,35 +4558,45 @@ export function App({
       kind: 'terminal',
       title: count === 0 ? base : `${base} (${count + 1})`,
       workspaceCwd: connection.workspaceCwd,
+      initialized: true,
     };
     setArtifactPanelTabs((tabs) => [...tabs, tab]);
     setActiveArtifactPanelTabId(tab.id);
     setArtifactPanelOpen(true);
   }, [connection.workspaceCwd, t]);
+  const sideTaskCreationPromisesRef = useRef(
+    new Map<string, Promise<{ sessionId: string; displayName?: string }>>(),
+  );
   const createSideTaskSession = useCallback(
-    async (_tabId: string, parentSessionId: string, title: string) => {
-      const ownerCwd = connection.workspaceCwd;
-      const parentClientId =
-        connection.sessionId === parentSessionId
-          ? connection.clientId
-          : undefined;
-      const session = await workspace.client.createSideTaskSession(
-        parentSessionId,
-        {
-          name: title,
-        },
-        parentClientId,
-      );
-      if (ownerCwd) {
-        sessionCatalogController.sessionCreated(ownerCwd, session.sessionId);
-      }
-      await workspace.client
-        .detachSession(session.sessionId, session.clientId)
-        .catch(() => undefined);
-      return {
-        sessionId: session.sessionId,
-        displayName: session.displayName,
-      };
+    (tabId: string, parentSessionId: string, title: string) => {
+      const pending = sideTaskCreationPromisesRef.current.get(tabId);
+      if (pending) return pending;
+      const creation = (async () => {
+        const ownerCwd = connection.workspaceCwd;
+        const parentClientId =
+          connection.sessionId === parentSessionId
+            ? connection.clientId
+            : undefined;
+        const session = await workspace.client.createSideTaskSession(
+          parentSessionId,
+          {
+            name: title,
+          },
+          parentClientId,
+        );
+        if (ownerCwd) {
+          sessionCatalogController.sessionCreated(ownerCwd, session.sessionId);
+        }
+        await workspace.client
+          .detachSession(session.sessionId, session.clientId)
+          .catch(() => undefined);
+        return {
+          sessionId: session.sessionId,
+          displayName: session.displayName,
+        };
+      })().finally(() => sideTaskCreationPromisesRef.current.delete(tabId));
+      sideTaskCreationPromisesRef.current.set(tabId, creation);
+      return creation;
     },
     [
       connection.clientId,
@@ -3587,7 +4623,10 @@ export function App({
         // the draft tab then lives in a saved per-session bucket rather than the
         // live tabs, so write the sessionId there too or reopening the parent
         // creates a duplicate side task.
-        for (const state of artifactPanelStateBySessionRef.current.values()) {
+        for (const [
+          sessionKey,
+          state,
+        ] of artifactPanelStateBySessionRef.current) {
           const candidate = state.tabs.find(
             (bucketTab) => bucketTab.id === tabId,
           );
@@ -3597,6 +4636,30 @@ export function App({
             bucketTab.id === tabId && bucketTab.kind === 'side_task'
               ? { ...bucketTab, sessionId }
               : bucketTab,
+          );
+          const previousPersistedState =
+            artifactPanelPersistedStatesRef.current[sessionKey];
+          const retainedTabs = [
+            ...(state.pendingRestore
+              ? (previousPersistedState?.tabs ?? [])
+              : []),
+            ...(artifactPanelDeferredPersistedTabsRef.current.get(sessionKey) ??
+              []),
+          ];
+          const serializedTabs = serializeArtifactPanelTabs(state.tabs);
+          delete artifactPanelPersistedStatesRef.current[sessionKey];
+          artifactPanelPersistedStatesRef.current[sessionKey] = {
+            open: state.open,
+            activeTabId: state.activeTabId,
+            tabs: mergePersistedArtifactPanelTabs(
+              serializedTabs,
+              retainedTabs,
+              previousPersistedState?.tabs,
+            ),
+          };
+          writeStoredArtifactPanelStates(
+            RIGHT_PANEL_STATE_STORAGE_KEY,
+            artifactPanelPersistedStatesRef.current,
           );
           break;
         }
@@ -3790,6 +4853,7 @@ export function App({
   const openArtifactPanel = useCallback(
     (artifactId: string, previewContent?: string) => {
       if (!artifactId) return;
+      rememberArtifactPanelTrigger();
       const artifact = artifactPanelArtifacts.find(
         (item) => item.id === artifactId,
       );
@@ -3824,6 +4888,7 @@ export function App({
       artifactWorkspaceTarget?.workspaceId,
       connection.workspaceCwd,
       getDefaultReviewPanelWidth,
+      rememberArtifactPanelTrigger,
     ],
   );
   const openReviewPanel = useCallback(
@@ -3833,6 +4898,8 @@ export function App({
       reviewWorkspaceCwd?: string,
       reviewWorkspaceId?: string,
       tabId = 'review',
+      sourceTurnId?: string,
+      sourceSessionId?: string,
     ) => {
       const reviewTab: ArtifactPanelTab = {
         id: tabId,
@@ -3842,6 +4909,9 @@ export function App({
         ...(selectedPath ? { selectedPath } : {}),
         ...(reviewWorkspaceCwd ? { workspaceCwd: reviewWorkspaceCwd } : {}),
         ...(reviewWorkspaceId ? { workspaceId: reviewWorkspaceId } : {}),
+        ...(sourceTurnId ? { sourceTurnId } : {}),
+        ...(sourceSessionId ? { sourceSessionId } : {}),
+        sourceToolCallIds: changes.map((change) => change.toolCallId),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === reviewTab.id)
@@ -3865,11 +4935,16 @@ export function App({
       undefined,
       connection.workspaceCwd,
       artifactWorkspaceTarget?.workspaceId,
+      undefined,
+      latestReviewTurnId,
+      connection.sessionId,
     );
   }, [
     artifactWorkspaceTarget?.workspaceId,
     connection.workspaceCwd,
+    connection.sessionId,
     latestReviewChanges,
+    latestReviewTurnId,
     openReviewPanel,
   ]);
   const openScheduledTaskPanel = useCallback(
@@ -3888,6 +4963,7 @@ export function App({
         task: tabWorkspaceId ? { ...task, workspaceId: tabWorkspaceId } : task,
         ...(tabWorkspaceCwd ? { workspaceCwd: tabWorkspaceCwd } : {}),
         ...(tabWorkspaceId ? { workspaceId: tabWorkspaceId } : {}),
+        ...(sourceSessionId ? { sourceSessionId } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -3942,13 +5018,20 @@ export function App({
     [getDefaultReviewPanelWidth],
   );
   const openImagePanel = useCallback(
-    (src: string, alt?: string) => {
+    (src: string, alt?: string, source?: ImageTabSource) => {
+      const resolvedSource =
+        source && !source.sessionId && connection.sessionId
+          ? { ...source, sessionId: connection.sessionId }
+          : source;
       const tab: ArtifactPanelTab = {
-        id: imageTabId(src),
+        id: resolvedSource
+          ? `image:${resolvedSource.sessionId ?? ''}:${resolvedSource.attachmentId}`
+          : imageTabId(src),
         kind: 'image',
         title: t('turnOutputs.imagePreview'),
         src,
         ...(alt ? { alt } : {}),
+        ...(resolvedSource ? { source: resolvedSource } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
@@ -3961,7 +5044,14 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [connection.sessionId, getDefaultReviewPanelWidth, t],
+  );
+  const readSessionImage = useCallback(
+    async (attachmentId: string): Promise<string> => {
+      const attachment = await sessionActions.readAttachment(attachmentId);
+      return `data:${attachment.mimeType};base64,${attachment.data}`;
+    },
+    [sessionActions],
   );
   const openTokenUsagePanel = useCallback(
     (
@@ -4031,6 +5121,10 @@ export function App({
           ...(resolvedFile.mimeType
             ? { previewMimeType: resolvedFile.mimeType }
             : {}),
+          ...(resolvedFile.attachmentId
+            ? { attachmentId: resolvedFile.attachmentId }
+            : {}),
+          ...(sourceSessionId ? { sourceSessionId } : {}),
           ...(previewOnly ? { previewOnly: true } : {}),
           ...(workspaceCwd ? { workspaceCwd } : {}),
           ...(workspaceId ? { workspaceId } : {}),
@@ -4103,6 +5197,803 @@ export function App({
       sessionOwnerGuard,
     ],
   );
+  const hydrateRestoredAttachmentTab = useCallback(
+    async (tab: ArtifactPanelTab | undefined) => {
+      if (!tab || (tab.kind !== 'image' && tab.kind !== 'file')) return;
+      const attachmentId =
+        tab.kind === 'image' ? tab.source?.attachmentId : tab.attachmentId;
+      if (!attachmentId) return;
+      if (tab.kind === 'image' && tab.src) return;
+      if (tab.kind === 'file' && tab.previewData) return;
+      const sourceSessionId =
+        tab.kind === 'image' ? tab.source?.sessionId : tab.sourceSessionId;
+      const owner = sessionOwnerGuard.capture();
+      setArtifactPanelTabs((tabs) =>
+        tabs.map((item) =>
+          item.id === tab.id && item.kind === tab.kind
+            ? { ...item, loadError: undefined }
+            : item,
+        ),
+      );
+      let attachment:
+        | Awaited<ReturnType<typeof sessionActions.readAttachment>>
+        | undefined;
+      try {
+        attachment = await (sourceSessionId &&
+        sourceSessionId !== connection.sessionId
+          ? workspace.client.readSessionAttachment(
+              sourceSessionId,
+              attachmentId,
+            )
+          : sessionActions.readAttachment(attachmentId));
+      } catch (error) {
+        if (!owner.isCurrent()) return;
+        const loadError = t('rightPanel.attachmentLoadFailed', {
+          error: formatError(error, t('environment.unavailable')),
+        });
+        setArtifactPanelTabs((tabs) =>
+          tabs.map((item) =>
+            item.id === tab.id && item.kind === tab.kind
+              ? { ...item, loadError }
+              : item,
+          ),
+        );
+        return;
+      }
+      if (!owner.isCurrent()) return;
+      setArtifactPanelTabs((tabs) =>
+        tabs.map((item) => {
+          if (item.id !== tab.id || item.kind !== tab.kind) return item;
+          return item.kind === 'image'
+            ? {
+                ...item,
+                src: `data:${attachment.mimeType};base64,${attachment.data}`,
+              }
+            : {
+                ...item,
+                previewData: base64ToBlob(attachment.data, attachment.mimeType),
+                previewMimeType: attachment.mimeType,
+                previewOnly: true,
+              };
+        }),
+      );
+    },
+    [
+      connection.sessionId,
+      sessionActions,
+      sessionOwnerGuard,
+      t,
+      workspace.client,
+    ],
+  );
+  const hydratePendingArtifactPanelTab = useCallback(
+    async (tab: Extract<ArtifactPanelTab, { kind: 'pending' }> | undefined) => {
+      if (!tab) return;
+      const owner = sessionOwnerGuard.capture();
+      setArtifactPanelTabs((tabs) =>
+        tabs.map((item) =>
+          item.id === tab.id && item.kind === 'pending'
+            ? { ...item, loadError: undefined }
+            : item,
+        ),
+      );
+      try {
+        let restored: ArtifactPanelTab | undefined;
+        let restoredArtifact: DaemonSessionArtifact | undefined;
+        if (tab.targetKind === 'artifact') {
+          const artifact = (
+            await workspace.client.listSessionArtifacts(tab.sourceSessionId)
+          ).artifacts.find((item) => item.id === tab.artifactId);
+          if (artifact) {
+            restoredArtifact = artifact;
+            restored = {
+              id: tab.id,
+              kind: 'artifact',
+              title: tab.title,
+              artifactId: artifact.id,
+              sourceSessionId: tab.sourceSessionId,
+              workspaceCwd: tab.workspaceCwd,
+              workspaceId: tab.workspaceId,
+            };
+          }
+        } else if (tab.targetKind === 'monitor' || tab.targetKind === 'shell') {
+          const snapshot = await workspace.client.sessionTasks(
+            tab.sourceSessionId,
+          );
+          if (snapshot.sessionId !== tab.sourceSessionId) {
+            throw new Error(t('rightPanel.savedContentUnavailable'));
+          }
+          const task = snapshot.tasks.find(
+            (item) => item.kind === tab.targetKind && item.id === tab.taskId,
+          );
+          if (task?.kind === 'monitor' || task?.kind === 'shell') {
+            const crossSessionActions: DaemonSessionActions = {
+              ...sessionActions,
+              getTasks: () =>
+                workspace.client.sessionTasks(tab.sourceSessionId),
+              cancelTask: (taskId, kind) =>
+                workspace.client.sessionTaskCancel(
+                  tab.sourceSessionId,
+                  taskId,
+                  kind,
+                ),
+            };
+            restored =
+              task.kind === 'monitor'
+                ? {
+                    id: tab.id,
+                    kind: 'monitor',
+                    title: tab.title,
+                    task,
+                    sessionId: tab.sourceSessionId,
+                    sessionActions: crossSessionActions,
+                  }
+                : {
+                    id: tab.id,
+                    kind: 'shell',
+                    title: tab.title,
+                    task,
+                    sessionId: tab.sourceSessionId,
+                    sessionActions: crossSessionActions,
+                  };
+          }
+        } else {
+          let cursor: string | undefined;
+          const events: DaemonEvent[] = [];
+          const seenCursors = new Set<string>();
+          const reviewToolCallIds = new Set(
+            tab.targetKind === 'review' ? (tab.sourceToolCallIds ?? []) : [],
+          );
+          const targetToolCallIds = new Set(
+            tab.targetKind === 'review'
+              ? reviewToolCallIds
+              : tab.targetKind === 'scheduled_task'
+                ? tab.toolCallId
+                  ? [tab.toolCallId]
+                  : []
+                : tab.targetKind === 'subagent'
+                  ? tab.rootToolCallId
+                    ? [tab.rootToolCallId]
+                    : []
+                  : [],
+          );
+          const stopWhenToolCallsFound = targetToolCallIds.size > 0;
+          let pageCount = 0;
+          for (;;) {
+            if (!owner.isCurrent()) return;
+            const page = await workspace.client.getSessionTranscriptPage(
+              tab.sourceSessionId,
+              {
+                ...(cursor ? { cursor } : { direction: 'backward' }),
+                limit: 250,
+              },
+            );
+            if (!owner.isCurrent()) return;
+            if (page.partial || page.replayError) {
+              throw new Error(t('rightPanel.savedContentUnavailable'));
+            }
+            events.unshift(...page.events);
+            pageCount += 1;
+            for (const event of page.events) {
+              if (event.type === 'session_update') {
+                const update = getSessionUpdatePayload(event.data);
+                const toolCallId = update?.['toolCallId'];
+                if (
+                  update?.['sessionUpdate'] === 'tool_call' &&
+                  typeof toolCallId === 'string'
+                ) {
+                  targetToolCallIds.delete(toolCallId);
+                }
+              }
+            }
+            cursor = page.nextCursor;
+            if (
+              !page.hasMore ||
+              !cursor ||
+              (stopWhenToolCallsFound && targetToolCallIds.size === 0)
+            ) {
+              break;
+            }
+            if (seenCursors.has(cursor)) {
+              throw new Error(t('rightPanel.savedContentUnavailable'));
+            }
+            if (pageCount >= MAX_ARTIFACT_PANEL_TRANSCRIPT_PAGES) {
+              throw new Error(t('rightPanel.savedContentUnavailable'));
+            }
+            seenCursors.add(cursor);
+          }
+          const sourceMessages = transcriptEventsToMessages(events);
+          if (tab.targetKind === 'review') {
+            const sourceArtifacts =
+              tab.sourceSessionId === connection.sessionId
+                ? artifactsRef.current
+                : ((
+                    await workspace.client
+                      .listSessionArtifacts(tab.sourceSessionId)
+                      .catch(() => undefined)
+                  )?.artifacts ?? []);
+            if (!owner.isCurrent()) return;
+            const changesByTurn = getFileChangesByTurn(
+              sourceMessages,
+              getArtifactsByTurn(
+                sourceMessages,
+                sourceArtifacts,
+                tab.workspaceCwd ?? '',
+              ),
+              tab.workspaceCwd ?? '',
+            );
+            const changes =
+              findReviewChangesByToolCallIds(
+                changesByTurn,
+                tab.sourceToolCallIds,
+              ) ?? changesByTurn.get(tab.sourceTurnId ?? '');
+            if (changes) {
+              restored = {
+                id: tab.id,
+                kind: 'review',
+                title: tab.title,
+                changes,
+                selectedPath: tab.selectedPath,
+                sourceTurnId: tab.sourceTurnId,
+                sourceSessionId: tab.sourceSessionId,
+                sourceToolCallIds: tab.sourceToolCallIds,
+                workspaceCwd: tab.workspaceCwd,
+                workspaceId: tab.workspaceId,
+              };
+            }
+          } else if (tab.targetKind === 'scheduled_task') {
+            const task = Array.from(
+              getScheduledTasksByTurn(sourceMessages).values(),
+            )
+              .flat()
+              .find((item) => item.toolCallId === tab.toolCallId);
+            if (task) {
+              restored = {
+                id: tab.id,
+                kind: 'scheduled_task',
+                title: tab.title,
+                task,
+                sourceSessionId: tab.sourceSessionId,
+                workspaceCwd: tab.workspaceCwd,
+                workspaceId: tab.workspaceId,
+              };
+            }
+          } else {
+            const rootTool = findToolCall(
+              sourceMessages,
+              tab.rootToolCallId ?? '',
+            );
+            if (rootTool) {
+              restored = {
+                id: tab.id,
+                kind: 'subagent',
+                title: tab.title,
+                sessionId: tab.sourceSessionId,
+                rootToolCallId: rootTool.callId,
+                rootTool,
+                workspaceCwd: tab.workspaceCwd,
+              };
+            }
+          }
+        }
+        if (!restored) {
+          throw new Error(t('rightPanel.savedContentUnavailable'));
+        }
+        if (!owner.isCurrent()) return;
+        if (restoredArtifact) {
+          setArtifactPanelExtraArtifacts((current) =>
+            current.some((item) => item.id === restoredArtifact.id)
+              ? current.map((item) =>
+                  item.id === restoredArtifact.id ? restoredArtifact : item,
+                )
+              : [...current, restoredArtifact],
+          );
+        }
+        setArtifactPanelTabs((tabs) =>
+          tabs.map((item) =>
+            item.id === tab.id && item.kind === 'pending' ? restored : item,
+          ),
+        );
+      } catch (error) {
+        if (!owner.isCurrent()) return;
+        const loadError = t('rightPanel.restoreFailed', {
+          error: formatError(error, t('environment.unavailable')),
+        });
+        setArtifactPanelTabs((tabs) =>
+          tabs.map((item) =>
+            item.id === tab.id && item.kind === 'pending'
+              ? { ...item, loadError }
+              : item,
+          ),
+        );
+      }
+    },
+    [
+      connection.sessionId,
+      sessionActions,
+      sessionOwnerGuard,
+      t,
+      workspace.client,
+    ],
+  );
+  const selectArtifactPanelTab = useCallback(
+    (tabId: string) => {
+      setArtifactPanelTabs((tabs) =>
+        tabs.map((tab) =>
+          tab.id === tabId && tab.kind === 'terminal' && !tab.initialized
+            ? { ...tab, initialized: true }
+            : tab,
+        ),
+      );
+      setActiveArtifactPanelTabId(tabId);
+      const tab = artifactPanelTabsRef.current.find(
+        (item) => item.id === tabId,
+      );
+      void hydrateRestoredAttachmentTab(tab);
+      void hydratePendingArtifactPanelTab(
+        tab?.kind === 'pending' ? tab : undefined,
+      );
+    },
+    [hydratePendingArtifactPanelTab, hydrateRestoredAttachmentTab],
+  );
+  const sessionAgentTraceSupported =
+    connection.capabilities?.features.includes(SESSION_AGENT_TRACE_FEATURE) ===
+    true;
+  useLayoutEffect(() => {
+    const previousSessionId = artifactPanelSessionIdRef.current;
+    const nextSessionId = logicalSessionKey;
+    setArtifactPanelRestoring(false);
+    if (
+      previousSessionId &&
+      previousSessionId !== nextSessionId &&
+      (artifactPanelRestoredSessionKeyRef.current === previousSessionId ||
+        (artifactPanelSessionStateRef.current?.tabs.length ?? 0) > 0)
+    ) {
+      const currentState = artifactPanelSessionStateRef.current;
+      if (currentState) {
+        artifactPanelStateBySessionRef.current.delete(previousSessionId);
+        artifactPanelStateBySessionRef.current.set(previousSessionId, {
+          ...currentState,
+          pendingRestore:
+            artifactPanelRestoredSessionKeyRef.current !== previousSessionId,
+        });
+        if (
+          artifactPanelStateBySessionRef.current.size >
+          MAX_ARTIFACT_PANEL_SESSION_STATES
+        ) {
+          const oldestSessionId = Array.from(
+            artifactPanelStateBySessionRef.current.keys(),
+          ).find((sessionId) => sessionId !== nextSessionId);
+          if (oldestSessionId) {
+            const oldestState =
+              artifactPanelStateBySessionRef.current.get(oldestSessionId);
+            for (const tab of oldestState?.tabs ?? []) {
+              if (tab.kind === 'terminal') {
+                releaseDetachedWebTerminal(
+                  workspace.baseUrl,
+                  tab.id,
+                  tab.workspaceCwd,
+                );
+              }
+            }
+            artifactPanelStateBySessionRef.current.delete(oldestSessionId);
+          }
+        }
+      }
+    }
+
+    if (previousSessionId !== nextSessionId) {
+      const nextSavedState = nextSessionId
+        ? artifactPanelStateBySessionRef.current.get(nextSessionId)
+        : undefined;
+      setReviewChanges([]);
+      setSelectedReviewPath(null);
+      setArtifactPanelExtraArtifacts(nextSavedState?.extraArtifacts ?? []);
+      setPaneArtifactSnapshots(new Map());
+      setArtifactPanelWidth(
+        nextSavedState?.width ?? getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelFullscreen(false);
+    }
+
+    artifactPanelSessionIdRef.current = nextSessionId;
+    if (!nextSessionId) {
+      artifactPanelRestoredSessionKeyRef.current = undefined;
+      setArtifactPanelRestoring(false);
+      setArtifactPanelOpen(false);
+      setArtifactPanelTabs([]);
+      setActiveArtifactPanelTabId(null);
+      return;
+    }
+    const newlyAvailableDeferredTab = (
+      artifactPanelDeferredPersistedTabsRef.current.get(nextSessionId) ?? []
+    ).some(
+      (tab) =>
+        (tab.kind === 'terminal' && webTerminalAvailable) ||
+        (tab.kind === 'workflow' &&
+          tab.sessionId === connection.sessionId &&
+          sessionAgentTraceSupported),
+    );
+    if (
+      artifactPanelRestoredSessionKeyRef.current === nextSessionId &&
+      !connection.loadingTranscript &&
+      !newlyAvailableDeferredTab
+    ) {
+      return;
+    }
+    const saveCurrentState = () => {
+      if (artifactPanelRestoredSessionKeyRef.current !== nextSessionId) return;
+      const currentState = artifactPanelSessionStateRef.current;
+      if (!currentState) return;
+      artifactPanelStateBySessionRef.current.delete(nextSessionId);
+      artifactPanelStateBySessionRef.current.set(nextSessionId, currentState);
+    };
+    if (connection.loadingTranscript) {
+      saveCurrentState();
+      artifactPanelRestoredSessionKeyRef.current = undefined;
+      const pendingState =
+        artifactPanelStateBySessionRef.current.get(nextSessionId) ??
+        artifactPanelPersistedStatesRef.current[nextSessionId];
+      const shouldOpen = Boolean(pendingState?.open);
+      setArtifactPanelRestoring(shouldOpen);
+      setSuppressArtifactDockOpenAnimation(shouldOpen);
+      setArtifactPanelOpen(shouldOpen);
+      setArtifactPanelTabs([]);
+      setActiveArtifactPanelTabId(null);
+      return;
+    }
+    if (connection.status !== 'connected') {
+      saveCurrentState();
+      artifactPanelRestoredSessionKeyRef.current = undefined;
+      const pendingState =
+        artifactPanelStateBySessionRef.current.get(nextSessionId) ??
+        artifactPanelPersistedStatesRef.current[nextSessionId];
+      const shouldOpen = Boolean(pendingState?.open);
+      setArtifactPanelRestoring(shouldOpen);
+      setSuppressArtifactDockOpenAnimation(shouldOpen);
+      setArtifactPanelOpen(shouldOpen);
+      setArtifactPanelTabs([]);
+      setActiveArtifactPanelTabId(null);
+      return;
+    }
+    if (artifactsLoading) {
+      saveCurrentState();
+      artifactPanelRestoredSessionKeyRef.current = undefined;
+      const pendingState =
+        artifactPanelStateBySessionRef.current.get(nextSessionId) ??
+        artifactPanelPersistedStatesRef.current[nextSessionId];
+      const shouldOpen = Boolean(pendingState?.open);
+      setArtifactPanelRestoring(shouldOpen);
+      setSuppressArtifactDockOpenAnimation(shouldOpen);
+      setArtifactPanelOpen(shouldOpen);
+      setArtifactPanelTabs([]);
+      setActiveArtifactPanelTabId(null);
+      return;
+    }
+
+    let savedState = artifactPanelStateBySessionRef.current.get(nextSessionId);
+    let savedRuntimeTabs =
+      savedState?.tabs.filter(
+        (tab) =>
+          savedState?.pendingRestore ||
+          (tab.kind === 'side_task' && !tab.sessionId),
+      ) ?? [];
+    let persisted =
+      artifactPanelPersistedStatesRef.current[nextSessionId] ?? undefined;
+    if (!persisted && savedRuntimeTabs.length === 0) {
+      artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
+      for (const tab of savedState?.tabs ?? []) {
+        if (tab.kind === 'terminal') {
+          releaseDetachedWebTerminal(
+            workspace.baseUrl,
+            tab.id,
+            tab.workspaceCwd,
+          );
+        }
+      }
+      artifactPanelStateBySessionRef.current.delete(nextSessionId);
+      artifactPanelRestoredSessionKeyRef.current = nextSessionId;
+      setArtifactPanelRestoring(false);
+      if (previousSessionId !== nextSessionId) {
+        setArtifactPanelOpen(false);
+        setArtifactPanelTabs([]);
+        setActiveArtifactPanelTabId(null);
+      }
+      return;
+    }
+    const deferredPersistedTabs = (persisted?.tabs ?? []).filter(
+      (tab) =>
+        (tab.kind === 'terminal' && !webTerminalAvailable) ||
+        (tab.kind === 'workflow' &&
+          tab.sessionId === connection.sessionId &&
+          !sessionAgentTraceSupported),
+    );
+    if (deferredPersistedTabs.length > 0) {
+      setBoundedMapEntry(
+        artifactPanelDeferredPersistedTabsRef.current,
+        nextSessionId,
+        deferredPersistedTabs,
+      );
+    } else {
+      artifactPanelDeferredPersistedTabsRef.current.delete(nextSessionId);
+    }
+    const restoredOpen = savedState?.open ?? persisted?.open ?? false;
+    setArtifactPanelRestoring(restoredOpen);
+    setSuppressArtifactDockOpenAnimation(restoredOpen);
+    if (previousSessionId !== nextSessionId) {
+      setArtifactPanelOpen(restoredOpen);
+      setArtifactPanelTabs([]);
+      setActiveArtifactPanelTabId(null);
+    }
+    let cancelled = false;
+    const restore = async () => {
+      const needsTasks = persisted?.tabs.some(
+        (tab) =>
+          (tab.kind === 'monitor' || tab.kind === 'shell') &&
+          (!tab.sessionId || tab.sessionId === connection.sessionId),
+      );
+      const taskSnapshot = needsTasks
+        ? await sessionActions.getTasks({ silent: true }).catch(() => null)
+        : undefined;
+      if (cancelled) return;
+      savedState = artifactPanelStateBySessionRef.current.get(nextSessionId);
+      savedRuntimeTabs =
+        savedState?.tabs.filter(
+          (tab) =>
+            savedState?.pendingRestore ||
+            (tab.kind === 'side_task' && !tab.sessionId),
+        ) ?? [];
+      persisted =
+        artifactPanelPersistedStatesRef.current[nextSessionId] ?? undefined;
+      const restoreInputs = artifactPanelRestoreInputsRef.current;
+      const restoredTabs = (
+        await Promise.all(
+          (persisted?.tabs ?? []).map(
+            async (tab): Promise<ArtifactPanelTab | undefined> => {
+              switch (tab.kind) {
+                case 'review': {
+                  if (
+                    tab.sourceSessionId &&
+                    tab.sourceSessionId !== connection.sessionId
+                  ) {
+                    return {
+                      ...tab,
+                      kind: 'pending',
+                      targetKind: 'review',
+                      sourceSessionId: tab.sourceSessionId,
+                    };
+                  }
+                  const changes =
+                    findReviewChangesByToolCallIds(
+                      restoreInputs.fileChangesByTurn,
+                      tab.sourceToolCallIds,
+                    ) ??
+                    (tab.sourceTurnId
+                      ? restoreInputs.fileChangesByTurn.get(tab.sourceTurnId)
+                      : restoreInputs.latestReviewChanges);
+                  const sourceSessionId =
+                    tab.sourceSessionId ?? connection.sessionId;
+                  return changes
+                    ? { ...tab, changes }
+                    : tab.sourceTurnId && sourceSessionId
+                      ? {
+                          ...tab,
+                          kind: 'pending',
+                          targetKind: 'review',
+                          sourceSessionId,
+                        }
+                      : undefined;
+                }
+                case 'file': {
+                  return tab;
+                }
+                case 'artifact':
+                  return tab.sourceSessionId &&
+                    tab.sourceSessionId !== connection.sessionId
+                    ? {
+                        ...tab,
+                        kind: 'pending',
+                        targetKind: 'artifact',
+                        sourceSessionId: tab.sourceSessionId,
+                      }
+                    : tab;
+                case 'scheduled_task': {
+                  if (
+                    tab.sourceSessionId &&
+                    tab.sourceSessionId !== connection.sessionId
+                  ) {
+                    return {
+                      ...tab,
+                      kind: 'pending',
+                      targetKind: 'scheduled_task',
+                      sourceSessionId: tab.sourceSessionId,
+                    };
+                  }
+                  const task = Array.from(
+                    restoreInputs.scheduledTasksByTurn.values(),
+                  )
+                    .flat()
+                    .find((item) => item.toolCallId === tab.toolCallId);
+                  if (!task) {
+                    const sourceSessionId =
+                      tab.sourceSessionId ?? connection.sessionId;
+                    return sourceSessionId
+                      ? {
+                          ...tab,
+                          kind: 'pending',
+                          targetKind: 'scheduled_task',
+                          sourceSessionId,
+                        }
+                      : undefined;
+                  }
+                  const { toolCallId: _toolCallId, ...rest } = tab;
+                  return { ...rest, task };
+                }
+                case 'image': {
+                  if (!tab.source) return undefined;
+                  return { ...tab, src: '' };
+                }
+                case 'subagent': {
+                  if (tab.sessionId !== connection.sessionId) {
+                    return {
+                      id: tab.id,
+                      kind: 'pending',
+                      title: tab.title,
+                      targetKind: 'subagent',
+                      sourceSessionId: tab.sessionId,
+                      rootToolCallId: tab.rootToolCallId,
+                      workspaceCwd: tab.workspaceCwd,
+                    };
+                  }
+                  const rootTool = findToolCall(
+                    restoreInputs.displayMessages,
+                    tab.rootToolCallId,
+                  );
+                  return {
+                    ...tab,
+                    rootTool: rootTool ?? {
+                      callId: tab.rootToolCallId,
+                      toolName: 'agent',
+                      title: tab.title,
+                      status: 'completed',
+                      args: {},
+                    },
+                  };
+                }
+                case 'monitor':
+                case 'shell': {
+                  if (tab.sessionId && tab.sessionId !== connection.sessionId) {
+                    return {
+                      id: tab.id,
+                      kind: 'pending',
+                      title: tab.title,
+                      targetKind: tab.kind,
+                      sourceSessionId: tab.sessionId,
+                      taskId: tab.taskId,
+                    };
+                  }
+                  const task = taskSnapshot?.tasks.find(
+                    (item) => item.kind === tab.kind && item.id === tab.taskId,
+                  );
+                  if (taskSnapshot === null) {
+                    return {
+                      id: tab.id,
+                      kind: 'pending',
+                      title: tab.title,
+                      targetKind: tab.kind,
+                      sourceSessionId: connection.sessionId!,
+                      taskId: tab.taskId,
+                    };
+                  }
+                  if (!task || task.kind !== tab.kind) return undefined;
+                  const { taskId: _taskId, ...rest } = tab;
+                  return { ...rest, task, sessionActions } as ArtifactPanelTab;
+                }
+                case 'side_task':
+                  return tab.sessionId ? tab : undefined;
+                case 'terminal':
+                  return webTerminalAvailable
+                    ? { ...tab, initialized: false }
+                    : undefined;
+                case 'token_usage': {
+                  if (!tab.sessionId) return undefined;
+                  const sessionId = tab.sessionId;
+                  return {
+                    ...tab,
+                    sessionActions:
+                      sessionId === connection.sessionId
+                        ? sessionActions
+                        : {
+                            ...sessionActions,
+                            getStats: () =>
+                              workspace.client.sessionStats(sessionId),
+                          },
+                  };
+                }
+                case 'workflow':
+                  return !tab.sessionId ||
+                    (tab.sessionId === connection.sessionId &&
+                      sessionAgentTraceSupported)
+                    ? tab
+                    : undefined;
+              }
+            },
+          ),
+        )
+      ).filter((tab): tab is ArtifactPanelTab => tab !== undefined);
+      const savedRuntimeTabIds = new Set(savedRuntimeTabs.map((tab) => tab.id));
+      const mergedRestoredTabs = [
+        ...restoredTabs.filter((tab) => !savedRuntimeTabIds.has(tab.id)),
+        ...savedRuntimeTabs,
+      ];
+      if (cancelled) return;
+      artifactPanelStateBySessionRef.current.delete(nextSessionId);
+      artifactPanelRestoredSessionKeyRef.current = nextSessionId;
+      setArtifactPanelRestoring(false);
+      const desiredActiveTabId =
+        savedState?.activeTabId ?? persisted?.activeTabId ?? null;
+      const tabsOpenedDuringRestore = artifactPanelTabsRef.current;
+      const newlyOpenedIds = new Set(
+        tabsOpenedDuringRestore.map((tab) => tab.id),
+      );
+      const mergedTabs = [
+        ...mergedRestoredTabs.filter((tab) => !newlyOpenedIds.has(tab.id)),
+        ...tabsOpenedDuringRestore,
+      ];
+      const activeTabId = mergedTabs.some(
+        (tab) => tab.id === activeArtifactPanelTabIdRef.current,
+      )
+        ? activeArtifactPanelTabIdRef.current
+        : mergedTabs.some((tab) => tab.id === desiredActiveTabId)
+          ? desiredActiveTabId
+          : (mergedTabs[0]?.id ?? null);
+      const activatedTabs = mergedTabs.map((tab) =>
+        tab.id === activeTabId && tab.kind === 'terminal'
+          ? { ...tab, initialized: true }
+          : tab,
+      );
+      setSuppressArtifactDockOpenAnimation(restoredOpen);
+      setArtifactPanelOpen(artifactPanelOpenRef.current);
+      setArtifactPanelTabs(activatedTabs);
+      setActiveArtifactPanelTabId(activeTabId);
+      if (previousSessionId !== nextSessionId) {
+        setReviewChanges(restoreInputs.latestReviewChanges);
+        setArtifactPanelWidth(
+          savedState?.width ?? getDefaultReviewPanelWidth(),
+        );
+      }
+      void hydrateRestoredAttachmentTab(
+        activatedTabs.find((tab) => tab.id === activeTabId),
+      );
+      const activeTab = activatedTabs.find((tab) => tab.id === activeTabId);
+      void hydratePendingArtifactPanelTab(
+        activeTab?.kind === 'pending' ? activeTab : undefined,
+      );
+    };
+    void restore().catch((error: unknown) => {
+      if (cancelled) return;
+      artifactPanelRestoredSessionKeyRef.current = nextSessionId;
+      setArtifactPanelRestoring(false);
+      console.warn('[web-shell] failed to restore right panel:', error);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    artifactsLoading,
+    connection.loadingTranscript,
+    connection.sessionId,
+    connection.status,
+    getDefaultReviewPanelWidth,
+    hydratePendingArtifactPanelTab,
+    hydrateRestoredAttachmentTab,
+    logicalSessionKey,
+    sessionAgentTraceSupported,
+    sessionActions,
+    webTerminalAvailable,
+    workspace.baseUrl,
+    workspace.client,
+  ]);
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -4147,6 +6038,7 @@ export function App({
       if (!artifactPanelOpenRef.current) {
         setWaitForSubagentPanelAnimation(true);
       }
+      rememberArtifactPanelTrigger();
       const rawOutput =
         tool.rawOutput && typeof tool.rawOutput === 'object'
           ? (tool.rawOutput as Record<string, unknown>)
@@ -4178,7 +6070,7 @@ export function App({
       );
       setArtifactPanelOpen(true);
     },
-    [getDefaultReviewPanelWidth, t],
+    [getDefaultReviewPanelWidth, rememberArtifactPanelTrigger, t],
   );
   const openSubagentPanel = useCallback(
     (tool: ACPToolCall) => {
@@ -4217,6 +6109,26 @@ export function App({
       openSubagentPanelForSession,
     ],
   );
+  const openAgentWorkflow = useCallback(() => {
+    if (!connection.sessionId) return;
+    if (!artifactPanelOpenRef.current) {
+      preserveEnvironmentPanelOnArtifactOpenRef.current = true;
+    }
+    const tab: ArtifactPanelTab = {
+      id: `workflow:${connection.sessionId}`,
+      kind: 'workflow',
+      title: t('workflow.title'),
+      sessionId: connection.sessionId,
+    };
+    setArtifactPanelTabs((tabs) =>
+      tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+    );
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelWidth((width) =>
+      artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+    );
+    setArtifactPanelOpen(true);
+  }, [connection.sessionId, getDefaultReviewPanelWidth, t]);
   const handleTurnOutputOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (request.kind === 'review' && onFileReviewOpen) {
@@ -4236,6 +6148,8 @@ export function App({
           request.sourceSessionId
             ? `review:${request.sourceSessionId}:${request.turnId}`
             : undefined,
+          request.turnId,
+          request.sourceSessionId,
         );
         return;
       }
@@ -4249,7 +6163,19 @@ export function App({
         return;
       }
       if (request.kind === 'image') {
-        openImagePanel(request.src, request.alt);
+        openImagePanel(
+          request.src,
+          request.alt,
+          request.attachmentId
+            ? {
+                kind: 'attachment',
+                attachmentId: request.attachmentId,
+                ...(request.sourceSessionId
+                  ? { sessionId: request.sourceSessionId }
+                  : {}),
+              }
+            : undefined,
+        );
         return;
       }
       if (request.kind === 'attachment') {
@@ -4259,6 +6185,9 @@ export function App({
             ...(request.mimeType ? { mimeType: request.mimeType } : {}),
             ...(request.data ? { data: request.data } : {}),
             ...(request.text !== undefined ? { text: request.text } : {}),
+            ...(request.attachmentId
+              ? { attachmentId: request.attachmentId }
+              : {}),
             ...(request.workspacePath
               ? { workspacePath: request.workspacePath }
               : {}),
@@ -4391,39 +6320,55 @@ export function App({
       observer.disconnect();
     };
   }, [artifactPanelOpen, artifactPanelFullscreen]);
-  const closeArtifactPanelTabs = useCallback((tabIds: ReadonlySet<string>) => {
-    if (tabIds.size === 0) return;
-    for (const tab of artifactPanelTabsRef.current) {
-      if (tabIds.has(tab.id) && tab.kind === 'terminal') {
-        releaseWebTerminal(tab.id);
+  const closeArtifactPanelTabs = useCallback(
+    (tabIds: ReadonlySet<string>) => {
+      if (tabIds.size === 0) return;
+      for (const tab of artifactPanelTabsRef.current) {
+        if (tabIds.has(tab.id) && tab.kind === 'terminal') {
+          releaseWebTerminal(tab.id);
+        }
       }
-    }
-    setArtifactPanelTabs((tabs) => {
-      const nextTabs = tabs.filter((tab) => !tabIds.has(tab.id));
-      if (nextTabs.length === tabs.length) return tabs;
-      if (nextTabs.length === 0) {
-        setArtifactPanelOpen(false);
-        setArtifactPanelFullscreen(false);
-        setSuppressArtifactDockOpenAnimation(false);
-        setActiveArtifactPanelTabId(null);
-        setReviewChanges([]);
-        setSelectedReviewPath(null);
-        setArtifactPanelExtraArtifacts([]);
-        setPaneArtifactSnapshots(new Map());
+      setArtifactPanelTabs((tabs) => {
+        const nextTabs = tabs.filter((tab) => !tabIds.has(tab.id));
+        if (nextTabs.length === tabs.length) return tabs;
+        if (nextTabs.length === 0) {
+          setArtifactPanelOpen(false);
+          setArtifactPanelFullscreen(false);
+          setSuppressArtifactDockOpenAnimation(false);
+          setActiveArtifactPanelTabId(null);
+          setReviewChanges([]);
+          setSelectedReviewPath(null);
+          setArtifactPanelExtraArtifacts([]);
+          setPaneArtifactSnapshots(new Map());
+          return nextTabs;
+        }
+        if (
+          activeArtifactPanelTabIdRef.current &&
+          tabIds.has(activeArtifactPanelTabIdRef.current)
+        ) {
+          const closedIndex = tabs.findIndex((tab) => tabIds.has(tab.id));
+          const nextActive =
+            nextTabs[Math.min(closedIndex, nextTabs.length - 1)] ?? nextTabs[0];
+          setActiveArtifactPanelTabId(nextActive.id);
+          const activatedTabs =
+            nextActive.kind === 'terminal' && !nextActive.initialized
+              ? nextTabs.map((tab) =>
+                  tab.id === nextActive.id
+                    ? { ...tab, initialized: true }
+                    : tab,
+                )
+              : nextTabs;
+          void hydrateRestoredAttachmentTab(nextActive);
+          void hydratePendingArtifactPanelTab(
+            nextActive.kind === 'pending' ? nextActive : undefined,
+          );
+          return activatedTabs;
+        }
         return nextTabs;
-      }
-      if (
-        activeArtifactPanelTabIdRef.current &&
-        tabIds.has(activeArtifactPanelTabIdRef.current)
-      ) {
-        const closedIndex = tabs.findIndex((tab) => tabIds.has(tab.id));
-        const nextActive =
-          nextTabs[Math.min(closedIndex, nextTabs.length - 1)] ?? nextTabs[0];
-        setActiveArtifactPanelTabId(nextActive.id);
-      }
-      return nextTabs;
-    });
-  }, []);
+      });
+    },
+    [hydratePendingArtifactPanelTab, hydrateRestoredAttachmentTab],
+  );
   const closeArtifactPanelTab = useCallback(
     (tabId: string) => closeArtifactPanelTabs(new Set([tabId])),
     [closeArtifactPanelTabs],
@@ -4657,14 +6602,117 @@ export function App({
     () => getTaskActivityKey(messages),
     [messages],
   );
+  // The activity fact travels beside the key, derived structurally — the
+  // key itself is not parseable back (callId is unconstrained text).
+  const taskActivityActive = useMemo(
+    () => hasActiveTaskActivity(messages, { workflowsEnabled }),
+    [messages, workflowsEnabled],
+  );
   const [backgroundTasksRefreshTrigger, setBackgroundTasksRefreshTrigger] =
     useState(0);
   const sessionTasks = useBackgroundTasks(
     connection.sessionId,
     taskActivityKey,
+    taskActivityActive,
     connection.status === 'connected',
     backgroundTasksRefreshTrigger,
+    workflowsEnabled,
   );
+  const [sessionAgentInventory, setSessionAgentInventory] = useState<{
+    sessionKey: string;
+    tasks: DaemonSessionAgentTaskStatus[];
+  }>();
+  const workflowTabActive =
+    artifactPanelOpen &&
+    Boolean(
+      connection.sessionId &&
+        artifactPanelTabs.some(
+          (tab) =>
+            tab.id === activeArtifactPanelTabId &&
+            tab.kind === 'workflow' &&
+            tab.sessionId === connection.sessionId,
+        ),
+    );
+  const environmentNeedsAgents =
+    environmentPanelOpen &&
+    environmentPanelReachable &&
+    environmentPanelItems.includes('subagents');
+  const sessionAgentsSupported =
+    connection.capabilities?.features.includes(SESSION_AGENTS_FEATURE) === true;
+  useEffect(() => {
+    if (
+      connection.status !== 'connected' ||
+      connection.loadingTranscript ||
+      !connection.sessionId ||
+      (!environmentNeedsAgents && !workflowTabActive) ||
+      !sessionAgentsSupported
+    ) {
+      return;
+    }
+    const sessionId = connection.sessionId;
+    const owner = sessionOwnerGuard.capture();
+    const controller = new AbortController();
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let consecutiveFailures = 0;
+    const refresh = async () => {
+      try {
+        const snapshot = await workspace.client.sessionAgents(
+          sessionId,
+          undefined,
+          controller.signal,
+        );
+        if (disposed || !owner.isCurrent() || snapshot.sessionId !== sessionId)
+          return;
+        const agents = snapshot.tasks;
+        if (logicalSessionKey) {
+          setSessionAgentInventory({
+            sessionKey: logicalSessionKey,
+            tasks: agents,
+          });
+        }
+        consecutiveFailures = 0;
+        if (
+          agents.some(
+            (task) => task.status === 'running' || task.status === 'paused',
+          )
+        ) {
+          timer = setTimeout(refresh, SESSION_AGENTS_REFRESH_INTERVAL_MS);
+        }
+      } catch (error) {
+        if (disposed || !owner.isCurrent()) return;
+        if (consecutiveFailures === 0) {
+          console.warn('[web-shell] failed to refresh session agents:', error);
+        }
+        consecutiveFailures += 1;
+        timer = setTimeout(
+          refresh,
+          Math.min(
+            SESSION_AGENTS_REFRESH_INTERVAL_MS * 2 ** (consecutiveFailures - 1),
+            SESSION_AGENTS_MAX_RETRY_INTERVAL_MS,
+          ),
+        );
+      }
+    };
+    void refresh();
+    return () => {
+      disposed = true;
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [
+    backgroundTasksRefreshTrigger,
+    connection.loadingTranscript,
+    connection.sessionId,
+    connection.status,
+    environmentNeedsAgents,
+    logicalSessionKey,
+    sessionAgentsSupported,
+    sessionOwnerGuard,
+    taskActivityKey,
+    workspace.client,
+    workflowTabActive,
+  ]);
   const terminalBackgroundShellTaskIdsKey = useMemo(
     () =>
       sessionTasks
@@ -4684,8 +6732,104 @@ export function App({
     [terminalBackgroundShellTaskIdsKey],
   );
   const environmentAgentTasks = useMemo(
-    () => getEnvironmentAgentTasks(messages, sessionTasks),
-    [messages, sessionTasks],
+    () =>
+      getEnvironmentAgentTasks(
+        messages,
+        sessionAgentsSupported &&
+          (environmentNeedsAgents || workflowTabActive) &&
+          sessionAgentInventory &&
+          sessionAgentInventory.sessionKey === logicalSessionKey
+          ? sessionAgentInventory.tasks
+          : sessionTasks,
+      ),
+    [
+      logicalSessionKey,
+      messages,
+      environmentNeedsAgents,
+      sessionAgentInventory,
+      sessionAgentsSupported,
+      sessionTasks,
+      workflowTabActive,
+    ],
+  );
+  const [sessionAgentTrace, setSessionAgentTrace] = useState<{
+    sessionKey: string;
+    trace: DaemonAgentTrace;
+  }>();
+  const [agentTraceFailedSessionKey, setAgentTraceFailedSessionKey] =
+    useState<string>();
+  const agentTraceActivityKey = useMemo(
+    () =>
+      environmentAgentTasks
+        .map((task) => `${task.id}:${task.status}`)
+        .join(','),
+    [environmentAgentTasks],
+  );
+  useEffect(() => {
+    if (
+      connection.status !== 'connected' ||
+      connection.loadingTranscript ||
+      !connection.sessionId ||
+      !logicalSessionKey ||
+      !workflowTabActive ||
+      !sessionAgentTraceSupported
+    ) {
+      return;
+    }
+    const sessionId = connection.sessionId;
+    const sessionKey = logicalSessionKey;
+    const owner = sessionOwnerGuard.capture();
+    const controller = new AbortController();
+    setAgentTraceFailedSessionKey(undefined);
+    let retryCount = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = () => {
+      void workspace.client
+        .sessionAgentTrace(sessionId, { signal: controller.signal })
+        .then((trace) => {
+          if (!owner.isCurrent() || trace.sessionId !== sessionId) return;
+          const value = { sessionKey, trace };
+          setSessionAgentTrace(value);
+        })
+        .catch(() => {
+          if (controller.signal.aborted || !owner.isCurrent()) return;
+          if (retryCount < 3) {
+            retryCount += 1;
+            timer = setTimeout(refresh, SESSION_AGENTS_REFRESH_INTERVAL_MS);
+          } else {
+            setAgentTraceFailedSessionKey(sessionKey);
+          }
+        });
+    };
+    refresh();
+    return () => {
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [
+    agentTraceActivityKey,
+    connection.loadingTranscript,
+    connection.sessionId,
+    connection.status,
+    logicalSessionKey,
+    sessionAgentTraceSupported,
+    sessionOwnerGuard,
+    workflowTabActive,
+    workspace.client,
+  ]);
+  const currentAgentTrace =
+    sessionAgentTrace && sessionAgentTrace.sessionKey === logicalSessionKey
+      ? sessionAgentTrace.trace
+      : undefined;
+  const agentTraceFailed = agentTraceFailedSessionKey === logicalSessionKey;
+  const agentTraceInitialLoading =
+    workflowTabActive &&
+    sessionAgentTraceSupported &&
+    !currentAgentTrace &&
+    !agentTraceFailed;
+  const tracedEnvironmentAgentTasks = useMemo(
+    () => mergeAgentTrace(environmentAgentTasks, currentAgentTrace),
+    [currentAgentTrace, environmentAgentTasks],
   );
   const lastReportedAgentTasksRef = useRef<string | undefined>(undefined);
   useEffect(() => {
@@ -4709,7 +6853,9 @@ export function App({
     onAgentTasksChange(environmentAgentTasks);
   }, [environmentAgentTasks, onAgentTasksChange]);
   const backgroundTasks = useMemo(
-    () => sessionTasks.filter((task) => task.kind !== 'agent'),
+    // Same rule as the status-bar pill: live background state only, never
+    // the project's retained workflow history.
+    () => sessionTasks.filter(isComposerTask),
     [sessionTasks],
   );
   const monitorDetailsSessionIdRef = useRef(connection.sessionId);
@@ -5477,12 +7623,30 @@ export function App({
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
   // is one of the activePanel values below.)
-  const [mainView, setMainView] = useState<
-    'chat' | 'scheduledTasks' | 'goals' | 'split'
-  >('chat');
+  const [mainView, setMainView] = useState<MainView>('chat');
   const mainViewRef = useRef(mainView);
+  const showChat = useCallback(() => {
+    if (cockpitViewRequested()) updateCockpitLocation(false);
+    setMainView('chat');
+  }, []);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
+  // The floating drawer mounts already-open. Only a genuine closed->open may
+  // move focus into it: the docked->floating hand-over of an open panel
+  // (viewport resize, split view) mounts the drawer mid-session, where
+  // autofocus would yank focus from whatever the user is typing. The ref
+  // tracks the panel's open state at the last render where the drawer was
+  // NOT mounted and stays frozen while it is, so re-renders never flip the
+  // prop under the drawer's mount-time autofocus wiring.
+  const floatingArtifactPanelVisible =
+    artifactPanelOpen && useFloatingArtifactPanel;
+  const artifactPanelOpenBeforeDrawerMountRef = useRef(artifactPanelOpen);
+  if (!floatingArtifactPanelVisible) {
+    artifactPanelOpenBeforeDrawerMountRef.current = artifactPanelOpen;
+  }
+  const floatingArtifactDrawerAutoFocus =
+    floatingArtifactPanelVisible &&
+    !artifactPanelOpenBeforeDrawerMountRef.current;
   const deferSubagentMount =
     waitForSubagentPanelAnimation &&
     artifactPanelOpen &&
@@ -5729,6 +7893,7 @@ export function App({
     | 'plugins'
     | 'agents'
     | 'channels'
+    | 'workspaces'
     | null
   >(null);
   const activePanelRef = useRef(activePanel);
@@ -5777,6 +7942,7 @@ export function App({
     if (
       mainView === 'scheduledTasks' ||
       mainView === 'goals' ||
+      mainView === 'cockpit' ||
       mainView === 'split'
     ) {
       setMainView('chat');
@@ -5809,43 +7975,55 @@ export function App({
         | 'skills'
         | 'plugins'
         | 'agents'
-        | 'channels',
+        | 'channels'
+        | 'workspaces',
     ) => {
       splitClassificationGenerationRef.current += 1;
-      setMainView('chat');
+      showChat();
       setActivePanel(panel);
     },
-    [],
+    [showChat],
   );
-  const loadMcpManagerMessage = useCallback(async () => {
-    const status = await workspaceActions.loadMcpStatus();
-    setMcpDialogMessage({
-      status,
-      toolsByServer: {},
-      resourcesByServer: {},
-      showDescriptions: false,
-      showSchema: false,
-      showTips: false,
-    });
-  }, [workspaceActions]);
   const openScheduledTasks = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
+    // Route through showChat so leaving the cockpit strips its ?view=cockpit
+    // deep link — the URL-sync removal branch only fires when the feature is
+    // disabled, and a stale deep link would reopen the cockpit on reload or
+    // Forward navigation instead of the view actually on screen.
+    showChat();
     setMainView('scheduledTasks');
-  }, []);
+  }, [showChat]);
+  const openWorkflows = useCallback(() => {
+    if (!workspaceContextActive || !workflowsEnabled) return;
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(null);
+    showChat();
+    setMainView('workflows');
+  }, [showChat, workflowsEnabled, workspaceContextActive]);
+  useEffect(() => {
+    if (
+      mainView === 'workflows' &&
+      (!workspaceContextActive || !workflowsEnabled)
+    ) {
+      showChat();
+    }
+  }, [mainView, showChat, workflowsEnabled, workspaceContextActive]);
   const openGoals = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
+    // See openScheduledTasks: leaving the cockpit must strip its deep link.
+    showChat();
     setMainView('goals');
-  }, []);
+  }, [showChat]);
   const openSessionDrawer = useCallback(() => {
     if (!sidebarOptions.enabled) return;
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
-    setMainView('chat');
+    showChat();
     setForceMobileDrawer(true);
     setMobileDrawerOpen(true);
-  }, [sidebarOptions.enabled]);
+  }, [showChat, sidebarOptions.enabled]);
   const sanitizeSplitSessionIds = useCallback(
     async (sessionIds: readonly string[]): Promise<string[]> => {
       const requested = Array.from(new Set(sessionIds.filter(Boolean))).slice(
@@ -5868,6 +8046,8 @@ export function App({
     (sessionIds?: readonly string[]) => {
       if (!workspaceContextActive) return;
       setActivePanel(null);
+      // See openScheduledTasks: leaving the cockpit must strip its deep link.
+      showChat();
       const requested = Array.from(
         new Set((sessionIds ?? []).filter(Boolean)),
       ).slice(0, MAX_SPLIT_PANES);
@@ -5907,6 +8087,7 @@ export function App({
       connection.sessionId,
       connection.workspaceCwd,
       sanitizeSplitSessionIds,
+      showChat,
       workspaceContextActive,
     ],
   );
@@ -5946,6 +8127,9 @@ export function App({
       : [];
     const generation = splitClassificationGenerationRef.current + 1;
     splitClassificationGenerationRef.current = generation;
+    if (requested.length > 0 && cockpitViewRequested()) {
+      updateCockpitLocation(false, true);
+    }
     if (requested.length === 0) {
       setSplitSessionIds([]);
       setMainView((previous) => (previous === 'split' ? 'chat' : previous));
@@ -6103,6 +8287,14 @@ export function App({
   // window is narrower than the large-screen breakpoint. Growing back past the
   // breakpoint restores it, so a transient resize doesn't drop the user's panes.
   const splitFoldedByShrinkRef = useRef(false);
+  // The manual title an armed `/clear` carries into the next created session
+  // (consumed by the deferred creation in ensureSessionForPrompt). Session
+  // binding outside the carry flow — sidebar navigation, workspace switches,
+  // the shrink-fold landing, workspace-resolver creation — must discard it,
+  // or a cleared title resurfaces on an unrelated session's successor.
+  const pendingManualTitleRef = useRef<{ displayName: string } | undefined>(
+    undefined,
+  );
   useEffect(() => {
     if (isLargeScreen) {
       // Grew back above the breakpoint: restore a split that a shrink folded
@@ -6136,6 +8328,10 @@ export function App({
         // pane the single connection can't own) just leaves the empty chat.
         const firstPane = splitSessionIdsRef.current[0];
         if (firstPane && !currentSessionIdRef.current) {
+          // Landing on a pane is session navigation: discard an armed
+          // `/clear` carry so the pane session's lineage never inherits the
+          // cleared session's title.
+          pendingManualTitleRef.current = undefined;
           void sessionActions.loadSession(firstPane).catch(() => undefined);
         }
       }
@@ -6171,7 +8367,14 @@ export function App({
     prevActivePanelRef.current = activePanel;
     prevApprovalOverlayRef.current = approvalOverlayActive;
     if (activePanel) {
-      if (activePanel === 'extensions' || activePanel === 'channels') {
+      if (
+        activePanel === 'extensions' ||
+        activePanel === 'channels' ||
+        // The Workspaces panel renders its own header; the generic Back
+        // button (panelBackRef) is excluded for it, so the fallback below
+        // would focus nothing.
+        activePanel === 'workspaces'
+      ) {
         panelHeadingRef.current?.focus();
         return;
       }
@@ -6228,12 +8431,18 @@ export function App({
     // need a pending-approval signal plumbed up through SplitView. Escape or
     // the toolbar exits fullscreen and reveals them.
     if (artifactPanelFullscreen) setArtifactPanelFullscreen(false);
-    // The Scheduled Tasks and Goals pages are full-pane overlays
+    // Workflow, Scheduled Tasks, and Goals are full-pane overlays
     // (position:absolute) that cover the chat footer too, so dismiss them for
     // the same reason. The split view is deliberately NOT dismissed: each pane
     // owns and renders its own session's approval, so an approval on the (outer)
     // main session must not yank the user out of the panes they are working in.
-    if (mainView === 'scheduledTasks' || mainView === 'goals') {
+    if (cockpitViewRequested()) updateCockpitLocation(false, true);
+    if (
+      mainView === 'cockpit' ||
+      mainView === 'scheduledTasks' ||
+      mainView === 'workflows' ||
+      mainView === 'goals'
+    ) {
       setMainView('chat');
     }
   }, [
@@ -6360,13 +8569,6 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
-  const planAgentTools = useMemo(
-    () =>
-      tasksDialogMessage
-        ? getAgentToolsForPlan(messages, floatingTodosState)
-        : [],
-    [floatingTodosState, messages, tasksDialogMessage],
-  );
   const handleOpenMonitorDetails = useCallback(
     (task: DaemonSessionMonitorTaskStatus) => {
       setTasksDialogMessage(null);
@@ -6649,6 +8851,7 @@ export function App({
       return Promise.resolve(undefined);
     }
     if (currentSessionId) return Promise.resolve(undefined);
+    const pendingManualTitle = pendingManualTitleRef.current;
     const promise = (async () => {
       let allocatedSessionId: string | undefined;
       const modelId =
@@ -6736,7 +8939,21 @@ export function App({
               ? { name: gitModeIntentRef.current.name }
               : undefined,
           sessionSourceType: sessionSourceTypeRef.current,
-          onSessionCreated: onSessionCreatedRef.current,
+          onSessionCreated: async (sessionId) => {
+            if (
+              pendingManualTitle &&
+              pendingManualTitleRef.current === pendingManualTitle
+            ) {
+              try {
+                await sessionActions.renameSession(
+                  pendingManualTitle.displayName,
+                );
+              } catch {
+                pendingManualTitleRef.current = undefined;
+              }
+            }
+            await onSessionCreatedRef.current?.(sessionId);
+          },
           onSessionAllocated: (sessionId) => {
             preparingSessionIdRef.current = sessionId;
             allocatedSessionId = sessionId;
@@ -6753,6 +8970,9 @@ export function App({
           },
           getCurrentSessionId: () => connectionRef.current.sessionId,
         }).then((result) => {
+          if (pendingManualTitleRef.current === pendingManualTitle) {
+            pendingManualTitleRef.current = undefined;
+          }
           if (result.worktree) {
             setSessionWorktree(result.worktree);
           }
@@ -7186,7 +9406,10 @@ export function App({
           );
           if (page.sessions.length > 0) return page.sessions[0].sessionId;
         }
-        // No session exists or forced: create one.
+        // No session exists or forced: create one. Creating binds the chat
+        // connection — session navigation that must discard an armed
+        // `/clear` carry, mirroring loadSidebarSession.
+        pendingManualTitleRef.current = undefined;
         const result = await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).createSession({ workspaceCwd: cwd });
@@ -8056,10 +10279,97 @@ export function App({
       (setting) => setting.key === 'experimental.liveVoice.enabled',
     ),
   );
+  // Do not expose workflow surfaces until settings have loaded successfully.
+  // The resource keeps stale data when a reload fails, so the error check is
+  // required to fail closed in that case too. `loading` is deliberately NOT
+  // part of the gate: a background revalidation (any client of this workspace
+  // saving any setting bumps settingsVersion) sets loading:true while keeping
+  // the last-known-good data, and gating on it would evict the user from an
+  // established Workflow view and delete its deep link. The initial load still
+  // fails closed via `status === undefined`.
   const sessionWorkflowEnabled =
+    !workspaceSettingsState.error &&
+    workspaceSettingsState.status !== undefined &&
     workspaceSettings.find(
       (setting) => setting.key === 'experimental.sessionWorkflow',
     )?.values.effective === true;
+  const sessionWorkflowSettingsResolved =
+    workspaceSettingsState.status !== undefined ||
+    workspaceSettingsState.error !== undefined;
+  const sessionWorkflowTodosState = useMemo(
+    () =>
+      sessionWorkflowEnabled
+        ? getSessionWorkflowTodos(messages)
+        : EMPTY_SESSION_WORKFLOW_TODOS,
+    [messages, sessionWorkflowEnabled],
+  );
+  const sessionWorkflowTodos = useStableArray(
+    sessionWorkflowTodosState.todos,
+    (todo) =>
+      JSON.stringify([
+        todo.id,
+        todo.status,
+        todo.content,
+        todo.blockedBy ?? [],
+      ]),
+  );
+  const floatingTodosUseSessionWorkflow =
+    sessionWorkflowEnabled &&
+    floatingTodosState.sourceMessageId !== null &&
+    floatingTodosState.sourceMessageId ===
+      sessionWorkflowTodosState.sourceMessageId;
+  const [selectedWorkflowTodoId, setSelectedWorkflowTodoId] = useState<
+    string | undefined
+  >();
+  useEffect(() => {
+    setSelectedWorkflowTodoId(undefined);
+  }, [logicalSessionKey]);
+  useEffect(() => {
+    if (
+      approvalOverlayActive ||
+      sessionWorkflowEnabled ||
+      !sessionWorkflowSettingsResolved ||
+      !artifactPanelTabs.some((tab) => tab.kind === 'workflow')
+    ) {
+      return;
+    }
+    closeArtifactPanelTab('workflow');
+  }, [
+    artifactPanelTabs,
+    approvalOverlayActive,
+    closeArtifactPanelTab,
+    sessionWorkflowEnabled,
+    sessionWorkflowSettingsResolved,
+  ]);
+  const planAgentTools = useMemo(() => {
+    if (
+      !sessionWorkflowEnabled ||
+      (mainView !== 'cockpit' &&
+        !artifactPanelTabs.some((tab) => tab.kind === 'workflow'))
+    ) {
+      return [];
+    }
+    return getAgentToolsForPlan(messages, sessionWorkflowTodosState);
+  }, [
+    artifactPanelTabs,
+    mainView,
+    messages,
+    sessionWorkflowEnabled,
+    sessionWorkflowTodosState,
+  ]);
+  // The tasks dialog renders the floating (latest) plan, so its agent tools
+  // anchor to floatingTodosState. That anchoring must stay out of
+  // planAgentTools: the cockpit and workflow inspector stay mounted behind
+  // the dialog and would lose (or re-anchor) the session-workflow plan's
+  // linked tools whenever the dialog opens after a user message emptied the
+  // floating plan.
+  const tasksDialogAgentTools = useMemo(
+    () =>
+      tasksDialogMessage
+        ? getAgentToolsForPlan(messages, floatingTodosState)
+        : [],
+    [floatingTodosState, messages, tasksDialogMessage],
+  );
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -8789,12 +11099,26 @@ export function App({
     onError(new Error(connection.error));
   }, [connection.error, onError]);
 
+  const prevConnectionModelRef = useRef(connection.currentModel);
   useLayoutEffect(() => {
-    setCurrentModel(connection.currentModel ?? '');
+    const next = connection.currentModel;
+    // A late standalone options publish lands as an undefined→value change;
+    // never let it overwrite a model the user already picked while waiting.
+    const wasLateHydration =
+      prevConnectionModelRef.current === undefined && next !== undefined;
+    prevConnectionModelRef.current = next;
+    setCurrentModel((prev) => (wasLateHydration && prev ? prev : (next ?? '')));
   }, [connection.currentModel, logicalSessionKey]);
 
+  const prevConnectionModeRef = useRef(connection.currentMode);
   useLayoutEffect(() => {
-    setCurrentMode(connection.currentMode ?? 'default');
+    const next = connection.currentMode;
+    const wasLateHydration =
+      prevConnectionModeRef.current === undefined && next !== undefined;
+    prevConnectionModeRef.current = next;
+    setCurrentMode((prev) =>
+      wasLateHydration && prev !== 'default' ? prev : (next ?? 'default'),
+    );
   }, [connection.currentMode, logicalSessionKey]);
 
   useEffect(() => {
@@ -9240,6 +11564,7 @@ export function App({
          * prompt sees it even while the clear is still in flight.
          */
         gitIntent?: SessionGitIntent;
+        carryManualTitle?: string;
       },
     ) => {
       if (
@@ -9249,6 +11574,9 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
+      pendingManualTitleRef.current = opts?.carryManualTitle
+        ? { displayName: opts.carryManualTitle }
+        : undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
       let nextContext: DaemonProductSessionContext | undefined;
@@ -9268,6 +11596,7 @@ export function App({
               }
             : undefined);
         if (nextContext?.kind === 'live') {
+          pendingManualTitleRef.current = undefined;
           gitModeIntentRef.current = { mode: 'current' };
           setGitModeIntent({ mode: 'current' });
           try {
@@ -9346,7 +11675,7 @@ export function App({
         splitFoldedByShrinkRef.current = false;
         closePanel();
       }
-      if (!opts?.keepView) setMainView('chat');
+      if (!opts?.keepView) showChat();
       let focusRequest: number | undefined;
       try {
         autoRecapVersionRef.current += 1;
@@ -9390,6 +11719,7 @@ export function App({
       scheduleComposerFocus,
       setPendingSessionContext,
       sessionActions,
+      showChat,
       t,
       workspaceCapabilitiesReady,
       workspace.client,
@@ -9400,6 +11730,14 @@ export function App({
    * Serializes workspace intent. An active session keeps its owner and is
    * replaced by a fresh chat; a draft only changes its next-session target.
    */
+  // The Workspaces panel's rows always name a workspace; a stable identity
+  // matters because the panel keys its column definitions on this handler.
+  const handlePanelNewSession = useCallback(
+    (workspaceCwd: string) =>
+      createNewSession({ kind: 'workspace', cwd: workspaceCwd }),
+    [createNewSession],
+  );
+
   const switchWorkspace = useCallback(
     async (
       workspaceCwd: string | undefined,
@@ -9431,6 +11769,7 @@ export function App({
         // intent. Compared before the ref is overwritten below. `undefined`
         // is the primary selection on both sides.
         const sameTarget = workspaceCwd === selectedWorkspaceCwdRef.current;
+        if (!sameTarget) pendingManualTitleRef.current = undefined;
         composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
@@ -9608,6 +11947,9 @@ export function App({
     },
     [switchWorkspace],
   );
+  const handleSelectComposerStandalone = useCallback(() => {
+    void createNewSession({ kind: 'global' });
+  }, [createNewSession]);
   const handleCreateComposerScratchWorkspace = useCallback(() => {
     void handleCreateScratchWorkspace();
   }, [handleCreateScratchWorkspace]);
@@ -9924,6 +12266,7 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
     ) => {
+      pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
       const previousPendingContext = pendingSessionContextRef.current;
@@ -10149,7 +12492,7 @@ export function App({
       splitClassificationGenerationRef.current += 1;
       // Explicit navigation cancels any pending shrink-fold split restore.
       splitFoldedByShrinkRef.current = false;
-      setMainView('chat');
+      showChat();
       const currentContext =
         pendingSessionContextRef.current ??
         connectionRef.current.sessionContext;
@@ -10163,7 +12506,7 @@ export function App({
         },
       );
     },
-    [loadSidebarSession, reportError],
+    [loadSidebarSession, reportError, showChat],
   );
 
   // Listen for `qwen:open-session` events dispatched by the markdown renderer
@@ -10338,7 +12681,7 @@ export function App({
   }, [clearPendingBoundRun, enqueueManualRun]);
   const runTaskManually = useCallback(
     (prompt: string, sessionId: string | null): Promise<void> => {
-      setMainView('chat');
+      showChat();
       if (!sessionId) {
         // Unbound: runs in the current session — resolves at admission.
         return enqueueManualRun(prompt);
@@ -10379,6 +12722,7 @@ export function App({
       enqueueManualRun,
       loadSidebarSession,
       clearPendingBoundRun,
+      showChat,
       sessionOwnerGuard,
       tryFireBoundRun,
     ],
@@ -10396,8 +12740,10 @@ export function App({
   const openTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
     const owner = sessionOwnerGuard.capture();
-    sessionActions
-      .getTasks()
+    const request = workflowsEnabled
+      ? sessionActions.getWorkflowTasks()
+      : sessionActions.getTasks();
+    request
       .then((snapshot) => {
         if (!owner.isCurrent()) return;
         setTasksDialogMessage({ snapshot });
@@ -10412,14 +12758,164 @@ export function App({
     requireActiveSessionForLocalCommand,
     sessionActions,
     sessionOwnerGuard,
+    workflowsEnabled,
   ]);
+  const openCockpit = useCallback((): boolean => {
+    if (!sessionWorkflowEnabled || approvalOverlayActive) return false;
+    if (!requireActiveSessionForLocalCommand()) return false;
+    if (!cockpitViewRequested()) updateCockpitLocation(true);
+    setActivePanel(null);
+    setTasksDialogMessage(null);
+    setMainView('cockpit');
+    return true;
+  }, [
+    approvalOverlayActive,
+    requireActiveSessionForLocalCommand,
+    sessionWorkflowEnabled,
+  ]);
+  const openWorkflowInspector = useCallback(() => {
+    if (!sessionWorkflowEnabled || approvalOverlayActive) return;
+    if (!requireActiveSessionForLocalCommand()) return;
+    rememberArtifactPanelTrigger();
+    const tab: ArtifactPanelTab = {
+      id: 'workflow',
+      kind: 'workflow',
+      title: t('workflow.title'),
+    };
+    setArtifactPanelTabs((tabs) =>
+      tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab],
+    );
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelWidth((width) =>
+      artifactPanelOpenRef.current
+        ? width
+        : Math.min(440, getDefaultReviewPanelWidth()),
+    );
+    setArtifactPanelOpen(true);
+  }, [
+    approvalOverlayActive,
+    getDefaultReviewPanelWidth,
+    rememberArtifactPanelTrigger,
+    requireActiveSessionForLocalCommand,
+    sessionWorkflowEnabled,
+    t,
+  ]);
+  const keepWorkflowDrawerClosedForCanvasRef = useRef(false);
+  const workflowCanvasEntryHandledRef = useRef(false);
+  const expandWorkflowGraph = useCallback(() => {
+    // Only close the floating inspector drawer when the cockpit actually
+    // opened: openCockpit() silently aborts on the approval-overlay and
+    // active-session guards, and closing the drawer anyway would drop the
+    // interactive workflow surface without delivering the expand action.
+    if (!openCockpit()) return;
+    if (artifactPanelFullscreen) setArtifactPanelFullscreen(false);
+    if (useFloatingArtifactPanel) {
+      keepWorkflowDrawerClosedForCanvasRef.current = true;
+      setArtifactPanelOpen(false);
+    }
+  }, [artifactPanelFullscreen, openCockpit, useFloatingArtifactPanel]);
+  useEffect(() => {
+    if (mainView !== 'cockpit') {
+      keepWorkflowDrawerClosedForCanvasRef.current = false;
+      workflowCanvasEntryHandledRef.current = false;
+      return;
+    }
+    if (workflowCanvasEntryHandledRef.current) return;
+    workflowCanvasEntryHandledRef.current = true;
+    if (
+      keepWorkflowDrawerClosedForCanvasRef.current ||
+      artifactPanelTabs.some((tab) => tab.kind === 'workflow')
+    ) {
+      return;
+    }
+    openWorkflowInspector();
+  }, [artifactPanelTabs, mainView, openWorkflowInspector]);
+  const focusComposerAfterCockpitCloseRef = useRef(false);
+  const closeCockpit = useCallback(() => {
+    focusComposerAfterCockpitCloseRef.current = true;
+    showChat();
+  }, [showChat]);
+  useEffect(() => {
+    if (mainView !== 'chat' || !focusComposerAfterCockpitCloseRef.current) {
+      return;
+    }
+    focusComposerAfterCockpitCloseRef.current = false;
+    if (!activePanel && !approvalOverlayActive) editorRef.current?.focus();
+  }, [activePanel, approvalOverlayActive, mainView]);
+  useEffect(() => {
+    if (!sessionWorkflowEnabled) {
+      if (mainView !== 'cockpit') return;
+      if (cockpitViewRequested()) {
+        if (sessionWorkflowSettingsResolved) {
+          updateCockpitLocation(false, true);
+        }
+      }
+      focusComposerAfterCockpitCloseRef.current = true;
+      setMainView('chat');
+      return;
+    }
+    if (
+      mainView === 'chat' &&
+      cockpitViewRequested() &&
+      !approvalOverlayActive
+    ) {
+      setMainView('cockpit');
+    }
+  }, [
+    approvalOverlayActive,
+    mainView,
+    sessionWorkflowEnabled,
+    sessionWorkflowSettingsResolved,
+  ]);
+  useEffect(() => {
+    const handlePopState = () => {
+      if (cockpitViewRequested()) {
+        if (sessionWorkflowEnabled && !approvalOverlayActive) {
+          setMainView('cockpit');
+        } else {
+          setMainView('chat');
+          if (approvalOverlayActive || sessionWorkflowSettingsResolved) {
+            updateCockpitLocation(false, true);
+          }
+        }
+      } else if (mainViewRef.current === 'cockpit') {
+        if (!approvalOverlayActive) {
+          focusComposerAfterCockpitCloseRef.current = true;
+        }
+        setMainView('chat');
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [
+    approvalOverlayActive,
+    sessionWorkflowEnabled,
+    sessionWorkflowSettingsResolved,
+  ]);
+  useEffect(() => {
+    if (
+      mainView === 'cockpit' &&
+      sessionWorkflowEnabled &&
+      !cockpitViewRequested()
+    ) {
+      updateCockpitLocation(true, true);
+    } else if (
+      mainView !== 'cockpit' &&
+      cockpitViewRequested() &&
+      !sessionWorkflowEnabled &&
+      sessionWorkflowSettingsResolved
+    ) {
+      updateCockpitLocation(false, true);
+    }
+  }, [mainView, sessionWorkflowEnabled, sessionWorkflowSettingsResolved]);
   const openEnvironmentTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
     setEnvironmentPanelOpen(true);
+    persistEnvironmentPanelOpen(true);
     setBackgroundTasksRefreshTrigger((value) => value + 1);
-  }, [requireActiveSessionForLocalCommand]);
+  }, [persistEnvironmentPanelOpen, requireActiveSessionForLocalCommand]);
   const openEnvironmentTask = useCallback(
-    (task: DaemonSessionTaskStatus) => {
+    (task: DaemonSessionTaskWithWorkflowStatus) => {
       if (task.kind === 'monitor' || task.kind === 'shell') {
         if (!artifactPanelOpenRef.current) {
           preserveEnvironmentPanelOnArtifactOpenRef.current = true;
@@ -10987,6 +13483,15 @@ export function App({
             openEnvironmentTasksPanel();
             return true;
           }
+          if (
+            cmd === 'workflows' &&
+            workspaceContextActive &&
+            workflowsEnabled &&
+            text.slice(match[0].length).trim().length === 0
+          ) {
+            openWorkflows();
+            return true;
+          }
           if (cmd === 'goal') {
             return handleGoalSlashCommand(
               text,
@@ -11232,6 +13737,16 @@ export function App({
                   reportError(error, t('model.switch'));
                 });
             } else {
+              if (
+                isStandaloneModelPickerUnavailable({
+                  sessionId: connectionRef.current.sessionId,
+                  sessionContextKind: effectiveSessionContext?.kind,
+                  models: connectionRef.current.models,
+                })
+              ) {
+                pushToast('info', t('model.unavailable'));
+                return true;
+              }
               setModelDialogMode('main');
             }
             return true;
@@ -11541,7 +14056,23 @@ export function App({
             return true;
           }
           if (cmd === 'clear') {
-            void createNewSession({ kind: 'inherit' });
+            const current = connectionRef.current;
+            const summary = currentSessionSummaryRef.current;
+            const carryManualTitle = current.sessionId
+              ? current.titleSource === 'manual'
+                ? current.displayName
+                : current.titleSource === undefined &&
+                    summary?.sessionId === current.sessionId &&
+                    summary.titleSource === 'manual'
+                  ? summary.displayName
+                  : current.titleSource === undefined
+                    ? pendingManualTitleRef.current?.displayName
+                    : undefined
+              : pendingManualTitleRef.current?.displayName;
+            void createNewSession(
+              { kind: 'inherit' },
+              carryManualTitle?.trim() ? { carryManualTitle } : undefined,
+            );
             return true;
           }
           if (cmd === 'new' || cmd === 'reset') {
@@ -11549,6 +14080,7 @@ export function App({
             return true;
           }
           if (cmd === 'rename') {
+            pendingManualTitleRef.current = undefined;
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
               if (commandBlocked) {
@@ -11904,6 +14436,8 @@ export function App({
       closeMobileDrawer,
       openPanel,
       openScheduledTasks,
+      openWorkflows,
+      workflowsEnabled,
       createNewSession,
       ensureSessionForPrompt,
       finishPromptPreparation,
@@ -11976,11 +14510,20 @@ export function App({
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
       const owner = sessionOwnerGuard.capture();
-      sessionActions
+      // Return the submission promise (and rethrow a rejection) so the
+      // ToolApproval re-arm contract engages: its confirm() resets the
+      // double-submit guard only when the returned promise rejects.
+      // Swallowing the rejection here would leave submittedRef latched on a
+      // transient daemon/WS failure, blocking every retry for this request.
+      // Same shape as ChatPane.handleConfirm.
+      return sessionActions
         .submitPermission(id, selectedOption, answers)
+        .then(() => undefined)
         .catch((error: unknown) => {
-          if (!owner.isCurrent()) return;
-          reportError(error, 'Failed to submit permission choice');
+          if (owner.isCurrent()) {
+            reportError(error, 'Failed to submit permission choice');
+          }
+          throw error;
         });
     },
     [sessionActions, reportError, sessionOwnerGuard],
@@ -12980,18 +15523,29 @@ export function App({
   const visibleComposerToolbarActions = useMemo<
     readonly ComposerToolbarAction[]
   >(() => {
-    if (composerToolbarActions) return composerToolbarActions;
     const defaults =
       isChatEmptyState || !environmentGitReplacementEnabled
         ? DEFAULT_EMPTY_COMPOSER_TOOLBAR_ACTIONS
         : DEFAULT_COMPOSER_TOOLBAR_ACTIONS;
-    return composerToolbarAdditionalActions?.length
-      ? [...defaults, ...composerToolbarAdditionalActions]
-      : defaults;
+    const configured =
+      composerToolbarActions ??
+      (composerToolbarAdditionalActions?.length
+        ? [...defaults, ...composerToolbarAdditionalActions]
+        : defaults);
+    return isStandaloneModelPickerUnavailable({
+      sessionId: connection.sessionId,
+      sessionContextKind: effectiveSessionContext?.kind,
+      models: connection.models,
+    })
+      ? configured.filter((action) => action !== 'model')
+      : configured;
   }, [
     composerToolbarActions,
     composerToolbarAdditionalActions,
+    connection.models,
+    connection.sessionId,
     environmentGitReplacementEnabled,
+    effectiveSessionContext?.kind,
     isChatEmptyState,
   ]);
   const useMobileWelcomeMiddleLayout =
@@ -13028,18 +15582,24 @@ export function App({
     !isChatEmptyState &&
     !activePanel &&
     mainView === 'chat';
-  const handleEnvironmentPanelOpenChange = useCallback((open: boolean) => {
-    if (!open) {
-      preserveEnvironmentPanelOnArtifactOpenRef.current = false;
-      setEnvironmentPanelOpen(false);
-      return;
-    }
-    setEnvironmentPanelOpen(true);
-  }, []);
+  const handleEnvironmentPanelOpenChange = useCallback(
+    (open: boolean) => {
+      persistEnvironmentPanelOpen(open);
+      if (!open) {
+        preserveEnvironmentPanelOnArtifactOpenRef.current = false;
+        setEnvironmentPanelOpen(false);
+        return;
+      }
+      setEnvironmentPanelOpen(true);
+      setBackgroundTasksRefreshTrigger((value) => value + 1);
+    },
+    [persistEnvironmentPanelOpen],
+  );
   const dismissEnvironmentPanel = useCallback(() => {
     preserveEnvironmentPanelOnArtifactOpenRef.current = false;
+    persistEnvironmentPanelOpen(false);
     setEnvironmentPanelOpen(false);
-  }, []);
+  }, [persistEnvironmentPanelOpen]);
   const handleRightPanelOpenChange = useCallback(
     (open: boolean) => {
       if (open) {
@@ -13265,8 +15825,9 @@ export function App({
     selectedReviewPath,
     workspaceCwd: connection.workspaceCwd || '',
     loading: artifactsLoading,
+    restoring: artifactPanelRestoring,
     error: artifactsError,
-    onSelectTab: setActiveArtifactPanelTabId,
+    onSelectTab: selectArtifactPanelTab,
     onCloseTab: closeArtifactPanelTab,
     onOpenFilePreview: openFilePreview,
     latestReviewAvailable: latestReviewChanges.length > 0,
@@ -13282,14 +15843,34 @@ export function App({
     onSideTaskTitleChange: handleSideTaskTitleChange,
     onNestedRightPanelOpen: handleTurnOutputOpen,
     onNestedArtifactsChange: handlePaneArtifactsChange,
+    onOpenNestedSubagent: openSubagentPanelForSession,
+    agentTasks: tracedEnvironmentAgentTasks,
+    agentTraceLoading: agentTraceInitialLoading,
+    agentTraceError: agentTraceFailed ? t('workflow.loadFailed') : undefined,
+    onOpenWorkflowAgent: openEnvironmentAgent,
     onError: reportError,
     sessionWorkflowEnabled,
+    workflow: sessionWorkflowEnabled
+      ? {
+          todos: sessionWorkflowTodos,
+          tools: planAgentTools,
+          tasks: environmentAgentTasks,
+          artifacts,
+          selectedTodoId: selectedWorkflowTodoId,
+          onSelectedTodoIdChange: setSelectedWorkflowTodoId,
+          onExpandGraph: expandWorkflowGraph,
+          onOpenSubagent: openSubagentPanel,
+          onOpenArtifact: openArtifactPanel,
+          canvasMode: mainView === 'cockpit',
+        }
+      : undefined,
     onImageIngestionNotice: pushToast,
     deferSubagentMount,
     onClose: closeArtifactPanel,
     fullscreen: artifactPanelFullscreen,
     onToggleFullscreen: toggleArtifactPanelFullscreen,
   };
+  const environmentPanelOwner = sessionOwnerGuard.capture();
 
   return (
     <ThemeProvider value={selectedTheme}>
@@ -13406,16 +15987,22 @@ export function App({
                   ? t('planExecution.dialogTitle')
                   : t('tasks.title')
               }
-              size="lg"
+              size="auto"
               onClose={() => setTasksDialogMessage(null)}
             >
               <TasksStatusMessage
                 message={tasksDialogMessage}
                 embedded
                 manageActiveEvent={false}
+                includeWorkflows={workflowsEnabled}
+                onWorkflowRunStarted={() =>
+                  setBackgroundTasksRefreshTrigger((value) => value + 1)
+                }
                 onClose={() => setTasksDialogMessage(null)}
                 planTodos={sessionWorkflowEnabled ? floatingTodos : []}
-                agentTools={sessionWorkflowEnabled ? planAgentTools : []}
+                agentTools={
+                  sessionWorkflowEnabled ? tasksDialogAgentTools : []
+                }
                 onOpenSubagent={(tool) => {
                   setTasksDialogMessage(null);
                   openSubagentPanel(tool);
@@ -13689,6 +16276,10 @@ export function App({
                     closeMobileDrawer();
                     openScheduledTasks();
                   }}
+                  onOpenWorkflows={() => {
+                    closeMobileDrawer();
+                    openWorkflows();
+                  }}
                   onOpenGoals={() => {
                     closeMobileDrawer();
                     openGoals();
@@ -13714,18 +16305,19 @@ export function App({
                       );
                     }
                   }}
+                  // A cwd-less New task inherits the current context: a
+                  // workspace chat stays in its workspace and a cold draft
+                  // lands on the primary one. Projectless targets are chosen
+                  // in the composer's workspace picker instead.
                   onNewSession={(workspaceCwd) =>
                     createNewSession(
                       typeof workspaceCwd === 'string'
                         ? { kind: 'workspace', cwd: workspaceCwd }
-                        : { kind: 'global' },
+                        : { kind: 'inherit' },
                     )
                   }
-                  globalNewSessionUsesStandalone={
-                    standaloneSessionsSupported && !lockedWorkspaceCwd
-                  }
                   onLoadSession={(sessionId, workspaceCwd) => {
-                    setMainView('chat');
+                    showChat();
                     return loadSidebarSession(sessionId, workspaceCwd);
                   }}
                   onLoadStandaloneSession={(sessionId) => {
@@ -13742,8 +16334,8 @@ export function App({
                   projectFeaturesEnabled={workspaceContextActive}
                   onSelectCurrentSession={() => {
                     closeMobileDrawer();
-                    setMainView('chat');
                     splitFoldedByShrinkRef.current = false;
+                    showChat();
                     closePanel();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
@@ -13812,6 +16404,10 @@ export function App({
                     closeMobileDrawer();
                     openPanel(target);
                   }}
+                  onOpenWorkspacesOverview={() => {
+                    closeMobileDrawer();
+                    openPanel('workspaces');
+                  }}
                   onNewWorktreeSession={(workspaceCwd) => {
                     // The intent travels with the draft it belongs to: set
                     // inside createNewSession's synchronous step, it is what
@@ -13855,7 +16451,7 @@ export function App({
               {chatHeaderEnabled &&
                 !isChatEmptyState &&
                 !activePanel &&
-                mainView === 'chat' && (
+                (mainView === 'chat' || mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
                   {sidebarOptions.enabled &&
                     sidebarOptions.showCompactToggle && (
@@ -13884,7 +16480,7 @@ export function App({
                         </svg>
                       </button>
                     )}
-                  {renderChatHeader ? (
+                  {renderChatHeader && mainView === 'chat' ? (
                     <div className={styles.customChatHeader}>
                       {renderChatHeader({
                         sessionId: connection.sessionId,
@@ -13920,10 +16516,14 @@ export function App({
                           : null
                       }
                       environmentOpen={environmentPanelVisible}
-                      environmentAvailable={environmentHeaderItemVisible}
+                      environmentAvailable={
+                        mainView === 'chat' && environmentHeaderItemVisible
+                      }
                       rightPanelOpen={artifactPanelOpen}
                       rightPanelAvailable={
-                        rightPanelHeaderItemVisible && !artifactPanelOpen
+                        mainView === 'chat' &&
+                        rightPanelHeaderItemVisible &&
+                        !artifactPanelOpen
                       }
                       onToggleEnvironment={() =>
                         handleEnvironmentPanelOpenChange(
@@ -13949,6 +16549,20 @@ export function App({
                       }
                     />
                   )}
+                  {sessionWorkflowEnabled &&
+                    (sessionWorkflowTodos.length > 0 ||
+                      mainView === 'cockpit') && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="mr-3"
+                        data-testid="open-workflow"
+                        disabled={approvalOverlayActive}
+                        onClick={openWorkflowInspector}
+                      >
+                        {t('workflow.title')}
+                      </Button>
+                    )}
                 </div>
               )}
               <div
@@ -14036,6 +16650,8 @@ export function App({
                               ? t('plugins.title')
                             : activePanel === 'channels'
                               ? t('channels.title')
+                            : activePanel === 'workspaces'
+                              ? t('workspacesOverview.title')
                               : t('sessionsOverview.title')
                   }
                 >
@@ -14044,7 +16660,8 @@ export function App({
                     activePanel !== 'skills' &&
                     activePanel !== 'agents' &&
                     activePanel !== 'plugins' &&
-                    activePanel !== 'channels' && (
+                    activePanel !== 'channels' &&
+                    activePanel !== 'workspaces' && (
                     <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
@@ -14143,7 +16760,8 @@ export function App({
                         activePanel === 'plugins'
                           ? pluginTabRef
                           : activePanel === 'extensions' ||
-                              activePanel === 'channels'
+                              activePanel === 'channels' ||
+                              activePanel === 'workspaces'
                             ? panelHeadingRef
                             : undefined
                       }
@@ -14220,15 +16838,6 @@ export function App({
                       />
                     ) : activePanel === 'plugins' ? (
                       <PluginManagerPage
-                        mcpMessage={mcpDialogMessage}
-                        loadMcpMessage={async () => {
-                          try {
-                            await loadMcpManagerMessage();
-                          } catch (error) {
-                            reportError(error, 'Failed to load MCP status');
-                            throw error;
-                          }
-                        }}
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
@@ -14236,6 +16845,20 @@ export function App({
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
                         onClose={closePanel}
+                        initialFocusRef={panelHeadingRef}
+                      />
+                    ) : activePanel === 'workspaces' ? (
+                      <WorkspacesOverviewPanel
+                        onClose={closePanel}
+                        // A new draft replaces the panel with the chat view;
+                        // createNewSession's default (no keepPanel) does that.
+                        onNewSession={handlePanelNewSession}
+                        onAddWorkspace={
+                          dynamicWorkspaceRegistrationSupported
+                            ? () => setShowAddWorkspaceDialog(true)
+                            : undefined
+                        }
+                        onError={reportError}
                         initialFocusRef={panelHeadingRef}
                       />
                     ) : (
@@ -14305,7 +16928,7 @@ export function App({
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={() => setMainView('chat')}
+                      onClick={showChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -14384,7 +17007,7 @@ export function App({
                       onOpenSession={(sessionId) => {
                         // The task's bound session IS its run history — switch
                         // to the chat view and load that session's transcript.
-                        setMainView('chat');
+                        showChat();
                         loadSidebarSession(sessionId).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
@@ -14396,13 +17019,74 @@ export function App({
                   </div>
                 </div>
               )}
+              {workspaceContextActive &&
+                mainView === 'workflows' &&
+                workflowsEnabled && (
+                <div
+                  className={styles.fullPage}
+                  data-testid="workflow-runs-page"
+                >
+                  <div className={styles.fullPageHeader}>
+                    <button
+                      type="button"
+                      className={styles.fullPageBack}
+                      onClick={showChat}
+                      aria-label={t('common.back')}
+                      title={t('common.back')}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="18"
+                        height="18"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M15 18l-6-6 6-6" />
+                      </svg>
+                    </button>
+                    <div className={styles.fullPageTitle}>
+                      {t('workflowRuns.title')}
+                    </div>
+                  </div>
+                  <div className={styles.fullPageBody}>
+                    <WorkflowRunsPage
+                      onWorkflowRunStarted={() =>
+                        setBackgroundTasksRefreshTrigger((value) => value + 1)
+                      }
+                      onCreateViaChat={() => {
+                        const targetCwd =
+                          resolveWorkspaceMaintenanceTargetCwd();
+                        if (!targetCwd) return;
+                        void createNewSession({
+                          kind: 'workspace',
+                          cwd: targetCwd,
+                        }).then((created) => {
+                          if (!created) return;
+                          onSessionIdChange?.(undefined);
+                          window.setTimeout(() => {
+                            editorRef.current?.insertText(
+                              '/workflow-creator ',
+                              { mode: 'replace' },
+                            );
+                            editorRef.current?.focus();
+                          }, 0);
+                        });
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
               {workspaceContextActive && mainView === 'goals' && (
                 <div className={styles.fullPage} data-testid="goals-page">
                   <div className={styles.fullPageHeader}>
                     <button
                       type="button"
                       className={styles.fullPageBack}
-                      onClick={() => setMainView('chat')}
+                      onClick={showChat}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -14493,11 +17177,11 @@ export function App({
                         }
                         if (!owner.isCurrent()) return false;
                         strandedGoalSessionRef.current = undefined;
-                        setMainView('chat');
+                        showChat();
                       }}
                       onOpenSession={(sessionId) => {
                         // The goal's session transcript IS its history.
-                        setMainView('chat');
+                        showChat();
                         loadSidebarSession(sessionId).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
@@ -14507,6 +17191,27 @@ export function App({
                       onError={reportError}
                     />
                   </div>
+                </div>
+              )}
+              {workspaceContextActive && mainView === 'cockpit' && (
+                <div className={styles.fullPage} data-testid="cockpit-page">
+                  <SessionWorkflowCockpit
+                    sessionId={connection.sessionId ?? ''}
+                    connected={connected}
+                    todos={sessionWorkflowTodos}
+                    tools={planAgentTools}
+                    tasks={environmentAgentTasks}
+                    selectedTodoId={selectedWorkflowTodoId}
+                    onSelectedTodoIdChange={setSelectedWorkflowTodoId}
+                    onBackToChat={closeCockpit}
+                    onOpenSubagent={openSubagentPanel}
+                    {...(sessionDisplayName
+                      ? { sessionName: sessionDisplayName }
+                      : {})}
+                    {...(connection.workspaceCwd
+                      ? { workspaceCwd: connection.workspaceCwd }
+                      : {})}
+                  />
                 </div>
               )}
               {workspaceContextActive && mainView === 'split' && (
@@ -14522,7 +17227,7 @@ export function App({
                       data-testid="split-approval-notice"
                     >
                       <span>{t('splitView.outerApprovalPending')}</span>
-                      <button type="button" onClick={() => setMainView('chat')}>
+                      <button type="button" onClick={showChat}>
                         {t('splitView.goToApproval')}
                       </button>
                     </div>
@@ -14759,11 +17464,16 @@ export function App({
                                 }
                               />
                             );
+                            const messageListWithWorkflowDetails = (
+                              <WorkflowDetailsProvider tasks={sessionTasks}>
+                                {messageListContent}
+                              </WorkflowDetailsProvider>
+                            );
                             const messageListWithSubagentDetails = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
                               >
-                                {messageListContent}
+                                {messageListWithWorkflowDetails}
                               </SubagentDetailsProvider>
                             );
                             const messageList = monitorDetailsSupported ? (
@@ -14867,15 +17577,17 @@ export function App({
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
                             onOpen={
-                              sessionWorkflowEnabled && showFloatingTodos
-                                ? openTasksPanel
+                              showFloatingTodos
+                                ? floatingTodosUseSessionWorkflow
+                                  ? openWorkflowInspector
+                                  : openTasksPanel
                                 : undefined
                             }
                           />
                         </div>
                       )}
                       {/* Only render the outer session's approval on the chat
-                          view. Under a full-page view (split / scheduled tasks)
+                          view. Under a full-page view (Workflow / split / scheduled tasks)
                           it would sit hidden and unreachable. Each split pane
                           surfaces its own approval. `keyboardActive` tells the
                           overlay to grab focus only when it's the topmost one. */}
@@ -15294,7 +18006,7 @@ export function App({
                                 : undefined
                           }
                           workspaces={
-                            workspaceContextActive
+                            composerWorkspaceSelectEnabled
                               ? composerWorkspaces
                               : undefined
                           }
@@ -15309,7 +18021,9 @@ export function App({
                                 : selectedWorkspaceCwd
                               : undefined
                           }
-                          workspaceSelectionDisabled={!workspaceContextActive}
+                          workspaceSelectionDisabled={
+                            !composerWorkspaceSelectEnabled
+                          }
                           atWorkspaceCwd={
                             workspaceContextActive
                               ? (ordinaryWorkspaces.find(
@@ -15329,8 +18043,21 @@ export function App({
                           }
                           workspaceFeaturesEnabled={workspaceContextActive}
                           onSelectWorkspace={
-                            workspaceContextActive
+                            composerWorkspaceSelectEnabled
                               ? handleSelectComposerWorkspace
+                              : undefined
+                          }
+                          standaloneTargetSupported={
+                            composerWorkspaceSelectEnabled &&
+                            standaloneSessionsSupported &&
+                            !lockedWorkspaceCwd
+                          }
+                          selectedStandaloneTarget={
+                            effectiveSessionContext?.kind === 'standalone'
+                          }
+                          onSelectStandaloneTarget={
+                            composerWorkspaceSelectEnabled
+                              ? handleSelectComposerStandalone
                               : undefined
                           }
                           scratchWorkspaceSupported={
@@ -15442,7 +18169,15 @@ export function App({
                             setShowApprovalModeDialog((v) => !v)
                           }
                           onSelectModel={() =>
-                            setModelDialogMode((v) => (v ? null : 'main'))
+                            isStandaloneModelPickerUnavailable({
+                              sessionId: connection.sessionId,
+                              sessionContextKind: effectiveSessionContext?.kind,
+                              models: connection.models,
+                            })
+                              ? pushToast('info', t('model.unavailable'))
+                              : setModelDialogMode((v) =>
+                                  v ? null : 'main',
+                                )
                           }
                           onShowContext={() =>
                             showContextUsage('/context', false)
@@ -15506,6 +18241,16 @@ export function App({
                 }
                 tasks={sessionTasks}
                 agentTasks={environmentAgentTasks}
+                attachments={
+                  logicalSessionKey
+                    ? (sessionAttachmentsBySessionRef.current.get(
+                        logicalSessionKey,
+                      ) ?? [])
+                    : []
+                }
+                attachmentsLoading={sessionAttachmentsSkeletonLoading}
+                artifacts={artifacts}
+                artifactsLoading={artifactsLoading}
                 items={environmentPanelItems}
                 onOpenGitDiff={
                   gitDiffWorkspaceCwd ? handleOpenGitDiff : undefined
@@ -15514,13 +18259,34 @@ export function App({
                   gitDiffWorkspaceCwd ? handleOpenCommit : undefined
                 }
                 onOpenAgent={openEnvironmentAgent}
+                onOpenAgentWorkflow={
+                  sessionAgentTraceSupported ? openAgentWorkflow : undefined
+                }
                 onOpenTask={openEnvironmentTask}
+                onReadImage={readSessionImage}
+                onImagePreview={(src, alt, source) => {
+                  if (environmentPanelOwner.isCurrent()) {
+                    openImagePanel(src, alt, source);
+                  }
+                }}
+                onAttachmentPreview={openAttachmentPanel}
+                onAttachmentPreviewError={(error) => {
+                  if (!environmentPanelOwner.isCurrent()) return;
+                  pushToast(
+                    'error',
+                    t('rightPanel.attachmentLoadFailed', {
+                      error: formatError(error, t('environment.unavailable')),
+                    }),
+                  );
+                }}
+                onOpenArtifact={openArtifactPanel}
                 onDismiss={dismissEnvironmentPanel}
               />
             )}
             {artifactPanelOpen && useFloatingArtifactPanel && (
               <Drawer
                 open
+                autoFocus={floatingArtifactDrawerAutoFocus}
                 direction="right"
                 shouldScaleBackground={false}
                 onOpenChange={(open) => {
@@ -15528,16 +18294,35 @@ export function App({
                 }}
               >
                 <DrawerContent
+                  overlayProps={
+                    suppressArtifactDockOpenAnimation
+                      ? {
+                          className:
+                            'bg-black/35 backdrop-blur-[1px] !duration-0 data-[state=open]:!animate-none',
+                        }
+                      : { className: 'bg-black/35 backdrop-blur-[1px]' }
+                  }
                   onAnimationEnd={(event) => {
                     if (event.target === event.currentTarget) {
                       setWaitForSubagentPanelAnimation(false);
                     }
                   }}
-                  className={
+                  className={`${
                     artifactPanelFullscreen
                       ? 'data-[vaul-drawer-direction=right]:w-full data-[vaul-drawer-direction=right]:sm:max-w-none data-[vaul-drawer-direction=right]:rounded-none data-[vaul-drawer-direction=right]:border-0 data-[vaul-drawer-direction=right]:pt-[env(safe-area-inset-top)] data-[vaul-drawer-direction=right]:pr-[env(safe-area-inset-right)] data-[vaul-drawer-direction=right]:pb-[env(safe-area-inset-bottom)] data-[vaul-drawer-direction=right]:pl-[env(safe-area-inset-left)]'
-                      : 'data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]'
-                  }
+                      : 'shadow-2xl data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]'
+                  } ${
+                    suppressArtifactDockOpenAnimation
+                      ? '!duration-0 !transition-none data-[state=open]:!animate-none'
+                      : ''
+                  }`}
+                  onCloseAutoFocus={(event) => {
+                    const trigger = artifactPanelTriggerRef.current;
+                    artifactPanelTriggerRef.current = null;
+                    if (!trigger?.isConnected) return;
+                    event.preventDefault();
+                    trigger.focus();
+                  }}
                   onEscapeKeyDown={(event) => {
                     if (isWebTerminalTarget(event)) {
                       event.preventDefault();

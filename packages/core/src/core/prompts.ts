@@ -457,9 +457,13 @@ Interaction mode reminder: ${interaction.questions}
  * together, so a session is never reminded about a style its prompt does not
  * carry. Prompt overrides own their wording end to end: neither a custom
  * `systemPrompt` nor a `QWEN_SYSTEM_MD` replacement gets a style section, so
- * neither gets a reminder. Uses a structural type, like
- * {@link resolveInteractionMode}, to avoid a hard dependency on the full
- * Config class.
+ * neither gets a reminder. A checked-in style file is a prompt, so a
+ * `project` style is dropped as soon as the workspace stops being trusted:
+ * the catalog is read once at startup but trust can flip mid-session, so the
+ * gate is re-checked here, where the prompt and the reminder consume it.
+ * Uses a structural type, like {@link resolveInteractionMode}, to avoid a
+ * hard dependency on the full Config class; a config that reports no trust
+ * verdict keeps whatever style it resolved.
  */
 export function resolveMainSessionOutputStyle(config: {
   getSystemPrompt(): string | undefined;
@@ -467,14 +471,16 @@ export function resolveMainSessionOutputStyle(config: {
   getExperimentalZedIntegration(): boolean;
   getInputFormat?(): string;
   isInteractive(): boolean;
+  isTrustedFolder?(): boolean;
 }): OutputStyleDefinition | undefined {
   if (config.getSystemPrompt() || isSystemMdActive()) {
     return undefined;
   }
-  return resolveEffectiveOutputStyle(
-    config.getOutputStyle(),
-    resolveInteractionMode(config),
-  );
+  const style = config.getOutputStyle();
+  if (style?.source === 'project' && config.isTrustedFolder?.() === false) {
+    return undefined;
+  }
+  return resolveEffectiveOutputStyle(style, resolveInteractionMode(config));
 }
 
 /**

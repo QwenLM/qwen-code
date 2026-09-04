@@ -19,6 +19,8 @@ import {
   createDebugLogger,
   persistSessionUsage,
   PRIVATE_ACP_CAPABILITY_ENV,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -53,7 +55,10 @@ import {
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import { SettingsWatcher } from './config/settingsWatcher.js';
-import { registerMcpHotReload } from './config/hot-reload.js';
+import {
+  registerMcpHotReload,
+  registerModelProvidersHotReload,
+} from './config/hot-reload.js';
 import { LspConfigWatcher } from './config/lsp-config-watcher.js';
 import { ExtensionFileWatcher } from './config/extension-file-watcher.js';
 import { ExtensionRefreshState } from './config/extension-refresh-state.js';
@@ -95,6 +100,7 @@ import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
+import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { initializeLlmOutputLanguage } from './i18n/languageUtils.js';
 import {
   CUSTOM_SANDBOX_IMAGE_ENV_VAR,
@@ -353,6 +359,13 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
 
 export async function main() {
   profileCheckpoint('main_entry');
+  // First thing, before any child can be spawned: an inherited messaging
+  // address/token names the ANCESTOR's inbox, and handing that pair on
+  // would let this session's hooks inject into the wrong session. Modes
+  // that never bind an inbox — feature off, headless `-p`, a registration
+  // that never completes — reach no other scrub, so it happens here for
+  // all of them. A session that does bind one re-exports its own pair.
+  clearInheritedPeerMessagingEnv();
   const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // LlmClient.setTools) into the cli's startup profiler. Gated on
@@ -373,6 +386,14 @@ export async function main() {
 
   const privateAcpParentCapability = process.env[PRIVATE_ACP_CAPABILITY_ENV];
   delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  // Captured beside the private parent capability so a Conversations
+  // provenance marker can never be introduced or withdrawn later by settings
+  // or environment files; acceptance below additionally requires ACP mode and
+  // the capability.
+  const conversationsRuntimeMarkerSeen =
+    process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV] ===
+    PRIVATE_CONVERSATIONS_RUNTIME_ENABLE;
+  delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
   const privateExternalToolGuard =
     process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV] ===
     EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
@@ -404,10 +425,20 @@ export async function main() {
   markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
   const isAcpMode = argv.acp || argv.experimentalAcp;
+  const conversationsRuntimeProvenance =
+    isAcpMode &&
+    privateAcpParentCapability !== undefined &&
+    conversationsRuntimeMarkerSeen;
   const privateAcpChildEnv =
     isAcpMode && privateAcpParentCapability !== undefined
       ? {
           [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability,
+          ...(conversationsRuntimeProvenance
+            ? {
+                [PRIVATE_CONVERSATIONS_RUNTIME_ENV]:
+                  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+              }
+            : {}),
           ...(privateExternalToolGuard
             ? {
                 [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: privateExternalToolGuard,
@@ -442,6 +473,9 @@ export async function main() {
     ? createMinimalSettings()
     : loadSettings();
   markAcpStartup('settingsLoadEnd');
+  // A user-level .env or settings reload may have reintroduced the marker;
+  // the accepted value already lives in immutable local state.
+  delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
 
   // Propagate corruption state to child process via env vars so
   // relaunchAppInChildProcess() doesn't lose the marker.
@@ -670,6 +704,12 @@ export async function main() {
             sessionId,
           )
         : injectStdinIntoArgs(process.argv, stdinData);
+
+      // The seatbelt spawn merges `{ ...process.env, ...childEnv }`, so the
+      // marker must not be sitting in process.env at the handoff: auth
+      // validation above re-runs the environment load, and the accepted
+      // provenance travels in `privateAcpChildEnv`, which is spread last.
+      delete process.env[PRIVATE_CONVERSATIONS_RUNTIME_ENV];
 
       await relaunchOnExitCode(
         () =>
@@ -908,6 +948,16 @@ export async function main() {
         config.getTopTierMcpServers(),
       );
       registerCleanup(disposeMcpHotReload);
+
+      // Same plumbing for modelProviders edits (#10568): reload the model
+      // registry in place so `/model` picks up new providers without a
+      // session restart.
+      const disposeModelProvidersHotReload = registerModelProvidersHotReload(
+        settingsWatcher,
+        settings,
+        config,
+      );
+      registerCleanup(disposeModelProvidersHotReload);
     }
 
     registerLspHotReload(config, registerCleanup);
@@ -1098,6 +1148,7 @@ export async function main() {
           privateParentCapability: isAcpMode
             ? privateAcpParentCapability
             : undefined,
+          conversationsRuntimeProvenance,
           externalToolGuardRequired:
             isAcpMode &&
             privateAcpParentCapability !== undefined &&
@@ -1185,6 +1236,57 @@ export async function main() {
       // startInteractiveUI) and so the first paint uses the refined theme
       // when the probe finishes in time.
       await themeAutoDetectionComplete;
+      // Renderer dispatch for the ink→OpenTUI migration: QWEN_TUI_RENDERER
+      // selects the experimental backend only on a runtime that can drive it;
+      // every other case — including a failed load or boot of the entry —
+      // falls through to ink, which stays the default renderer. The try/catch
+      // is load-bearing: importing the entry evaluates opentui modules whose
+      // module scope touches the native FFI, which can still throw on a
+      // runtime that passed the version gate.
+      const { selectTuiRenderer, TUI_RENDERER_STRICT_ENV_VAR } = await import(
+        './ui/opentui/renderer-selection.js'
+      );
+      const selection = selectTuiRenderer();
+      if (selection.renderer === 'opentui') {
+        try {
+          const { startOpenTuiUI } = await import(
+            './ui/opentui/start-opentui-ui.js'
+          );
+          const started = await startOpenTuiUI(
+            config,
+            settings,
+            startupWarnings,
+            process.cwd(),
+            initializationResult!,
+            {
+              postRenderConnectIde: deferIdeConnection,
+              extensionRefreshState,
+            },
+          );
+          if (started) {
+            clearCorruptionEnvVars();
+            return;
+          }
+          // The entry returned false: it already warned on stderr. Strict
+          // mode turns that fallback into a loud failure too, so an E2E
+          // renderer-matrix leg cannot pass green on ink.
+          if (selection.strict) {
+            throw new Error(
+              `OpenTUI failed to start and ${TUI_RENDERER_STRICT_ENV_VAR} forbids the ink fallback`,
+            );
+          }
+        } catch (err) {
+          if (selection.strict) {
+            throw err;
+          }
+          debugLogger.error('OpenTUI boot failed; falling back to ink:', err);
+          writeStderrLine(
+            `Warning: OpenTUI failed to start — ${err instanceof Error ? err.message : String(err)} (falling back to ink)`,
+          );
+        }
+      } else {
+        debugLogger.debug(`TUI renderer: ${selection.reason}`);
+      }
       const { startInteractiveUI } = await import('./ui/startInteractiveUI.js');
       await startInteractiveUI(
         config,

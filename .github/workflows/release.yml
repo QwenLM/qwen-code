@@ -2,10 +2,14 @@ name: 'Release'
 
 on:
   schedule:
-    # Runs every day at midnight UTC for the nightly release.
-    - cron: '0 0 * * *'
-    # Runs every Tuesday at 23:59 UTC for the preview release.
-    - cron: '59 23 * * 2'
+    # Both crons run in the ECS pool's quiet hours (UTC+8 early morning),
+    # hours apart from each other and from the CI/E2E nightlies. Scheduled
+    # release validation is also serialized below. The strings are compared
+    # verbatim in prepare.
+    # Runs every day at 21:00 UTC for the nightly release.
+    - cron: '0 21 * * *'
+    # Runs every Tuesday at 17:00 UTC for the preview release.
+    - cron: '0 17 * * 2'
   workflow_dispatch:
     inputs:
       version:
@@ -38,19 +42,33 @@ on:
         type: 'boolean'
         default: false
 
+concurrency:
+  # A delayed preview must not overlap the nightly validation on the same
+  # reserved host. Manual runs keep unique groups so GitHub's non-FIFO
+  # concurrency queue can never supersede a pending real release with a dry run.
+  group: "${{ github.event_name == 'schedule' && 'release-scheduled-validation' || format('release-{0}', github.run_id) }}"
+  cancel-in-progress: false
+
 jobs:
+  # Validation is pinned to the hk4 host through its dedicated label:
+  # every runner on a host shares its CPUs, and the sharded workspace tests
+  # failed on timing whenever they landed on a host that was also running
+  # a dozen PR CI / E2E jobs. The workflow deliberately does not require the
+  # shared ecs-qwen label, so infra can remove that label from hk4 and keep
+  # the host release-only without making these jobs unroutable.
   prepare:
     name: 'Prepare Release Metadata'
     # Process cleanup belongs to the runner service/cgroup boundary. This
     # workflow only resets job-owned filesystem state on the shared pool.
     # MAINTAINER_ECS_RUNNER_DISABLED restores the hosted fallback.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 30
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
       contents: 'read'
     outputs:
+      release_sha: '${{ steps.source.outputs.release_sha }}'
       release_tag: '${{ steps.version.outputs.RELEASE_TAG }}'
       release_version: '${{ steps.version.outputs.RELEASE_VERSION }}'
       npm_tag: '${{ steps.version.outputs.NPM_TAG }}'
@@ -73,7 +91,7 @@ jobs:
           # wipe — rather than keeping and scrubbing .git like serve-ab.yml —
           # is deliberate: these checkouts run with CI_BOT_PAT and the npm
           # OIDC id-token, so no pre-existing repo state may survive into
-          # them; the accepted cost is re-fetching full history each run.
+          # them; the accepted cost is fetching a fresh ref each run.
           #
           # Guards ported from serve-ab.yml's wipe (#9220, #9265): under a
           # mangled env even `/home` or an empty string reached the rm. A
@@ -231,13 +249,13 @@ jobs:
           DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
         run: |-
           is_nightly="false"
-          if [[ "${CRON}" == "0 0 * * *" || "${CREATE_NIGHTLY_RELEASE}" == "true" ]]; then
+          if [[ "${CRON}" == "0 21 * * *" || "${CREATE_NIGHTLY_RELEASE}" == "true" ]]; then
             is_nightly="true"
           fi
           echo "is_nightly=${is_nightly}" >> "${GITHUB_OUTPUT}"
 
           is_preview="false"
-          if [[ "${CRON}" == "59 23 * * 2" || "${CREATE_PREVIEW_RELEASE}" == "true" ]]; then
+          if [[ "${CRON}" == "0 17 * * 2" || "${CREATE_PREVIEW_RELEASE}" == "true" ]]; then
             is_preview="true"
           fi
           echo "is_preview=${is_preview}" >> "${GITHUB_OUTPUT}"
@@ -247,6 +265,10 @@ jobs:
             is_dry_run="true"
           fi
           echo "is_dry_run=${is_dry_run}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Resolve release commit'
+        id: 'source'
+        run: 'echo "release_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"'
 
       - name: 'Set up Node.js (hosted)'
         if: "${{ runner.environment != 'self-hosted' }}"
@@ -312,16 +334,16 @@ jobs:
           echo "NPM_TAG=$(echo "$VERSION_JSON" | jq -r .npmTag)" >> "$GITHUB_OUTPUT"
           echo "PREVIOUS_RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .previousReleaseTag)" >> "$GITHUB_OUTPUT"
 
-  quality:
-    name: 'Quality Checks'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 120
+  quality_static:
+    name: 'Quality Checks (Static)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 30
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
     permissions:
       contents: 'read'
-    env:
+    env: &release_test_env
       OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
       OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
       OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
@@ -331,13 +353,15 @@ jobs:
       # containerized job. Restore the reusable workspace before checkout.
       - *restore_release_workspace
 
-      - name: 'Checkout'
+      - &checkout_release_validation
+        name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
-          fetch-depth: 0
+          ref: '${{ needs.prepare.outputs.release_sha }}'
+          fetch-depth: 1
 
-      - name: 'Set up Node.js (hosted)'
+      - &setup_release_node_hosted
+        name: 'Set up Node.js (hosted)'
         if: "${{ runner.environment != 'self-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
@@ -349,11 +373,13 @@ jobs:
       # Avoid setup-node downloads on ECS, where nodejs.org may be
       # unreachable through the egress proxy; reuse the machine's Node
       # instead.
-      - name: 'Use pre-installed Node.js (self-hosted)'
+      - &setup_release_node_self_hosted
+        name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
 
-      - name: 'Install Dependencies'
+      - &install_release_dependencies
+        name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
@@ -372,6 +398,28 @@ jobs:
         run: |-
           npm run lint:ci
 
+  quality_build:
+    name: 'Quality Checks (Build)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 45
+    needs: 'prepare'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
+
+      # This step also materializes the repo-root `dist` that Pack Build
+      # Outputs packs below: check:serve-fast-path-bundle runs the esbuild
+      # bundle (outdir dist). Keep it ahead of the pack step, or Pack would
+      # fail closed on a missing dist instead of shipping the bundle.
       - name: 'Check Serve Fast Path Bundle'
         run: |-
           npm run check:serve-fast-path-bundle
@@ -380,9 +428,113 @@ jobs:
         run: |-
           npm run build
 
+      - name: 'Pack Build Outputs'
+        run: |-
+          build_paths=('dist' 'packages/web-templates/src/generated')
+          while IFS= read -r -d '' path; do
+            build_paths+=("${path}")
+          done < <(find packages integrations -type d -name node_modules -prune -o -type d -name dist -prune -print0)
+          printf '%s\n' "${build_paths[@]}"
+          # Fail closed on a silent under-pack: if find contributes nothing
+          # beyond the two hardcoded paths (a dropped `-o` turns the two
+          # -prune clauses into one conjunction that matches nothing), tar
+          # would still succeed and the missing outputs would surface as
+          # dist errors in downstream consumers instead of here.
+          [[ ${#build_paths[@]} -gt 2 ]] || {
+            echo "::error::Pack Build Outputs found no build outputs beyond the hardcoded paths."
+            exit 1
+          }
+          tar -czf "${RUNNER_TEMP}/release-build.tgz" "${build_paths[@]}"
+
+      - name: 'Upload Build Outputs'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'release-quality-build'
+          path: '${{ runner.temp }}/release-build.tgz'
+          retention-days: 3
+          if-no-files-found: 'error'
+          overwrite: true
+
+      # prepare:package's guards (unpacked size budget, forbidden literals,
+      # missing bundle artifacts) had no gate before the publish job, so the
+      # first thing that tripped one was the Dockerfile's builder stage in
+      # integration_docker — a ~20 minute wait for a one-line error, and
+      # before the build_sandbox.js output fix, one that printed nothing.
+      # Running the same steps here reports it in minutes instead. Kept after
+      # the upload so the packed artifact stays exactly what the build steps
+      # above produced.
+      - name: 'Verify Prepared Package'
+        run: |-
+          npm run bundle
+          test -f dist/review-sources.sha256 || {
+            echo "::error::review source stamp missing — see the copy_bundle_assets warning above"
+            exit 1
+          }
+          npm run prepare:package
+
+  quality_typecheck:
+    name: 'Quality Checks (Typecheck)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 30
+    needs:
+      - 'prepare'
+      - 'quality_build'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
+
+      - &download_release_build
+        name: 'Download Build Outputs'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'release-quality-build'
+          path: '${{ runner.temp }}/release-quality-build'
+
+      - &unpack_release_build
+        name: 'Unpack Build Outputs'
+        run: 'tar -xzf "${RUNNER_TEMP}/release-quality-build/release-build.tgz"'
+
       - name: 'Typecheck Project'
         run: |-
           npm run typecheck
+
+  workspace_tests:
+    name: 'Workspace Tests (${{ matrix.shard }}/3)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Set by how busy the reserved host is, not by the suite: the same third
+    # ran 6.7 min quiet and 36 contended, and 45 killed shards at the boundary
+    # with every suite green (run 33713579913). Retunable without a PR.
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}"
+    needs:
+      - 'prepare'
+      - 'quality_build'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
+      - *download_release_build
+      - *unpack_release_build
 
       - name: 'Run Workspace Tests'
         env:
@@ -391,60 +543,150 @@ jobs:
           VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
           VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
           VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          # Every release schedule absorbs a transient timing failure, not
+          # just nightly and preview. A stable release used to run with no
+          # retry at all, so any one flaky test out of ~30k reddened it
+          # outright: six consecutive stable runs failed on a single test
+          # each while every other gate stayed green, and the same test
+          # passed on the next attempt. Retrying hides nothing — a real
+          # break fails all three attempts — it only stops a contended
+          # runner from deciding whether a release ships. Operators can
+          # retune this without a PR via the repository variable, or set it
+          # to 'off' to omit the flag entirely. 'off' rather than '0': a
+          # command-line --retry=0 outranks the config and would disable a
+          # workspace's deliberate retry (packages/sdk-typescript) on the
+          # release lane alone, and an empty variable just falls back to the
+          # default.
+          VITEST_RETRY: "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}"
         run: |-
-          npm run test:release
+          retry_arg=()
+          if [ -n "${VITEST_RETRY}" ] && [ "${VITEST_RETRY}" != 'off' ]; then
+            retry_arg=("--retry=${VITEST_RETRY}")
+          fi
+          # `tee` so the annotation can name WHICH failure this is: a shard
+          # killed by Vitest's own worker RPC timing out reads identically to
+          # a real break, and this release lost two attempts to that
+          # (run 33713579913). The status is re-raised untouched either way;
+          # `-o pipefail` is the step default, so `$?` is npm's.
+          log="${RUNNER_TEMP:-/tmp}/workspace-tests-${{ matrix.shard }}.log"
+          npm run test:release:workspaces -- --shard=${{ matrix.shard }}/3 --passWithNoTests "${retry_arg[@]}" 2>&1 | tee "${log}" || {
+            status=$?
+            if grep -qE '^[[:space:]]*FAIL ' "${log}"; then
+              : # A failing test names itself; an annotation adds nothing.
+            elif grep -q 'Timeout calling' "${log}"; then
+              # Passed only with proof the run reached its end and nothing
+              # else broke: a normal exit (a signal death is 128+N), a
+              # passing tally, no failing tally, and no unhandled error that
+              # is not the transport. Vitest's worker RPC giving up says
+              # nothing about the product, and --retry cannot cover it —
+              # retries re-run failing TESTS while an unhandled error fails
+              # the run outright. It has now cost this release three
+              # attempts (run 33713579913).
+              if [ "${status}" -lt 128 ] \
+                && grep -qE '^[[:space:]]*Tests[[:space:]]+[0-9]+ passed' "${log}" \
+                && ! grep -qE '^[[:space:]]*(Tests|Test Files)[[:space:]]+[0-9]+ failed' "${log}" \
+                && ! grep -E '^[[:space:]]*Error:' "${log}" | grep -qv 'Timeout calling'; then
+                echo "::warning title=Workspace tests passed through a Vitest transport timeout::Every test passed and no other error was reported; Vitest's own worker RPC timed out. Treated as a pass."
+                exit 0
+              fi
+              echo "::warning title=Workspace tests exited ${status} on a Vitest transport timeout::A transport timeout with no passing tally to back it, so the failure stands. Rerun the job."
+            else
+              echo "::error title=Workspace tests exited ${status} with no failing test::No FAIL line and no transport timeout in the log. Look for a Vitest Unhandled Errors section, or a worker killed before it could report."
+            fi
+            exit "${status}"
+          }
+
+  quality_scripts:
+    name: 'Quality Checks (Scripts)'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 30
+    needs:
+      - 'prepare'
+      - 'quality_build'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env: *release_test_env
+
+    steps:
+      - *restore_release_workspace
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
+      - *download_release_build
+      - *unpack_release_build
+
+      - name: 'Run Script Tests'
+        env:
+          # Match the tunable per-process bound used by the main CI gate.
+          VITEST_MAX_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_THREADS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          VITEST_MAX_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && (vars.QWEN_CI_VITEST_MAX_WORKERS || '4') || '' }}"
+          VITEST_MIN_FORKS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+        run: 'npm run test:scripts'
+
+  quality:
+    name: 'Quality Checks'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    needs:
+      - 'prepare'
+      - 'quality_static'
+      - 'quality_build'
+      - 'quality_typecheck'
+      - 'workspace_tests'
+      - 'quality_scripts'
+    # !cancelled() rather than always(): a cancelled run must leave this
+    # aggregate skipped, not turn component 'cancelled' results into a
+    # quality 'failure' that opens notify_failure's "Release Failed" issue
+    # for a run the operator stopped on purpose. Failed components still
+    # run this job and fail it closed. The prepare gate keeps fail-closed
+    # aggregation for real runs while skipping it when prepare never ran
+    # (forks): without it, !cancelled() would aggregate five skipped lanes
+    # into a quality 'failure' and open notify_failure on a fork dispatch.
+    if: |-
+      ${{ !cancelled() && needs.prepare.result == 'success' && github.event.inputs.force_skip_tests != 'true' }}
+    permissions: {}
+    steps:
+      - name: 'Verify quality results'
+        env:
+          STATIC_RESULT: '${{ needs.quality_static.result }}'
+          BUILD_RESULT: '${{ needs.quality_build.result }}'
+          TYPECHECK_RESULT: '${{ needs.quality_typecheck.result }}'
+          WORKSPACE_TEST_RESULT: '${{ needs.workspace_tests.result }}'
+          SCRIPT_TEST_RESULT: '${{ needs.quality_scripts.result }}'
+        run: |-
+          for result in \
+            "${STATIC_RESULT}" \
+            "${BUILD_RESULT}" \
+            "${TYPECHECK_RESULT}" \
+            "${WORKSPACE_TEST_RESULT}" \
+            "${SCRIPT_TEST_RESULT}"; do
+            if [[ "${result}" != 'success' ]]; then
+              echo "::error::A release quality check did not succeed."
+              exit 1
+            fi
+          done
 
   integration_none:
     name: 'Integration Tests (No Sandbox)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 120
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
     permissions:
       contents: 'read'
-    env:
-      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+    env: *release_test_env
 
     steps:
-      # Shared ECS runners can retain root-owned files from an earlier
-      # containerized job. Restore the reusable workspace before checkout.
       - *restore_release_workspace
-
-      - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
-        with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
-          fetch-depth: 0
-
-      - name: 'Set up Node.js (hosted)'
-        if: "${{ runner.environment != 'self-hosted' }}"
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          package-manager-cache: false
-          cache-dependency-path: 'package-lock.json'
-
-      # Avoid setup-node downloads on ECS, where nodejs.org may be
-      # unreachable through the egress proxy; reuse the machine's Node
-      # instead.
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        uses: './.github/actions/self-hosted-node'
-
-      - name: 'Install Dependencies'
-        env:
-          NPM_CONFIG_PREFER_OFFLINE: 'true'
-        run: |-
-          npm ci --ignore-scripts --no-audit --progress=false
-          # Replay the root postinstall (patch-package) and commit-info
-          # generation; dependency and workspace lifecycle scripts remain
-          # disabled.
-          npm run postinstall
-          npm run generate
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
 
       - name: 'Build Bundle'
         run: |-
@@ -465,17 +707,14 @@ jobs:
 
   integration_docker:
     name: 'Integration Tests (Docker)'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 120
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
     permissions:
       contents: 'read'
-    env:
-      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+    env: *release_test_env
 
     steps:
       # Shared ECS runners can retain root-owned files from an earlier
@@ -490,38 +729,10 @@ jobs:
             exit 1
           fi
 
-      - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
-        with:
-          ref: '${{ github.event.inputs.ref || github.sha }}'
-          fetch-depth: 0
-
-      - name: 'Set up Node.js (hosted)'
-        if: "${{ runner.environment != 'self-hosted' }}"
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-          package-manager-cache: false
-          cache-dependency-path: 'package-lock.json'
-
-      # Avoid setup-node downloads on ECS, where nodejs.org may be
-      # unreachable through the egress proxy; reuse the machine's Node
-      # instead.
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        uses: './.github/actions/self-hosted-node'
-
-      - name: 'Install Dependencies'
-        env:
-          NPM_CONFIG_PREFER_OFFLINE: 'true'
-        run: |-
-          npm ci --ignore-scripts --no-audit --progress=false
-          # Replay the root postinstall (patch-package) and commit-info
-          # generation; dependency and workspace lifecycle scripts remain
-          # disabled.
-          npm run postinstall
-          npm run generate
+      - *checkout_release_validation
+      - *setup_release_node_hosted
+      - *setup_release_node_self_hosted
+      - *install_release_dependencies
 
       - name: 'Build Bundle'
         run: |-
@@ -542,50 +753,54 @@ jobs:
           sandbox_revision="$(git rev-parse HEAD)"
           sandbox_image="$(node -p "require('./packages/cli/package.json').config.sandboxImageUri")-release-${sandbox_revision}"
 
-          acquire_daemon_write_lock() {
-            lock_deadline=$((SECONDS + 1800))
-            until flock --nonblock 9; do
-              if (( SECONDS >= lock_deadline )); then
-                echo "::error::docker daemon write lock not acquired within 30 minutes"
-                exit 1
-              fi
-              sleep 1
-            done
-          }
-
           if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
             mkdir -p "${HOME}/.cache/qwen-code-ci"
-            exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-release-${sandbox_revision}.lock"
-            if ! flock --wait 1800 8; then
-              echo "::error::docker build coordinator lock not acquired within 30 minutes"
-              exit 1
-            fi
+            # Same protocol as e2e.yml: the host daemon lock is held shared
+            # for the whole step and never upgraded, so preparing an image
+            # cannot be starved by the test phase of a run already on the
+            # host (run 33637097713).
             exec 9>"${HOME}/.cache/qwen-code-ci/docker-sandbox-daemon.lock"
             if ! flock --shared --wait 1800 9; then
               echo "::error::docker daemon read lock not acquired within 30 minutes"
+              exit 1
+            fi
+            exec 8>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build-release-${sandbox_revision}.lock"
+            if ! flock --wait 1800 8; then
+              echo "::error::docker build coordinator lock not acquired within 30 minutes"
               exit 1
             fi
           fi
 
           if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
             if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
-              flock --unlock 9
-              acquire_daemon_write_lock
+              # Host build mutex, shared with the E2E lane and held only
+              # while an image is prepared.
+              exec 7>"${HOME}/.cache/qwen-code-ci/docker-sandbox-build.lock"
+              if ! flock --wait 1800 7; then
+                echo "::error::docker build lock not acquired within 30 minutes"
+                exit 1
+              fi
             fi
             docker image prune --all --force --filter 'label=org.qwen-code.ci.sandbox=true' --filter 'until=24h' || echo "::warning::old CI sandbox image cleanup failed on ${RUNNER_NAME:-this runner}"
-            npm run build:sandbox -- -s --no-prune -i "$sandbox_image"
+            # See e2e.yml: closing the lock descriptors in the child keeps
+            # a descendant that outlives this job from holding the lock.
+            npm run build:sandbox -- -s --no-prune -i "$sandbox_image" 7>&- 8>&- 9>&-
+            if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
+              flock --unlock 7
+              exec 7>&-
+            fi
           fi
           sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
           export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
           if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
-            flock --shared 9
             flock --unlock 8
+            exec 8>&-
           fi
 
           # The package.json docker test scripts each rebuild the sandbox image.
           # Run vitest directly here so this job reuses the image built above.
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
-          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli 9>&-
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive 9>&-
 
   audio_capture_prebuilds:
     name: 'Audio Capture Prebuilds'
@@ -663,7 +878,7 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           token: '${{ secrets.CI_BOT_PAT }}'
-          ref: '${{ github.event.inputs.ref || github.sha }}'
+          ref: '${{ needs.prepare.outputs.release_sha }}'
           fetch-depth: 0
           persist-credentials: false
 
@@ -722,7 +937,7 @@ jobs:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: |-
-          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json
+          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json integrations/*/package.json integrations/*/qwen-extension.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
@@ -823,7 +1038,35 @@ jobs:
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
-        run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
+        run: |-
+          PREVIEW_ARGS=""
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+            PREVIEW_ARGS="--include-opentui-preview"
+          fi
+          npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone ${PREVIEW_ARGS}
+
+      # npm trusted publishing can only be configured after a package exists.
+      # Keep this disabled until the one-time bootstrap publish and trusted
+      # publisher setup are complete.
+      - name: 'Publish @qwen-code/external-context-mem0'
+        if: |-
+          ${{ github.repository == 'QwenLM/qwen-code' && vars.NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED == 'true' }}
+        working-directory: 'integrations/external-context-mem0'
+        run: |-
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          PUBLISH_ARGS=(--access public "--tag=${NPM_TAG}")
+          if [[ "${IS_DRY_RUN}" == "true" ]]; then
+            PUBLISH_ARGS+=(--dry-run)
+          elif npm view "${PACKAGE_NAME}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::${PACKAGE_NAME}@${RELEASE_VERSION} already published; skipping"
+            exit 0
+          fi
+          npm publish --provenance "${PUBLISH_ARGS[@]}"
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Publish @qwen-code/audio-capture'
         if: |-
@@ -909,8 +1152,14 @@ jobs:
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
 
       - name: 'Verify Standalone Archives'
+        env:
+          OPENTUI_PREVIEW_RELEASE_ENABLED: "${{ vars.OPENTUI_PREVIEW_RELEASE_ENABLED == 'true' }}"
         run: |-
-          npm run verify:installation-release -- --dir dist/standalone
+          PREVIEW_ARGS=""
+          if [[ "${OPENTUI_PREVIEW_RELEASE_ENABLED}" == "true" ]]; then
+            PREVIEW_ARGS="--include-opentui-preview"
+          fi
+          npm run verify:installation-release -- --dir dist/standalone ${PREVIEW_ARGS}
 
       - name: 'Auto-label internal CI PRs for release notes exclusion'
         continue-on-error: true

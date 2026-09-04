@@ -59,6 +59,12 @@ export interface WebShellDaemonScenario {
   currentModel: string;
   currentMode: string;
   capabilities: DaemonCapabilities;
+  /** Extra fields merged into `GET /session/:id/supported-commands`. */
+  supportedCommands?: Record<string, unknown>;
+  /** Tasks returned by `GET /session/:id/tasks` (workflow snapshots included). */
+  workflowTasks?: unknown[];
+  /** Definitions served by `GET /session/:id/saved-workflows/:name`, keyed by name. */
+  savedWorkflowDetails?: Record<string, Record<string, unknown>>;
   providers: DaemonWorkspaceProvidersStatus;
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
@@ -428,6 +434,9 @@ export function createWebShellDaemonScenario(
     events: overrides.events ?? [],
     state,
     contextDelayMs: overrides.contextDelayMs,
+    supportedCommands: overrides.supportedCommands,
+    workflowTasks: overrides.workflowTasks,
+    savedWorkflowDetails: overrides.savedWorkflowDetails,
     providersDelayMs: overrides.providersDelayMs,
     artifacts: overrides.artifacts ?? [],
     workspaceFiles: overrides.workspaceFiles ?? {},
@@ -715,6 +724,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/skills\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/(mcp|extensions|memory|hooks)\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/open\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/channel-types\/?$/.test(path) ||
@@ -726,6 +736,8 @@ function isDaemonPath(path: string): boolean {
     /^\/workspaces\/[^/]+\/channels\/[^/]+\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/sessions\/?$/.test(path) ||
+    /^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/session-groups\/?$/.test(path) ||
@@ -751,6 +763,8 @@ function isDaemonPath(path: string): boolean {
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/goal\/?$/.test(path) ||
     /^\/session\/[^/]+\/status\/?$/.test(path) ||
+    /^\/session\/[^/]+\/tasks\/?$/.test(path) ||
+    /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-messages(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/(load|resume|branch|prompt|permission\/[^/]+|context|supported-commands|events|model|config-option|approval-mode|heartbeat|cancel|detach|btw)\/?$/.test(
@@ -808,6 +822,9 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/open\/?$/.test(path)) {
+    return true;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     return true;
   }
@@ -827,6 +844,13 @@ function isDaemonRoute(method: string, path: string): boolean {
     method === 'GET' &&
     (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path))
   ) {
     return true;
   }
@@ -977,8 +1001,10 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   return (
-    method === 'GET' &&
-    /^\/session\/[^/]+\/(context|supported-commands)\/?$/.test(path)
+    (method === 'GET' &&
+      /^\/session\/[^/]+\/(context|supported-commands|tasks)\/?$/.test(path)) ||
+    (method === 'GET' &&
+      /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path))
   );
 }
 
@@ -1193,6 +1219,17 @@ async function handleDaemonRoute(
   }
   if (
     method === 'GET' &&
+    (/^\/workspace\/.+\/sessions\/search\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/sessions\/search\/?$/.test(path))
+  ) {
+    // Content search scans transcript bodies server-side; scenarios don't
+    // model those, so answer with no hits and let the client fall back to
+    // its local title/id/git filter.
+    await json(route, { results: [] });
+    return;
+  }
+  if (
+    method === 'GET' &&
     (/^\/workspace\/.+\/sessions\/?$/.test(path) ||
       /^\/workspaces\/[^/]+\/sessions\/?$/.test(path))
   ) {
@@ -1390,6 +1427,10 @@ async function handleDaemonRoute(
         branch: null,
       },
     );
+    return;
+  }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/open\/?$/.test(path)) {
+    await json(route, { kind: 'workspace-local-open', opened: true });
     return;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
@@ -1906,6 +1947,26 @@ async function handleDaemonRoute(
         sessionId,
         availableCommands: [],
         availableSkills: [],
+        ...(scenario.supportedCommands ?? {}),
+      });
+      return;
+    }
+    if (action === 'tasks') {
+      await json(route, {
+        v: 1,
+        sessionId,
+        now: Date.now(),
+        tasks: scenario.workflowTasks ?? [],
+      });
+      return;
+    }
+    if (action === 'saved-workflows') {
+      const detail = scenario.savedWorkflowDetails?.[extra];
+      await json(route, {
+        v: 1,
+        sessionId,
+        name: extra,
+        workflow: detail ? { v: 1, sessionId, name: extra, ...detail } : null,
       });
       return;
     }

@@ -17,6 +17,7 @@
 import * as net from 'node:net';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  buildAuthLine,
   buildDeliveryStatusFrame,
   encodePeerFrame,
   MAX_FRAME_BYTES,
@@ -69,6 +70,18 @@ export class PeerSendError extends Error {
   }
 }
 
+export interface SendPeerFrameOptions {
+  timeoutMs?: number;
+  /**
+   * The receiver's inbox token, sent as an auth line ahead of the frame.
+   * Omitted when the receiver's record advertises none — an inbox that
+   * requires one then drops the connection, which is the documented
+   * old-sender/new-receiver break; an inbox that requires none skips the
+   * line as unparseable, so leading with it is always safe.
+   */
+  authToken?: string;
+}
+
 /**
  * Write one frame to `socketPath`.
  *
@@ -87,8 +100,9 @@ export class PeerSendError extends Error {
 export function sendPeerFrame(
   socketPath: string,
   frame: PeerFrame,
-  timeoutMs: number = SEND_TIMEOUT_MS,
+  options: SendPeerFrameOptions = {},
 ): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? SEND_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     if (!isLocalIpcPath(socketPath)) {
       reject(
@@ -149,7 +163,14 @@ export function sendPeerFrame(
     }, timeoutMs);
     socket.on('error', fail);
     socket.on('connect', () => {
-      socket.end(encoded);
+      // The auth line rides in the same write as the frame: the receiver
+      // reads lines in order, and a separate write would only open a
+      // window for a partial flush to strand the frame unauthenticated.
+      socket.end(
+        options.authToken !== undefined
+          ? buildAuthLine(options.authToken) + encoded
+          : encoded,
+      );
     });
     socket.on('close', () => {
       if (settled) return;
@@ -172,9 +193,12 @@ export function sendPeerFrame(
 export async function sendDeliveryStatus(
   socketPath: string,
   fields: { status: PeerDeliveryStatus; origMsgId: string; from?: string },
+  authToken?: string,
 ): Promise<void> {
   try {
-    await sendPeerFrame(socketPath, buildDeliveryStatusFrame(fields));
+    await sendPeerFrame(socketPath, buildDeliveryStatusFrame(fields), {
+      ...(authToken !== undefined ? { authToken } : {}),
+    });
   } catch (error) {
     debugLogger.debug(
       `delivery-status (${fields.status}) to ${socketPath} failed: ${
@@ -185,37 +209,85 @@ export async function sendDeliveryStatus(
 }
 
 /**
- * True when something is listening on `socketPath`.
+ * What a probe of `socketPath` established.
  *
- * A full listen backlog (EAGAIN on POSIX, EBUSY on Windows named pipes)
- * counts as alive: the peer is listening but momentarily saturated, which
- * is a busy session, not a dead one. Everything else — including a socket
- * file left behind by a crashed process — is dead, which is the point: a
- * stale socket inode still stats fine, so only a dial can tell the
- * difference.
+ * `unknown` is the load-bearing member. A probe that timed out, or that this
+ * process was not permitted to make, has established nothing at all — and a
+ * caller that deletes on the verdict must not spend "could not tell" as proof
+ * of death. Only `dead` is a definitive negative: the dial reached the path
+ * and nothing was there.
  */
-export function probePeerSocket(socketPath: string): Promise<boolean> {
+export type PeerSocketVerdict = 'alive' | 'dead' | 'unknown';
+
+/**
+ * Dial `socketPath` and report what that established.
+ *
+ * `alive` means a listener answered, or the dial hit a full listen backlog
+ * (EAGAIN on POSIX, EBUSY on Windows named pipes) — a busy session, not a
+ * dead one. `dead` means the path was reached and nothing held it: no file
+ * (ENOENT), or a socket inode a crashed process left behind (ECONNREFUSED).
+ * A stale inode still stats fine, so only a dial can tell those apart, which
+ * is the point of probing at all.
+ *
+ * Everything else is `unknown`: the 250 ms deadline (a slow peer and a
+ * stalled prober are indistinguishable from here), local descriptor
+ * exhaustion (EMFILE, and ENFILE which a neighbouring process can cause
+ * while this one is healthy), permission errors, and any errno not
+ * enumerated above.
+ */
+export function probePeerSocketVerdict(
+  socketPath: string,
+): Promise<PeerSocketVerdict> {
   return new Promise((resolve) => {
     if (!isLocalIpcPath(socketPath)) {
-      resolve(false);
+      resolve('unknown');
       return;
     }
     const socket = net.connect({ path: socketPath });
     let settled = false;
-    const settle = (alive: boolean) => {
+    const settle = (verdict: PeerSocketVerdict) => {
       if (settled) return;
       settled = true;
       clearTimeout(deadline);
       socket.destroy();
-      resolve(alive);
+      resolve(verdict);
     };
     // An absolute deadline rather than socket.setTimeout, for the same
     // reason sendPeerFrame uses one: an idle timer is reset by any byte.
-    const deadline = setTimeout(() => settle(false), PROBE_TIMEOUT_MS);
+    const deadline = setTimeout(() => settle('unknown'), PROBE_TIMEOUT_MS);
     deadline.unref();
-    socket.on('connect', () => settle(true));
-    socket.on('error', (error: NodeJS.ErrnoException) =>
-      settle(error.code === 'EAGAIN' || error.code === 'EBUSY'),
-    );
+    socket.on('connect', () => settle('alive'));
+    socket.on('error', (error: NodeJS.ErrnoException) => {
+      const code = error.code;
+      if (code === 'EAGAIN' || code === 'EBUSY') {
+        settle('alive');
+        return;
+      }
+      if (code === 'ENOENT' || code === 'ECONNREFUSED') {
+        settle('dead');
+        return;
+      }
+      settle('unknown');
+    });
   });
+}
+
+/**
+ * True when something is listening on `socketPath`.
+ *
+ * Only a definitive `alive` reads as true, so an inconclusive probe is not
+ * reachable — which is what a read-only listing wants. Callers that DELETE
+ * on the answer must use {@link probePeerSocketVerdict} and require `dead`:
+ * this collapse maps `unknown` and `dead` onto the same `false`, and acting
+ * destructively on that would treat "could not tell" as "provably gone".
+ *
+ * Kept for callers outside this package; nothing in this repository uses
+ * it. The read-only listing it was written for moved to the verdict so
+ * its own tests could tell `unknown` from `dead`, and this wrapper's
+ * suite in `uds-client.test.ts` is now what pins the collapse.
+ */
+export function probePeerSocket(socketPath: string): Promise<boolean> {
+  return probePeerSocketVerdict(socketPath).then(
+    (verdict) => verdict === 'alive',
+  );
 }

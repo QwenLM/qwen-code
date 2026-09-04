@@ -18,7 +18,7 @@
  *    `/branch` are host actions (handleResume / handleBranch), never dialogs.
  *
  * 2. Command routes — one entry per built-in command module registered by
- *    services/BuiltinCommandLoader.ts (69 modules). Each entry lists the
+ *    services/BuiltinCommandLoader.ts (70 modules). Each entry lists the
  *    action-result kinds the command can produce and the dialogs it opens,
  *    so the OpenTUI dispatcher covers every built-in command the ink TUI
  *    does. `commands-registry.test.ts` cross-checks names, aliases, and
@@ -45,6 +45,7 @@ export type OpenTuiDialogRequest =
   | { dialog: 'permissions' }
   | { dialog: 'approval-mode' }
   | { dialog: 'effort' }
+  | { dialog: 'output-style' }
   | { dialog: 'delete' }
   | { dialog: 'resume'; matchedSessions?: SessionListItem[] }
   | { dialog: 'extensions_manage' }
@@ -96,6 +97,8 @@ export function routeDialogToOpenTui(
       return { dialog: 'approval-mode' };
     case 'effort':
       return { dialog: 'effort' };
+    case 'output-style':
+      return { dialog: 'output-style' };
     case 'delete':
       return { dialog: 'delete' };
     case 'resume':
@@ -213,7 +216,7 @@ export interface CommandRouteSpec {
 }
 
 /**
- * All 69 built-in command modules, one entry each, in the registration order
+ * All 70 built-in command modules, one entry each, in the registration order
  * of BuiltinCommandLoader.ts. `/status` is aboutCommand's canonical name
  * ('about' is the alias); names with subcommands list the union of the whole
  * command tree.
@@ -290,10 +293,7 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
     gatedBy: 'managed-memory',
   },
   { name: 'forget', results: ['message'], gatedBy: 'managed-memory' },
-  {
-    name: 'goal',
-    results: ['goal_control', 'message', 'submit_prompt'],
-  },
+  { name: 'goal', results: ['goal_control', 'message'] },
   { name: 'memory', results: ['dialog'], dialogs: ['memory'] },
   {
     name: 'model',
@@ -306,6 +306,11 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
       'compaction-model',
       'image-model',
     ],
+  },
+  {
+    name: 'output-style',
+    results: ['dialog', 'message'],
+    dialogs: ['output-style'],
   },
   { name: 'remember', results: ['message', 'submit_prompt'] },
   { name: 'plan', results: ['message', 'submit_prompt'] },
