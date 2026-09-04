@@ -130,6 +130,7 @@ const mockSlashCommands: SlashCommand[] = [
     name: 'memory',
     kind: CommandKind.BUILT_IN,
     description: 'Manage memory',
+    action: vi.fn(),
     subCommands: [
       {
         name: 'show',
