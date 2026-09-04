@@ -6150,6 +6150,7 @@ export class Session implements SessionContext {
                       toolRun,
                       goalTurn,
                       channelTurn,
+                      responseCapture.channelDelivery !== undefined,
                     )
                   ) {
                     const result = {
@@ -7213,6 +7214,7 @@ export class Session implements SessionContext {
             toolRun,
             options.goalTurn,
             options.channelTurn ?? false,
+            options.responseCapture?.channelDelivery !== undefined,
           )
         ) {
           return {
@@ -7923,9 +7925,10 @@ export class Session implements SessionContext {
    * queued for the next continuation rather than drained into a turn that is
    * already over.
    *
-   * Channel turns keep the loop alive for their final tool-free response;
-   * ending on the tool batch would return or submit an empty response because
-   * only a tool-free response is committed as the channel final.
+   * Channel turns and requested channel deliveries keep the loop alive for
+   * their final tool-free response; ending on the tool batch would return or
+   * submit an empty response because only a tool-free response is committed
+   * as the channel final.
    *
    * Returns false outside a Goal turn, where nothing sets the flag today and
    * a turn has no verification boundary to reach.
@@ -7934,6 +7937,7 @@ export class Session implements SessionContext {
     toolRun: RunToolResult,
     goalTurn: AcpGoalTurn | undefined,
     channelTurn: boolean,
+    hasChannelDelivery: boolean,
   ): Promise<boolean> {
     // Loop protection keeps its own stop path, with the telemetry and the
     // context message that go with it, so it wins a batch that trips both.
@@ -7941,7 +7945,8 @@ export class Session implements SessionContext {
       !goalTurn ||
       toolRun.terminateTurn !== true ||
       toolRun.loopDetected ||
-      channelTurn
+      channelTurn ||
+      hasChannelDelivery
     ) {
       return false;
     }
