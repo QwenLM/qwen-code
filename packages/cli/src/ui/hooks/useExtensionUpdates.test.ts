@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
@@ -360,6 +361,49 @@ describe('useExtensionUpdates', () => {
       },
       { timeout: 4000 },
     );
+  });
+
+  it('should surface automatic update warnings', async () => {
+    const extension = createMockExtension({
+      name: 'test-extension',
+      installMetadata: {
+        type: 'git',
+        source: 'https://some.git/repo',
+        autoUpdate: true,
+      },
+    });
+    const addItem = vi.fn();
+    const extensionManager = createMockExtensionManager(
+      [extension],
+      async (callback) => {
+        callback('test-extension', ExtensionUpdateState.UPDATE_AVAILABLE);
+      },
+      {
+        originalVersion: '1.0.0',
+        updatedVersion: '1.1.0',
+        name: 'test-extension',
+        warnings: [
+          {
+            code: 'extension_settings_legacy_sync_failed',
+            error: 'keychain unavailable',
+          },
+        ],
+      },
+    );
+
+    renderHook(() =>
+      useExtensionUpdates(extensionManager, addItem, tempHomeDir),
+    );
+
+    await waitFor(() => {
+      expect(addItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.WARNING,
+          text: 'Extension "test-extension" updated with warnings: extension_settings_legacy_sync_failed: keychain unavailable.',
+        },
+        expect.any(Number),
+      );
+    });
   });
 
   it('should batch update notifications for multiple extensions', async () => {

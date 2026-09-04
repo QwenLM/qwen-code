@@ -4,16 +4,44 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, expectTypeOf } from 'vitest';
+import {
+  DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
+  HELD_EXPIRY_OPTIONS,
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  OutputFormat,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+} from '@qwen-code/qwen-code-core';
 import {
   getSettingsSchema,
   type SettingDefinition,
   type Settings,
   type SettingsSchema,
 } from './settingsSchema.js';
+import { MergeStrategy } from '../utils/deepMerge.js';
+import {
+  MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
+  MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+  MAX_TRACKED_SPAWNED_SESSIONS,
+} from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
   describe('getSettingsSchema', () => {
+    it('should describe prompt hooks supported by the runtime', () => {
+      const hookProperties =
+        getSettingsSchema().hooks.properties.PreToolUse.items.properties?.[
+          'hooks'
+        ]?.items?.properties;
+
+      expect(hookProperties?.['type']?.enum).toEqual([
+        'command',
+        'http',
+        'prompt',
+      ]);
+      expect(hookProperties?.['prompt']).toMatchObject({ type: 'string' });
+      expect(hookProperties?.['model']).toMatchObject({ type: 'string' });
+    });
+
     it('should contain all expected top-level settings', () => {
       const expectedSettings: Array<keyof Settings> = [
         'mcpServers',
@@ -28,11 +56,39 @@ describe('SettingsSchema', () => {
         'mcp',
         'security',
         'advanced',
+        'plansDirectory',
+        'voiceModel',
+        'imageModel',
       ];
 
       expectedSettings.forEach((setting) => {
         expect(getSettingsSchema()[setting as keyof Settings]).toBeDefined();
       });
+    });
+
+    it('accepts none in configuration without adding a TUI off control', () => {
+      const { options, jsonSchemaOverride } =
+        getSettingsSchema().model.properties.reasoningEffort;
+
+      expect(options?.map((option) => option.value)).toEqual([
+        'low',
+        'medium',
+        'high',
+        'xhigh',
+        'max',
+      ]);
+      expect(jsonSchemaOverride).toEqual({
+        type: 'string',
+        enum: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      });
+      expectTypeOf<
+        NonNullable<Settings['model']>['reasoningEffort']
+      >().toEqualTypeOf<
+        'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined
+      >();
+      expect(options).not.toContainEqual(
+        expect.objectContaining({ value: 'default' }),
+      );
     });
 
     it('should have correct structure for each setting', () => {
@@ -73,6 +129,12 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should not expose the removed dynamic command translation setting', () => {
+      expect(getSettingsSchema().general.properties).not.toHaveProperty(
+        'dynamicCommandTranslation',
+      );
+    });
+
     it('should have accessibility nested properties', () => {
       expect(
         getSettingsSchema().ui?.properties?.accessibility?.properties,
@@ -80,17 +142,6 @@ describe('SettingsSchema', () => {
       expect(
         getSettingsSchema().ui?.properties?.accessibility.properties
           ?.enableLoadingPhrases.type,
-      ).toBe('boolean');
-    });
-
-    it('should have checkpointing nested properties', () => {
-      expect(
-        getSettingsSchema().general?.properties?.checkpointing.properties
-          ?.enabled,
-      ).toBeDefined();
-      expect(
-        getSettingsSchema().general?.properties?.checkpointing.properties
-          ?.enabled.type,
       ).toBe('boolean');
     });
 
@@ -105,8 +156,62 @@ describe('SettingsSchema', () => {
       ).toBeDefined();
       expect(
         getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles,
+      ).toBeDefined();
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.type,
+      ).toBe('array');
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.default,
+      ).toEqual([...DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES]);
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
+          ?.customIgnoreFiles?.showInDialog,
+      ).toBe(false);
+      expect(
+        getSettingsSchema().context.properties.fileFiltering.properties
           ?.enableRecursiveFileSearch,
       ).toBeDefined();
+    });
+
+    it('should keep the ACP session writer lease opt-in', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWriterLease,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+      });
+    });
+
+    // requiresRestart is load-bearing, not decorative: the Workflow tool is
+    // registered once while the tool registry is built, so a mid-session
+    // toggle would leave the dialog claiming the feature is on while the
+    // tool is absent from the registry.
+    it('should keep dynamic workflows opt-in and restart-scoped', () => {
+      expect(
+        getSettingsSchema().tools.properties.workflowsEnabled,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: true,
+        showInDialog: true,
+        category: 'Tools',
+      });
+    });
+
+    it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
+      const threshold =
+        getSettingsSchema().context.properties.clearContextOnIdle.properties
+          ?.toolResultsTotalCharsThreshold;
+
+      expect(threshold).toBeDefined();
+      expect(threshold?.type).toBe('number');
+      expect(threshold?.default).toBe(500_000);
+      expect(threshold?.requiresRestart).toBe(false);
     });
 
     it('should have sandboxImage setting under tools', () => {
@@ -117,6 +222,235 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().tools.properties.sandboxImage.default).toBe(
         undefined,
       );
+    });
+
+    it('should define tools.sandbox schema override as boolean or string', () => {
+      expect(
+        getSettingsSchema().tools.properties.sandbox.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [{ type: 'boolean' }, { type: 'string' }],
+      });
+    });
+
+    it('should have top-level proxy setting in schema', () => {
+      expect(getSettingsSchema().proxy).toBeDefined();
+      expect(getSettingsSchema().proxy.type).toBe('string');
+      expect(getSettingsSchema().proxy.category).toBe('Advanced');
+      expect(getSettingsSchema().proxy.requiresRestart).toBe(true);
+      expect(getSettingsSchema().proxy.default).toBe(undefined);
+      expect(getSettingsSchema().proxy.showInDialog).toBe(false);
+    });
+
+    it('should have general.outputStyle setting in schema', () => {
+      const outputStyle = getSettingsSchema().general.properties!.outputStyle;
+
+      expect(outputStyle).toBeDefined();
+      expect(outputStyle.type).toBe('string');
+      expect(outputStyle.category).toBe('General');
+      expect(outputStyle.default).toBe(undefined);
+      expect(outputStyle.requiresRestart).toBe(true);
+    });
+
+    it('should have plansDirectory setting in schema', () => {
+      expect(getSettingsSchema().plansDirectory).toBeDefined();
+      expect(getSettingsSchema().plansDirectory.type).toBe('string');
+      expect(getSettingsSchema().plansDirectory.category).toBe('Advanced');
+      expect(getSettingsSchema().plansDirectory.default).toBe(undefined);
+      expect(getSettingsSchema().plansDirectory.requiresRestart).toBe(true);
+      expect(getSettingsSchema().plansDirectory.showInDialog).toBe(false);
+    });
+
+    it('should have voice model setting in schema', () => {
+      const voiceModel = getSettingsSchema().voiceModel;
+
+      expect(voiceModel).toBeDefined();
+      expect(voiceModel.type).toBe('string');
+      expect(voiceModel.category).toBe('Model');
+      expect(voiceModel.default).toBe('');
+      expect(voiceModel.requiresRestart).toBe(false);
+      expect(voiceModel.showInDialog).toBe(false);
+    });
+
+    it('should define the image model setting', () => {
+      const imageModel = getSettingsSchema().imageModel;
+
+      expect(imageModel.type).toBe('string');
+      expect(imageModel.category).toBe('Model');
+      expect(imageModel.default).toBe('');
+      expect(imageModel.requiresRestart).toBe(false);
+      expect(imageModel.showInDialog).toBe(false);
+      expect(imageModel.description).toContain('supportsImageGeneration: true');
+    });
+
+    it('should define the advisor model setting', () => {
+      const advisorModel = getSettingsSchema().advisorModel;
+
+      expect(advisorModel.type).toBe('string');
+      expect(advisorModel.category).toBe('Model');
+      expect(advisorModel.default).toBe('');
+      expect(advisorModel.requiresRestart).toBe(false);
+      expect(advisorModel.showInDialog).toBe(true);
+    });
+
+    it('should define the built-in Explore model setting', () => {
+      const exploreModel =
+        getSettingsSchema().agents.properties.builtin.properties.exploreModel;
+
+      expect(exploreModel.type).toBe('string');
+      expect(exploreModel.category).toBe('Model');
+      expect(exploreModel.default).toBe('inherit');
+      expect(exploreModel.requiresRestart).toBe(true);
+      expect(exploreModel.showInDialog).toBe(false);
+    });
+
+    it('should keep cross-session messaging off by default', () => {
+      // The default is the entire security posture of the feature: shipping
+      // it flipped on would open every session on the box to peer messages.
+      const crossSessionMessaging =
+        getSettingsSchema().agents.properties.crossSessionMessaging;
+
+      expect(crossSessionMessaging.type).toBe('boolean');
+      expect(crossSessionMessaging.default).toBe(false);
+      expect(crossSessionMessaging.requiresRestart).toBe(true);
+      expect(crossSessionMessaging.showInDialog).toBe(false);
+    });
+
+    it('should define the inbound cross-session policy as accept/hold/refuse', () => {
+      const crossSessionInbound =
+        getSettingsSchema().agents.properties.crossSessionInbound;
+
+      expect(crossSessionInbound.type).toBe('enum');
+      // Unset is not a fourth policy: it means approval-mode parity, which
+      // the gate derives. A concrete default here would silence that.
+      expect(crossSessionInbound.default).toBeUndefined();
+      expect(crossSessionInbound.options).toEqual([
+        { value: 'accept', label: 'Accept' },
+        { value: 'hold', label: 'Hold for review' },
+        { value: 'refuse', label: 'Refuse' },
+      ]);
+    });
+
+    it('should offer exactly the hold lifetimes core knows how to parse', () => {
+      // Three copies of this vocabulary exist: core's table, these
+      // options, and the generated JSON schema. Adding an option here
+      // without a core entry fails nowhere -- `parseHeldExpiry` takes its
+      // unrecognized branch, logs at debug level (off by default), and
+      // returns the five-minute default. A user who hand-edits
+      // settings.json to the new value gets a silently shorter review
+      // window, with the whole suite green.
+      const crossSessionHeldExpiry =
+        getSettingsSchema().agents.properties.crossSessionHeldExpiry;
+
+      expect(crossSessionHeldExpiry.options?.map((o) => o.value)).toEqual(
+        HELD_EXPIRY_OPTIONS,
+      );
+      // And the declared default must be one core resolves to a real
+      // lifetime, not one that happens to fall back to it.
+      expect(HELD_EXPIRY_OPTIONS).toContain(crossSessionHeldExpiry.default);
+    });
+
+    it('should define model grade settings', () => {
+      const agents = getSettingsSchema().agents.properties;
+
+      expect(agents.modelGrades.jsonSchemaOverride).toEqual({
+        type: 'object',
+        additionalProperties: { type: 'string' },
+      });
+      expect(agents.modelGrades.requiresRestart).toBe(true);
+      expect(agents.allowedGrades.type).toBe('array');
+      expect(agents.allowedGrades.items).toEqual({ type: 'string' });
+      expect(agents.allowedGrades.requiresRestart).toBe(true);
+    });
+
+    it('should define visionBridgeTimeoutMs as a restart-required bounded integer', () => {
+      const timeout = getSettingsSchema().visionBridgeTimeoutMs;
+
+      expect(timeout).toBeDefined();
+      expect(timeout.type).toBe('integer');
+      expect(timeout.category).toBe('Model');
+      expect(timeout.default).toBeUndefined();
+      expect(timeout.minimum).toBe(1);
+      expect(timeout.maximum).toBe(2_147_483_647);
+      expect(timeout.requiresRestart).toBe(true);
+      expect(timeout.showInDialog).toBe(false);
+    });
+
+    it('should define count-based model limits as integers', () => {
+      const model = getSettingsSchema().model.properties;
+
+      expect(model.maxSessionTurns.type).toBe('integer');
+      expect(model.maxToolCallsPerTurn.type).toBe('integer');
+    });
+
+    it('should define streamIdleTimeoutMs as a bounded generation setting', () => {
+      const streamIdleTimeout =
+        getSettingsSchema().model.properties.generationConfig.properties
+          ?.streamIdleTimeoutMs;
+
+      expect(streamIdleTimeout).toMatchObject({
+        type: 'integer',
+        default: undefined,
+        minimum: 0,
+        maximum: 2_147_483_647,
+        requiresRestart: false,
+        showInDialog: false,
+      });
+    });
+
+    it('should define stopHookBlockingCap schema override as a positive integer', () => {
+      expect(
+        getSettingsSchema().stopHookBlockingCap.jsonSchemaOverride,
+      ).toEqual({
+        type: 'integer',
+        minimum: 1,
+        default: 8,
+      });
+    });
+
+    it('should define telemetry sensitiveSpanAttributeMaxLength as a positive integer', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(
+        telemetrySchema.properties?.sensitiveSpanAttributeMaxLength,
+      ).toEqual({
+        description:
+          'Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Maximum: 104857600 (100 MiB). Set lower if your collector or backend rejects large span attributes.',
+        type: 'integer',
+        minimum: 1,
+        maximum: SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
+        default: DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+      });
+    });
+
+    it('should define telemetry userId as a privacy-sensitive string', () => {
+      const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
+      expect(telemetrySchema.properties?.userId).toEqual({
+        description:
+          'Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.',
+        type: 'string',
+      });
+    });
+
+    it('should have voice dictation settings under general', () => {
+      const voice =
+        getSettingsSchema().general.properties.voice.properties ?? {};
+
+      expect(voice.enabled.type).toBe('boolean');
+      expect(voice.enabled.default).toBe(false);
+
+      expect(voice.mode.type).toBe('enum');
+      expect(voice.mode.default).toBe('hold');
+      expect(
+        voice.mode.options?.map((o: { value: string }) => o.value),
+      ).toEqual(['hold', 'tap']);
+
+      expect(voice.language.type).toBe('string');
+      expect(voice.language.default).toBe('');
+
+      expect(voice.keytermsFile.type).toBe('string');
+      expect(voice.keytermsFile.default).toBe('');
+
+      expect(voice.refineTranscript.type).toBe('boolean');
+      expect(voice.refineTranscript.default).toBe(true);
     });
 
     it('should have unique categories', () => {
@@ -147,6 +481,45 @@ describe('SettingsSchema', () => {
       expect(categories).toContain('Advanced');
     });
 
+    it('marks MCP reconcile inputs as hot-reloadable but startup-only MCP keys as restart-required (sub-task 3)', () => {
+      // These three feed the runtime reconcile (mcpServers is the server map;
+      // mcp.allowed / mcp.excluded are read by mcpGatingEqual), so they MUST be
+      // hot-reloadable — otherwise the SettingsWatcher suppresses MCP-only
+      // edits and registerMcpHotReload never fires for the advertised
+      // add/remove/restart/gating changes.
+      expect(getSettingsSchema().mcpServers.requiresRestart).toBe(false);
+      expect(getSettingsSchema().mcp.properties!.allowed.requiresRestart).toBe(
+        false,
+      );
+      expect(getSettingsSchema().mcp.properties!.excluded.requiresRestart).toBe(
+        false,
+      );
+      // serverCommand is consumed once at startup (not part of the reconcile
+      // input), so it stays restart-required. The mcp parent node also stays
+      // restart-required; the watcher resolves the longest-matching schema key,
+      // so the flipped leaves win for allowed/excluded edits regardless.
+      expect(
+        getSettingsSchema().mcp.properties!.serverCommand.requiresRestart,
+      ).toBe(true);
+      expect(getSettingsSchema().mcp.requiresRestart).toBe(true);
+    });
+
+    it('defines disabled skill levels as a restart-required union setting', () => {
+      const disabledLevels =
+        getSettingsSchema().skills.properties.disabledLevels;
+
+      expect(disabledLevels.type).toBe('array');
+      expect(disabledLevels.default).toBeUndefined();
+      expect(disabledLevels.requiresRestart).toBe(true);
+      expect(disabledLevels.mergeStrategy).toBe(MergeStrategy.UNION);
+      expect(disabledLevels.items?.enum).toEqual([
+        'project',
+        'user',
+        'extension',
+        'bundled',
+      ]);
+    });
+
     it('should have consistent default values for boolean settings', () => {
       const checkBooleanDefaults = (schema: SettingsSchema) => {
         Object.entries(schema).forEach(([, definition]) => {
@@ -162,6 +535,17 @@ describe('SettingsSchema', () => {
       };
 
       checkBooleanDefaults(getSettingsSchema() as SettingsSchema);
+    });
+
+    it('keeps Session Workflow opt-in without requiring a restart', () => {
+      expect(
+        getSettingsSchema().experimental.properties.sessionWorkflow,
+      ).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: false,
+        showInDialog: true,
+      });
     });
 
     it('should have showInDialog property configured', () => {
@@ -182,6 +566,10 @@ describe('SettingsSchema', () => {
         true,
       );
       expect(
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond
+          .showInDialog,
+      ).toBe(true);
+      expect(
         getSettingsSchema().privacy.properties.usageStatisticsEnabled
           .showInDialog,
       ).toBe(true);
@@ -199,9 +587,6 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().ui.properties.customThemes.showInDialog).toBe(
         false,
       ); // Managed via theme editor
-      expect(
-        getSettingsSchema().general.properties.checkpointing.showInDialog,
-      ).toBe(false); // Experimental feature
       expect(getSettingsSchema().ui.properties.accessibility.showInDialog).toBe(
         false,
       );
@@ -217,11 +602,70 @@ describe('SettingsSchema', () => {
       ).toBe(false);
     });
 
+    it('should define Markdown render mode as a user-facing UI enum', () => {
+      const renderMode = getSettingsSchema().ui.properties.renderMode;
+
+      expect(renderMode.type).toBe('enum');
+      expect(renderMode.default).toBe('render');
+      expect(renderMode.requiresRestart).toBe(false);
+      expect(renderMode.showInDialog).toBe(true);
+      expect(renderMode.options).toEqual([
+        { value: 'render', label: 'Render visual previews' },
+        { value: 'raw', label: 'Show raw source' },
+      ]);
+    });
+
+    it('should have useTerminalBuffer in ui settings', () => {
+      const useTerminalBuffer =
+        getSettingsSchema().ui.properties.useTerminalBuffer;
+      expect(useTerminalBuffer).toBeDefined();
+      expect(useTerminalBuffer.type).toBe('boolean');
+      expect(useTerminalBuffer.default).toBe(true);
+      expect(useTerminalBuffer.showInDialog).toBe(true);
+      expect(useTerminalBuffer.requiresRestart).toBe(true);
+    });
+
+    it('should have mouseTracking in ui settings', () => {
+      const mouseTracking = getSettingsSchema().ui.properties.mouseTracking;
+      expect(mouseTracking).toBeDefined();
+      expect(mouseTracking.type).toBe('boolean');
+      expect(mouseTracking.default).toBe(true);
+      expect(mouseTracking.showInDialog).toBe(true);
+      expect(mouseTracking.requiresRestart).toBe(true);
+    });
+
+    it('should expose response tokens/sec as an opt-in UI setting', () => {
+      const responseTokensPerSecond =
+        getSettingsSchema().ui.properties.showResponseTokensPerSecond;
+      expect(responseTokensPerSecond).toBeDefined();
+      expect(responseTokensPerSecond.type).toBe('boolean');
+      expect(responseTokensPerSecond.default).toBe(false);
+      expect(responseTokensPerSecond.showInDialog).toBe(true);
+      expect(responseTokensPerSecond.requiresRestart).toBe(true);
+    });
+
+    it('should pin serve sub-session caps to the runtime defaults', () => {
+      const serve = getSettingsSchema().serve.properties;
+      expect(serve.maxConcurrentSubSessionsPerCaller.default).toBe(
+        MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
+      );
+      expect(serve.maxConcurrentSubSessionsTotal.default).toBe(
+        MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
+      );
+      // The runtime clamps the total cap to the tracked-id set size; the
+      // schema maximum must match so editors reject values that the daemon
+      // would otherwise silently clamp.
+      expect(serve.maxConcurrentSubSessionsTotal.maximum).toBe(
+        MAX_TRACKED_SPAWNED_SESSIONS,
+      );
+    });
+
     it('should infer Settings type correctly', () => {
       // This test ensures that the Settings type is properly inferred from the schema
       const settings: Settings = {
         ui: {
           theme: 'dark',
+          renderMode: 'raw',
         },
         context: {
           includeDirectories: ['/path/to/dir'],
@@ -231,6 +675,7 @@ describe('SettingsSchema', () => {
 
       // TypeScript should not complain about these properties
       expect(settings.ui?.theme).toBe('dark');
+      expect(settings.ui?.renderMode).toBe('raw');
       expect(settings.context?.includeDirectories).toEqual(['/path/to/dir']);
       expect(settings.context?.loadFromIncludeDirectories).toBe(true);
     });
@@ -248,6 +693,43 @@ describe('SettingsSchema', () => {
       expect(
         getSettingsSchema().context?.properties.includeDirectories.default,
       ).toEqual([]);
+    });
+
+    it('should define context.fileName schema override as string or string array', () => {
+      expect(
+        getSettingsSchema().context?.properties.fileName.jsonSchemaOverride,
+      ).toEqual({
+        anyOf: [
+          { type: 'string' },
+          { type: 'array', items: { type: 'string' } },
+        ],
+      });
+    });
+
+    it('should define context.importFormat as tree or flat', () => {
+      const importFormat = getSettingsSchema().context?.properties.importFormat;
+
+      expect(importFormat.type).toBe('enum');
+      expect(importFormat.options).toEqual([
+        { value: 'tree', label: 'Tree' },
+        { value: 'flat', label: 'Flat' },
+      ]);
+    });
+
+    it('should allow stream-json as an output.format the runtime honors', () => {
+      // The runtime reads `output.format` from settings.json via
+      // `normalizeOutputFormat`, which returns `OutputFormat.STREAM_JSON` for
+      // `"stream-json"` — a documented, first-class CLI output format. The
+      // settings schema drives VS Code validation of `.qwen/settings.json`, so
+      // it must not reject a value the runtime accepts and runs.
+      const format = getSettingsSchema().output?.properties.format;
+
+      expect(format.type).toBe('enum');
+      const values = format.options?.map((o: { value: string }) => o.value);
+      // Pin the options to the full runtime enum, array-derived (order
+      // included) so a removed, added, or reordered core format fails this
+      // test until the schema follows.
+      expect(values).toEqual(Object.values(OutputFormat));
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {
@@ -314,6 +796,17 @@ describe('SettingsSchema', () => {
         getSettingsSchema().general.properties.debugKeystrokeLogging
           .description,
       ).toBe('Enable debug logging of keystrokes to the console.');
+    });
+
+    it('should define advanced.dnsResolutionOrder as ipv4first or verbatim', () => {
+      const dnsResolutionOrder =
+        getSettingsSchema().advanced.properties.dnsResolutionOrder;
+
+      expect(dnsResolutionOrder.type).toBe('enum');
+      expect(dnsResolutionOrder.options).toEqual([
+        { value: 'ipv4first', label: 'IPv4 First' },
+        { value: 'verbatim', label: 'Verbatim' },
+      ]);
     });
   });
 });

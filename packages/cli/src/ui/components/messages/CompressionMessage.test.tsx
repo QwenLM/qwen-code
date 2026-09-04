@@ -45,7 +45,7 @@ describe('<CompressionMessage />', () => {
       const { lastFrame } = render(<CompressionMessage {...props} />);
       const output = lastFrame();
 
-      expect(output).toContain('✦');
+      expect(output).toContain('◆');
       expect(output).toContain(
         'Chat history compressed from 100 to 50 tokens.',
       );
@@ -67,13 +67,56 @@ describe('<CompressionMessage />', () => {
         const { lastFrame } = render(<CompressionMessage {...props} />);
         const output = lastFrame();
 
-        expect(output).toContain('✦');
+        expect(output).toContain('◆');
         expect(output).toContain(
           `compressed from ${original} to ${newTokens} tokens`,
         );
         expect(output).not.toContain('Skipping compression');
         expect(output).not.toContain('did not reduce size');
       });
+    });
+  });
+
+  // Issue #9309: /compress-fast and /compress report on different scales
+  // (API-reported baseline vs local history-only estimate), so estimated
+  // numbers must be visibly marked to keep consecutive banners from reading
+  // as lost context.
+  describe('estimated token counts', () => {
+    it('marks an estimated new count with a ~ prefix', () => {
+      const props = createCompressionProps({
+        originalTokenCount: 100,
+        newTokenCount: 50,
+        compressionStatus: CompressionStatus.COMPRESSED,
+        newTokenCountIsEstimated: true,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+
+      expect(lastFrame()).toContain('compressed from 100 to ~50 tokens');
+    });
+
+    it('marks an estimated original count with a ~ prefix', () => {
+      const props = createCompressionProps({
+        originalTokenCount: 100,
+        newTokenCount: 50,
+        compressionStatus: CompressionStatus.COMPRESSED,
+        originalTokenCountIsEstimated: true,
+        newTokenCountIsEstimated: true,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+
+      expect(lastFrame()).toContain('compressed from ~100 to ~50 tokens');
+    });
+
+    it('does not mark authoritative counts', () => {
+      const props = createCompressionProps({
+        originalTokenCount: 100,
+        newTokenCount: 50,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+
+      expect(lastFrame()).toContain('compressed from 100 to 50 tokens');
+      expect(lastFrame()).not.toContain('~');
     });
   });
 
@@ -89,7 +132,7 @@ describe('<CompressionMessage />', () => {
       const { lastFrame } = render(<CompressionMessage {...props} />);
       const output = lastFrame();
 
-      expect(output).toContain('✦');
+      expect(output).toContain('◆');
       expect(output).toContain(
         'Compression was not beneficial for this history size.',
       );
@@ -193,6 +236,52 @@ describe('<CompressionMessage />', () => {
         expect(output).not.toContain('compressed from');
         expect(output).not.toContain('Compression was not beneficial');
       });
+    });
+
+    it('shows API error message when compression side-query fails', () => {
+      const props = createCompressionProps({
+        isPending: false,
+        originalTokenCount: 100000,
+        newTokenCount: 100000,
+        compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+      const output = lastFrame();
+
+      expect(output).toContain(
+        'Could not compress chat history due to an API error.',
+      );
+    });
+
+    it('shows empty summary failure message', () => {
+      const props = createCompressionProps({
+        isPending: false,
+        originalTokenCount: 100000,
+        newTokenCount: 0,
+        compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+      const output = lastFrame();
+
+      expect(output).toContain(
+        'Could not compress chat history because the compression summary was empty.',
+      );
+    });
+
+    it('shows truncated output failure message', () => {
+      const props = createCompressionProps({
+        isPending: false,
+        originalTokenCount: 100000,
+        newTokenCount: 0,
+        compressionStatus:
+          CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+      const output = lastFrame();
+
+      expect(output).toContain(
+        'Could not compress chat history because the compression summary was truncated.',
+      );
     });
   });
 });

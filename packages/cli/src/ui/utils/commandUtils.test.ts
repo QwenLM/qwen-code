@@ -5,7 +5,7 @@
  */
 
 import type { Mock } from 'vitest';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { spawn, SpawnOptions } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import {
@@ -14,8 +14,15 @@ import {
   copyToClipboard,
   getUrlOpenCommand,
   CodePage,
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
+  consumesContextAnnouncementLatch,
   findMidInputSlashCommand,
+  findSlashCommandTokens,
+  getBestSlashCommandMatch,
+  isContextFilesAnnouncement,
 } from './commandUtils.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
+import { CommandKind, type SlashCommand } from '../commands/types.js';
 
 // Mock child_process
 vi.mock('child_process');
@@ -40,6 +47,15 @@ interface MockChildProcess extends EventEmitter {
   stderr: EventEmitter;
 }
 
+const createMockChild = (): MockChildProcess =>
+  Object.assign(new EventEmitter(), {
+    stdin: Object.assign(new EventEmitter(), {
+      write: vi.fn(),
+      end: vi.fn(),
+    }),
+    stderr: new EventEmitter(),
+  }) as MockChildProcess;
+
 describe('commandUtils', () => {
   let mockSpawn: Mock;
   let mockChild: MockChildProcess;
@@ -51,15 +67,13 @@ describe('commandUtils', () => {
     mockSpawn = spawn as Mock;
 
     // Create mock child process with stdout/stderr emitters
-    mockChild = Object.assign(new EventEmitter(), {
-      stdin: Object.assign(new EventEmitter(), {
-        write: vi.fn(),
-        end: vi.fn(),
-      }),
-      stderr: new EventEmitter(),
-    }) as MockChildProcess;
+    mockChild = createMockChild();
 
     mockSpawn.mockReturnValue(mockChild as unknown as ReturnType<typeof spawn>);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   describe('isAtCommand', () => {
@@ -117,6 +131,15 @@ describe('commandUtils', () => {
       expect(isSlashCommand('/* This is a block comment */')).toBe(false);
       expect(isSlashCommand('/*\n * Multi-line comment\n */')).toBe(false);
       expect(isSlashCommand('/*comment without space*/')).toBe(false);
+    });
+
+    it('should return false for slash-prefixed file paths', () => {
+      expect(isSlashCommand('/api/apiFunction/接口的实现')).toBe(false);
+      expect(isSlashCommand('/Users/me/project/src/index.ts')).toBe(false);
+      expect(isSlashCommand('/var/log/syslog check this')).toBe(false);
+      expect(isSlashCommand('/home/user/.qwen/settings.json')).toBe(false);
+      expect(isSlashCommand('/tmp/test.txt')).toBe(false);
+      expect(isSlashCommand('/tmp\\test.txt')).toBe(false);
     });
   });
 
@@ -202,6 +225,249 @@ describe('commandUtils', () => {
     describe('on Linux', () => {
       beforeEach(() => {
         mockProcess.platform = 'linux';
+        vi.stubEnv('XDG_SESSION_TYPE', 'x11');
+        vi.stubEnv('WAYLAND_DISPLAY', '');
+      });
+
+      it('should prefer wl-copy in a Wayland session', async () => {
+        const testText = 'GIF89a selected source text 🧪';
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+
+        setTimeout(() => {
+          mockChild.emit('close', 0);
+        }, 0);
+
+        await copyToClipboard(testText);
+
+        expect(mockSpawn).toHaveBeenCalledTimes(1);
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+        expect(mockChild.stdin.write).toHaveBeenCalledWith(testText);
+        expect(mockChild.stdin.end).toHaveBeenCalled();
+      });
+
+      it('should detect a case-insensitive Wayland session type', async () => {
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', 'Wayland');
+
+        setTimeout(() => {
+          mockChild.emit('close', 0);
+        }, 0);
+
+        await copyToClipboard('Wayland');
+
+        expect(mockSpawn).toHaveBeenCalledTimes(1);
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+      });
+
+      it('should detect Wayland from WAYLAND_DISPLAY when the session type is unset', async () => {
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        delete process.env['XDG_SESSION_TYPE'];
+        vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
+
+        setTimeout(() => {
+          mockChild.emit('close', 0);
+        }, 0);
+
+        await copyToClipboard('WSL Wayland');
+
+        expect(mockSpawn).toHaveBeenCalledTimes(1);
+        expect(mockSpawn).toHaveBeenCalledWith(
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+      });
+
+      it('should fall back to xclip when wl-copy is unavailable', async () => {
+        const linuxOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'pipe'],
+        };
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        let callCount = 0;
+
+        mockSpawn.mockImplementation(() => {
+          const child = createMockChild();
+
+          setTimeout(() => {
+            if (callCount++ === 0) {
+              const error = new Error('spawn wl-copy ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
+            } else {
+              child.emit('close', 0);
+            }
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        await copyToClipboard('fallback');
+
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          1,
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          2,
+          'xclip',
+          ['-selection', 'clipboard'],
+          linuxOptions,
+        );
+      });
+
+      it('should fall back to xclip when wl-copy exits non-zero', async () => {
+        const linuxOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'pipe'],
+        };
+        const waylandOptions: SpawnOptions = {
+          stdio: ['pipe', 'inherit', 'ignore'],
+        };
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        let callCount = 0;
+
+        mockSpawn.mockImplementation(() => {
+          const child = createMockChild();
+
+          setTimeout(() => {
+            child.emit('close', callCount++ === 0 ? 1 : 0);
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        await copyToClipboard('fallback');
+
+        expect(mockSpawn).toHaveBeenCalledTimes(2);
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          1,
+          'wl-copy',
+          ['-t', 'text/plain'],
+          waylandOptions,
+        );
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          2,
+          'xclip',
+          ['-selection', 'clipboard'],
+          linuxOptions,
+        );
+      });
+
+      it('should include the wl-copy failure when all fallbacks fail', async () => {
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        let callCount = 0;
+        const originalStdoutIsTTY = process.stdout.isTTY;
+        const originalStderrIsTTY = process.stderr.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+        Object.defineProperty(process.stderr, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+
+        mockSpawn.mockImplementation(() => {
+          const child = createMockChild();
+
+          setTimeout(() => {
+            const currentCall = callCount++;
+            if (currentCall === 0) {
+              const error = new Error('spawn wl-copy ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
+              child.emit('close', 1);
+              return;
+            }
+            const error = new Error(
+              `spawn ${currentCall === 1 ? 'xclip' : 'xsel'} ENOENT`,
+            );
+            (error as NodeJS.ErrnoException).code = 'ENOENT';
+            child.emit('error', error);
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        try {
+          await expect(copyToClipboard('failure')).rejects.toThrow(
+            /wl-copy failed \("wl-copy not found"\); xclip\/xsel not found/,
+          );
+          expect(mockSpawn).toHaveBeenCalledTimes(3);
+        } finally {
+          Object.defineProperty(process.stdout, 'isTTY', {
+            value: originalStdoutIsTTY,
+            configurable: true,
+          });
+          Object.defineProperty(process.stderr, 'isTTY', {
+            value: originalStderrIsTTY,
+            configurable: true,
+          });
+        }
+      });
+
+      it('should preserve wl-copy diagnostics when X11 fallbacks also fail', async () => {
+        vi.stubEnv('XDG_SESSION_TYPE', 'wayland');
+        const originalStdoutIsTTY = process.stdout.isTTY;
+        const originalStderrIsTTY = process.stderr.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+        Object.defineProperty(process.stderr, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+        let callCount = 0;
+
+        mockSpawn.mockImplementation(() => {
+          const child = createMockChild();
+          setTimeout(() => {
+            const currentCall = callCount++;
+            if (currentCall === 0) {
+              child.emit('close', 1);
+              return;
+            }
+            child.stderr.emit('data', "Error: Can't open display:");
+            child.emit('close', 1);
+          }, 0);
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        try {
+          await expect(copyToClipboard('failure')).rejects.toThrow(
+            /wl-copy failed \("'wl-copy' exited with code 1"\); xclip\/xsel failed \(/,
+          );
+          expect(mockSpawn).toHaveBeenCalledTimes(3);
+        } finally {
+          Object.defineProperty(process.stdout, 'isTTY', {
+            value: originalStdoutIsTTY,
+            configurable: true,
+          });
+          Object.defineProperty(process.stderr, 'isTTY', {
+            value: originalStderrIsTTY,
+            configurable: true,
+          });
+        }
       });
 
       it('should successfully copy text to clipboard using xclip', async () => {
@@ -233,13 +499,7 @@ describe('commandUtils', () => {
         };
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             if (callCount === 0) {
@@ -275,21 +535,21 @@ describe('commandUtils', () => {
         );
       });
 
-      it('should throw error when both xclip and xsel are not found', async () => {
+      it('should throw when xclip/xsel missing and OSC 52 fails (no TTY)', async () => {
         const testText = 'Hello, world!';
         let callCount = 0;
         const linuxOptions: SpawnOptions = {
           stdio: ['pipe', 'inherit', 'pipe'],
         };
 
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             if (callCount === 0) {
@@ -310,8 +570,10 @@ describe('commandUtils', () => {
 
           return child as unknown as ReturnType<typeof spawn>;
         });
+
+        // No TTY available → OSC 52 fails → should throw
         await expect(copyToClipboard(testText)).rejects.toThrow(
-          'Please ensure xclip or xsel is installed and configured.',
+          'Clipboard unavailable',
         );
 
         expect(mockSpawn).toHaveBeenCalledTimes(2);
@@ -327,9 +589,63 @@ describe('commandUtils', () => {
           ['--clipboard', '--input'],
           linuxOptions,
         );
+
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
       });
 
-      it('should emit error when xclip or xsel fail with stderr output (command installed)', async () => {
+      it('should fall back to OSC 52 when xclip/xsel missing and stdout is TTY', async () => {
+        const testText = 'Hello, world!';
+        let callCount = 0;
+
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: true,
+          configurable: true,
+        });
+        const writeSpy = vi
+          .spyOn(process.stdout, 'write')
+          .mockReturnValue(true);
+
+        mockSpawn.mockImplementation(() => {
+          const child = createMockChild();
+
+          setTimeout(() => {
+            if (callCount === 0) {
+              const error = new Error('spawn xclip ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
+              child.emit('close', 1);
+              callCount++;
+            } else {
+              const error = new Error('spawn xsel ENOENT');
+              (error as NodeJS.ErrnoException).code = 'ENOENT';
+              child.emit('error', error);
+              child.emit('close', 1);
+            }
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        // TTY available → OSC 52 succeeds → should not throw
+        await copyToClipboard(testText);
+
+        expect(writeSpy).toHaveBeenCalled();
+        const written = writeSpy.mock.calls[0]?.[0] as string;
+        expect(written).toContain('\x1b]52;c;');
+        expect(written).toContain('\x07');
+
+        writeSpy.mockRestore();
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
+      });
+
+      it('should try OSC 52 when xclip/xsel fail but no TTY is available', async () => {
         const testText = 'Hello, world!';
         let callCount = 0;
         const linuxOptions: SpawnOptions = {
@@ -339,13 +655,7 @@ describe('commandUtils', () => {
         const exitCode = 1;
 
         mockSpawn.mockImplementation(() => {
-          const child = Object.assign(new EventEmitter(), {
-            stdin: Object.assign(new EventEmitter(), {
-              write: vi.fn(),
-              end: vi.fn(),
-            }),
-            stderr: new EventEmitter(),
-          }) as MockChildProcess;
+          const child = createMockChild();
 
           setTimeout(() => {
             // e.g., cannot connect to X server
@@ -362,11 +672,18 @@ describe('commandUtils', () => {
           return child as unknown as ReturnType<typeof spawn>;
         });
 
+        // No TTY available — OSC 52 will fail
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: false,
+          configurable: true,
+        });
+
         const xclipErrorMsg = `'xclip' exited with code ${exitCode}${errorMsg ? `: ${errorMsg}` : ''}`;
         const xselErrorMsg = `'xsel' exited with code ${exitCode}${errorMsg ? `: ${errorMsg}` : ''}`;
 
         await expect(copyToClipboard(testText)).rejects.toThrow(
-          `All copy commands failed. "${xclipErrorMsg}", "${xselErrorMsg}". `,
+          `Clipboard unavailable: xclip/xsel failed ("${xclipErrorMsg}", "${xselErrorMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
         );
 
         expect(mockSpawn).toHaveBeenCalledTimes(2);
@@ -382,6 +699,63 @@ describe('commandUtils', () => {
           ['--clipboard', '--input'],
           linuxOptions,
         );
+
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
+      });
+
+      it('should succeed with OSC 52 when xclip/xsel fail but TTY is available', async () => {
+        const testText = 'Hello, world!';
+        let callCount = 0;
+        const errorMsg = "Error: Can't open display:";
+        const exitCode = 1;
+
+        mockSpawn.mockImplementation(() => {
+          const child = createMockChild();
+
+          setTimeout(() => {
+            // e.g., cannot connect to X server
+            if (callCount === 0) {
+              child.stderr.emit('data', errorMsg);
+              child.emit('close', exitCode);
+              callCount++;
+            } else {
+              child.stderr.emit('data', errorMsg);
+              child.emit('close', exitCode);
+            }
+          }, 0);
+
+          return child as unknown as ReturnType<typeof spawn>;
+        });
+
+        // TTY available — OSC 52 should succeed
+        const originalIsTTY = process.stdout.isTTY;
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: true,
+          configurable: true,
+        });
+        const writeSpy = vi
+          .spyOn(process.stdout, 'write')
+          .mockReturnValue(true);
+
+        // Should not throw — OSC 52 succeeds
+        await copyToClipboard(testText);
+
+        expect(writeSpy).toHaveBeenCalled();
+        const written = writeSpy.mock.calls[0]?.[0] as string;
+        expect(written).toContain('\x1b]52;c;');
+        expect(written).toContain(
+          Buffer.from(testText, 'utf-8').toString('base64'),
+        );
+        expect(written).toContain('\x07');
+
+        writeSpy.mockRestore();
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalIsTTY,
+          configurable: true,
+        });
       });
     });
 
@@ -490,8 +864,26 @@ describe('commandUtils', () => {
 });
 
 describe('findMidInputSlashCommand', () => {
-  it('returns null when input starts with / (handled by start-of-line completion)', () => {
+  it('returns null for a slash at position 0 (handled by start-of-line completion)', () => {
     expect(findMidInputSlashCommand('/review', 7)).toBeNull();
+  });
+
+  it('returns match for a later slash token when the buffer starts with /', () => {
+    const result = findMidInputSlashCommand('/review /sto', 12);
+    expect(result).toEqual({
+      token: '/sto',
+      startPos: 8,
+      partialCommand: 'sto',
+    });
+  });
+
+  it('returns match for a slash token after a newline when the buffer starts with /', () => {
+    const result = findMidInputSlashCommand('/review\n/sto', 12);
+    expect(result).toEqual({
+      token: '/sto',
+      startPos: 8,
+      partialCommand: 'sto',
+    });
   });
 
   it('returns null when cursor is before the slash token', () => {
@@ -534,5 +926,453 @@ describe('findMidInputSlashCommand', () => {
   it('returns null when / is not preceded by whitespace', () => {
     // "hello/review", no space before slash
     expect(findMidInputSlashCommand('hello/review', 12)).toBeNull();
+  });
+
+  it('handles a non-BMP prefix before the token (code-point offsets)', () => {
+    // "please 👍 /sto": 👍 is one code point but two UTF-16 units, so the
+    // code-point cursor offset (13) is one short of the UTF-16 offset (14).
+    // A UTF-16-based implementation slices one char early and returns null.
+    const input = 'please 👍 /sto';
+    const cursorOffset = [...input].length; // 13 code points, cursor at end
+    expect(cursorOffset).toBe(13);
+    const result = findMidInputSlashCommand(input, cursorOffset);
+    expect(result).toEqual({
+      token: '/sto',
+      startPos: 9, // code-point index of "/"
+      partialCommand: 'sto',
+    });
+  });
+});
+
+describe('findSlashCommandTokens', () => {
+  const mockCommands = [
+    {
+      name: 'review',
+      description: 'Review code',
+      kind: 'built-in' as const,
+      modelInvocable: true,
+      userInvocable: true,
+      hidden: false,
+    },
+    {
+      name: 'clear',
+      description: 'Clear conversation',
+      kind: 'built-in' as const,
+      modelInvocable: false,
+      userInvocable: true,
+      hidden: false,
+    },
+    {
+      name: 'hidden-cmd',
+      description: 'Hidden',
+      kind: 'built-in' as const,
+      modelInvocable: true,
+      userInvocable: true,
+      hidden: true,
+    },
+    {
+      name: 'model-only',
+      description: 'Model-only command',
+      kind: 'built-in' as const,
+      modelInvocable: true,
+      userInvocable: false,
+      hidden: false,
+    },
+  ] as Parameters<typeof findSlashCommandTokens>[1];
+
+  it('returns empty array for empty text', () => {
+    expect(findSlashCommandTokens('', mockCommands)).toEqual([]);
+  });
+
+  it('marks line-start known command as valid', () => {
+    const tokens = findSlashCommandTokens('/clear some args', mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'clear', valid: true });
+  });
+
+  it('marks line-start hidden command as invalid', () => {
+    const tokens = findSlashCommandTokens('/hidden-cmd', mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'hidden-cmd',
+      valid: false,
+    });
+  });
+
+  it('marks line-start non-user-invocable command as invalid', () => {
+    const tokens = findSlashCommandTokens('/model-only', mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'model-only',
+      valid: false,
+    });
+  });
+
+  it('marks mid-input modelInvocable command as valid', () => {
+    const tokens = findSlashCommandTokens(
+      'please /review this code',
+      mockCommands,
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'review', valid: true });
+  });
+
+  it('marks mid-input model-only command as valid', () => {
+    const tokens = findSlashCommandTokens(
+      'please /model-only this code',
+      mockCommands,
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'model-only',
+      valid: true,
+    });
+  });
+
+  it('marks mid-input non-modelInvocable command as invalid', () => {
+    const tokens = findSlashCommandTokens(
+      'please /clear everything',
+      mockCommands,
+    );
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'clear', valid: false });
+  });
+
+  it('marks same-line stacked skill tokens as valid even when the later skill is not model-invocable', () => {
+    const commands = [
+      {
+        name: 'review-skill',
+        description: 'Review code',
+        kind: 'skill' as const,
+        modelInvocable: true,
+        userInvocable: true,
+        hidden: false,
+      },
+      {
+        name: 'store-locally',
+        description: 'Store locally',
+        kind: 'skill' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens(
+      '/review-skill /store-locally',
+      commands,
+    );
+
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'review-skill',
+      valid: true,
+    });
+    expect(tokens[1]).toMatchObject({
+      commandName: 'store-locally',
+      valid: true,
+    });
+  });
+
+  it('does not mark non-skill tokens valid after a stacked skill prefix', () => {
+    const commands = [
+      {
+        name: 'review-skill',
+        description: 'Review code',
+        kind: 'skill' as const,
+        modelInvocable: true,
+        userInvocable: true,
+        hidden: false,
+      },
+      {
+        name: 'clear',
+        description: 'Clear conversation',
+        kind: 'built-in' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens('/review-skill /clear', commands);
+
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'review-skill',
+      valid: true,
+    });
+    expect(tokens[1]).toMatchObject({ commandName: 'clear', valid: false });
+  });
+
+  it('does not mark stackable skills valid after a non-skill prefix', () => {
+    const commands = [
+      {
+        name: 'clear',
+        description: 'Clear conversation',
+        kind: 'built-in' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+      {
+        name: 'store-locally',
+        description: 'Store locally',
+        kind: 'skill' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens('/clear /store-locally', commands);
+
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toMatchObject({ commandName: 'clear', valid: true });
+    expect(tokens[1]).toMatchObject({
+      commandName: 'store-locally',
+      valid: false,
+    });
+  });
+
+  it('marks unknown token as invalid', () => {
+    const tokens = findSlashCommandTokens('/usr/bin/something', mockCommands);
+    // /usr matches nothing, so invalid
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'usr', valid: false });
+  });
+
+  it('returns correct start and end positions', () => {
+    const text = 'run /review now';
+    const tokens = findSlashCommandTokens(text, mockCommands);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0].start).toBe(4);
+    expect(tokens[0].end).toBe(11); // '/review' is 7 chars, starts at 4
+  });
+
+  it('marks altName token as valid (line-start)', () => {
+    const commandsWithAlt = [
+      ...mockCommands,
+      {
+        name: 'stats',
+        description: 'Show stats',
+        kind: 'built-in' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+        altNames: ['usage'],
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens('/usage', commandsWithAlt);
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({ commandName: 'usage', valid: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getBestSlashCommandMatch
+// ---------------------------------------------------------------------------
+describe('getBestSlashCommandMatch', () => {
+  const makeCommand = (
+    name: string,
+    opts: {
+      modelInvocable?: boolean;
+      completionPriority?: number;
+      argumentHint?: string;
+      altNames?: string[];
+    } = {},
+  ) =>
+    ({
+      name,
+      description: `${name} desc`,
+      kind: 'built-in',
+      modelInvocable: opts.modelInvocable ?? true,
+      completionPriority: opts.completionPriority ?? 0,
+      argumentHint: opts.argumentHint,
+      altNames: opts.altNames,
+      userInvocable: true,
+      hidden: false,
+    }) as Parameters<typeof getBestSlashCommandMatch>[1][number];
+
+  const cmds = [
+    makeCommand('review', { completionPriority: 5 }),
+    makeCommand('refactor', { completionPriority: 3 }),
+    makeCommand('run', { completionPriority: 1 }),
+  ];
+
+  it('returns null for empty partialCommand', () => {
+    expect(getBestSlashCommandMatch('', cmds)).toBeNull();
+  });
+
+  it('returns null when no commands match', () => {
+    expect(getBestSlashCommandMatch('xyz', cmds)).toBeNull();
+  });
+
+  it('returns null for non-modelInvocable commands', () => {
+    const nonInvocable = [makeCommand('reset', { modelInvocable: false })];
+    expect(getBestSlashCommandMatch('re', nonInvocable)).toBeNull();
+  });
+
+  it('returns the best prefix match by completionPriority', () => {
+    // 'r' matches review(5), refactor(3), run(1) — highest priority wins
+    const result = getBestSlashCommandMatch('r', cmds);
+    expect(result).not.toBeNull();
+    expect(result!.fullCommand).toBe('review');
+    expect(result!.suffix).toBe('eview');
+  });
+
+  it('returns argumentHint when command has one', () => {
+    const withHint = [makeCommand('ask', { argumentHint: '<query>' })];
+    const result = getBestSlashCommandMatch('as', withHint);
+    expect(result!.argumentHint).toBe('<query>');
+  });
+
+  it('respects recentCommands ordering (recent overrides lower priority)', () => {
+    // 'r' matches review(5), refactor(3), run(1)
+    // Make 'run' recently used — but completionPriority takes precedence
+    const recentCommands: RecentSlashCommands = new Map([
+      ['run', { name: 'run', usedAt: Date.now(), count: 10 }],
+    ]);
+    const result = getBestSlashCommandMatch('r', cmds, recentCommands);
+    // completionPriority is checked first, so review (priority=5) still wins
+    expect(result!.fullCommand).toBe('review');
+  });
+
+  it('uses recentCommands to break a tie in completionPriority', () => {
+    const tied = [
+      makeCommand('alpha', { completionPriority: 5 }),
+      makeCommand('albet', { completionPriority: 5 }),
+    ];
+    const recentCommands: RecentSlashCommands = new Map([
+      ['albet', { name: 'albet', usedAt: Date.now(), count: 1 }],
+    ]);
+    const result = getBestSlashCommandMatch('al', tied, recentCommands);
+    expect(result!.fullCommand).toBe('albet');
+  });
+
+  it('excludes exact-match commands without argumentHint', () => {
+    // 'review' exactly matches 'review' with no argumentHint → excluded
+    const result = getBestSlashCommandMatch('review', cmds);
+    expect(result).toBeNull();
+  });
+
+  it('includes exact-match command when it has argumentHint', () => {
+    const withHint = [makeCommand('review', { argumentHint: '<file>' })];
+    const result = getBestSlashCommandMatch('review', withHint);
+    expect(result).not.toBeNull();
+    expect(result!.suffix).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// consumesContextAnnouncementLatch
+// ---------------------------------------------------------------------------
+describe('consumesContextAnnouncementLatch', () => {
+  const makeCommand = (name: string, modelInvocable: boolean): SlashCommand =>
+    ({
+      name,
+      description: `${name} desc`,
+      kind: modelInvocable ? CommandKind.SKILL : CommandKind.BUILT_IN,
+      modelInvocable,
+      action: vi.fn(),
+    }) as SlashCommand;
+
+  const slashCommands = [
+    makeCommand('feat-dev', true),
+    makeCommand('help', false),
+  ];
+  const options = (shellModeActive: boolean) => ({
+    shellModeActive,
+    slashCommands,
+  });
+
+  it('admits a plain prompt', () => {
+    expect(consumesContextAnnouncementLatch('hello', options(false))).toBe(
+      true,
+    );
+  });
+
+  it('rejects blank input (dropped by the queue)', () => {
+    expect(consumesContextAnnouncementLatch('', options(false))).toBe(false);
+  });
+
+  it('rejects /btw side-questions (fork via runForkedAgent, no main turn)', () => {
+    expect(
+      consumesContextAnnouncementLatch('/btw side note', options(false)),
+    ).toBe(false);
+  });
+
+  it('consumes ?btw (not a slash command, goes to the main model)', () => {
+    expect(
+      consumesContextAnnouncementLatch('?btw side note', options(false)),
+    ).toBe(true);
+  });
+
+  it('rejects local slash commands (no model turn)', () => {
+    expect(consumesContextAnnouncementLatch('/help', options(false))).toBe(
+      false,
+    );
+  });
+
+  it('rejects unknown slash commands', () => {
+    expect(
+      consumesContextAnnouncementLatch('/no-such-command x', options(false)),
+    ).toBe(false);
+  });
+
+  it('admits model-invocable slash commands (expanded to submit_prompt)', () => {
+    expect(
+      consumesContextAnnouncementLatch('/feat-dev implement X', options(false)),
+    ).toBe(true);
+  });
+
+  it('rejects plain input while shell mode is active', () => {
+    expect(consumesContextAnnouncementLatch('ls -la', options(true))).toBe(
+      false,
+    );
+  });
+
+  it('admits model-invocable slash commands even while shell mode is active', () => {
+    // Slash commands are routed before the shell-mode intercept.
+    expect(
+      consumesContextAnnouncementLatch('/feat-dev implement X', options(true)),
+    ).toBe(true);
+  });
+
+  it('rejects local slash commands while shell mode is active', () => {
+    expect(consumesContextAnnouncementLatch('/help', options(true))).toBe(
+      false,
+    );
+  });
+});
+
+describe('isContextFilesAnnouncement', () => {
+  it('matches an INFO item with the announcement prefix', () => {
+    expect(
+      isContextFilesAnnouncement({
+        type: 'info',
+        text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} QWEN.md`,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects a non-INFO item even when text starts with the prefix', () => {
+    // A user prompt literally starting with "Read context files:" must
+    // not be treated as the announcement after a rewind.
+    expect(
+      isContextFilesAnnouncement({
+        type: 'user',
+        text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} please`,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects an INFO item without the prefix', () => {
+    expect(
+      isContextFilesAnnouncement({
+        type: 'info',
+        text: 'Memory refreshed successfully.',
+      }),
+    ).toBe(false);
   });
 });

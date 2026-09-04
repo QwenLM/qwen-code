@@ -60,6 +60,18 @@ interface MaxSizedBoxProps {
   maxHeight: number | undefined;
   overflowDirection?: 'top' | 'bottom';
   additionalHiddenLinesCount?: number;
+  sourceBoundaries?: ReadonlyArray<{
+    kind: 'soft' | 'hard';
+    joiner: string;
+  }>;
+  /**
+   * Whether hidden lines in this box count toward the global overflow state
+   * that drives the `Press ctrl-s to show more lines` hint. Set to `false`
+   * for truncation that ctrl+s does not lift (e.g. the `ui.shellOutputMaxLines`
+   * cap): the `... N lines hidden ...` marker still renders, but the box no
+   * longer advertises lines that ctrl+s cannot reveal (#10640).
+   */
+  registerOverflow?: boolean;
 }
 
 /**
@@ -107,11 +119,16 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
   maxHeight,
   overflowDirection = 'top',
   additionalHiddenLinesCount = 0,
+  sourceBoundaries,
+  registerOverflow = true,
 }) => {
   const id = useId();
   const { addOverflowingId, removeOverflowingId } = useOverflowActions() || {};
 
   const laidOutStyledText: StyledText[][] = [];
+  const lineMetadata = new Map<StyledText[], LineMetadata>();
+  let rowIndex = 0;
+  let sourceBoundaryIndex = 0;
   const targetMaxHeight = Math.max(
     Math.round(maxHeight ?? Number.MAX_SAFE_INTEGER),
     MINIMUM_MAX_HEIGHT,
@@ -131,7 +148,14 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
     }
 
     if (element.type === Box) {
-      layoutInkElementAsStyledText(element, maxWidth!, laidOutStyledText);
+      layoutInkElementAsStyledText(
+        element,
+        maxWidth!,
+        laidOutStyledText,
+        lineMetadata,
+        `${id}:${rowIndex++}`,
+        () => sourceBoundaries?.[sourceBoundaryIndex++],
+      );
       return;
     }
 
@@ -156,7 +180,7 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
   const totalHiddenLines = hiddenLinesCount + additionalHiddenLinesCount;
 
   useEffect(() => {
-    if (totalHiddenLines > 0) {
+    if (registerOverflow && totalHiddenLines > 0) {
       addOverflowingId?.(id);
     } else {
       removeOverflowingId?.(id);
@@ -165,7 +189,13 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
     return () => {
       removeOverflowingId?.(id);
     };
-  }, [id, totalHiddenLines, addOverflowingId, removeOverflowingId]);
+  }, [
+    id,
+    registerOverflow,
+    totalHiddenLines,
+    addOverflowingId,
+    removeOverflowingId,
+  ]);
 
   const visibleStyledText =
     hiddenLinesCount > 0
@@ -174,19 +204,40 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
         : laidOutStyledText.slice(0, visibleContentHeight)
       : laidOutStyledText;
 
-  const visibleLines = visibleStyledText.map((line, index) => (
-    <Box key={index}>
-      {line.length > 0 ? (
-        line.map((segment, segIndex) => (
-          <Text key={segIndex} {...segment.props}>
-            {segment.text}
+  // Pin each rendered row to its natural height. Ink's default flexShrink is
+  // 1, so when an ancestor clamps this column's height (e.g. the pending-
+  // region maxHeight backstop) Yoga compresses the rows and stacks several at
+  // the same Y, leaving only every Nth line visible (#6809). flexShrink={0}
+  // keeps rows full-height and sequential under a clamped ancestor.
+  const visibleLines = visibleStyledText.map((line, index) => {
+    const metadata = lineMetadata.get(line)!;
+    return (
+      <Box key={index} flexShrink={0}>
+        {line.length > 0 ? (
+          line.map((segment, segIndex) => (
+            <Text
+              key={segIndex}
+              {...segment.props}
+              selectionFlow={metadata.flowKey}
+              selectionBreakAfter={metadata.breakAfter}
+              selectionJoiner={metadata.joiner}
+            >
+              {segment.text}
+            </Text>
+          ))
+        ) : (
+          <Text
+            selectable={false}
+            selectionFlow={metadata.flowKey}
+            selectionBreakAfter={metadata.breakAfter}
+            selectionJoiner={metadata.joiner}
+          >
+            {' '}
           </Text>
-        ))
-      ) : (
-        <Text> </Text>
-      )}
-    </Box>
-  ));
+        )}
+      </Box>
+    );
+  });
 
   return (
     <Box flexDirection="column" width={maxWidth} flexShrink={0}>
@@ -211,6 +262,12 @@ export const MaxSizedBox: React.FC<MaxSizedBoxProps> = ({
 interface StyledText {
   text: string;
   props: Record<string, unknown>;
+}
+
+interface LineMetadata {
+  flowKey: string;
+  breakAfter: 'soft' | 'hard';
+  joiner: string;
 }
 
 /**
@@ -385,11 +442,24 @@ function layoutInkElementAsStyledText(
   element: React.ReactElement,
   maxWidth: number,
   output: StyledText[][],
+  lineMetadata: Map<StyledText[], LineMetadata>,
+  flowKey: string,
+  nextSourceBoundary: () =>
+    | { kind: 'soft' | 'hard'; joiner: string }
+    | undefined,
 ) {
+  const pushOutput = (
+    line: StyledText[],
+    breakAfter: 'soft' | 'hard',
+    joiner: string,
+  ) => {
+    output.push(line);
+    lineMetadata.set(line, { flowKey, breakAfter, joiner });
+  };
   const row = visitBoxRow(element);
   if (row.segments.length === 0 && row.noWrapSegments.length === 0) {
     // Return a single empty line if there are no segments to display
-    output.push([]);
+    pushOutput([], 'hard', '\n');
     return;
   }
 
@@ -428,7 +498,7 @@ function layoutInkElementAsStyledText(
       lines.push(currentLine);
     }
     for (const line of lines) {
-      output.push(line);
+      pushOutput(line, 'hard', '\n');
     }
     return;
   }
@@ -513,7 +583,7 @@ function layoutInkElementAsStyledText(
     }
 
     for (const line of lines) {
-      output.push(line);
+      pushOutput(line, 'hard', '\n');
     }
     return;
   }
@@ -522,19 +592,27 @@ function layoutInkElementAsStyledText(
   let wrappingPart: StyledText[] = [];
   let wrappingPartWidth = 0;
 
-  function addWrappingPartToLines() {
+  function addWrappingPartToLines(breakAfter: 'soft' | 'hard', joiner: string) {
+    let line: StyledText[];
     if (lines.length === 0) {
-      lines.push([...nonWrappingContent, ...wrappingPart]);
+      line = [...nonWrappingContent, ...wrappingPart];
     } else {
       if (noWrappingWidth > 0) {
-        lines.push([
-          ...[{ text: ' '.repeat(noWrappingWidth), props: {} }],
+        line = [
+          ...[
+            {
+              text: ' '.repeat(noWrappingWidth),
+              props: { selectable: false },
+            },
+          ],
           ...wrappingPart,
-        ]);
+        ];
       } else {
-        lines.push(wrappingPart);
+        line = wrappingPart;
       }
     }
+    lines.push(line);
+    lineMetadata.set(line, { flowKey, breakAfter, joiner });
     wrappingPart = [];
     wrappingPartWidth = 0;
   }
@@ -555,7 +633,11 @@ function layoutInkElementAsStyledText(
 
     linesFromSegment.forEach((lineText, lineIndex) => {
       if (lineIndex > 0) {
-        addWrappingPartToLines();
+        const boundary = nextSourceBoundary() ?? {
+          kind: 'hard' as const,
+          joiner: '\n',
+        };
+        addWrappingPartToLines(boundary.kind, boundary.joiner);
       }
 
       const words = lineText.split(/(\s+)/); // Split by whitespace
@@ -568,7 +650,7 @@ function layoutInkElementAsStyledText(
           wrappingPartWidth + wordWidth > availableWidth &&
           wrappingPartWidth > 0
         ) {
-          addWrappingPartToLines();
+          addWrappingPartToLines('soft', /^\s+$/u.test(word) ? word : '');
           if (/^\s+$/.test(word)) {
             return;
           }
@@ -604,7 +686,7 @@ function layoutInkElementAsStyledText(
             }
 
             if (remainingWordAsCodePoints.length > 0) {
-              addWrappingPartToLines();
+              addWrappingPartToLines('soft', '');
             }
           }
         } else {
@@ -615,12 +697,12 @@ function layoutInkElementAsStyledText(
     });
     // Split omits a trailing newline, so we need to handle it here
     if (segment.text.endsWith('\n')) {
-      addWrappingPartToLines();
+      addWrappingPartToLines('hard', '\n');
     }
   });
 
   if (wrappingPart.length > 0) {
-    addWrappingPartToLines();
+    addWrappingPartToLines('hard', '\n');
   }
   for (const line of lines) {
     output.push(line);

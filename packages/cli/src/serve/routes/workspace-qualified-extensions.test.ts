@@ -1,0 +1,2769 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { promises as fsp } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import request from 'supertest';
+import {
+  ExtensionManager,
+  hashDaemonWorkspace,
+  type Extension,
+  type ExtensionStoreSnapshot,
+} from '@qwen-code/qwen-code-core';
+import { createServeApp } from '../server.js';
+import { ClientMcpSenderRegistry } from '../acp-http/client-mcp-sender-registry.js';
+import {
+  canonicalizeWorkspace,
+  createWorkspaceFileSystemFactory,
+} from '../fs/index.js';
+import type { ServeOptions } from '../types.js';
+import {
+  createWorkspaceRegistry,
+  type WorkspaceRuntime,
+} from '../workspace-registry.js';
+import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import { ConversationWorkspace } from '../conversations/conversation-workspace.js';
+import type { DaemonWorkspaceService } from '../workspace-service/types.js';
+import * as settingsModule from '../../config/settings.js';
+
+const extensionId = 'a'.repeat(64);
+const secondExtensionId = 'b'.repeat(64);
+const baseOpts: ServeOptions = {
+  hostname: '127.0.0.1',
+  port: 4198,
+  mode: 'http-bridge',
+};
+const activeApps = new Set<ReturnType<typeof createServeApp>>();
+
+function host(): string {
+  return `127.0.0.1:${baseOpts.port}`;
+}
+
+function makeBridge(): AcpSessionBridge {
+  return {
+    permissionPolicy: 'first-responder',
+    knownClientIds: () => new Set<string>(['client-1']),
+    publishWorkspaceEvent: vi.fn(),
+    refreshExtensionsForAllSessions: vi.fn(async () => ({
+      refreshed: 1,
+      failed: 0,
+    })),
+    broadcastExtensionsChanged: vi.fn(),
+    getDaemonStatusSnapshot: vi.fn(() => ({
+      limits: {
+        maxSessions: 20,
+        maxPendingPromptsPerSession: 5,
+        eventRingSize: 8000,
+        compactedReplayMaxBytes: 4 * 1024 * 1024,
+        maxJournalEvents: 10_000,
+        maxJournalBytes: 8 * 1024 * 1024,
+        journalGrowth: null,
+        channelIdleTimeoutMs: 0,
+        sessionIdleTimeoutMs: 1_800_000,
+      },
+      sessionCount: 0,
+      pendingPermissionCount: 0,
+      channelLive: false,
+      permissionPolicy: 'first-responder',
+      sessions: [],
+    })),
+    listWorkspaceSessions: vi.fn(() => []),
+    getSessionSummary: vi.fn(() => {
+      throw new Error('not found');
+    }),
+    sessionCount: 0,
+    activePromptCount: 0,
+    pendingPromptTotal: 0,
+    lastActivityAt: null,
+  } as unknown as AcpSessionBridge;
+}
+
+function makeWorkspaceService(): DaemonWorkspaceService {
+  return {
+    invalidateWorkspaceSkillsStatus: vi.fn(),
+    refreshExtensionsForAllSessions: vi.fn(async () => ({
+      refreshed: 1,
+      failed: 0,
+    })),
+  } as unknown as DaemonWorkspaceService;
+}
+
+function makeRuntime(
+  workspaceCwd: string,
+  opts: {
+    primary: boolean;
+    trusted: boolean;
+    workspaceId: string;
+    provenance?: 'live-conversation';
+    removable?: boolean;
+  },
+): WorkspaceRuntime {
+  return {
+    workspaceId: opts.workspaceId,
+    workspaceCwd,
+    sessionRuntimeBaseDir: path.join(workspaceCwd, '.runtime'),
+    primary: opts.primary,
+    trusted: opts.trusted,
+    ...(opts.provenance ? { provenance: opts.provenance } : {}),
+    ...(opts.removable === undefined ? {} : { removable: opts.removable }),
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: makeBridge(),
+    workspaceService: makeWorkspaceService(),
+    routeFileSystemFactory: createWorkspaceFileSystemFactory({
+      boundWorkspaces: [workspaceCwd],
+      trusted: opts.trusted,
+      emit: () => {},
+    }),
+    clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+  };
+}
+
+async function makeHarness(opts?: {
+  internalRuntime?: boolean;
+  secondaryTrusted?: boolean;
+  singleWorkspace?: boolean;
+}) {
+  const scratch = await fsp.mkdtemp(
+    path.join(os.tmpdir(), 'qwen-extension-management-v2-'),
+  );
+  const primaryCwd = path.join(scratch, 'primary');
+  const secondaryCwd = path.join(scratch, 'secondary');
+  const conversationWorkspace = opts?.internalRuntime
+    ? new ConversationWorkspace({ homeDir: scratch })
+    : undefined;
+  await fsp.mkdir(primaryCwd, { recursive: true });
+  await fsp.mkdir(secondaryCwd, { recursive: true });
+  const canonicalPrimary = canonicalizeWorkspace(primaryCwd);
+  const canonicalSecondary = canonicalizeWorkspace(secondaryCwd);
+  const primary = makeRuntime(canonicalPrimary, {
+    primary: true,
+    trusted: true,
+    workspaceId: 'primary-id',
+  });
+  const secondary = makeRuntime(canonicalSecondary, {
+    primary: false,
+    trusted: opts?.secondaryTrusted ?? true,
+    workspaceId: hashDaemonWorkspace(canonicalSecondary),
+  });
+  const conversationRoot = conversationWorkspace
+    ? (await conversationWorkspace.getRoot()).canonicalRoot
+    : undefined;
+  const internal = conversationRoot
+    ? makeRuntime(conversationRoot, {
+        primary: false,
+        trusted: true,
+        workspaceId: hashDaemonWorkspace(conversationRoot),
+        provenance: 'live-conversation',
+        removable: false,
+      })
+    : undefined;
+  const registry = createWorkspaceRegistry(
+    opts?.singleWorkspace
+      ? [primary]
+      : [primary, secondary, ...(internal ? [internal] : [])],
+  );
+  const app = createServeApp(
+    { ...baseOpts, workspace: canonicalPrimary, token: 'secret' },
+    undefined,
+    {
+      workspaceRegistry: registry,
+      ...(conversationWorkspace
+        ? {
+            liveConversationWorkspace: conversationWorkspace,
+            conversationRuntimeOwnershipFactory: () => ({
+              acquire: vi.fn(async () => ({ reclaimed: false })),
+              release: vi.fn(async () => false),
+            }),
+          }
+        : {}),
+    },
+  );
+  activeApps.add(app);
+  return { app, scratch, primary, secondary, internal, registry };
+}
+
+function auth(pending: request.Test): request.Test {
+  return pending
+    .set('Host', host())
+    .set('Authorization', 'Bearer secret')
+    .set('X-Qwen-Client-Id', 'client-1');
+}
+
+function mockExtensionManager(
+  installType: 'archive-url' | 'local' | 'snapshot' = 'archive-url',
+): Extension {
+  const extension = {
+    id: extensionId,
+    name: 'demo',
+    version: '1.0.0',
+    path: '/extensions/demo',
+    isActive: true,
+    config: { name: 'demo', version: '1.0.0' },
+    installMetadata: {
+      type: installType,
+      source:
+        installType === 'archive-url'
+          ? 'https://example.com/demo.zip'
+          : installType === 'snapshot'
+            ? 'snapshot'
+            : '/extensions/demo.zip',
+    },
+    contextFiles: [],
+  } as Extension;
+  const snapshot: ExtensionStoreSnapshot = {
+    version: 2,
+    generation: 7,
+    legacyProjectionHash: 'hash',
+    extensions: {
+      [extensionId]: {
+        name: 'demo',
+        defaultActivation: 'disabled',
+        workspaceOverrides: {},
+      },
+    },
+  };
+  vi.spyOn(ExtensionManager.prototype, 'refreshCache').mockResolvedValue();
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'refreshCacheWithSnapshot',
+  ).mockResolvedValue(snapshot);
+  vi.spyOn(ExtensionManager.prototype, 'getLoadedExtensions').mockReturnValue([
+    extension,
+  ]);
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'getExtensionStoreSnapshot',
+  ).mockResolvedValue(snapshot);
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'getExtensionActivation',
+  ).mockResolvedValue({
+    default: 'disabled',
+    workspace: 'inherit',
+    effective: 'disabled',
+    source: 'default',
+  });
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'getExtensionActivationFromSnapshot',
+  ).mockReturnValue({
+    default: 'disabled',
+    workspace: 'inherit',
+    effective: 'disabled',
+    source: 'default',
+  });
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'getExtensionActivationForIdentityFromSnapshot',
+  ).mockReturnValue({
+    default: 'disabled',
+    workspace: 'inherit',
+    effective: 'disabled',
+    source: 'default',
+  });
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'getExtensionActivationForNameFromSnapshot',
+  ).mockReturnValue({
+    default: 'disabled',
+    workspace: 'inherit',
+    effective: 'disabled',
+    source: 'default',
+  });
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'setExtensionDefaultActivation',
+  ).mockResolvedValue(snapshot);
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'setExtensionDefaultActivations',
+  ).mockResolvedValue(snapshot);
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'setExtensionWorkspaceActivation',
+  ).mockResolvedValue(snapshot);
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'setExtensionWorkspaceActivations',
+  ).mockResolvedValue(snapshot);
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'clearExtensionWorkspaceActivation',
+  ).mockResolvedValue(snapshot);
+  vi.spyOn(
+    ExtensionManager.prototype,
+    'uninstallExtensionById',
+  ).mockResolvedValue(snapshot);
+  return extension;
+}
+
+async function pollOperation(
+  app: ReturnType<typeof createServeApp>,
+  operationId: string,
+  operationBasePath = '/extensions/operations',
+) {
+  for (let i = 0; i < 100; i++) {
+    const response = await auth(
+      request(app).get(
+        `${operationBasePath}/${encodeURIComponent(operationId)}`,
+      ),
+    );
+    if (
+      response.status === 200 &&
+      response.body.status !== 'queued' &&
+      response.body.status !== 'running'
+    ) {
+      return response.body;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`operation ${operationId} did not settle`);
+}
+
+describe('extension management v2 REST', () => {
+  afterEach(() => {
+    for (const app of activeApps) {
+      (
+        app.locals as { stopExtensionGenerationReconciler?: () => void }
+      ).stopExtensionGenerationReconciler?.();
+    }
+    activeApps.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('advertises extension_management_v2 but not the abandoned capability', async () => {
+    const h = await makeHarness({ singleWorkspace: true });
+    try {
+      const response = await auth(request(h.app).get('/capabilities'));
+      expect(response.status).toBe(200);
+      expect(response.body.features).toContain('extension_management_v2');
+      expect(response.body.features).toContain('extension_state');
+      expect(response.body.features).toContain('extension_git_credentials');
+      expect(response.body.features).toContain('extension_local_path_install');
+      expect(response.body.features).toContain('extension_batch_activation_v2');
+      expect(response.body.features).not.toContain(
+        'workspace_qualified_extensions',
+      );
+      expect(response.body.workspaces).toEqual([
+        expect.objectContaining({
+          id: h.primary.workspaceId,
+          cwd: h.primary.workspaceCwd,
+          primary: true,
+        }),
+      ]);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns a global catalog with generation and default activation', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    try {
+      const response = await auth(request(h.app).get('/extensions'));
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        v: 1,
+        generation: 7,
+        extensions: [
+          {
+            id: extensionId,
+            name: 'demo',
+            installType: 'archive-url',
+            defaultActivation: 'disabled',
+            workspaceOverrideCount: 0,
+          },
+        ],
+      });
+      expect(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).toHaveBeenCalledOnce();
+      expect(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects malformed state batches before queuing or refreshing', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const setStates = vi.spyOn(
+      ExtensionManager.prototype,
+      'setExtensionSkillStates',
+    );
+    const enabled = { name: 'alpha', state: 'enabled' };
+    try {
+      for (const body of [
+        [],
+        {},
+        { skills: [] },
+        { skills: [enabled, { name: 'Alpha', state: 'disabled' }] },
+        { skills: [enabled, { name: 'beta', state: 'inherit' }] },
+        { skills: [enabled, { name: 'invalid/name', state: 'enabled' }] },
+        {
+          skills: Array.from({ length: 101 }, (_, index) => ({
+            ...enabled,
+            name: `s${index}`,
+          })),
+        },
+        { skills: [enabled], mcpServers: [] },
+        { skills: [enabled], constructor: {} },
+      ]) {
+        const response = await auth(
+          request(h.app)
+            .put(
+              `/workspaces/${h.secondary.workspaceId}/extensions/${extensionId}/state`,
+            )
+            .send(body),
+        );
+        expect(response.status).toBe(400);
+        expect(response.body.operationId).toBeUndefined();
+      }
+      expect(setStates).not.toHaveBeenCalled();
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns complete owned state and ordered results with selected settings precedence', async () => {
+    const h = await makeHarness();
+    const extension = mockExtensionManager();
+    extension.config.skillStates = { alpha: false, beta: true };
+    extension.skills = ['alpha', 'beta'].map((name) => ({
+      name,
+      description: name,
+      body: name,
+      level: 'extension',
+      filePath: `/extensions/demo/${name}/SKILL.md`,
+      extensionName: 'demo',
+    }));
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+    ).mockReturnValue({
+      default: 'enabled',
+      workspace: 'inherit',
+      effective: 'enabled',
+      source: 'default',
+    });
+    const loadSettings = vi
+      .spyOn(settingsModule, 'loadSettings')
+      .mockReturnValue({
+        merged: { skills: { disabled: ['alpha'], enabled: ['beta'] } },
+        forScope: () => ({ settings: {} }),
+      } as unknown as settingsModule.LoadedSettings);
+    const snapshot =
+      await ExtensionManager.prototype.getExtensionStoreSnapshot();
+    snapshot.extensions[extensionId]!.defaultActivation = 'enabled';
+    const committed = {
+      ...snapshot,
+      generation: 8,
+      extensions: {
+        ...snapshot.extensions,
+        [extensionId]: {
+          ...snapshot.extensions[extensionId]!,
+          skillWorkspaceOverrides: {
+            [h.secondary.workspaceCwd]: { alpha: true, beta: false },
+          },
+        },
+      },
+    };
+    const setStates = vi
+      .spyOn(ExtensionManager.prototype, 'setExtensionSkillStates')
+      .mockResolvedValue(committed);
+    vi.mocked(
+      ExtensionManager.prototype.refreshCacheWithSnapshot,
+    ).mockResolvedValue(committed);
+    const route = `/workspaces/${h.secondary.workspaceId}/extensions/${extensionId}/state`;
+    const beta = {
+      name: 'beta',
+      defaultEnabled: true,
+      workspaceEnabled: false,
+      effectiveEnabled: true,
+    };
+    const alpha = {
+      name: 'alpha',
+      defaultEnabled: false,
+      workspaceEnabled: true,
+      effectiveEnabled: false,
+      disabledReason: 'hard',
+    };
+    try {
+      const response = await auth(
+        request(h.app)
+          .put(route)
+          .send({
+            skills: [
+              { name: 'Beta', state: 'disabled' },
+              { name: 'alpha', state: 'enabled' },
+            ],
+          }),
+      );
+      expect(response.status).toBe(202);
+      await expect(
+        pollOperation(h.app, response.body.operationId),
+      ).resolves.toMatchObject({
+        operation: 'set_extension_state',
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          resourceStates: { skills: [beta, alpha] },
+          refreshed: 1,
+          failed: 0,
+        },
+      });
+      expect(setStates).toHaveBeenCalledExactlyOnceWith(
+        extensionId,
+        h.secondary.workspaceCwd,
+        [
+          { name: 'Beta', state: 'disabled' },
+          { name: 'alpha', state: 'enabled' },
+        ],
+        expect.any(Function),
+        expect.any(Function),
+      );
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ status: 'updated' }),
+        { skillsOnly: true },
+      );
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.secondary.workspaceService.invalidateWorkspaceSkillsStatus,
+      ).toHaveBeenCalledTimes(2);
+      const state = await auth(request(h.app).get(route));
+      expect(state.body).toEqual({
+        v: 1,
+        workspaceId: h.secondary.workspaceId,
+        workspaceCwd: h.secondary.workspaceCwd,
+        extensionId,
+        name: 'demo',
+        skills: [alpha, beta],
+      });
+      expect(loadSettings).toHaveBeenCalledWith(h.secondary.workspaceCwd, {
+        consumeCorruptionEnvVars: false,
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: false,
+        workspaceTrusted: true,
+      });
+      extension.isActive = false;
+      const inactive = await auth(request(h.app).get(route));
+      expect(inactive.body.skills).toEqual([
+        { ...alpha, disabledReason: 'inactive_extension' },
+        {
+          ...beta,
+          effectiveEnabled: false,
+          disabledReason: 'inactive_extension',
+        },
+      ]);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('records state ownership failures without refreshing either workspace', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const setStates = vi
+      .spyOn(ExtensionManager.prototype, 'setExtensionSkillStates')
+      .mockRejectedValue(
+        new Error('Skill "foreign" does not belong to extension "demo"'),
+      );
+    try {
+      const response = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${h.secondary.workspaceId}/extensions/${extensionId}/state`,
+          )
+          .send({ skills: [{ name: 'foreign', state: 'enabled' }] }),
+      );
+      expect(response.status).toBe(202);
+      await expect(
+        pollOperation(h.app, response.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'failed',
+        error: expect.stringContaining('does not belong'),
+      });
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+      setStates.mockClear();
+      h.registry.beginReplacement(
+        h.registry.getEntryByWorkspaceId(h.secondary.workspaceId)!,
+        'next',
+      );
+      const unavailableRoute = `/workspaces/${h.secondary.workspaceId}/extensions/${extensionId}/state`;
+      expect((await auth(request(h.app).get(unavailableRoute))).status).toBe(
+        503,
+      );
+      expect(
+        (
+          await auth(
+            request(h.app)
+              .put(unavailableRoute)
+              .send({ skills: [{ name: 'alpha', state: 'enabled' }] }),
+          )
+        ).status,
+      ).toBe(503);
+      expect(
+        (
+          await auth(
+            request(h.app).get(
+              `/workspaces/unknown/extensions/${extensionId}/state`,
+            ),
+          )
+        ).status,
+      ).toBe(400);
+      expect(setStates).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('changes global defaults in one batch and refreshes every runtime', async () => {
+    const h = await makeHarness();
+    const first = mockExtensionManager();
+    const second = {
+      ...first,
+      id: secondExtensionId,
+      name: 'second-demo',
+      config: { ...first.config, name: 'second-demo' },
+    } as Extension;
+    vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue([
+      first,
+      second,
+    ]);
+    try {
+      const started = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({
+            extensionNames: ['demo', 'future-demo', 'second-demo', 'DEMO'],
+            state: 'disabled',
+          }),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        operation: 'set_default_activation_batch',
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          results: [
+            {
+              name: 'demo',
+              defaultActivation: 'disabled',
+            },
+            {
+              name: 'future-demo',
+              defaultActivation: 'disabled',
+            },
+            {
+              name: 'second-demo',
+              defaultActivation: 'disabled',
+            },
+          ],
+          refreshed: 2,
+          failed: 0,
+        },
+      });
+      expect(
+        ExtensionManager.prototype.setExtensionDefaultActivations,
+      ).toHaveBeenCalledWith(
+        ['demo', 'future-demo', 'second-demo'],
+        'disabled',
+        expect.any(Function),
+      );
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('declares and reconciles an all-uninstalled global batch', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    try {
+      const started = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({
+            extensionNames: ['future-demo'],
+            state: 'enabled',
+          }),
+      );
+
+      expect(started.status).toBe(202);
+      const completed = await pollOperation(h.app, started.body.operationId);
+      expect(completed).toMatchObject({
+        operation: 'set_default_activation_batch',
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          results: [
+            {
+              name: 'future-demo',
+              defaultActivation: 'enabled',
+            },
+          ],
+          refreshed: 2,
+          failed: 0,
+        },
+      });
+      expect(
+        ExtensionManager.prototype.setExtensionDefaultActivations,
+      ).toHaveBeenCalledWith(['future-demo'], 'enabled', expect.any(Function));
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('stops request parsing after rejecting an invalid extension id', async () => {
+    const h = await makeHarness();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const globalResponse = await auth(
+        request(h.app)
+          .put('/extensions/not-an-extension-id/activation')
+          .send({ state: 'invalid' }),
+      );
+      const workspaceResponse = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/not-an-extension-id/activation`,
+          )
+          .send({ state: 'invalid' }),
+      );
+
+      expect(globalResponse.body).toMatchObject({
+        code: 'invalid_extension_id',
+      });
+      expect(workspaceResponse.body).toMatchObject({
+        code: 'invalid_extension_id',
+      });
+      expect(stderr).not.toHaveBeenCalledWith(
+        expect.stringContaining('Cannot set headers after they are sent'),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects malformed v2 batches before queueing an operation', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const nonArrayGlobal = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({ extensionNames: 'demo', state: 'enabled' }),
+      );
+      const missingGlobal = await auth(
+        request(h.app).put('/extensions/activation').send({ state: 'enabled' }),
+      );
+      const emptyGlobal = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({ extensionNames: [], state: 'enabled' }),
+      );
+      const nonStringGlobal = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({
+            extensionNames: ['demo', 42],
+            state: 'enabled',
+          }),
+      );
+      const oversizedGlobal = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({
+            extensionNames: Array.from(
+              { length: 101 },
+              (_, index) => `demo-${index}`,
+            ),
+            state: 'enabled',
+          }),
+      );
+      const invalidNameGlobal = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({
+            extensionNames: ['not/a/name'],
+            state: 'enabled',
+          }),
+      );
+      const nonArrayWorkspace = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
+          )
+          .send({ extensionNames: 'demo' }),
+      );
+      const emptyWorkspace = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
+          )
+          .send({ extensionNames: [] }),
+      );
+      const invalidWorkspace = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
+          )
+          .send({
+            extensionNames: ['demo'],
+            state: 'invalid',
+          }),
+      );
+      const inheritedGlobal = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({
+            extensionNames: ['demo'],
+            state: 'inherit',
+          }),
+      );
+
+      expect(nonArrayGlobal.status).toBe(400);
+      expect(missingGlobal.status).toBe(400);
+      expect(emptyGlobal.status).toBe(400);
+      expect(nonStringGlobal.status).toBe(400);
+      expect(oversizedGlobal.status).toBe(400);
+      expect(invalidNameGlobal.status).toBe(400);
+      expect(nonArrayWorkspace.status).toBe(400);
+      expect(emptyWorkspace.status).toBe(400);
+      expect(invalidWorkspace.status).toBe(400);
+      expect(inheritedGlobal.status).toBe(400);
+      expect(oversizedGlobal.body).toMatchObject({
+        code: 'invalid_extension_names',
+      });
+      expect(invalidNameGlobal.body).toMatchObject({
+        code: 'invalid_extension_name',
+      });
+      expect(invalidWorkspace.body).toMatchObject({
+        code: 'invalid_extension_activation',
+      });
+      expect(inheritedGlobal.body).toMatchObject({
+        code: 'invalid_extension_activation',
+      });
+      for (const response of [
+        nonArrayGlobal,
+        missingGlobal,
+        emptyGlobal,
+        nonStringGlobal,
+        nonArrayWorkspace,
+        emptyWorkspace,
+      ]) {
+        expect(response.body).toMatchObject({
+          code: 'invalid_extension_names',
+        });
+      }
+      expect(
+        ExtensionManager.prototype.setExtensionDefaultActivations,
+      ).not.toHaveBeenCalled();
+      expect(
+        ExtensionManager.prototype.setExtensionWorkspaceActivations,
+      ).not.toHaveBeenCalled();
+      expect(stderr).not.toHaveBeenCalledWith(
+        expect.stringContaining('Cannot set headers after they are sent'),
+      );
+    } finally {
+      stderr.mockRestore();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('applies a batch at the 100-extension limit in one commit', async () => {
+    const h = await makeHarness();
+    const template = mockExtensionManager();
+    const extensionIds = Array.from({ length: 100 }, (_, index) =>
+      index.toString(16).padStart(64, '0'),
+    );
+    const extensions = extensionIds.map(
+      (id, index) =>
+        ({
+          ...template,
+          id,
+          name: `demo-${index}`,
+          config: { ...template.config, name: `demo-${index}` },
+        }) as Extension,
+    );
+    const names = extensions.map(({ name }) => name);
+    vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue(
+      extensions,
+    );
+    try {
+      const started = await auth(
+        request(h.app)
+          .put('/extensions/activation')
+          .send({ extensionNames: names, state: 'enabled' }),
+      );
+
+      expect(started.status).toBe(202);
+      const completed = await pollOperation(h.app, started.body.operationId);
+      expect(completed).toMatchObject({
+        operation: 'set_default_activation_batch',
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          refreshed: 2,
+          failed: 0,
+        },
+      });
+      expect(completed.result.results).toHaveLength(100);
+      expect(
+        completed.result.results.map((result: { name: string }) => result.name),
+      ).toEqual(names);
+      expect(
+        completed.result.results.every(
+          (result: { defaultActivation: string }) =>
+            result.defaultActivation === 'enabled',
+        ),
+      ).toBe(true);
+      expect(
+        ExtensionManager.prototype.setExtensionDefaultActivations,
+      ).toHaveBeenCalledOnce();
+      expect(
+        ExtensionManager.prototype.setExtensionDefaultActivations,
+      ).toHaveBeenCalledWith(names, 'enabled', expect.any(Function));
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns the selected workspace projection, including when untrusted', async () => {
+    const h = await makeHarness({ secondaryTrusted: false });
+    mockExtensionManager();
+    const loadSettings = vi.spyOn(settingsModule, 'loadSettings');
+    try {
+      const response = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        v: 1,
+        workspaceId: h.secondary.workspaceId,
+        workspaceCwd: h.secondary.workspaceCwd,
+        desiredGeneration: 7,
+        extensions: [
+          {
+            extensionId,
+            defaultActivation: 'disabled',
+            workspaceActivation: null,
+            effectiveActivation: 'disabled',
+            activationSource: 'default',
+          },
+        ],
+      });
+      expect(
+        ExtensionManager.prototype.getExtensionActivationFromSnapshot,
+      ).toHaveBeenCalledWith(
+        extensionId,
+        expect.objectContaining({ generation: 7 }),
+        h.secondary.workspaceCwd,
+      );
+      expect(
+        ExtensionManager.prototype.getExtensionActivation,
+      ).not.toHaveBeenCalled();
+      const state = await auth(
+        request(h.app).get(
+          `/workspaces/${h.secondary.workspaceId}/extensions/${extensionId}/state`,
+        ),
+      );
+      expect(state.status).toBe(200);
+      expect(state.body).toMatchObject({
+        workspaceId: h.secondary.workspaceId,
+        skills: [],
+      });
+      expect(loadSettings).toHaveBeenCalledWith(
+        h.secondary.workspaceCwd,
+        expect.objectContaining({
+          skipWorkspaceSettings: true,
+          workspaceTrusted: false,
+        }),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('changes only the target workspace activation and refreshes its runtime', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    try {
+      const started = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+          )
+          .send({ state: 'enabled' }),
+      );
+      expect(started.status).toBe(202);
+      expect(started.headers['location']).toBe(
+        `/extensions/operations/${started.body.operationId}`,
+      );
+      const operation = await pollOperation(h.app, started.body.operationId);
+      expect(operation.status).toBe('succeeded');
+      expect(
+        ExtensionManager.prototype.setExtensionWorkspaceActivation,
+      ).toHaveBeenCalledWith(
+        extensionId,
+        h.secondary.workspaceCwd,
+        'enabled',
+        expect.any(Function),
+      );
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('clears selected workspace overrides in one targeted batch', async () => {
+    const h = await makeHarness();
+    const first = mockExtensionManager();
+    const second = {
+      ...first,
+      id: secondExtensionId,
+      name: 'second-demo',
+      config: { ...first.config, name: 'second-demo' },
+    } as Extension;
+    vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue([
+      first,
+      second,
+    ]);
+    const committedSnapshot: ExtensionStoreSnapshot = {
+      version: 2,
+      generation: 8,
+      legacyProjectionHash: 'hash',
+      extensions: {
+        [extensionId]: {
+          name: 'demo',
+          defaultActivation: 'disabled',
+          workspaceOverrides: {},
+        },
+        [secondExtensionId]: {
+          name: 'second-demo',
+          defaultActivation: 'enabled',
+          workspaceOverrides: {},
+        },
+      },
+    };
+    vi.mocked(
+      ExtensionManager.prototype.setExtensionWorkspaceActivations,
+    ).mockResolvedValueOnce(committedSnapshot);
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionActivationForNameFromSnapshot,
+    ).mockImplementation((name) => ({
+      default: name === 'demo' ? 'disabled' : 'enabled',
+      workspace: 'inherit',
+      effective: name === 'demo' ? 'disabled' : 'enabled',
+      source: 'default',
+    }));
+    try {
+      const started = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
+          )
+          .send({
+            extensionNames: ['demo', 'second-demo'],
+            state: 'inherit',
+          }),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        operation: 'set_workspace_activation_batch',
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          results: [
+            {
+              name: 'demo',
+              workspaceActivation: null,
+              effectiveActivation: 'disabled',
+            },
+            {
+              name: 'second-demo',
+              workspaceActivation: null,
+              effectiveActivation: 'enabled',
+            },
+          ],
+          refreshed: 1,
+          failed: 0,
+        },
+      });
+      expect(
+        ExtensionManager.prototype.setExtensionWorkspaceActivations,
+      ).toHaveBeenCalledWith(
+        ['demo', 'second-demo'],
+        h.secondary.workspaceCwd,
+        'inherit',
+        expect.any(Function),
+      );
+      expect(
+        ExtensionManager.prototype.getExtensionActivationForNameFromSnapshot,
+      ).toHaveBeenNthCalledWith(
+        1,
+        'demo',
+        committedSnapshot,
+        h.secondary.workspaceCwd,
+      );
+      expect(
+        ExtensionManager.prototype.getExtensionActivationForNameFromSnapshot,
+      ).toHaveBeenNthCalledWith(
+        2,
+        'second-demo',
+        committedSnapshot,
+        h.secondary.workspaceCwd,
+      );
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('sets selected workspace overrides in one targeted batch', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const missingExtensionId = 'c'.repeat(64);
+    const committedSnapshot: ExtensionStoreSnapshot = {
+      version: 2,
+      generation: 8,
+      legacyProjectionHash: 'hash',
+      extensions: {
+        [extensionId]: {
+          name: 'demo',
+          defaultActivation: 'disabled',
+          workspaceOverrides: {
+            [h.secondary.workspaceCwd]: 'enabled',
+          },
+        },
+        [missingExtensionId]: {
+          name: 'future-demo',
+          declarationOnly: true,
+          defaultActivation: 'enabled',
+          workspaceOverrides: {
+            [h.secondary.workspaceCwd]: 'enabled',
+          },
+        },
+      },
+    };
+    vi.mocked(
+      ExtensionManager.prototype.setExtensionWorkspaceActivations,
+    ).mockResolvedValueOnce(committedSnapshot);
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionActivationForNameFromSnapshot,
+    ).mockReturnValue({
+      default: 'disabled',
+      workspace: 'enabled',
+      effective: 'enabled',
+      source: 'workspace_override',
+    });
+    try {
+      const started = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
+          )
+          .send({
+            extensionNames: ['demo', 'future-demo'],
+            state: 'enabled',
+          }),
+      );
+
+      expect(started.status).toBe(202);
+      const completed = await pollOperation(h.app, started.body.operationId);
+      expect(completed).toMatchObject({
+        operation: 'set_workspace_activation_batch',
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          results: [
+            {
+              name: 'demo',
+              workspaceActivation: 'enabled',
+              effectiveActivation: 'enabled',
+            },
+            {
+              name: 'future-demo',
+              workspaceActivation: 'enabled',
+              effectiveActivation: 'enabled',
+            },
+          ],
+          refreshed: 1,
+          failed: 0,
+        },
+      });
+      expect(
+        ExtensionManager.prototype.setExtensionWorkspaceActivations,
+      ).toHaveBeenCalledWith(
+        ['demo', 'future-demo'],
+        h.secondary.workspaceCwd,
+        'enabled',
+        expect.any(Function),
+      );
+      expect(
+        ExtensionManager.prototype.getExtensionActivationForNameFromSnapshot,
+      ).toHaveBeenCalledWith(
+        'demo',
+        committedSnapshot,
+        h.secondary.workspaceCwd,
+      );
+      expect(
+        ExtensionManager.prototype.getExtensionActivationForNameFromSnapshot,
+      ).toHaveBeenCalledTimes(2);
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('declares and reconciles an all-uninstalled workspace batch', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    try {
+      const started = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
+          )
+          .send({
+            extensionNames: ['future-demo'],
+            state: 'disabled',
+          }),
+      );
+
+      expect(started.status).toBe(202);
+      const completed = await pollOperation(h.app, started.body.operationId);
+      expect(completed).toMatchObject({
+        operation: 'set_workspace_activation_batch',
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          results: [
+            {
+              name: 'future-demo',
+              workspaceActivation: 'disabled',
+              effectiveActivation: 'disabled',
+            },
+          ],
+          refreshed: 1,
+          failed: 0,
+        },
+      });
+      expect(
+        ExtensionManager.prototype.setExtensionWorkspaceActivations,
+      ).toHaveBeenCalledWith(
+        ['future-demo'],
+        h.secondary.workspaceCwd,
+        'disabled',
+        expect.any(Function),
+      );
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns the effective activation after clearing a workspace override', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionActivation,
+    ).mockResolvedValue({
+      default: 'enabled',
+      workspace: 'inherit',
+      effective: 'enabled',
+      source: 'default',
+    });
+    try {
+      const started = await auth(
+        request(h.app).delete(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+        ),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: { status: 'disabled', name: 'demo' },
+      });
+      expect(
+        ExtensionManager.prototype.getExtensionActivation,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a post-commit failure as succeeded with warnings', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.mocked(
+      h.secondary.workspaceService.invalidateWorkspaceSkillsStatus,
+    ).mockImplementationOnce(() => {
+      throw new Error('status invalidation failed');
+    });
+    try {
+      const started = await auth(
+        request(h.app).delete(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+        ),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded_with_warnings',
+        warnings: [
+          expect.objectContaining({
+            error: expect.stringMatching(/status invalidation failed/),
+            workspaceId: h.secondary.workspaceId,
+          }),
+        ],
+      });
+      expect(
+        h.primary.workspaceService.invalidateWorkspaceSkillsStatus,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('includes the mutation status in post-commit failure broadcasts', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.mocked(
+      h.secondary.workspaceService.invalidateWorkspaceSkillsStatus,
+    ).mockImplementationOnce(() => {
+      throw new Error('status invalidation failed');
+    });
+    try {
+      const started = await auth(
+        request(h.app).delete(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+        ),
+      );
+
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded_with_warnings',
+        result: { status: 'disabled', name: 'demo' },
+      });
+      expect(
+        h.secondary.bridge.broadcastExtensionsChanged,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ status: 'disabled', failed: 1 }),
+      );
+      expect(
+        h.primary.bridge.broadcastExtensionsChanged,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps generation polling serialized while a runtime refresh is in flight', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    let releaseRefresh = () => {};
+    const refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    vi.mocked(h.secondary.bridge.refreshExtensionsForAllSessions)
+      .mockImplementationOnce(async () => {
+        await refreshGate;
+        return { refreshed: 1, failed: 0 };
+      })
+      .mockResolvedValue({ refreshed: 1, failed: 0 });
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(90_000);
+
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+
+      releaseRefresh();
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+    } finally {
+      releaseRefresh();
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('retries generation reconciliation after a runtime refresh fails', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.mocked(h.secondary.bridge.refreshExtensionsForAllSessions)
+      .mockRejectedValueOnce(new Error('refresh failed'))
+      .mockResolvedValue({ refreshed: 1, failed: 0 });
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not let successful skill state refresh conceal a failed full generation', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    const extension = mockExtensionManager();
+    extension.skills = [
+      {
+        name: 'alpha',
+        description: 'alpha',
+        body: 'alpha',
+        level: 'extension',
+        filePath: '/extensions/demo/alpha/SKILL.md',
+      },
+    ];
+    const snapshot =
+      await ExtensionManager.prototype.getExtensionStoreSnapshot();
+    vi.spyOn(settingsModule, 'loadSettings').mockReturnValue({
+      merged: {},
+      forScope: () => ({ settings: {} }),
+    } as unknown as settingsModule.LoadedSettings);
+    vi.mocked(
+      ExtensionManager.prototype.setExtensionWorkspaceActivation,
+    ).mockImplementation(async (_id, _workspace, _activation, committed) => {
+      snapshot.generation = 8;
+      committed?.(8);
+      return snapshot;
+    });
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'setExtensionSkillStates',
+    ).mockImplementation(async (_id, _workspace, _updates, committed) => {
+      snapshot.generation = 9;
+      committed?.(9);
+      return snapshot;
+    });
+    const base = `/workspaces/${h.secondary.workspaceId}/extensions`;
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      vi.mocked(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).mockResolvedValueOnce({ refreshed: 0, failed: 1 });
+      const activation = await auth(
+        request(h.app)
+          .put(`${base}/${extensionId}/activation`)
+          .send({ state: 'enabled' }),
+      );
+      await expect(
+        pollOperation(h.app, activation.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded_with_warnings' });
+      const state = await auth(
+        request(h.app)
+          .put(`${base}/${extensionId}/state`)
+          .send({ skills: [{ name: 'alpha', state: 'disabled' }] }),
+      );
+      await expect(
+        pollOperation(h.app, state.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: 'updated' }),
+        { skillsOnly: true },
+      );
+      const pending = await auth(request(h.app).get(base));
+      expect(pending.body).toMatchObject({
+        desiredGeneration: 9,
+        appliedGeneration: 7,
+      });
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledTimes(4);
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenLastCalledWith();
+      const refreshed = await auth(request(h.app).get(base));
+      expect(refreshed.body).toMatchObject({
+        desiredGeneration: 9,
+        appliedGeneration: 9,
+      });
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reconciles runtimes when the authoritative generation rolls back', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    const rolledBackSnapshot: ExtensionStoreSnapshot = {
+      version: 2,
+      generation: 6,
+      legacyProjectionHash: 'rolled-back-hash',
+      extensions: {
+        [extensionId]: {
+          name: 'demo',
+          defaultActivation: 'disabled',
+          workspaceOverrides: {},
+        },
+      },
+    };
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).mockResolvedValue(rolledBackSnapshot);
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledTimes(2);
+      const projection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 6,
+        appliedGeneration: 6,
+      });
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reconciles a runtime added after the generation stabilizes', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      const lateCwd = path.join(h.scratch, 'late-stable');
+      await fsp.mkdir(lateCwd, { recursive: true });
+      const late = makeRuntime(canonicalizeWorkspace(lateCwd), {
+        primary: false,
+        trusted: true,
+        workspaceId: 'late-stable-id',
+      });
+      h.registry.add(late);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        late.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      const projection = await auth(
+        request(h.app).get('/workspaces/late-stable-id/extensions'),
+      );
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('advances applied generation only after the workspace reconciles', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.mocked(h.secondary.bridge.refreshExtensionsForAllSessions)
+      .mockResolvedValueOnce({ refreshed: 0, failed: 1 })
+      .mockResolvedValue({ refreshed: 1, failed: 0 });
+    try {
+      const activation = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+          )
+          .send({ state: 'enabled' }),
+      );
+      expect(activation.status).toBe(202);
+      await expect(
+        pollOperation(h.app, activation.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded_with_warnings' });
+
+      const drifted = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(drifted.body).toMatchObject({
+        desiredGeneration: 7,
+        appliedGeneration: 0,
+      });
+
+      const refresh = await auth(
+        request(h.app).post(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/refresh`,
+        ),
+      );
+      expect(refresh.status).toBe(202);
+      await expect(
+        pollOperation(h.app, refresh.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      const converged = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(converged.body).toMatchObject({
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes runtime reconciliation in generation order', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const snapshot = (generation: number): ExtensionStoreSnapshot => ({
+      version: 2,
+      generation,
+      legacyProjectionHash: 'hash',
+      extensions: {
+        [extensionId]: {
+          name: 'demo',
+          defaultActivation: 'disabled',
+          workspaceOverrides: {},
+        },
+      },
+    });
+    let releaseFirstCommit: (() => void) | undefined;
+    vi.mocked(ExtensionManager.prototype.setExtensionWorkspaceActivation)
+      .mockImplementationOnce(
+        async (_id, _workspace, _activation, committed) => {
+          committed?.(8);
+          await new Promise<void>((resolve) => {
+            releaseFirstCommit = resolve;
+          });
+          return snapshot(8);
+        },
+      )
+      .mockImplementationOnce(
+        async (_id, _workspace, _activation, committed) => {
+          committed?.(9);
+          return snapshot(9);
+        },
+      );
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionStoreSnapshot,
+    ).mockResolvedValue(snapshot(9));
+    vi.mocked(
+      h.secondary.bridge.refreshExtensionsForAllSessions,
+    ).mockResolvedValue({ refreshed: 1, failed: 0 });
+    try {
+      const first = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+          )
+          .send({ state: 'enabled' }),
+      );
+      await vi.waitFor(() => expect(releaseFirstCommit).toBeDefined());
+
+      const second = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+          )
+          .send({ state: 'disabled' }),
+      );
+      await vi.waitFor(async () => {
+        const operation = await auth(
+          request(h.app).get(
+            `/extensions/operations/${second.body.operationId}`,
+          ),
+        );
+        expect(operation.body).toMatchObject({
+          status: 'running',
+          phase: 'reconciling',
+        });
+      });
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+
+      releaseFirstCommit?.();
+      await expect(
+        pollOperation(h.app, second.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      await expect(
+        pollOperation(h.app, first.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledTimes(2);
+      const projection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(projection.body.appliedGeneration).toBe(9);
+    } finally {
+      releaseFirstCommit?.();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('fans a global default change out to every registered runtime', async () => {
+    const h = await makeHarness({ internalRuntime: true });
+    mockExtensionManager();
+    try {
+      const started = await auth(
+        request(h.app)
+          .put(`/extensions/${extensionId}/activation`)
+          .send({ state: 'disabled' }),
+      );
+      expect(started.status).toBe(202);
+      const operation = await pollOperation(h.app, started.body.operationId);
+      expect(operation.status).toBe('succeeded');
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.internal?.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not reconcile extension generations after runtime activity seals', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness({ internalRuntime: true });
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const activity = (
+      h.app.locals as {
+        conversationRuntimeActivity?: { sealAndWait(): Promise<void> };
+      }
+    ).conversationRuntimeActivity;
+    try {
+      expect(activity).toBeDefined();
+      await activity!.sealAndWait();
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.primary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.secondary.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.internal?.bridge.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('includes runtimes registered while a global mutation is committing', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    let commitStarted = false;
+    let releaseCommit = () => {};
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    vi.mocked(
+      ExtensionManager.prototype.setExtensionDefaultActivation,
+    ).mockImplementation(async () => {
+      commitStarted = true;
+      await commitGate;
+      return {
+        version: 2,
+        generation: 7,
+        legacyProjectionHash: 'hash',
+        extensions: {
+          [extensionId]: {
+            name: 'demo',
+            defaultActivation: 'disabled',
+            workspaceOverrides: {},
+          },
+        },
+      };
+    });
+    try {
+      const started = await auth(
+        request(h.app)
+          .put(`/extensions/${extensionId}/activation`)
+          .send({ state: 'disabled' }),
+      );
+      expect(started.status).toBe(202);
+      await vi.waitFor(() => expect(commitStarted).toBe(true));
+
+      const lateCwd = path.join(h.scratch, 'late');
+      await fsp.mkdir(lateCwd, { recursive: true });
+      const late = makeRuntime(canonicalizeWorkspace(lateCwd), {
+        primary: false,
+        trusted: true,
+        workspaceId: 'late-id',
+      });
+      h.registry.add(late);
+      releaseCommit();
+
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+      expect(
+        late.bridge.refreshExtensionsForAllSessions,
+      ).toHaveBeenCalledOnce();
+      const projection = await auth(
+        request(h.app).get('/workspaces/late-id/extensions'),
+      );
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+    } finally {
+      releaseCommit();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('validates mutation clients against the targeted runtime set', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(h.primary.bridge, 'knownClientIds').mockReturnValue(
+      new Set(['primary-client']),
+    );
+    vi.spyOn(h.secondary.bridge, 'knownClientIds').mockReturnValue(
+      new Set(['secondary-client']),
+    );
+    const secondaryAuth = (pending: request.Test) =>
+      pending
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'secondary-client');
+    try {
+      const wrongRuntime = await request(h.app)
+        .put(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+        )
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'primary-client')
+        .send({ state: 'enabled' });
+      expect(wrongRuntime.status).toBe(400);
+      expect(wrongRuntime.body).toMatchObject({ code: 'invalid_client_id' });
+
+      const targeted = await secondaryAuth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+          )
+          .send({ state: 'enabled' }),
+      );
+      expect(targeted.status).toBe(202);
+      await expect(
+        pollOperation(h.app, targeted.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      const global = await secondaryAuth(
+        request(h.app)
+          .put(`/extensions/${extensionId}/activation`)
+          .send({ state: 'disabled' }),
+      );
+      expect(global.status).toBe(202);
+      await expect(
+        pollOperation(h.app, global.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('allows bearer-authenticated global install without a workspace client id', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const prepareInstall = vi
+      .spyOn(ExtensionManager.prototype, 'prepareExtensionInstall')
+      .mockResolvedValue({} as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'demo' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    try {
+      const started = await request(h.app)
+        .post('/extensions/install')
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .send({
+          source: '@scope/demo:plugin',
+          consent: true,
+          activation: { scope: 'user' },
+        });
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: { status: 'installed', name: 'demo' },
+      });
+      expect(prepareInstall).toHaveBeenCalledWith(
+        expect.objectContaining({
+          installMetadata: expect.objectContaining({
+            source: '@scope/demo',
+            type: 'npm',
+            pluginName: 'plugin',
+          }),
+        }),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('installs a daemon-local path through the global V2 route', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const source = path.join(h.scratch, 'local-extension');
+    await fsp.mkdir(source);
+    const prepareInstall = vi
+      .spyOn(ExtensionManager.prototype, 'prepareExtensionInstall')
+      .mockResolvedValue({} as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'local-extension' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    try {
+      const started = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source,
+            consent: true,
+            activation: {
+              scope: 'workspace',
+              workspaceId: h.secondary.workspaceId,
+            },
+          }),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: {
+          status: 'installed',
+          source,
+          name: 'local-extension',
+        },
+      });
+      expect(prepareInstall).toHaveBeenCalledWith(
+        expect.objectContaining({
+          installMetadata: expect.objectContaining({ source, type: 'local' }),
+          initialActivation: {
+            scope: 'workspace',
+            workspacePath: h.secondary.workspaceCwd,
+          },
+        }),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not install a relative local path through the global V2 route', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const prepareInstall = vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    );
+    try {
+      const started = await auth(
+        request(h.app)
+          .post('/extensions/install')
+          .send({
+            source: '.',
+            consent: true,
+            activation: { scope: 'user' },
+          }),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'failed',
+        error:
+          'Local extension sources must be absolute daemon-host paths; relative paths are not supported over the daemon endpoint.',
+      });
+      expect(prepareInstall).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    { option: 'ref', installOptions: { ref: 'v1' } },
+    { option: 'autoUpdate', installOptions: { autoUpdate: true } },
+  ])(
+    'does not install a daemon-local path with $option through the global V2 route',
+    async ({ installOptions }) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      const source = path.join(h.scratch, 'local-extension');
+      await fsp.mkdir(source);
+      const prepareInstall = vi.spyOn(
+        ExtensionManager.prototype,
+        'prepareExtensionInstall',
+      );
+      try {
+        const started = await auth(
+          request(h.app)
+            .post('/extensions/install')
+            .send({
+              source,
+              ...installOptions,
+              consent: true,
+              activation: { scope: 'user' },
+            }),
+        );
+
+        expect(started.status).toBe(202);
+        await expect(
+          pollOperation(h.app, started.body.operationId),
+        ).resolves.toMatchObject({
+          status: 'failed',
+          error:
+            '`ref` and `autoUpdate` are not applicable for local extensions.',
+        });
+        expect(prepareInstall).not.toHaveBeenCalled();
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    { persistence: undefined, expected: 'one_time' as const },
+    { persistence: 'one_time' as const, expected: 'one_time' as const },
+    { persistence: 'stored' as const, expected: 'stored' as const },
+  ])(
+    'installs a credentialed HTTPS Git source through V2 with $expected persistence',
+    async ({ persistence, expected }) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      const prepareInstall = vi
+        .spyOn(ExtensionManager.prototype, 'prepareExtensionInstall')
+        .mockResolvedValue({
+          ...(expected === 'stored'
+            ? { credentialStorage: 'encrypted_file' }
+            : {}),
+        } as never);
+      vi.spyOn(
+        ExtensionManager.prototype,
+        'commitPreparedExtension',
+      ).mockResolvedValue({
+        identity: { id: extensionId, name: 'demo' },
+        version: '1.0.0',
+        generation: 7,
+      } as never);
+      vi.spyOn(
+        ExtensionManager.prototype,
+        'disposePreparedExtension',
+      ).mockResolvedValue();
+      try {
+        const started = await request(h.app)
+          .post('/extensions/install')
+          .set('Host', host())
+          .set('Authorization', 'Bearer secret')
+          .send({
+            source:
+              'https://user:fine-grained-token@git.example.com/org/repository.git',
+            consent: true,
+            activation: { scope: 'user' },
+            ...(persistence ? { credentialPersistence: persistence } : {}),
+          });
+
+        expect(started.status).toBe(202);
+        const operation = await pollOperation(h.app, started.body.operationId);
+        expect(operation).toMatchObject({
+          status: 'succeeded',
+          result: {
+            status: 'installed',
+            name: 'demo',
+            credentialPersistence: expected,
+            ...(expected === 'stored'
+              ? {
+                  source: 'https://git.example.com/org/repository.git',
+                  credentialStorage: 'encrypted_file',
+                }
+              : {}),
+          },
+        });
+        if (expected === 'one_time') {
+          expect(operation.result).not.toHaveProperty('source');
+        }
+        expect(prepareInstall).toHaveBeenCalledWith(
+          expect.objectContaining({
+            installMetadata: expect.objectContaining({
+              source: 'https://git.example.com/org/repository.git',
+              type: 'git',
+            }),
+            gitCredential: {
+              username: 'user',
+              password: 'fine-grained-token',
+              persistence: expected,
+            },
+          }),
+        );
+        expect(
+          prepareInstall.mock.calls.at(-1)?.[0].installMetadata,
+        ).not.toHaveProperty('networkPolicy');
+        expect(JSON.stringify(operation)).not.toContain('fine-grained-token');
+        expect(JSON.stringify(h.primary.bridge)).not.toContain(
+          'fine-grained-token',
+        );
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('preserves prototype-named extension update states', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'checkForAllExtensionUpdates',
+    ).mockImplementation(async (onResult) => {
+      onResult('__proto__', 'update available' as never);
+    });
+    try {
+      const legacy = await auth(
+        request(h.app).post('/workspace/extensions/check-updates'),
+      );
+      expect(legacy.status).toBe(200);
+      expect(Object.hasOwn(legacy.body.states, '__proto__')).toBe(true);
+      expect(legacy.body.states['__proto__']).toBe('update available');
+
+      const started = await auth(
+        request(h.app).post('/extensions/check-updates'),
+      );
+      expect(started.status).toBe(202);
+      const operation = await pollOperation(h.app, started.body.operationId);
+      expect(operation.status).toBe('succeeded');
+      expect(Object.hasOwn(operation.result.states, '__proto__')).toBe(true);
+      expect(operation.result.states['__proto__']).toBe('update available');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('times out a legacy update check while its cache refresh stalls', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const stalledRefresh = new Promise<void>(() => {});
+    const refreshCache = vi
+      .spyOn(ExtensionManager.prototype, 'refreshCache')
+      .mockImplementationOnce(async () => await stalledRefresh)
+      .mockResolvedValue(undefined);
+    try {
+      const response = auth(
+        request(h.app).post('/workspace/extensions/check-updates'),
+      ).then((result) => result);
+      await vi.waitFor(() => expect(refreshCache).toHaveBeenCalledOnce());
+
+      await vi.advanceTimersByTimeAsync(2 * 60_000);
+
+      await expect(response).resolves.toMatchObject({
+        status: 500,
+        body: { code: 'extension_prepare_timeout' },
+      });
+      const next = await auth(
+        request(h.app).post('/workspace/extensions/check-updates'),
+      );
+      expect(next.status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reports legacy global mutations as applied after runtime reconciliation', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockResolvedValue({} as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'demo' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    try {
+      const started = await auth(
+        request(h.app)
+          .post('/workspace/extensions/install')
+          .send({ source: '@scope/demo', consent: true }),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(
+          h.app,
+          started.body.operationId,
+          '/workspace/extensions/operations',
+        ),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      const projection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(projection.body).toMatchObject({
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reports legacy workspace activation mutations as applied immediately', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(ExtensionManager.prototype, 'enableExtension').mockResolvedValue({
+      generation: 7,
+    } as never);
+    vi.spyOn(ExtensionManager.prototype, 'disableExtension').mockResolvedValue({
+      generation: 8,
+    } as never);
+    try {
+      const enable = await auth(
+        request(h.app)
+          .post('/workspace/extensions/demo/enable')
+          .send({ scope: 'workspace' }),
+      );
+      expect(enable.status).toBe(202);
+      await expect(
+        pollOperation(
+          h.app,
+          enable.body.operationId,
+          '/workspace/extensions/operations',
+        ),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      const enabledProjection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.primary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(enabledProjection.body).toMatchObject({
+        desiredGeneration: 7,
+        appliedGeneration: 7,
+      });
+
+      vi.mocked(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).mockResolvedValue({
+        version: 2,
+        generation: 8,
+        legacyProjectionHash: 'hash',
+        extensions: {},
+      });
+      vi.mocked(
+        ExtensionManager.prototype.refreshCacheWithSnapshot,
+      ).mockResolvedValue({
+        version: 2,
+        generation: 8,
+        legacyProjectionHash: 'hash',
+        extensions: {},
+      });
+      const disable = await auth(
+        request(h.app)
+          .post('/workspace/extensions/demo/disable')
+          .send({ scope: 'workspace' }),
+      );
+      expect(disable.status).toBe(202);
+      await expect(
+        pollOperation(
+          h.app,
+          disable.body.operationId,
+          '/workspace/extensions/operations',
+        ),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      const disabledProjection = await auth(
+        request(h.app).get(
+          `/workspaces/${encodeURIComponent(h.primary.workspaceId)}/extensions`,
+        ),
+      );
+      expect(disabledProjection.body).toMatchObject({
+        desiredGeneration: 8,
+        appliedGeneration: 8,
+      });
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('updates archive URL extensions through the global V2 route', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const prepared = {} as never;
+    const prepareUpdate = vi
+      .spyOn(ExtensionManager.prototype, 'prepareExtensionUpdate')
+      .mockResolvedValue({ upToDate: false, prepared });
+    const commitPrepared = vi
+      .spyOn(ExtensionManager.prototype, 'commitPreparedExtension')
+      .mockResolvedValue({
+        identity: { id: extensionId, name: 'demo' },
+        version: '2.0.0',
+        generation: 8,
+      } as never);
+    const disposePrepared = vi
+      .spyOn(ExtensionManager.prototype, 'disposePreparedExtension')
+      .mockResolvedValue();
+    try {
+      const started = await auth(
+        request(h.app).post(`/extensions/${extensionId}/update`),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: {
+          status: 'updated',
+          name: 'demo',
+          updated: true,
+          version: '2.0.0',
+        },
+      });
+      expect(prepareUpdate).toHaveBeenCalledWith({
+        extension: expect.objectContaining({
+          id: extensionId,
+          installMetadata: expect.objectContaining({ type: 'archive-url' }),
+        }),
+        signal: expect.any(AbortSignal),
+      });
+      expect(commitPrepared).toHaveBeenCalledWith(
+        prepared,
+        expect.any(Function),
+      );
+      expect(disposePrepared).toHaveBeenCalledWith(prepared);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an up-to-date V2 update as checked without committing', async () => {
+    const h = await makeHarness();
+    const extension = mockExtensionManager();
+    const prepareUpdate = vi
+      .spyOn(ExtensionManager.prototype, 'prepareExtensionUpdate')
+      .mockResolvedValue({ upToDate: true, extension });
+    const commitPrepared = vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    );
+    try {
+      const started = await auth(
+        request(h.app).post(`/extensions/${extensionId}/update`),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: {
+          status: 'checked',
+          name: 'demo',
+          updated: false,
+          reason: 'up_to_date',
+        },
+      });
+      expect(commitPrepared).not.toHaveBeenCalled();
+    } finally {
+      prepareUpdate.mockRestore();
+      commitPrepared.mockRestore();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves structured update preparation error codes', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const timeout = Object.assign(
+      new Error('preparation timed out\n\u001b[31mforged\u001b[0m'),
+      {
+        code: 'extension_prepare_timeout',
+      },
+    );
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionUpdate',
+    ).mockRejectedValue(timeout);
+    try {
+      const started = await auth(
+        request(h.app).post('/workspace/extensions/demo/update'),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'failed',
+        code: 'extension_prepare_timeout',
+        error:
+          'Update check failed for extension "demo": preparation timed outforged',
+      });
+      expect(stderr).not.toHaveBeenCalledWith(
+        expect.stringContaining('\nforged'),
+      );
+      expect(stderr).not.toHaveBeenCalledWith(
+        expect.stringContaining('\u001b'),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('returns the stable not-updatable code for snapshot extensions', async () => {
+    const h = await makeHarness();
+    mockExtensionManager('snapshot');
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const prepareUpdate = vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionUpdate',
+    );
+    try {
+      const started = await auth(
+        request(h.app).post(`/extensions/${extensionId}/update`),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'failed',
+        code: 'extension_not_updatable',
+        error: 'Extension "demo" is not remotely updatable.',
+      });
+      expect(prepareUpdate).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('validates uninstall clients before reading extension state', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    try {
+      const response = await request(h.app)
+        .delete(`/extensions/${extensionId}`)
+        .set('Host', host())
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'invalid client id');
+
+      expect(response.status).toBe(400);
+      expect(response.body).toMatchObject({ code: 'invalid_client_id' });
+      expect(
+        ExtensionManager.prototype.getExtensionStoreSnapshot,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('routes uninstall store lookup failures through the bridge error handler', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionStoreSnapshot,
+    ).mockRejectedValueOnce(new Error('extension lookup failed'));
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const response = await auth(
+        request(h.app).delete(`/extensions/${extensionId}`),
+      );
+
+      expect(response.status).toBe(500);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'bridge error (DELETE /extensions/:extensionId)',
+        ),
+      );
+      expect(stderr).not.toHaveBeenCalledWith(
+        expect.stringContaining('unhandled error'),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('uninstalls by store identity when the extension is not loadable', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.mocked(ExtensionManager.prototype.getLoadedExtensions).mockReturnValue(
+      [],
+    );
+    try {
+      const started = await auth(
+        request(h.app).delete(`/extensions/${extensionId}`),
+      );
+
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: { status: 'uninstalled', name: 'demo' },
+      });
+      expect(
+        ExtensionManager.prototype.uninstallExtensionById,
+      ).toHaveBeenCalledWith(
+        extensionId,
+        false,
+        undefined,
+        expect.any(Function),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('treats an activation declaration as absent during uninstall', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.mocked(
+      ExtensionManager.prototype.getExtensionStoreSnapshot,
+    ).mockResolvedValueOnce({
+      version: 2,
+      generation: 8,
+      legacyProjectionHash: 'hash',
+      extensions: {
+        [extensionId]: {
+          name: 'demo',
+          declarationOnly: true,
+          defaultActivation: 'disabled',
+          workspaceOverrides: {},
+        },
+      },
+    });
+    try {
+      const response = await auth(
+        request(h.app).delete(`/extensions/${extensionId}`),
+      );
+
+      expect(response.status).toBe(204);
+      expect(
+        ExtensionManager.prototype.uninstallExtensionById,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects singular and batch activation on an untrusted target', async () => {
+    const h = await makeHarness({ secondaryTrusted: false });
+    mockExtensionManager();
+    try {
+      const response = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+          )
+          .send({ state: 'enabled' }),
+      );
+      expect(response.status).toBe(403);
+      expect(response.body.code).toBe('untrusted_workspace');
+      const batchResponse = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/activation`,
+          )
+          .send({
+            extensionNames: ['demo'],
+            state: 'inherit',
+          }),
+      );
+      expect(batchResponse.status).toBe(403);
+      expect(batchResponse.body.code).toBe('untrusted_workspace');
+      const stateResponse = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${h.secondary.workspaceId}/extensions/${extensionId}/state`,
+          )
+          .send({ skills: [{ name: 'alpha', state: 'disabled' }] }),
+      );
+      expect(stateResponse.status).toBe(403);
+      expect(stateResponse.body.code).toBe('untrusted_workspace');
+      expect(
+        ExtensionManager.prototype.setExtensionWorkspaceActivations,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not expose workspace-qualified install/update/uninstall routes', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    try {
+      const response = await auth(
+        request(h.app)
+          .post(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/install`,
+          )
+          .send({ source: 'https://github.com/example/extension' }),
+      );
+      expect(response.status).toBe(404);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+});

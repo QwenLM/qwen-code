@@ -1,0 +1,207 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { loadSettings } from '../../config/settings.js';
+import { SUPPORTED_LANGUAGES } from '../../i18n/index.js';
+import { hasConfiguredBatchVoiceTranscriptionModel } from '../../services/voice-service.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
+import { getAdvertisedServeFeatures } from '../capabilities.js';
+import { isBrowserAutomationMcpAvailable } from '../cdp-mcp-command.js';
+import type { ServeOptions } from '../types.js';
+
+// Keep in sync with acp-bridge bridge.ts and SDK DaemonClient.ts.
+const DEFAULT_MAX_SESSIONS = 32;
+const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
+
+export const SERVE_LANGUAGE_CODES = [
+  ...SUPPORTED_LANGUAGES.map((language) => language.code),
+  'auto',
+];
+
+export function advertisedMaxPendingPromptsPerSession(
+  value: number | undefined,
+): number | null {
+  if (value === undefined) return DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION;
+  if (value === 0 || value === Number.POSITIVE_INFINITY) return null;
+  return value;
+}
+
+export function advertisedMaxSessions(
+  value: number | undefined,
+): number | null {
+  if (value === undefined) return DEFAULT_MAX_SESSIONS;
+  if (value === 0 || value === Number.POSITIVE_INFINITY) return null;
+  return value;
+}
+
+interface CreateServeFeaturesDeps {
+  opts: ServeOptions;
+  boundWorkspace: string;
+  persistSettingAvailable: boolean;
+  sessionArtifactsPersistenceAvailable: boolean;
+  sessionGenerationAvailable: () => boolean;
+  currentSessionSchedulingAvailable: boolean;
+  workspaceGenerationAvailable: () => boolean;
+  reloadAvailable: boolean;
+  channelReloadAvailable: () => boolean;
+  channelControlAvailable: boolean;
+  channelManagementAvailable: boolean;
+  sessionShellCommandEnabled: boolean;
+  multiWorkspaceSessionsEnabled: () => boolean;
+  dynamicWorkspaceRegistrationAvailable: boolean;
+  persistentWorkspaceRegistrationAvailable: boolean;
+  scratchWorkspaceRegistrationAvailable: () => boolean;
+  realtimeVoiceEnabled: () => boolean;
+  standaloneSessionsAvailable?: () => boolean;
+  acpHttpEnabled?: boolean;
+  workspaceRuntimeRemovalAvailable?: boolean;
+  nativeDirectoryPickerAvailable?: boolean;
+  workspaceRuntimeAvailable: () => boolean;
+  localPathOpenAvailable?: boolean;
+  localTerminalOpenAvailable?: boolean;
+  workspaceTrustHotReloadAvailable?: boolean;
+  isPrimaryWorkspaceTrusted?: () => boolean;
+  env?: Readonly<Record<string, string | undefined>>;
+  getEnv?: () => Readonly<Record<string, string | undefined>>;
+}
+
+export interface ServeFeaturesRuntime {
+  languageCodes: string[];
+  currentServeFeatures: () => ReturnType<typeof getAdvertisedServeFeatures>;
+  invalidateServeFeaturesCache: () => void;
+}
+
+export function createServeFeatures(
+  deps: CreateServeFeaturesDeps,
+): ServeFeaturesRuntime {
+  const {
+    opts,
+    boundWorkspace,
+    persistSettingAvailable,
+    sessionArtifactsPersistenceAvailable,
+    sessionGenerationAvailable,
+    currentSessionSchedulingAvailable,
+    workspaceGenerationAvailable,
+    reloadAvailable,
+    channelReloadAvailable,
+    channelControlAvailable,
+    channelManagementAvailable,
+    sessionShellCommandEnabled,
+    multiWorkspaceSessionsEnabled,
+    dynamicWorkspaceRegistrationAvailable,
+    persistentWorkspaceRegistrationAvailable,
+    scratchWorkspaceRegistrationAvailable,
+    realtimeVoiceEnabled,
+    standaloneSessionsAvailable,
+    acpHttpEnabled,
+    workspaceRuntimeRemovalAvailable,
+    nativeDirectoryPickerAvailable,
+    workspaceRuntimeAvailable,
+    localPathOpenAvailable,
+    localTerminalOpenAvailable,
+    workspaceTrustHotReloadAvailable,
+  } = deps;
+  const getEnv = deps.getEnv ?? (() => deps.env ?? process.env);
+  let cachedVoiceTranscriptionAvailable: boolean | undefined;
+  const invalidateServeFeaturesCache = () => {
+    cachedVoiceTranscriptionAvailable = undefined;
+  };
+  const getCachedVoiceTranscriptionAvailable = () => {
+    cachedVoiceTranscriptionAvailable ??=
+      isWorkspaceVoiceTranscriptionAvailable(
+        boundWorkspace,
+        getEnv(),
+        deps.env !== undefined || deps.getEnv !== undefined,
+        deps.isPrimaryWorkspaceTrusted?.() ?? true,
+      );
+    return cachedVoiceTranscriptionAvailable;
+  };
+
+  return {
+    languageCodes: SERVE_LANGUAGE_CODES,
+    invalidateServeFeaturesCache,
+    currentServeFeatures: () => {
+      const env = getEnv();
+      const currentAcpHttpEnabled =
+        acpHttpEnabled ?? resolveAcpHttpEnabled(env as NodeJS.ProcessEnv);
+      return getAdvertisedServeFeatures(undefined, {
+        requireAuth: opts.requireAuth === true,
+        mcpPoolActive: opts.mcpPoolActive !== false,
+        allowOriginActive:
+          opts.allowOrigins !== undefined && opts.allowOrigins.length > 0,
+        ...(opts.promptDeadlineMs !== undefined
+          ? { promptDeadlineMs: opts.promptDeadlineMs }
+          : {}),
+        ...(opts.writerIdleTimeoutMs !== undefined
+          ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
+          : {}),
+        persistSettingAvailable,
+        sessionShellCommandEnabled,
+        sessionArtifactsPersistenceAvailable,
+        sessionGenerationAvailable: sessionGenerationAvailable(),
+        currentSessionSchedulingAvailable,
+        workspaceGenerationAvailable: workspaceGenerationAvailable(),
+        rateLimit: opts.rateLimit === true,
+        reloadAvailable,
+        channelReloadAvailable: channelReloadAvailable(),
+        channelControlAvailable,
+        channelManagementAvailable,
+        multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
+        dynamicWorkspaceRegistrationAvailable,
+        persistentWorkspaceRegistrationAvailable,
+        scratchWorkspaceRegistrationAvailable:
+          scratchWorkspaceRegistrationAvailable(),
+        workspaceRuntimeRemovalAvailable,
+        nativeDirectoryPickerAvailable,
+        workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
+        localPathOpenAvailable,
+        localTerminalOpenAvailable,
+        workspaceTrustHotReloadAvailable,
+        acpHttpEnabled: currentAcpHttpEnabled,
+        realtimeVoiceEnabled: realtimeVoiceEnabled(),
+        standaloneSessionsAvailable: standaloneSessionsAvailable?.() === true,
+        clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
+        cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
+        browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(
+          opts,
+          env,
+        ),
+        voiceTranscriptionAvailable: getCachedVoiceTranscriptionAvailable(),
+        // Advertised whenever the `/voice/stream` WS endpoint exists (ACP HTTP
+        // on). A configured token no longer suppresses it — the browser carries
+        // the bearer token via the WS subprotocol, which the upgrade listener
+        // verifies (acp-http/index.ts).
+        voiceWsAvailable: currentAcpHttpEnabled,
+      });
+    },
+  };
+}
+
+function isWorkspaceVoiceTranscriptionAvailable(
+  boundWorkspace: string,
+  env: Readonly<Record<string, string | undefined>>,
+  skipLoadEnvironment: boolean,
+  workspaceTrusted: boolean,
+): boolean {
+  try {
+    return hasConfiguredBatchVoiceTranscriptionModel(
+      loadSettings(boundWorkspace, {
+        skipLoadEnvironment: skipLoadEnvironment || !workspaceTrusted,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      }),
+      { env },
+    );
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: workspace voice transcription capability check failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return false;
+  }
+}

@@ -6,8 +6,8 @@
 
 import { useState, useCallback } from 'react';
 import type { LoadedSettings, SettingScope } from '../../config/settings.js';
-import { type HistoryItem, MessageType } from '../types.js';
-import type { EditorType } from '@qwen-code/qwen-code-core';
+import { type HistoryItemWithoutId, MessageType } from '../types.js';
+import type { Config, EditorType } from '@qwen-code/qwen-code-core';
 import {
   allowEditorTypeInSandbox,
   checkHasEditorType,
@@ -26,7 +26,8 @@ interface UseEditorSettingsReturn {
 export const useEditorSettings = (
   loadedSettings: LoadedSettings,
   setEditorError: (error: string | null) => void,
-  addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+  addItem: (item: HistoryItemWithoutId, timestamp: number) => void,
+  config?: Config,
 ): UseEditorSettingsReturn => {
   const [isEditorDialogOpen, setIsEditorDialogOpen] = useState(false);
 
@@ -46,20 +47,23 @@ export const useEditorSettings = (
 
       try {
         loadedSettings.setValue(scope, 'general.preferredEditor', editorType);
-        addItem(
-          {
-            type: MessageType.INFO,
-            text: `Editor preference ${editorType ? `set to "${editorType}"` : 'cleared'} in ${scope} settings.`,
-          },
-          Date.now(),
-        );
+        const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
+          type: MessageType.INFO,
+          text: `Editor preference ${editorType ? `set to "${editorType}"` : 'cleared'} in ${scope} settings.`,
+        };
+        addItem(feedbackItem, Date.now());
+        config?.getChatRecordingService?.()?.recordSlashCommand({
+          phase: 'result',
+          rawCommand: '/editor',
+          outputHistoryItems: [feedbackItem],
+        });
         setEditorError(null);
         setIsEditorDialogOpen(false);
       } catch (error) {
         setEditorError(`Failed to set editor preference: ${error}`);
       }
     },
-    [loadedSettings, setEditorError, addItem],
+    [loadedSettings, setEditorError, addItem, config],
   );
 
   const exitEditorDialog = useCallback(() => {

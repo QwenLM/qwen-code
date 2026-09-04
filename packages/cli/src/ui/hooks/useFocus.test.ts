@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { renderHook, act } from '@testing-library/react';
 import { EventEmitter } from 'node:events';
@@ -37,7 +38,11 @@ describe('useFocus', () => {
     stdin.resume = vi.fn();
     stdin.pause = vi.fn();
     stdout = { write: vi.fn() };
-    mockedUseStdin.mockReturnValue({ stdin } as ReturnType<typeof useStdin>);
+    mockedUseStdin.mockReturnValue({
+      stdin,
+      setRawMode: vi.fn(),
+      isRawModeSupported: true,
+    } as unknown as ReturnType<typeof useStdin>);
     mockedUseStdout.mockReturnValue({ stdout } as unknown as ReturnType<
       typeof useStdout
     >);

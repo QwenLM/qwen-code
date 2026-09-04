@@ -7,9 +7,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   authCommand,
+  closeDiffCommand,
   focusChatCommand,
   openNewChatTabCommand,
   registerNewCommands,
+  showDiffCommand,
 } from './index.js';
 
 const {
@@ -17,6 +19,8 @@ const {
   executeCommand,
   showWarningMessage,
   showInformationMessage,
+  joinPath,
+  workspaceMock,
 } = vi.hoisted(() => ({
   registerCommand: vi.fn(
     (_id: string, handler: (...args: unknown[]) => unknown) => ({
@@ -27,6 +31,16 @@ const {
   executeCommand: vi.fn(),
   showWarningMessage: vi.fn(),
   showInformationMessage: vi.fn(),
+  joinPath: vi.fn((base: { fsPath: string }, filePath: string) => ({
+    fsPath: `${base.fsPath}/${filePath}`,
+  })),
+  workspaceMock: {
+    workspaceFolders: [] as Array<{
+      uri: { fsPath: string };
+      name: string;
+      index: number;
+    }>,
+  },
 }));
 
 vi.mock('vscode', () => ({
@@ -38,11 +52,10 @@ vi.mock('vscode', () => ({
     showWarningMessage,
     showInformationMessage,
   },
-  workspace: {
-    workspaceFolders: [],
-  },
+  workspace: workspaceMock,
   Uri: {
-    joinPath: vi.fn(),
+    file: (fsPath: string) => ({ fsPath }),
+    joinPath,
   },
 }));
 
@@ -65,6 +78,10 @@ describe('registerNewCommands', () => {
     executeCommand.mockClear();
     showWarningMessage.mockClear();
     showInformationMessage.mockClear();
+    joinPath.mockClear();
+    diffManager.showDiff.mockClear();
+    log.mockClear();
+    workspaceMock.workspaceFolders = [];
   });
 
   it('openNewChatTab opens a new provider without creating a second session explicitly', async () => {
@@ -113,39 +130,157 @@ describe('registerNewCommands', () => {
     expect(executeCommand).not.toHaveBeenCalled();
   });
 
-  it('focusChat focuses the secondary sidebar when it is supported', async () => {
+  it('focusChat focuses the Activity Bar chat view', async () => {
     registerNewCommands(
       context as never,
       log,
       diffManager as never,
       () => [],
       vi.fn() as never,
-      undefined,
-      true,
-    );
-
-    await getRegisteredHandler(focusChatCommand)();
-
-    expect(executeCommand).toHaveBeenCalledWith(
-      'qwen-code.chatView.secondary.focus',
-    );
-  });
-
-  it('focusChat falls back to the primary sidebar when secondary sidebar is unavailable', async () => {
-    registerNewCommands(
-      context as never,
-      log,
-      diffManager as never,
-      () => [],
-      vi.fn() as never,
-      undefined,
-      false,
     );
 
     await getRegisteredHandler(focusChatCommand)();
 
     expect(executeCommand).toHaveBeenCalledWith(
       'qwen-code.chatView.sidebar.focus',
+    );
+  });
+
+  it('showDiff resolves relative paths against the workspace', async () => {
+    workspaceMock.workspaceFolders = [
+      { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },
+    ];
+
+    registerNewCommands(
+      context as never,
+      log,
+      diffManager as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    await getRegisteredHandler(showDiffCommand)({
+      path: 'src/app.ts',
+      oldText: 'old',
+      newText: 'new',
+    });
+
+    expect(joinPath).toHaveBeenCalledWith(
+      { fsPath: '/workspace' },
+      'src/app.ts',
+    );
+    expect(diffManager.showDiff).toHaveBeenCalledWith(
+      '/workspace/src/app.ts',
+      'old',
+      'new',
+      { readOnly: false, permissionRequestId: undefined },
+    );
+  });
+
+  it('closeDiff resolves relative paths against the workspace', async () => {
+    workspaceMock.workspaceFolders = [
+      { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },
+    ];
+    const closeDiff = vi.fn().mockResolvedValue(undefined);
+
+    registerNewCommands(
+      context as never,
+      log,
+      { showDiff: vi.fn(), closeDiff } as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    await getRegisteredHandler(closeDiffCommand)('src/foo.ts');
+
+    expect(joinPath).toHaveBeenCalledWith(
+      { fsPath: '/workspace' },
+      'src/foo.ts',
+    );
+    expect(closeDiff).toHaveBeenCalledWith(
+      '/workspace/src/foo.ts',
+      true,
+      undefined,
+    );
+  });
+
+  it('closeDiff keeps absolute paths unchanged', async () => {
+    workspaceMock.workspaceFolders = [
+      { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },
+    ];
+    const closeDiff = vi.fn().mockResolvedValue(undefined);
+
+    registerNewCommands(
+      context as never,
+      log,
+      { showDiff: vi.fn(), closeDiff } as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    await getRegisteredHandler(closeDiffCommand)('/workspace/src/foo.ts');
+
+    expect(joinPath).not.toHaveBeenCalled();
+    expect(closeDiff).toHaveBeenCalledWith(
+      '/workspace/src/foo.ts',
+      true,
+      undefined,
+    );
+  });
+
+  it('showDiff keeps UNC paths absolute', async () => {
+    workspaceMock.workspaceFolders = [
+      { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },
+    ];
+
+    registerNewCommands(
+      context as never,
+      log,
+      diffManager as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    await getRegisteredHandler(showDiffCommand)({
+      path: '\\\\server\\share\\app.ts',
+      oldText: 'old',
+      newText: 'new',
+    });
+
+    expect(joinPath).not.toHaveBeenCalled();
+    expect(diffManager.showDiff).toHaveBeenCalledWith(
+      '\\\\server\\share\\app.ts',
+      'old',
+      'new',
+      { readOnly: false, permissionRequestId: undefined },
+    );
+  });
+
+  it('showDiff forwards the readOnly flag', async () => {
+    workspaceMock.workspaceFolders = [
+      { uri: { fsPath: '/workspace' }, name: 'workspace', index: 0 },
+    ];
+
+    registerNewCommands(
+      context as never,
+      log,
+      diffManager as never,
+      () => [],
+      vi.fn() as never,
+    );
+
+    await getRegisteredHandler(showDiffCommand)({
+      path: '/workspace/src/app.ts',
+      oldText: 'old',
+      newText: 'new',
+      readOnly: true,
+    });
+
+    expect(diffManager.showDiff).toHaveBeenCalledWith(
+      '/workspace/src/app.ts',
+      'old',
+      'new',
+      { readOnly: true, permissionRequestId: undefined },
     );
   });
 });

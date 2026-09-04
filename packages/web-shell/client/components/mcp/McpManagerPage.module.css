@@ -1,0 +1,31 @@
+.connectedBadge {
+  background: var(--success-bg);
+  color: var(--success-color);
+}
+
+.serverGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+@container panel-body (min-width: 600px) {
+  .serverGrid[data-column-count='2'],
+  .serverGrid[data-column-count='3'],
+  .serverGrid[data-column-count='4'] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container panel-body (min-width: 900px) {
+  .serverGrid[data-column-count='3'],
+  .serverGrid[data-column-count='4'] {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@container panel-body (min-width: 1200px) {
+  .serverGrid[data-column-count='4'] {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}

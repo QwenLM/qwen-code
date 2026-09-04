@@ -5,34 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-
-// Mock the request tokenizer module BEFORE importing the class that uses it
-const mockTokenizer = {
-  calculateTokens: vi.fn().mockResolvedValue({
-    totalTokens: 50,
-    breakdown: {
-      textTokens: 50,
-      imageTokens: 0,
-      audioTokens: 0,
-      otherTokens: 0,
-    },
-    processingTime: 1,
-  }),
-  dispose: vi.fn(),
-};
-
-vi.mock('../../../utils/request-tokenizer/index.js', () => ({
-  RequestTokenEstimator: vi.fn(() => mockTokenizer),
-}));
-
-// Now import the modules that depend on the mocked modules
 import { OpenAIContentGenerator } from './openaiContentGenerator.js';
 import type { Config } from '../../config/config.js';
 import { AuthType } from '../contentGenerator.js';
-import type {
-  GenerateContentParameters,
-  CountTokensParameters,
-} from '@google/genai';
+import type { GenerateContentParameters } from '@google/genai';
 import type { OpenAICompatibleProvider } from './provider/index.js';
 import type OpenAI from 'openai';
 
@@ -123,43 +99,34 @@ describe('OpenAIContentGenerator (Refactored)', () => {
     });
   });
 
-  describe('countTokens', () => {
-    it('should count tokens using character-based estimation', async () => {
-      const request: CountTokensParameters = {
-        contents: [{ role: 'user', parts: [{ text: 'Hello world' }] }],
-        model: 'gpt-4',
-      };
-
-      const result = await generator.countTokens(request);
-
-      // 'Hello world' = 11 ASCII chars
-      // 11 / 4 = 2.75 -> ceil = 3 tokens
-      expect(result.totalTokens).toBe(3);
-    });
-
-    it('should handle multimodal content', async () => {
-      const request: CountTokensParameters = {
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: 'Hello' }, { text: ' world' }],
-          },
-        ],
-        model: 'gpt-4',
-      };
-
-      const result = await generator.countTokens(request);
-
-      // Parts are combined for estimation:
-      // 'Hello world' = 11 ASCII chars -> 11/4 = 2.75 -> ceil = 3 tokens
-      expect(result.totalTokens).toBe(3);
-    });
-  });
-
   describe('embedContent', () => {
     it('should delegate to pipeline.client.embeddings.create', async () => {
       // This test verifies the method exists and can be called
       expect(typeof generator.embedContent).toBe('function');
+    });
+
+    it('should redact proxy credentials from embedding request errors', async () => {
+      const generatorWithClient = generator as unknown as {
+        pipeline: {
+          client: {
+            embeddings: {
+              create: ReturnType<typeof vi.fn>;
+            };
+          };
+        };
+      };
+      generatorWithClient.pipeline.client.embeddings.create.mockRejectedValue(
+        new Error('connect ECONNREFUSED token@proxy.local:8080'),
+      );
+
+      await expect(
+        generator.embedContent({
+          model: 'text-embedding-ada-002',
+          contents: 'hello',
+        }),
+      ).rejects.toThrow(
+        'OpenAI API error: connect ECONNREFUSED <redacted>@proxy.local:8080',
+      );
     });
   });
 

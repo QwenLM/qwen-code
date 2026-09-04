@@ -1,0 +1,55 @@
+.header {
+  display: flex;
+  min-width: 0;
+  min-height: 52px;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 0;
+  padding: 8px 20px 8px 12px;
+}
+
+.content {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.action {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.action:hover,
+.action:focus-visible,
+.action[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--foreground);
+  outline: none;
+}
+
+.action svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.7;
+}

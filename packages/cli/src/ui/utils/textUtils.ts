@@ -10,16 +10,20 @@ import { stripVTControlCharacters } from 'node:util';
 import stringWidth from 'string-width';
 
 /**
- * Calculates the maximum width of a multi-line ASCII art string.
+ * Calculates the maximum *visual* width (terminal cells) of a multi-line
+ * ASCII art string. Uses `string-width` semantics via `getCachedStringWidth`
+ * so CJK fullwidth characters count as 2 cells and emoji are sized
+ * correctly — `.length` would undercount these and let oversized art slip
+ * past the width budget that `pickAsciiArtTier` applies.
  * @param asciiArt The ASCII art string.
- * @returns The length of the longest line in the ASCII art.
+ * @returns The widest line's terminal-cell width.
  */
 export const getAsciiArtWidth = (asciiArt: string): number => {
   if (!asciiArt) {
     return 0;
   }
   const lines = asciiArt.split('\n');
-  return Math.max(...lines.map((line) => line.length));
+  return Math.max(...lines.map((line) => getCachedStringWidth(line)));
 };
 
 /*
@@ -31,6 +35,22 @@ export const getAsciiArtWidth = (asciiArt: string): number => {
 // Cache for code points to reduce GC pressure
 const codePointsCache = new Map<string, string[]>();
 const MAX_STRING_LENGTH_TO_CACHE = 1000;
+
+/** Max entries in each text cache before eviction */
+export const TEXT_CACHE_MAX_ENTRIES = 500;
+
+/**
+ * Evict oldest entry if a cache reaches the soft cap.
+ * Map iteration order is insertion order, so the first key is the oldest.
+ */
+function evictOldestTextCacheEntry<K, V>(cache: Map<K, V>): void {
+  if (cache.size >= TEXT_CACHE_MAX_ENTRIES) {
+    const firstKey = cache.keys().next().value;
+    if (firstKey !== undefined) {
+      cache.delete(firstKey);
+    }
+  }
+}
 
 export function toCodePoints(str: string): string[] {
   // ASCII fast path - check if all chars are ASCII (0-127)
@@ -55,8 +75,9 @@ export function toCodePoints(str: string): string[] {
 
   const result = Array.from(str);
 
-  // Cache result (unlimited like Ink)
+  // Cache result (bounded; oldest entry evicted at the cap)
   if (str.length <= MAX_STRING_LENGTH_TO_CACHE) {
+    evictOldestTextCacheEntry(codePointsCache);
     codePointsCache.set(str, result);
   }
 
@@ -123,8 +144,9 @@ export function stripUnsafeCharacters(str: string): string {
 const stringWidthCache = new Map<string, number>();
 
 /**
- * Cached version of stringWidth function for better performance
- * Follows Ink's approach with unlimited cache (no eviction)
+ * Cached version of stringWidth function for better performance.
+ * Bounded with oldest-entry eviction so long sessions cannot grow it
+ * without limit.
  */
 export const getCachedStringWidth = (str: string): number => {
   // ASCII printable chars have width 1
@@ -132,15 +154,149 @@ export const getCachedStringWidth = (str: string): number => {
     return str.length;
   }
 
+  if (str.length > MAX_STRING_LENGTH_TO_CACHE) {
+    return stringWidth(str);
+  }
+
   if (stringWidthCache.has(str)) {
     return stringWidthCache.get(str)!;
   }
 
   const width = stringWidth(str);
+  evictOldestTextCacheEntry(stringWidthCache);
   stringWidthCache.set(str, width);
 
   return width;
 };
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: 'grapheme',
+});
+
+/**
+ * Truncate text to a display width (terminal cells), appending an ellipsis
+ * when clipped. Grapheme- and width-aware (via `getCachedStringWidth`) so CJK
+ * text — two cells per character — is bounded correctly. Returns an empty
+ * string when even the ellipsis would overflow the budget.
+ */
+export function truncateToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return '';
+  }
+  if (getCachedStringWidth(text) <= maxWidth) {
+    return text;
+  }
+  const ellipsis = '…';
+  const budget = Math.max(0, maxWidth - getCachedStringWidth(ellipsis));
+  let width = 0;
+  let result = '';
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > budget) {
+      break;
+    }
+    result += segment;
+    width += segmentWidth;
+  }
+  return `${result}${ellipsis}`;
+}
+
+export interface VisualHeightSlice {
+  text: string;
+  hiddenLinesCount: number;
+}
+
+interface SliceTextByVisualHeightOptions {
+  minHeight?: number;
+  reservedRows?: number;
+  overflowDirection?: 'top' | 'bottom';
+}
+
+/**
+ * Bounds text by terminal visual rows before it reaches Ink/Yoga layout.
+ *
+ * Explicit newlines and soft wraps caused by narrow terminals both count as
+ * visual rows. `overflowDirection: "top"` keeps the newest tail, which is
+ * useful for streaming logs; `"bottom"` keeps the beginning, which is useful
+ * for task prompts.
+ */
+export function sliceTextByVisualHeight(
+  text: string,
+  maxHeight: number | undefined,
+  maxWidth: number,
+  options: SliceTextByVisualHeightOptions = {},
+): VisualHeightSlice {
+  if (maxHeight === undefined) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  const targetMaxHeight = Math.max(
+    Math.round(maxHeight),
+    options.minHeight ?? 1,
+  );
+  const visibleContentHeight = Math.max(
+    1,
+    targetMaxHeight - (options.reservedRows ?? 0),
+  );
+  const visualWidth = Math.max(1, Math.floor(maxWidth));
+  const overflowDirection = options.overflowDirection ?? 'top';
+  const visibleLines: string[] = [];
+  let visualLineCount = 0;
+  let currentLine = '';
+  let currentLineWidth = 0;
+
+  const appendVisibleLine = (line: string) => {
+    visualLineCount += 1;
+
+    if (overflowDirection === 'bottom') {
+      if (visibleLines.length < visibleContentHeight) {
+        visibleLines.push(line);
+      }
+      return;
+    }
+
+    visibleLines.push(line);
+    if (visibleLines.length > visibleContentHeight) {
+      visibleLines.shift();
+    }
+  };
+
+  const flushCurrentLine = () => {
+    appendVisibleLine(currentLine);
+    currentLine = '';
+    currentLineWidth = 0;
+  };
+
+  for (const char of toCodePoints(text)) {
+    if (char === '\n') {
+      flushCurrentLine();
+      continue;
+    }
+
+    const charWidth = Math.max(getCachedStringWidth(char), 1);
+    if (currentLineWidth > 0 && currentLineWidth + charWidth > visualWidth) {
+      flushCurrentLine();
+    }
+
+    currentLine += char;
+    currentLineWidth += charWidth;
+  }
+
+  flushCurrentLine();
+
+  // Compare against `visibleContentHeight`, not `targetMaxHeight`: when a
+  // caller asks us to reserve rows for a separate footer/header (e.g. the
+  // "...N task lines hidden..." line), the budget for the actual content is
+  // `visibleContentHeight` and exceeding it must still trigger truncation.
+  if (visualLineCount <= visibleContentHeight) {
+    return { text, hiddenLinesCount: 0 };
+  }
+
+  return {
+    text: visibleLines.join('\n'),
+    hiddenLinesCount: visualLineCount - visibleContentHeight,
+  };
+}
 
 /**
  * Clear the string width cache
@@ -149,7 +305,44 @@ export const clearStringWidthCache = (): void => {
   stringWidthCache.clear();
 };
 
+/**
+ * Report current sizes of the module-level text caches.
+ * @internal — only used in tests to verify cache bounds.
+ */
+export const __getTextUtilsCacheSizes = (): {
+  codePoints: number;
+  stringWidth: number;
+} => ({
+  codePoints: codePointsCache.size,
+  stringWidth: stringWidthCache.size,
+});
+
 const regex = ansiRegex();
+
+// Bare C0 control bytes (plus DEL / C1) that `escapeAnsiCtrlCodes` (ansi-regex)
+// leaves untouched because they carry no ESC prefix — BEL \x07, BS \x08,
+// VT \x0b, FF \x0c, CR \x0d, SO \x0e, SI \x0f, etc. TAB (\x09) and LF (\x0a)
+// are intentionally preserved: they legitimately structure multi-line output.
+// eslint-disable-next-line no-control-regex
+const BARE_C0_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+// Unicode bidirectional override / isolate characters (the "Trojan Source"
+// attack class, CVE-2021-42572) that can visually reorder rendered text.
+const BIDI_OVERRIDE_CHARS_REGEX = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * Full sanitization for raw, untrusted text about to be rendered into a
+ * terminal `<Text>` (e.g. tool output in the Ctrl+O transcript, or a caught
+ * error message). Three passes: (1) neutralize ESC-prefixed ANSI sequences
+ * (alt-screen exit, OSC 52 clipboard, …); (2) strip bare C0/C1 control bytes
+ * ansi-regex misses, keeping only TAB/LF; (3) strip bidi override/isolate chars
+ * (Trojan Source). Single source of truth so every render site stays aligned.
+ */
+export function sanitizeTerminalText(value: string): string {
+  return escapeAnsiCtrlCodes(value)
+    .replace(BARE_C0_CONTROL_CHARS_REGEX, '')
+    .replace(BIDI_OVERRIDE_CHARS_REGEX, '');
+}
 
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)
  * and escapes all ANSI control characters found in any string values.
@@ -179,6 +372,16 @@ export function escapeAnsiCtrlCodes<T>(obj: T): T {
   }
 
   if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+
+  const record = obj as Record<string, unknown>;
+  if (
+    !Array.isArray(obj) &&
+    typeof record['data'] === 'string' &&
+    typeof record['mimeType'] === 'string' &&
+    record['mimeType'].toLowerCase().startsWith('image/')
+  ) {
     return obj;
   }
 
@@ -288,4 +491,76 @@ export function sanitizeSensitiveText(
   }
 
   return result;
+}
+
+// Match standalone C0 controls (incl. TAB/CR/LF/BEL/BS), DEL, and C1 controls.
+// `escapeAnsiCtrlCodes` only neutralizes multi-byte ANSI sequences; raw single
+// bytes like `\n`, `\r`, BEL, BS slip past it and can still break layouts or
+// inject terminal effects when rendered as part of a git-supplied filename.
+// The Unicode bidi embedding/isolate controls (U+202A–202E, U+2066–2069) are
+// also stripped so a crafted filename can't visually spoof its extension.
+/* eslint-disable no-control-regex */
+const FILENAME_CONTROL_CHARS_REGEX =
+  /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
+
+// Same as FILENAME_CONTROL_CHARS_REGEX minus `\n` (row separator) and `\t`
+// (benign indentation), which multi-line display treats as layout.
+/* eslint-disable no-control-regex */
+const MULTILINE_CONTROL_CHARS_REGEX =
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
+
+function escapeControlChar(ch: string): string {
+  switch (ch) {
+    case '\b':
+      return '\\b';
+    case '\t':
+      return '\\t';
+    case '\n':
+      return '\\n';
+    case '\f':
+      return '\\f';
+    case '\r':
+      return '\\r';
+    default: {
+      // DEL (0x7F) and C1 controls (0x80-0x9F) are returned as raw bytes by
+      // JSON.stringify, which is exactly what we are trying to keep out of
+      // rendered output. Hand-roll the \uXXXX escape so every matched code
+      // point becomes printable.
+      const code = ch.charCodeAt(0);
+      return `\\u${code.toString(16).padStart(4, '0')}`;
+    }
+  }
+}
+
+/**
+ * Make a git-supplied filename safe to drop into a TUI text node or a
+ * stdout / log line. Strips both multi-byte ANSI sequences (via
+ * `escapeAnsiCtrlCodes`) and bare control bytes that git happily round-trips
+ * through `-z` paths but which would otherwise inject color resets, cursor
+ * moves, BEL, or layout-breaking newlines into the rendered output.
+ *
+ * Use this anywhere a path from `fetchGitDiff`, `fetchGitDiffHunks`, or a
+ * file-history backup is rendered to the user.
+ */
+export function sanitizeFilenameForDisplay(name: string): string {
+  return escapeAnsiCtrlCodes(name).replace(
+    FILENAME_CONTROL_CHARS_REGEX,
+    escapeControlChar,
+  );
+}
+
+/**
+ * Make untrusted multi-line text (e.g. model-generated file contents) safe to
+ * render in the TUI while preserving its line structure: neutralizes
+ * multi-byte ANSI/VT sequences (via `escapeAnsiCtrlCodes`), then escapes the
+ * remaining bare control bytes — BEL, BS, CR, DEL, C1, the 8-bit CSI — as
+ * inert, visible text. `\n` and `\t` pass through untouched.
+ */
+export function sanitizeMultilineForDisplay(text: string): string {
+  return escapeAnsiCtrlCodes(text).replace(
+    MULTILINE_CONTROL_CHARS_REGEX,
+    escapeControlChar,
+  );
 }

@@ -19,7 +19,9 @@ import {
   createContext,
   useContext,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import {
@@ -28,6 +30,7 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { useArenaInProcess } from '../hooks/useArenaInProcess.js';
+import { useTeamInProcess } from '../hooks/useTeamInProcess.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -47,16 +50,22 @@ export interface AgentViewState {
   agents: ReadonlyMap<string, RegisteredAgent>;
   /** Whether any agent tab's embedded shell currently has input focus. */
   agentShellFocused: boolean;
-  /** Current text in the active agent tab's input buffer (empty when on main). */
+  /** Last synced text from the active agent tab's input buffer. */
   agentInputBufferText: string;
   /** Whether the tab bar has keyboard focus (vs the agent input). */
   agentTabBarFocused: boolean;
   /** Per-agent approval modes (keyed by agentId). */
   agentApprovalModes: ReadonlyMap<string, ApprovalMode>;
+  /**
+   * Queued follow-up messages per agent (keyed by agentId). Held here —
+   * not in the composer — because the layout keys AgentComposer by the
+   * active view, so switching teammate tabs unmounts the composer and any
+   * component-local queue would be silently discarded (#10069).
+   */
+  agentMessageQueues: ReadonlyMap<string, readonly string[]>;
 }
 
 export interface AgentViewActions {
-  switchToMain(): void;
   switchToAgent(agentId: string): void;
   switchToNext(): void;
   switchToPrevious(): void;
@@ -73,6 +82,10 @@ export interface AgentViewActions {
   setAgentInputBufferText(text: string): void;
   setAgentTabBarFocused(focused: boolean): void;
   setAgentApprovalMode(agentId: string, mode: ApprovalMode): void;
+  /** Replace the queued follow-up messages for an agent (see state docs). */
+  setAgentMessageQueue(agentId: string, queue: readonly string[]): void;
+  /** Append one follow-up message without relying on a render-time snapshot. */
+  appendToAgentMessageQueue(agentId: string, message: string): void;
 }
 
 // ─── Context ────────────────────────────────────────────────
@@ -89,12 +102,12 @@ const DEFAULT_STATE: AgentViewState = {
   agentInputBufferText: '',
   agentTabBarFocused: false,
   agentApprovalModes: new Map(),
+  agentMessageQueues: new Map(),
 };
 
 const noop = () => {};
 
 const DEFAULT_ACTIONS: AgentViewActions = {
-  switchToMain: noop,
   switchToAgent: noop,
   switchToNext: noop,
   switchToPrevious: noop,
@@ -105,6 +118,8 @@ const DEFAULT_ACTIONS: AgentViewActions = {
   setAgentInputBufferText: noop,
   setAgentTabBarFocused: noop,
   setAgentApprovalMode: noop,
+  setAgentMessageQueue: noop,
+  appendToAgentMessageQueue: noop,
 };
 
 // ─── Hook: useAgentViewState ────────────────────────────────
@@ -140,17 +155,22 @@ export function AgentViewProvider({
   const [agentApprovalModes, setAgentApprovalModes] = useState<
     Map<string, ApprovalMode>
   >(() => new Map());
+  const [agentMessageQueues, setAgentMessageQueues] = useState<
+    Map<string, readonly string[]>
+  >(() => new Map());
+  // Synchronous mirror of the registered agent ids. The `agents` state only
+  // reflects register/unregister after commit, so a same-batch append cannot
+  // consult it to learn that an agent is being unregistered right now; this
+  // ref is updated at action-call time so appendToAgentMessageQueue drops
+  // follow-ups for a departing agent instead of resurrecting its queue.
+  const registeredIdsRef = useRef<Set<string>>(new Set());
 
   // ── Navigation ──
-
-  const switchToMain = useCallback(() => {
-    setActiveView('main');
-    setAgentTabBarFocused(false);
-  }, []);
 
   const switchToAgent = useCallback(
     (agentId: string) => {
       if (agents.has(agentId)) {
+        setAgentShellFocused(false);
         setActiveView(agentId);
       }
     },
@@ -161,6 +181,7 @@ export function AgentViewProvider({
     const ids = ['main', ...agents.keys()];
     const currentIndex = ids.indexOf(activeView);
     const nextIndex = (currentIndex + 1) % ids.length;
+    setAgentShellFocused(false);
     setActiveView(ids[nextIndex]!);
   }, [agents, activeView]);
 
@@ -168,8 +189,25 @@ export function AgentViewProvider({
     const ids = ['main', ...agents.keys()];
     const currentIndex = ids.indexOf(activeView);
     const prevIndex = (currentIndex - 1 + ids.length) % ids.length;
+    setAgentShellFocused(false);
     setActiveView(ids[prevIndex]!);
   }, [agents, activeView]);
+
+  // Belt and braces for the switch resets above: the embedded-shell focus
+  // belongs to the active tab's content, so ANY view change — including
+  // unregisterAgent/unregisterAll bouncing activeView back to 'main'
+  // without going through a switch — must drop a flag the unmounted
+  // content can no longer clear (#9290 review). Skip the mount run: the
+  // flag starts false there, and resetting it in the mount commit would
+  // clobber a same-commit seed from the active tab's content.
+  const initialViewRef = useRef(true);
+  useEffect(() => {
+    if (initialViewRef.current) {
+      initialViewRef.current = false;
+      return;
+    }
+    setAgentShellFocused(false);
+  }, [activeView]);
 
   // ── Registration ──
 
@@ -181,6 +219,7 @@ export function AgentViewProvider({
       color: string,
       modelName?: string,
     ) => {
+      registeredIdsRef.current.add(agentId);
       setAgents((prev) => {
         const next = new Map(prev);
         next.set(agentId, {
@@ -203,6 +242,7 @@ export function AgentViewProvider({
   );
 
   const unregisterAgent = useCallback((agentId: string) => {
+    registeredIdsRef.current.delete(agentId);
     setAgents((prev) => {
       if (!prev.has(agentId)) return prev;
       const next = new Map(prev);
@@ -215,12 +255,20 @@ export function AgentViewProvider({
       next.delete(agentId);
       return next;
     });
+    setAgentMessageQueues((prev) => {
+      if (!prev.has(agentId)) return prev;
+      const next = new Map(prev);
+      next.delete(agentId);
+      return next;
+    });
     setActiveView((current) => (current === agentId ? 'main' : current));
   }, []);
 
   const unregisterAll = useCallback(() => {
+    registeredIdsRef.current.clear();
     setAgents(new Map());
     setAgentApprovalModes(new Map());
+    setAgentMessageQueues(new Map());
     setActiveView('main');
     setAgentTabBarFocused(false);
   }, []);
@@ -242,6 +290,37 @@ export function AgentViewProvider({
     [agents],
   );
 
+  const setAgentMessageQueue = useCallback(
+    (agentId: string, queue: readonly string[]) => {
+      setAgentMessageQueues((prev) => {
+        const next = new Map(prev);
+        if (queue.length === 0) {
+          next.delete(agentId);
+        } else {
+          next.set(agentId, queue);
+        }
+        return next;
+      });
+    },
+    [],
+  );
+
+  const appendToAgentMessageQueue = useCallback(
+    (agentId: string, message: string) => {
+      // Membership is checked against the registered-agents mirror, not the
+      // queues map: empty queues hold no map entry (a `prev.has` guard would
+      // drop the first message), and the mirror already reflects an
+      // unregisterAgent that ran earlier in the same React batch.
+      if (!registeredIdsRef.current.has(agentId)) return;
+      setAgentMessageQueues((prev) => {
+        const next = new Map(prev);
+        next.set(agentId, [...(next.get(agentId) ?? []), message]);
+        return next;
+      });
+    },
+    [],
+  );
+
   // ── Memoized values ──
 
   const state: AgentViewState = useMemo(
@@ -252,6 +331,7 @@ export function AgentViewProvider({
       agentInputBufferText,
       agentTabBarFocused,
       agentApprovalModes,
+      agentMessageQueues,
     }),
     [
       activeView,
@@ -260,12 +340,12 @@ export function AgentViewProvider({
       agentInputBufferText,
       agentTabBarFocused,
       agentApprovalModes,
+      agentMessageQueues,
     ],
   );
 
   const actions: AgentViewActions = useMemo(
     () => ({
-      switchToMain,
       switchToAgent,
       switchToNext,
       switchToPrevious,
@@ -276,9 +356,10 @@ export function AgentViewProvider({
       setAgentInputBufferText,
       setAgentTabBarFocused,
       setAgentApprovalMode,
+      setAgentMessageQueue,
+      appendToAgentMessageQueue,
     }),
     [
-      switchToMain,
       switchToAgent,
       switchToNext,
       switchToPrevious,
@@ -289,14 +370,17 @@ export function AgentViewProvider({
       setAgentInputBufferText,
       setAgentTabBarFocused,
       setAgentApprovalMode,
+      setAgentMessageQueue,
+      appendToAgentMessageQueue,
     ],
   );
 
-  // ── Arena in-process bridge ──
-  // Bridge arena manager events to agent registration. The hook is kept
-  // in its own file for separation of concerns; it's called here so the
-  // provider is the single owner of agent tab lifecycle.
+  // ── In-process bridges ──
+  // Bridge arena and team manager events to agent registration. The hooks
+  // are kept in their own files for separation of concerns; they're called
+  // here so the provider is the single owner of agent tab lifecycle.
   useArenaInProcess(config ?? null, actions);
+  useTeamInProcess(config ?? null, actions);
 
   return (
     <AgentViewStateContext.Provider value={state}>

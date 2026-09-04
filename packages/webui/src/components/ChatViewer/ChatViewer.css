@@ -51,6 +51,44 @@
   scroll-behavior: smooth;
 }
 
+/* ===========================
+   Global expand/collapse control
+   =========================== */
+.chat-viewer-expand-control {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 20px 0;
+  flex-shrink: 0;
+}
+
+.chat-viewer-expand-control-button {
+  background: transparent;
+  border: 1px solid var(--app-input-border, rgba(255, 255, 255, 0.2));
+  border-radius: 4px;
+  color: var(--app-secondary-foreground, rgba(255, 255, 255, 0.6));
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 3px 10px;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.chat-viewer-expand-control-button:hover {
+  color: var(--app-primary-foreground, #cccccc);
+  border-color: var(--app-primary-foreground, #cccccc);
+  background-color: var(--app-input-background, rgba(255, 255, 255, 0.06));
+}
+
+@media (max-width: 600px) {
+  .chat-viewer-expand-control {
+    padding: 8px 12px 0;
+  }
+}
+
 /* Dark theme scrollbar styling */
 .chat-viewer-messages::-webkit-scrollbar {
   width: 8px;

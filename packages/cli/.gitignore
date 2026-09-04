@@ -1,0 +1,7 @@
+
+# Debug-log directories leaked by CLI unit tests that resolve paths relative
+# to the package dir instead of a temp dir (settings/config suites).
+/custom/
+/first/
+/from-env/
+/workspace/

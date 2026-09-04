@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import {
   type ArenaManager,
   AgentStatus,
@@ -17,6 +17,7 @@ import type {
   SlashCommand,
 } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 function getArenaSubCommand(
   name: 'start' | 'stop' | 'status' | 'select',
@@ -27,6 +28,99 @@ function getArenaSubCommand(
   }
   return command;
 }
+
+beforeEach(async () => {
+  await setLanguageAsync('en');
+});
+
+afterAll(async () => {
+  await setLanguageAsync('en');
+});
+
+describe('arenaCommand localization', () => {
+  it('localizes descriptions and common errors in zh', async () => {
+    await setLanguageAsync('zh');
+
+    expect(arenaCommand.description).toBe('管理 Arena 会话');
+    expect(getArenaSubCommand('stop').description).toBe('停止当前 Arena 会话');
+
+    const stopContext = createMockCommandContext({
+      executionMode: 'interactive',
+      services: {
+        config: {
+          getArenaManager: vi.fn(() => null),
+        } as never,
+      },
+    });
+    const stopResult = await getArenaSubCommand('stop').action!(
+      stopContext,
+      '',
+    );
+
+    expect(stopResult).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: '未找到正在运行的 Arena 会话。',
+    });
+
+    const selectContext = createMockCommandContext({
+      executionMode: 'interactive',
+      services: {
+        config: {
+          getArenaManager: vi.fn(() => ({
+            getSessionStatus: vi.fn(() => ArenaSessionStatus.RUNNING),
+          })),
+        } as never,
+      },
+    });
+    const selectResult = await getArenaSubCommand('select').action!(
+      selectContext,
+      '',
+    );
+
+    expect(selectResult).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Arena 会话仍在运行中。请等待其完成，或先使用 /arena stop。',
+    });
+  });
+});
+
+describe('arenaCommand start subcommand', () => {
+  it('rejects image-only models passed explicitly', async () => {
+    const context = createMockCommandContext({
+      executionMode: 'interactive',
+      services: {
+        config: {
+          getArenaManager: vi.fn(() => null),
+          getContentGeneratorConfig: vi.fn(() => undefined),
+          getModelsConfig: vi.fn(() => ({
+            getAvailableModelsForAuthType: vi.fn(() => [
+              {
+                id: 'qwen-image-2.0',
+                label: 'Qwen Image 2.0',
+                imageOnly: true,
+              },
+              { id: 'qwen-plus', label: 'Qwen Plus' },
+            ]),
+          })),
+        } as never,
+      },
+    });
+
+    const result = await getArenaSubCommand('start').action!(
+      context,
+      '--models qwen-image-2.0,qwen-plus "build a feature"',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Image-only model 'qwen-image-2.0' cannot be used in an Arena session.",
+    });
+  });
+});
 
 describe('arenaCommand stop subcommand', () => {
   let mockContext: CommandContext;
@@ -215,7 +309,7 @@ describe('arenaCommand select subcommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content: 'No arena session found. Start one with /arena start.',
+      content: 'No Arena session found. Start one with /arena start.',
     });
   });
 

@@ -48,14 +48,14 @@ describe('telemetry', () => {
     }
   });
 
-  it('should initialize the telemetry service', () => {
-    initializeTelemetry(mockConfig);
+  it('should initialize the telemetry service', async () => {
+    await initializeTelemetry(mockConfig);
     expect(NodeSDK).toHaveBeenCalled();
     expect(mockNodeSdk.start).toHaveBeenCalled();
   });
 
   it('should shutdown the telemetry service', async () => {
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
     await shutdownTelemetry();
 
     expect(mockNodeSdk.shutdown).toHaveBeenCalled();

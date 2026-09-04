@@ -36,6 +36,20 @@ export interface TokenStorage {
   clearAll(): Promise<void>;
 }
 
+/**
+ * Storage for arbitrary named secrets (e.g. sensitive extension settings),
+ * scoped to the backing store's service name. Implemented by both the keychain
+ * and the encrypted-file backends so that secrets degrade gracefully to file
+ * storage when the OS keychain is unavailable.
+ */
+export interface SecretStorage {
+  isAvailable(): Promise<boolean>;
+  setSecret(key: string, value: string): Promise<void>;
+  getSecret(key: string): Promise<string | null>;
+  deleteSecret(key: string): Promise<void>;
+  listSecrets(): Promise<string[]>;
+}
+
 export enum TokenStorageType {
   KEYCHAIN = 'keychain',
   ENCRYPTED_FILE = 'encrypted_file',

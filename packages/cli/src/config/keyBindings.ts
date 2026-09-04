@@ -31,14 +31,22 @@ export enum Command {
   NAVIGATION_UP = 'navigationUp',
   NAVIGATION_DOWN = 'navigationDown',
 
+  // Selection list navigation (dialogs, menus)
+  SELECTION_UP = 'selectionUp',
+  SELECTION_DOWN = 'selectionDown',
+
   // Auto-completion
   ACCEPT_SUGGESTION = 'acceptSuggestion',
   COMPLETION_UP = 'completionUp',
   COMPLETION_DOWN = 'completionDown',
+  COMPLETION_TAB_LEFT = 'completionTabLeft',
+  COMPLETION_TAB_RIGHT = 'completionTabRight',
 
   // Text input
   SUBMIT = 'submit',
+  QUEUE_MESSAGE = 'queueMessage',
   NEWLINE = 'newline',
+  VOICE_PUSH_TO_TALK = 'voicePushToTalk',
 
   // External tools
   OPEN_EXTERNAL_EDITOR = 'openExternalEditor',
@@ -51,7 +59,15 @@ export enum Command {
   EXIT = 'exit',
   SHOW_MORE_LINES = 'showMoreLines',
   RETRY_LAST = 'retryLast',
-  TOGGLE_COMPACT_MODE = 'toggleCompactMode',
+  TOGGLE_RENDER_MODE = 'toggleRenderMode',
+  /**
+   * Promote the running foreground shell command to a background task.
+   * The child process keeps running and the agent's turn unblocks; the
+   * shell becomes a regular `BackgroundShellEntry` visible in `/tasks`,
+   * the Background tasks dialog, and stoppable via `task_stop`.
+   * No-op when no foreground shell is currently executing.
+   */
+  PROMOTE_SHELL_TO_BACKGROUND = 'promoteShellToBackground',
 
   // Shell commands
   REVERSE_SEARCH = 'reverseSearch',
@@ -62,6 +78,17 @@ export enum Command {
   // Suggestion expansion
   EXPAND_SUGGESTION = 'expandSuggestion',
   COLLAPSE_SUGGESTION = 'collapseSuggestion',
+
+  // Thinking expansion
+  TOGGLE_THINKING_EXPANDED = 'toggleThinkingExpanded',
+
+  // Scroll commands
+  SCROLL_UP = 'scrollUp',
+  SCROLL_DOWN = 'scrollDown',
+  PAGE_UP = 'pageUp',
+  PAGE_DOWN = 'pageDown',
+  SCROLL_HOME = 'scrollHome',
+  SCROLL_END = 'scrollEnd',
 }
 
 /**
@@ -106,11 +133,19 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Text deletion
   [Command.KILL_LINE_RIGHT]: [{ key: 'k', ctrl: true }],
   [Command.KILL_LINE_LEFT]: [{ key: 'u', ctrl: true }],
-  [Command.CLEAR_INPUT]: [{ key: 'c', ctrl: true }],
+  [Command.CLEAR_INPUT]: [{ key: 'c', ctrl: true, shift: false }],
   // Added command (meta/alt/option) for mac compatibility
   [Command.DELETE_WORD_BACKWARD]: [
     { key: 'backspace', ctrl: true },
     { key: 'backspace', command: true },
+    // MinTTY (Git Bash on Windows) emits the byte \x1f (ASCII Unit
+    // Separator, rendered as "^_" by `cat -v`) for Ctrl+Backspace under
+    // its standard Ctrl-modifies-meta-keys convention. The same byte is
+    // the historical Ctrl-mapping of the Unit Separator on traditional
+    // ANSI/VT terminals (Ctrl+_ and Ctrl+/ also emit it), but qwen-code
+    // doesn't bind those keystrokes elsewhere so this entry is additive
+    // and non-conflicting on every platform.
+    { sequence: '\x1f' },
   ],
 
   // Screen control
@@ -119,15 +154,56 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // History navigation
   [Command.HISTORY_UP]: [{ key: 'p', ctrl: true }],
   [Command.HISTORY_DOWN]: [{ key: 'n', ctrl: true }],
-  [Command.NAVIGATION_UP]: [{ key: 'up' }],
-  [Command.NAVIGATION_DOWN]: [{ key: 'down' }],
+  [Command.NAVIGATION_UP]: [{ key: 'up', shift: false }],
+  [Command.NAVIGATION_DOWN]: [{ key: 'down', shift: false }],
+
+  // Selection-list nav: arrows + k/j + Ctrl+P/Ctrl+N
+  // ctrl: false on bare k/j skips Ctrl+K and Ctrl+J
+  [Command.SELECTION_UP]: [
+    { key: 'up', shift: false },
+    { key: 'k', ctrl: false },
+    { key: 'p', ctrl: true },
+  ],
+  [Command.SELECTION_DOWN]: [
+    { key: 'down', shift: false },
+    { key: 'j', ctrl: false },
+    { key: 'n', ctrl: true },
+  ],
 
   // Auto-completion
-  [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
-  // Completion navigation uses only arrow keys
-  // Ctrl+P/N are reserved for history navigation (HISTORY_UP/DOWN)
-  [Command.COMPLETION_UP]: [{ key: 'up' }],
-  [Command.COMPLETION_DOWN]: [{ key: 'down' }],
+  [Command.ACCEPT_SUGGESTION]: [
+    { key: 'tab' },
+    { key: 'return', ctrl: false, shift: false },
+  ],
+  // Completion navigation: arrows + readline/Vim-style Ctrl+P/Ctrl+N
+  [Command.COMPLETION_UP]: [
+    { key: 'up', shift: false },
+    { key: 'p', ctrl: true },
+  ],
+  [Command.COMPLETION_DOWN]: [
+    { key: 'down', shift: false },
+    { key: 'n', ctrl: true },
+  ],
+  // Completion category tab switching (for the tabbed @ completion UI).
+  // Bound to the BARE arrow keys: Ctrl+←/→ was the original binding but many
+  // terminals intercept it for word-jump, and on macOS the system claims it
+  // for Mission Control, so the documented gesture was unreachable for most
+  // users (#8069).
+  //
+  // Tradeoff, accepted deliberately: while the `@` category tabs are visible,
+  // the bare arrows no longer move the caret in the input buffer — press Esc
+  // to dismiss the menu first. InputPrompt only renders and handles the tabs
+  // when they own the arrows, so search and attachment navigation keep their
+  // normal behavior.
+  //
+  // Modifiers are pinned false so Alt/Option+arrow word movement and any
+  // Ctrl+arrow terminal binding fall through untouched.
+  [Command.COMPLETION_TAB_LEFT]: [
+    { key: 'left', shift: false, ctrl: false, meta: false },
+  ],
+  [Command.COMPLETION_TAB_RIGHT]: [
+    { key: 'right', shift: false, ctrl: false, meta: false },
+  ],
 
   // Text input
   // Must also exclude shift to allow shift+enter for newline
@@ -140,6 +216,9 @@ export const defaultKeyBindings: KeyBindingConfig = {
       shift: false,
     },
   ],
+  [Command.QUEUE_MESSAGE]: [
+    { key: 'q', ctrl: true, command: false, shift: false, paste: false },
+  ],
   // Split into multiple data-driven bindings
   // Now also includes shift+enter for multi-line input
   [Command.NEWLINE]: [
@@ -149,6 +228,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'return', shift: true },
     { key: 'j', ctrl: true },
   ],
+  [Command.VOICE_PUSH_TO_TALK]: [{ key: 'space', ctrl: false, meta: false }],
 
   // External tools
   [Command.OPEN_EXTERNAL_EDITOR]: [
@@ -169,11 +249,12 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // App level bindings
   [Command.TOGGLE_TOOL_DESCRIPTIONS]: [{ key: 't', ctrl: true }],
   [Command.TOGGLE_IDE_CONTEXT_DETAIL]: [{ key: 'g', ctrl: true }],
-  [Command.QUIT]: [{ key: 'c', ctrl: true }],
+  [Command.QUIT]: [{ key: 'c', ctrl: true, shift: false }],
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
-  [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
+  [Command.TOGGLE_RENDER_MODE]: [{ key: 'm', meta: true }],
+  [Command.PROMOTE_SHELL_TO_BACKGROUND]: [{ key: 'b', ctrl: true }],
 
   // Shell commands
   [Command.REVERSE_SEARCH]: [{ key: 'r', ctrl: true }],
@@ -185,4 +266,18 @@ export const defaultKeyBindings: KeyBindingConfig = {
   // Suggestion expansion
   [Command.EXPAND_SUGGESTION]: [{ key: 'right' }],
   [Command.COLLAPSE_SUGGESTION]: [{ key: 'left' }],
+
+  // Thinking expansion (Ctrl+O primary, Alt+T legacy)
+  [Command.TOGGLE_THINKING_EXPANDED]: [
+    { key: 'o', ctrl: true },
+    { key: 't', meta: true },
+  ],
+
+  // Scroll commands
+  [Command.SCROLL_UP]: [{ key: 'up', shift: true }],
+  [Command.SCROLL_DOWN]: [{ key: 'down', shift: true }],
+  [Command.PAGE_UP]: [{ key: 'pageup' }],
+  [Command.PAGE_DOWN]: [{ key: 'pagedown' }],
+  [Command.SCROLL_HOME]: [{ key: 'home', ctrl: true }],
+  [Command.SCROLL_END]: [{ key: 'end', ctrl: true }],
 };

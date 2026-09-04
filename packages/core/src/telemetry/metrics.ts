@@ -8,9 +8,18 @@ import type { Attributes, Meter, Counter, Histogram } from '@opentelemetry/api';
 import { diag, metrics, ValueType } from '@opentelemetry/api';
 import { SERVICE_NAME, EVENT_CHAT_COMPRESSION } from './constants.js';
 import type { Config } from '../config/config.js';
-import type { ModelSlashCommandEvent } from './types.js';
+import type { TelemetryRuntimeConfig } from './runtime-config.js';
+import type {
+  ModelSlashCommandEvent,
+  MemoryRecallDeliveryPhase,
+  MemoryRecallDeliveryPoint,
+  MemoryRecallDiscardReason,
+} from './types.js';
+import type { ToolExecutionStatus } from '../core/turn.js';
 
 const TOOL_CALL_COUNT = `${SERVICE_NAME}.tool.call.count`;
+const TOOL_EXECUTION_COUNT = `${SERVICE_NAME}.tool.execution.count`;
+export const REPEATED_TOOL_FAILURE_GUARD_COUNT = `${SERVICE_NAME}.repeated_tool_failure_guard.count`;
 const TOOL_CALL_LATENCY = `${SERVICE_NAME}.tool.call.latency`;
 const API_REQUEST_COUNT = `${SERVICE_NAME}.api.request.count`;
 const API_REQUEST_LATENCY = `${SERVICE_NAME}.api.request.latency`;
@@ -20,6 +29,9 @@ const FILE_OPERATION_COUNT = `${SERVICE_NAME}.file.operation.count`;
 const INVALID_CHUNK_COUNT = `${SERVICE_NAME}.chat.invalid_chunk.count`;
 const CONTENT_RETRY_COUNT = `${SERVICE_NAME}.chat.content_retry.count`;
 const CONTENT_RETRY_FAILURE_COUNT = `${SERVICE_NAME}.chat.content_retry_failure.count`;
+// Phase 4b — Counts HTTP-status retries emitted by `retryWithBackoff` at LLM
+// call sites. Tagged by `model` so operators can graph per-model retry rate.
+const API_RETRY_COUNT = `${SERVICE_NAME}.api.retry.count`;
 const MODEL_SLASH_COMMAND_CALL_COUNT = `${SERVICE_NAME}.slash_command.model.call_count`;
 export const SUBAGENT_EXECUTION_COUNT = `${SERVICE_NAME}.subagent.execution.count`;
 
@@ -51,22 +63,84 @@ const MEMORY_DREAM_COUNT = `${SERVICE_NAME}.memory.dream.count`;
 const MEMORY_DREAM_DURATION = `${SERVICE_NAME}.memory.dream.duration`;
 const MEMORY_RECALL_COUNT = `${SERVICE_NAME}.memory.recall.count`;
 const MEMORY_RECALL_DURATION = `${SERVICE_NAME}.memory.recall.duration`;
+const CHANNEL_MEMORY_RECALL_COUNT = `${SERVICE_NAME}.channel.memory.recall.count`;
+const CHANNEL_MEMORY_RECALL_DURATION = `${SERVICE_NAME}.channel.memory.recall.duration`;
+const CHANNEL_MEMORY_RECALL_SELECTED_COUNT = `${SERVICE_NAME}.channel.memory.recall.selected_count`;
+const MEMORY_RECALL_DELIVERY_COUNT = `${SERVICE_NAME}.memory.recall.delivery.count`;
+const MEMORY_RECALL_DELIVERY_LATENCY = `${SERVICE_NAME}.memory.recall.delivery.latency`;
 
 const baseMetricDefinition = {
-  getCommonAttributes: (config: Config): Attributes => ({
-    'session.id': config.getSessionId(),
-  }),
+  // session.id on metrics is opt-in: each session is a new value, so
+  // attaching it by default would create unbounded time-series fan-out on
+  // every metric backend. Operators who need session-level metric slicing
+  // can enable QWEN_TELEMETRY_METRICS_INCLUDE_SESSION_ID or
+  // telemetry.metrics.includeSessionId. Spans and logs always carry
+  // session.id for trace/log correlation.
+  getCommonAttributes: (config: TelemetryRuntimeConfig): Attributes => {
+    const out: Attributes = {};
+    if (config.getTelemetryMetricsIncludeSessionId()) {
+      out['session.id'] = config.getSessionId();
+    }
+    return out;
+  },
 };
 
 const COUNTER_DEFINITIONS = {
   [TOOL_CALL_COUNT]: {
-    description: 'Counts tool calls, tagged by function name and success.',
+    description:
+      'Counts tool calls, tagged by function name and terminal status.',
     valueType: ValueType.INT,
     assign: (c: Counter) => (toolCallCounter = c),
     attributes: {} as {
       function_name: string;
       success: boolean;
+      status?: 'success' | 'error' | 'cancelled';
       decision?: 'accept' | 'reject' | 'modify' | 'auto_accept';
+      tool_type?: 'native' | 'mcp';
+    },
+  },
+  [TOOL_EXECUTION_COUNT]: {
+    description: 'Counts tool execution outcomes.',
+    valueType: ValueType.INT,
+    assign: (c: Counter) => (toolExecutionCounter = c),
+    attributes: {} as {
+      execution_status: ToolExecutionStatus | 'unknown';
+      tool_type: 'native' | 'mcp';
+    },
+  },
+  [REPEATED_TOOL_FAILURE_GUARD_COUNT]: {
+    description:
+      'Counts privacy-safe repeated tool execution failure guard transitions.',
+    valueType: ValueType.INT,
+    assign: (c: Counter) => (repeatedToolFailureGuardCounter = c),
+    attributes: {} as {
+      route: 'acp_foreground';
+      mode: 'shadow' | 'warn' | 'enforce';
+      phase_before: 'idle' | 'tracking' | 'warned' | 'latched';
+      phase_after: 'idle' | 'tracking' | 'warned' | 'latched';
+      decision:
+        | 'reset'
+        | 'tracked'
+        | 'would_warn'
+        | 'warned'
+        | 'would_stop'
+        | 'stopped';
+      failure_count_bucket: '0' | '1-2' | '3-4' | '5-7' | '8+';
+      batch_count_bucket: '0' | '1' | '2' | '3+';
+      reset_reason?:
+        | 'success'
+        | 'cancelled'
+        | 'not_started'
+        | 'post_execution_failure'
+        | 'unknown'
+        | 'mixed'
+        | 'incomplete'
+        | 'external_input'
+        | 'queued_prompt'
+        | 'unreliable_input'
+        | 'contract_violation';
+      terminal_status?: 'error';
+      execution_status?: 'error';
       tool_type?: 'native' | 'mcp';
     },
   },
@@ -86,7 +160,7 @@ const COUNTER_DEFINITIONS = {
     assign: (c: Counter) => (tokenUsageCounter = c),
     attributes: {} as {
       model: string;
-      type: 'input' | 'output' | 'thought' | 'cache' | 'tool';
+      type: 'input' | 'output' | 'thought' | 'cache';
     },
   },
   [SESSION_COUNT]: {
@@ -124,6 +198,15 @@ const COUNTER_DEFINITIONS = {
     valueType: ValueType.INT,
     assign: (c: Counter) => (contentRetryFailureCounter = c),
     attributes: {} as Record<string, never>,
+  },
+  [API_RETRY_COUNT]: {
+    description:
+      'Counts HTTP-status retries (429/5xx) at LLM call sites, emitted by retryWithBackoff onRetry callback.',
+    valueType: ValueType.INT,
+    assign: (c: Counter) => (apiRetryCounter = c),
+    attributes: {} as {
+      model: string;
+    },
   },
   [MODEL_SLASH_COMMAND_CALL_COUNT]: {
     description: 'Counts model slash command calls.',
@@ -336,6 +419,8 @@ export enum ApiRequestPhase {
 
 let cliMeter: Meter | undefined;
 let toolCallCounter: Counter | undefined;
+let toolExecutionCounter: Counter | undefined;
+let repeatedToolFailureGuardCounter: Counter | undefined;
 let toolCallLatencyHistogram: Histogram | undefined;
 let apiRequestCounter: Counter | undefined;
 let apiRequestLatencyHistogram: Histogram | undefined;
@@ -346,6 +431,7 @@ let chatCompressionCounter: Counter | undefined;
 let invalidChunkCounter: Counter | undefined;
 let contentRetryCounter: Counter | undefined;
 let contentRetryFailureCounter: Counter | undefined;
+let apiRetryCounter: Counter | undefined;
 let subagentExecutionCounter: Counter | undefined;
 let modelSlashCommandCallCounter: Counter | undefined;
 
@@ -376,6 +462,11 @@ let memoryDreamCounter: Counter | undefined;
 let memoryDreamDurationHistogram: Histogram | undefined;
 let memoryRecallCounter: Counter | undefined;
 let memoryRecallDurationHistogram: Histogram | undefined;
+let channelMemoryRecallCounter: Counter | undefined;
+let channelMemoryRecallDurationHistogram: Histogram | undefined;
+let channelMemoryRecallSelectedCountHistogram: Histogram | undefined;
+let memoryRecallDeliveryCounter: Counter | undefined;
+let memoryRecallDeliveryLatencyHistogram: Histogram | undefined;
 
 let isMetricsInitialized = false;
 let isPerformanceMonitoringEnabled = false;
@@ -387,7 +478,7 @@ export function getMeter(): Meter | undefined {
   return cliMeter;
 }
 
-export function initializeMetrics(config: Config): void {
+export function initializeMetrics(config: TelemetryRuntimeConfig): void {
   if (isMetricsInitialized) return;
 
   const meter = getMeter();
@@ -481,6 +572,49 @@ export function initializeMetrics(config: Config): void {
       valueType: ValueType.INT,
     },
   );
+  channelMemoryRecallCounter = meter.createCounter(
+    CHANNEL_MEMORY_RECALL_COUNT,
+    {
+      description:
+        'Counts channel memory recall attempts by cache path and bounded result.',
+      valueType: ValueType.INT,
+    },
+  );
+  channelMemoryRecallDurationHistogram = meter.createHistogram(
+    CHANNEL_MEMORY_RECALL_DURATION,
+    {
+      description: 'Duration of channel memory recall attempts.',
+      unit: 'ms',
+      valueType: ValueType.DOUBLE,
+      advice: {
+        explicitBucketBoundaries: [0.1, 0.5, 1, 2, 5, 10, 25, 50, 100, 250],
+      },
+    },
+  );
+  channelMemoryRecallSelectedCountHistogram = meter.createHistogram(
+    CHANNEL_MEMORY_RECALL_SELECTED_COUNT,
+    {
+      description: 'Number of channel memory entries selected per attempt.',
+      valueType: ValueType.INT,
+    },
+  );
+  memoryRecallDeliveryCounter = meter.createCounter(
+    MEMORY_RECALL_DELIVERY_COUNT,
+    {
+      description:
+        'Counts auto-memory recall delivery outcomes, tagged by phase and delivery point.',
+      valueType: ValueType.INT,
+    },
+  );
+  memoryRecallDeliveryLatencyHistogram = meter.createHistogram(
+    MEMORY_RECALL_DELIVERY_LATENCY,
+    {
+      description:
+        'Latency from auto-memory recall prefetch start to delivery or discard.',
+      unit: 'ms',
+      valueType: ValueType.INT,
+    },
+  );
   // Initialize performance monitoring metrics if enabled
   initializePerformanceMonitoring(config);
 
@@ -509,12 +643,31 @@ export function recordToolCallMetrics(
   const metricAttributes: Attributes = {
     ...baseMetricDefinition.getCommonAttributes(config),
     ...attributes,
+    status: attributes.status ?? (attributes.success ? 'success' : 'error'),
   };
   toolCallCounter.add(1, metricAttributes);
   toolCallLatencyHistogram.record(durationMs, {
     ...baseMetricDefinition.getCommonAttributes(config),
     function_name: attributes.function_name,
   });
+}
+
+export function recordToolExecutionMetrics(
+  config: TelemetryRuntimeConfig,
+  attributes: MetricDefinitions[typeof TOOL_EXECUTION_COUNT]['attributes'],
+): void {
+  if (!toolExecutionCounter || !isMetricsInitialized) return;
+  toolExecutionCounter.add(1, {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    ...attributes,
+  });
+}
+
+export function recordRepeatedToolFailureGuardMetrics(
+  attributes: MetricDefinitions[typeof REPEATED_TOOL_FAILURE_GUARD_COUNT]['attributes'],
+): void {
+  if (!repeatedToolFailureGuardCounter || !isMetricsInitialized) return;
+  repeatedToolFailureGuardCounter.add(1, attributes);
 }
 
 export function recordTokenUsageMetrics(
@@ -616,6 +769,23 @@ export function recordContentRetryFailure(config: Config): void {
   );
 }
 
+/**
+ * Phase 4b — Records a metric for an HTTP-status retry at an LLM call site.
+ * Tagged by `model` so operators can graph per-model retry rate. Called from
+ * `logApiRetry` in loggers.ts which is wired to `retryWithBackoff`'s `onRetry`
+ * callback at the 4 LLM call sites.
+ */
+export function recordApiRetry(
+  config: Config,
+  attributes: MetricDefinitions[typeof API_RETRY_COUNT]['attributes'],
+): void {
+  if (!apiRetryCounter || !isMetricsInitialized) return;
+  apiRetryCounter.add(1, {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    ...attributes,
+  });
+}
+
 export function recordModelSlashCommand(
   config: Config,
   event: ModelSlashCommandEvent,
@@ -629,7 +799,9 @@ export function recordModelSlashCommand(
 
 // Performance Monitoring Functions
 
-export function initializePerformanceMonitoring(config: Config): void {
+export function initializePerformanceMonitoring(
+  config: TelemetryRuntimeConfig,
+): void {
   const meter = getMeter();
   if (!meter) return;
 
@@ -959,7 +1131,7 @@ export function recordMemoryDreamMetrics(
   durationMs: number,
   attrs: {
     trigger: 'auto' | 'manual';
-    status: 'updated' | 'noop' | 'failed';
+    status: 'updated' | 'noop' | 'failed' | 'cancelled';
     deduped_entries: number;
   },
 ): void {
@@ -989,4 +1161,49 @@ export function recordMemoryRecallMetrics(
     ...common,
     strategy: attrs.strategy,
   });
+}
+
+export function recordChannelMemoryRecallMetrics(observation: {
+  durationMs: number;
+  cache: 'hit' | 'miss' | 'bypass';
+  result: 'selected' | 'empty' | 'stale' | 'read_error' | 'revision_unstable';
+  selectedCount: number;
+}): void {
+  if (!isMetricsInitialized) return;
+  const attributes = {
+    cache: observation.cache,
+    result: observation.result,
+  };
+  channelMemoryRecallCounter?.add(1, attributes);
+  channelMemoryRecallDurationHistogram?.record(
+    observation.durationMs,
+    attributes,
+  );
+  channelMemoryRecallSelectedCountHistogram?.record(
+    observation.selectedCount,
+    attributes,
+  );
+}
+
+export function recordMemoryRecallDeliveryMetrics(
+  config: Config,
+  latencyMs: number,
+  attrs: {
+    phase: MemoryRecallDeliveryPhase;
+    delivery_point: MemoryRecallDeliveryPoint;
+    discard_reason?: MemoryRecallDiscardReason;
+    strategy: 'none' | 'heuristic' | 'model';
+  },
+): void {
+  if (!isMetricsInitialized) return;
+  const common = baseMetricDefinition.getCommonAttributes(config);
+  const metricAttributes = {
+    ...common,
+    phase: attrs.phase,
+    delivery_point: attrs.delivery_point,
+    strategy: attrs.strategy,
+    ...(attrs.discard_reason ? { discard_reason: attrs.discard_reason } : {}),
+  };
+  memoryRecallDeliveryCounter?.add(1, metricAttributes);
+  memoryRecallDeliveryLatencyHistogram?.record(latencyMs, metricAttributes);
 }

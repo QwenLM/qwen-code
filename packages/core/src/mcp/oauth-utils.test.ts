@@ -251,10 +251,75 @@ describe('OAuthUtils', () => {
       );
     });
 
+    it('should parse resource metadata URI with optional whitespace around equals', () => {
+      const header =
+        'Bearer realm="example", resource_metadata = "https://example.com/.well-known/oauth-protected-resource"';
+      const result = OAuthUtils.parseWWWAuthenticateHeader(header);
+      expect(result).toBe(
+        'https://example.com/.well-known/oauth-protected-resource',
+      );
+    });
+
+    it('should parse single-quoted resource metadata URI', () => {
+      const header =
+        'Bearer realm="example", resource_metadata=\'https://example.com/.well-known/oauth-protected-resource\'';
+      const result = OAuthUtils.parseWWWAuthenticateHeader(header);
+      expect(result).toBe(
+        'https://example.com/.well-known/oauth-protected-resource',
+      );
+    });
+
+    it('should preserve apostrophes inside double-quoted resource metadata URI', () => {
+      const header =
+        'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource?name=o\'hara"';
+      const result = OAuthUtils.parseWWWAuthenticateHeader(header);
+      expect(result).toBe(
+        "https://example.com/.well-known/oauth-protected-resource?name=o'hara",
+      );
+    });
+
+    it('should ignore apostrophes in other auth params', () => {
+      const header =
+        'Bearer ext=can\'t, resource_metadata="https://example.com/.well-known/oauth-protected-resource"';
+      const result = OAuthUtils.parseWWWAuthenticateHeader(header);
+      expect(result).toBe(
+        'https://example.com/.well-known/oauth-protected-resource',
+      );
+    });
+
     it('should return null when no resource metadata URI is found', () => {
       const header = 'Bearer realm="example"';
       const result = OAuthUtils.parseWWWAuthenticateHeader(header);
       expect(result).toBeNull();
+    });
+
+    it('should not parse malformed resource metadata values', () => {
+      expect(
+        OAuthUtils.parseWWWAuthenticateHeader(
+          'Bearer resource_metadata=https://example.com/.well-known/oauth-protected-resource',
+        ),
+      ).toBeNull();
+      expect(
+        OAuthUtils.parseWWWAuthenticateHeader('Bearer resource_metadata=""'),
+      ).toBeNull();
+      expect(
+        OAuthUtils.parseWWWAuthenticateHeader(
+          'Bearer resource_metadata=\'https://example.com/.well-known/oauth-protected-resource"',
+        ),
+      ).toBeNull();
+    });
+
+    it('should only parse standalone resource metadata params', () => {
+      expect(
+        OAuthUtils.parseWWWAuthenticateHeader(
+          'Bearer not_resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
+        ),
+      ).toBeNull();
+      expect(
+        OAuthUtils.parseWWWAuthenticateHeader(
+          'Bearer error_description="missing, resource_metadata=\'https://example.com/.well-known/oauth-protected-resource\'"',
+        ),
+      ).toBeNull();
     });
   });
 

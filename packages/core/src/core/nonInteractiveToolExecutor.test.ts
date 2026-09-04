@@ -12,12 +12,14 @@ import type {
   ToolCallRequestInfo,
   ToolResult,
   Config,
+  RuntimeContentGeneratorView,
 } from '../index.js';
 import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   ToolErrorType,
   ApprovalMode,
+  getRuntimeContentGenerator,
 } from '../index.js';
 import type { Part } from '@google/genai';
 import { MockTool } from '../test-utils/mock-tool.js';
@@ -61,7 +63,7 @@ describe('executeToolCall', () => {
         DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getUseModelRouter: () => false,
-      getGeminiClient: () => null, // No client needed for these tests
+      getLlmClient: () => null, // No client needed for these tests
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -105,6 +107,7 @@ describe('executeToolCall', () => {
       callId: 'call1',
       error: undefined,
       errorType: undefined,
+      executionStatus: 'success',
       resultDisplay: 'Success!',
       contentLength:
         typeof toolResult.llmContent === 'string'
@@ -120,6 +123,80 @@ describe('executeToolCall', () => {
         },
       ],
     });
+  });
+
+  it('records direct calls by default and can defer to an outer boundary', async () => {
+    const recordToolResult = vi.fn();
+    mockConfig.getChatRecordingService = () =>
+      ({
+        recordToolResult,
+        recordUiTelemetryEvent: vi.fn(),
+      }) as unknown as ReturnType<Config['getChatRecordingService']>;
+    const directRequest: ToolCallRequestInfo = {
+      callId: 'direct-call',
+      name: 'testTool',
+      args: { param1: 'value1' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-direct',
+    };
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    executeFn.mockResolvedValue({
+      llmContent: 'record later',
+      returnDisplay: 'record later',
+    } satisfies ToolResult);
+
+    const directResponse = await executeToolCall(
+      mockConfig,
+      directRequest,
+      abortController.signal,
+    );
+
+    expect(recordToolResult).toHaveBeenCalledWith(
+      directResponse.responseParts,
+      expect.objectContaining({ callId: directRequest.callId }),
+    );
+    recordToolResult.mockClear();
+    const deferredRequest = { ...directRequest, callId: 'deferred-call' };
+    await expect(
+      executeToolCall(mockConfig, deferredRequest, abortController.signal, {
+        recordToolResult: false,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ callId: deferredRequest.callId }),
+    );
+    expect(recordToolResult).not.toHaveBeenCalled();
+  });
+
+  it('runs the tool with the requested runtime content generator', async () => {
+    const request: ToolCallRequestInfo = {
+      callId: 'runtime-call',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'runtime-prompt',
+    };
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+    } as unknown as RuntimeContentGeneratorView;
+    let observedRuntime: RuntimeContentGeneratorView | undefined;
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    executeFn.mockImplementation(() => {
+      observedRuntime = getRuntimeContentGenerator();
+      return Promise.resolve({
+        llmContent: 'done',
+        returnDisplay: 'done',
+      });
+    });
+
+    await executeToolCall(mockConfig, request, abortController.signal, {
+      runtimeView,
+    });
+
+    expect(observedRuntime).toBe(runtimeView);
   });
 
   it('should return an error if tool is not found', async () => {
@@ -148,6 +225,7 @@ describe('executeToolCall', () => {
       callId: 'call2',
       error: new Error(expectedErrorMessage),
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
+      executionStatus: 'not_started',
       resultDisplay: expectedErrorMessage,
       contentLength: expectedErrorMessage.length,
       responseParts: [
@@ -186,6 +264,7 @@ describe('executeToolCall', () => {
       callId: 'call3',
       error: new Error('Invalid parameters'),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+      executionStatus: 'not_started',
       responseParts: [
         {
           functionResponse: {
@@ -230,6 +309,7 @@ describe('executeToolCall', () => {
       callId: 'call4',
       error: new Error('Execution failed'),
       errorType: ToolErrorType.EXECUTION_FAILED,
+      executionStatus: 'error',
       responseParts: [
         {
           functionResponse: {
@@ -267,6 +347,7 @@ describe('executeToolCall', () => {
       callId: 'call5',
       error: new Error('Something went very wrong'),
       errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+      executionStatus: 'error',
       resultDisplay: 'Something went very wrong',
       contentLength: 'Something went very wrong'.length,
       responseParts: [
@@ -309,6 +390,7 @@ describe('executeToolCall', () => {
       callId: 'call6',
       error: undefined,
       errorType: undefined,
+      executionStatus: 'success',
       resultDisplay: 'Image processed',
       contentLength: undefined,
       responseParts: [

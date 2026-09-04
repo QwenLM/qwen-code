@@ -27,13 +27,13 @@ export type {
 } from './types.js';
 
 // Emitters
-export { BaseEmitter } from './emitters/BaseEmitter.js';
+export { BaseEmitter } from './emitters/base-emitter.js';
 export { MessageEmitter } from './emitters/MessageEmitter.js';
 export { PlanEmitter } from './emitters/PlanEmitter.js';
-export { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+export { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 
 // Components
-export { HistoryReplayer } from './HistoryReplayer.js';
+export { HistoryReplayer } from './history-replayer.js';
 export { SubAgentTracker } from './SubAgentTracker.js';
 
 // Main Session class

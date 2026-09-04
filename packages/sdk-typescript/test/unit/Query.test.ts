@@ -16,10 +16,12 @@ import type {
   CLIControlRequest,
   CLIControlResponse,
   ControlCancelRequest,
+  CLIControlInitializeRequest,
 } from '../../src/types/protocol.js';
 import { ControlRequestType } from '../../src/types/protocol.js';
 import { AbortError } from '../../src/types/errors.js';
 import { Stream } from '../../src/utils/Stream.js';
+import { SdkLogger } from '../../src/utils/logger.js';
 
 // Mock Transport implementation
 class MockTransport implements Transport {
@@ -313,6 +315,187 @@ describe('Query', () => {
       await query.close();
     });
 
+    it('should include canUseTool timeout in initialize request', async () => {
+      const query = new Query(transport, {
+        cwd: '/test',
+        timeout: {
+          canUseTool: 120_000,
+        },
+      });
+
+      await vi.waitFor(() => {
+        expect(transport.writtenMessages.length).toBeGreaterThan(0);
+      });
+
+      const initRequest =
+        transport.getLastWrittenMessage() as CLIControlRequest;
+      expect(initRequest.request.subtype).toBe('initialize');
+      expect(
+        (initRequest.request as CLIControlInitializeRequest).timeout,
+      ).toEqual({ canUseTool: 120_000 });
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
+    it('should expose a shadowed initial effort status', async () => {
+      const query = new Query(transport, {
+        cwd: '/test',
+        effort: 'high',
+      });
+
+      await vi.waitFor(() => {
+        expect(transport.writtenMessages.length).toBeGreaterThan(0);
+      });
+      const initRequest =
+        transport.getLastWrittenMessage() as CLIControlRequest;
+      transport.simulateMessage(
+        createControlResponse(initRequest.request_id, true, {
+          effort_status: {
+            effort: 'high',
+            applied: false,
+            override: {
+              source: 'extra_body',
+              field: 'thinking_budget',
+            },
+          },
+        }),
+      );
+
+      await query.initialized;
+      expect(query.getInitialEffortStatus()).toEqual({
+        applied: false,
+        override: {
+          source: 'extra_body',
+          field: 'thinking_budget',
+        },
+      });
+      await query.close();
+    });
+
+    it('should expose the CLI reason on a shadowed initial effort status', async () => {
+      const query = new Query(transport, {
+        cwd: '/test',
+        effort: 'high',
+      });
+
+      await vi.waitFor(() => {
+        expect(transport.writtenMessages.length).toBeGreaterThan(0);
+      });
+      const initRequest =
+        transport.getLastWrittenMessage() as CLIControlRequest;
+      transport.simulateMessage(
+        createControlResponse(initRequest.request_id, true, {
+          effort_status: {
+            effort: 'high',
+            applied: false,
+            override: {
+              source: 'extra_body',
+              field: 'thinking_budget',
+            },
+            reason:
+              'thinking may be disabled; extra_body.thinking_budget takes precedence',
+          },
+        }),
+      );
+
+      await query.initialized;
+      expect(query.getInitialEffortStatus()).toEqual({
+        applied: false,
+        override: {
+          source: 'extra_body',
+          field: 'thinking_budget',
+        },
+        reason:
+          'thinking may be disabled; extra_body.thinking_budget takes precedence',
+      });
+      await query.close();
+    });
+
+    it('should warn with the CLI-assembled reason when the effort is not applied', async () => {
+      const logged: string[] = [];
+      SdkLogger.configure({
+        logLevel: 'warn',
+        stderr: (message) => logged.push(message),
+      });
+      try {
+        const query = new Query(transport, { cwd: '/test', effort: 'high' });
+
+        await vi.waitFor(() => {
+          expect(transport.writtenMessages.length).toBeGreaterThan(0);
+        });
+        const initRequest =
+          transport.getLastWrittenMessage() as CLIControlRequest;
+        transport.simulateMessage(
+          createControlResponse(initRequest.request_id, true, {
+            effort_status: {
+              effort: 'high',
+              applied: false,
+              override: {
+                source: 'extra_body',
+                field: 'thinking_budget',
+              },
+              reason:
+                'thinking may be disabled; extra_body.thinking_budget takes precedence',
+            },
+          }),
+        );
+
+        await query.initialized;
+        expect(
+          logged.some((line) =>
+            line.includes(
+              'Initial reasoning effort was not applied (thinking may be disabled; extra_body.thinking_budget takes precedence)',
+            ),
+          ),
+        ).toBe(true);
+        await query.close();
+      } finally {
+        SdkLogger.configure({});
+      }
+    });
+
+    it('should fall back to a derived reason when the CLI sends none', async () => {
+      const logged: string[] = [];
+      SdkLogger.configure({
+        logLevel: 'warn',
+        stderr: (message) => logged.push(message),
+      });
+      try {
+        const query = new Query(transport, { cwd: '/test', effort: 'high' });
+
+        await vi.waitFor(() => {
+          expect(transport.writtenMessages.length).toBeGreaterThan(0);
+        });
+        const initRequest =
+          transport.getLastWrittenMessage() as CLIControlRequest;
+        transport.simulateMessage(
+          createControlResponse(initRequest.request_id, true, {
+            effort_status: {
+              effort: 'high',
+              applied: false,
+              override: {
+                source: 'extra_body',
+                field: 'thinking_budget',
+              },
+            },
+          }),
+        );
+
+        await query.initialized;
+        expect(
+          logged.some((line) =>
+            line.includes(
+              'Initial reasoning effort was not applied (extra_body.thinking_budget takes precedence)',
+            ),
+          ),
+        ).toBe(true);
+        await query.close();
+      } finally {
+        SdkLogger.configure({});
+      }
+    });
+
     it('should generate unique session ID', async () => {
       const transport2 = new MockTransport();
       const query1 = new Query(transport, { cwd: '/test' });
@@ -337,6 +520,40 @@ describe('Query', () => {
       });
 
       expect(query.getSessionId()).toBe(resumeId);
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
+    it('should use new session ID when forkSession is true', async () => {
+      const resumeId = '123e4567-e89b-12d3-a456-426614174000';
+      const query = new Query(transport, {
+        cwd: '/test',
+        forkSession: true,
+        resume: resumeId,
+      });
+
+      expect(query.getSessionId()).not.toBe(resumeId);
+      expect(query.getSessionId()).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
+    it('should use explicit sessionId when forkSession is true', async () => {
+      const resumeId = '123e4567-e89b-12d3-a456-426614174000';
+      const forkId = '234e5678-e89b-12d3-a456-426614174001';
+      const query = new Query(transport, {
+        cwd: '/test',
+        forkSession: true,
+        resume: resumeId,
+        sessionId: forkId,
+      });
+
+      expect(query.getSessionId()).toBe(forkId);
+      expect(query.getSessionId()).not.toBe(resumeId);
 
       await respondToInitialize(transport, query);
       await query.close();
@@ -1246,6 +1463,163 @@ describe('Query', () => {
       await query.close();
     });
 
+    it('should provide setEffort() method', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+
+      await respondToInitialize(transport, query);
+
+      const setEffortPromise = query.setEffort('high');
+
+      await vi.waitFor(() => {
+        const messages = transport.getAllWrittenMessages();
+        const setEffortMsg = findControlRequest(
+          messages,
+          ControlRequestType.SET_EFFORT,
+        );
+        expect(setEffortMsg).toBeDefined();
+      });
+
+      const messages = transport.getAllWrittenMessages();
+      const setEffortMsg = findControlRequest(
+        messages,
+        ControlRequestType.SET_EFFORT,
+      )!;
+
+      expect((setEffortMsg.request as Record<string, unknown>).effort).toBe(
+        'high',
+      );
+
+      transport.simulateMessage(
+        createControlResponse(setEffortMsg.request_id, true, {
+          subtype: 'set_effort',
+          effort: 'high',
+          applied: true,
+        }),
+      );
+
+      const result = await setEffortPromise;
+      expect(result).toBe(true);
+
+      await query.close();
+    });
+
+    it('should expose the setEffort override status', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+      await respondToInitialize(transport, query);
+
+      const statusPromise = query.setEffortStatus('max');
+      await vi.waitFor(() => {
+        expect(
+          findControlRequest(
+            transport.getAllWrittenMessages(),
+            ControlRequestType.SET_EFFORT,
+          ),
+        ).toBeDefined();
+      });
+      const request = findControlRequest(
+        transport.getAllWrittenMessages(),
+        ControlRequestType.SET_EFFORT,
+      )!;
+      transport.simulateMessage(
+        createControlResponse(request.request_id, true, {
+          subtype: 'set_effort',
+          effort: 'max',
+          applied: false,
+          override: {
+            source: 'extra_body',
+            field: 'thinking_budget',
+          },
+        }),
+      );
+
+      await expect(statusPromise).resolves.toEqual({
+        applied: false,
+        override: {
+          source: 'extra_body',
+          field: 'thinking_budget',
+        },
+      });
+      await query.close();
+    });
+
+    it('should provide getAvailableModels() method', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+
+      await respondToInitialize(transport, query);
+
+      const modelsPromise = query.getAvailableModels();
+
+      await vi.waitFor(() => {
+        const messages = transport.getAllWrittenMessages();
+        const modelsMsg = findControlRequest(
+          messages,
+          ControlRequestType.GET_AVAILABLE_MODELS,
+        );
+        expect(modelsMsg).toBeDefined();
+      });
+
+      const messages = transport.getAllWrittenMessages();
+      const modelsMsg = findControlRequest(
+        messages,
+        ControlRequestType.GET_AVAILABLE_MODELS,
+      )!;
+
+      transport.simulateMessage(
+        createControlResponse(modelsMsg.request_id, true, {
+          subtype: 'get_available_models',
+          models: [{ id: 'qwen-max', label: 'Qwen Max' }],
+        }),
+      );
+
+      const result = await modelsPromise;
+      expect(result).toMatchObject({
+        subtype: 'get_available_models',
+        models: [{ id: 'qwen-max', label: 'Qwen Max' }],
+      });
+
+      await query.close();
+    });
+
+    it('should provide getUsageInfo() method', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+
+      await respondToInitialize(transport, query);
+
+      const usagePromise = query.getUsageInfo('week');
+
+      await vi.waitFor(() => {
+        const messages = transport.getAllWrittenMessages();
+        const usageMsg = findControlRequest(
+          messages,
+          ControlRequestType.GET_USAGE_INFO,
+        );
+        expect(usageMsg).toBeDefined();
+      });
+
+      const messages = transport.getAllWrittenMessages();
+      const usageMsg = findControlRequest(
+        messages,
+        ControlRequestType.GET_USAGE_INFO,
+      )!;
+
+      expect((usageMsg.request as Record<string, unknown>).range).toBe('week');
+
+      transport.simulateMessage(
+        createControlResponse(usageMsg.request_id, true, {
+          range: 'week',
+          summary: { totalTokens: 50000 },
+        }),
+      );
+
+      const result = await usagePromise;
+      expect(result).toMatchObject({
+        range: 'week',
+        summary: { totalTokens: 50000 },
+      });
+
+      await query.close();
+    });
+
     it('should throw if methods called on closed query', async () => {
       const query = new Query(transport, { cwd: '/test' });
       await respondToInitialize(transport, query);
@@ -1261,6 +1635,27 @@ describe('Query', () => {
       );
       await expect(query.mcpServerStatus()).rejects.toThrow('Query is closed');
       await expect(query.getContextUsage()).rejects.toThrow('Query is closed');
+      await expect(query.setEffort('high')).rejects.toThrow('Query is closed');
+      await expect(query.getAvailableModels()).rejects.toThrow(
+        'Query is closed',
+      );
+      await expect(query.getUsageInfo()).rejects.toThrow('Query is closed');
+    });
+
+    it('should send effort in initialize payload when provided in options', async () => {
+      const query = new Query(transport, { cwd: '/test', effort: 'high' });
+
+      await respondToInitialize(transport, query);
+
+      const messages = transport.getAllWrittenMessages();
+      const initMsg = findControlRequest(
+        messages,
+        ControlRequestType.INITIALIZE,
+      );
+      expect(initMsg).toBeDefined();
+      expect((initMsg!.request as Record<string, unknown>).effort).toBe('high');
+
+      await query.close();
     });
   });
 

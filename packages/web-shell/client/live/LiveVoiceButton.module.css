@@ -1,0 +1,166 @@
+.trigger {
+  position: relative;
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 10px;
+  color: var(--muted-foreground);
+  background: transparent;
+  cursor: pointer;
+  transition:
+    color 120ms ease,
+    background-color 120ms ease;
+}
+
+.trigger:hover,
+.trigger[data-active='true'] {
+  color: var(--foreground);
+  background: var(--muted);
+}
+
+.trigger[data-state='listening'],
+.trigger[data-state='speaking'] {
+  color: var(--primary);
+}
+
+.trigger[data-state='starting'],
+.trigger[data-state='thinking'],
+.trigger[data-state='stopping'] {
+  color: var(--primary);
+}
+
+.trigger[data-state='starting']::after,
+.trigger[data-state='thinking']::after,
+.trigger[data-state='speaking']::after {
+  position: absolute;
+  inset: 3px;
+  border: 1px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  border-radius: 9px;
+  content: '';
+  animation: livePulse 1.2s ease-in-out infinite;
+}
+
+.trigger[data-available='false'] {
+  color: var(--destructive);
+}
+
+.requirements {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.requirement {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.requirementState {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--muted-foreground);
+}
+
+.dot[data-ready='true'] {
+  background: #22c55e;
+}
+
+.dot[data-denied='true'] {
+  background: var(--destructive);
+}
+
+.error {
+  margin: 0;
+  color: var(--destructive);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.liveState {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.liveStateOrb {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff, #8b6bf0 45%, #4b35a7);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 15%, transparent);
+}
+
+.liveState[data-state='thinking'] .liveStateOrb,
+.liveState[data-state='starting'] .liveStateOrb,
+.liveState[data-state='speaking'] .liveStateOrb {
+  animation: livePulse 1.2s ease-in-out infinite;
+}
+
+.transcript {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  color: var(--foreground);
+  background: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.transcript[data-role='assistant'] {
+  border-radius: 18px;
+  font-style: italic;
+}
+
+.transcript[data-role='user'] {
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.hint {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+@keyframes livePulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.92);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trigger::after {
+    animation: none !important;
+  }
+}

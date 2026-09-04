@@ -16,8 +16,12 @@
  */
 
 import { ToolNames } from '../tools/tool-names.js';
-import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
+import {
+  classifyShellCommandSafety,
+  classifyShellCommandSafetyInDirectory,
+} from '../utils/shellAstParser.js';
 import { ApprovalMode } from '../config/config.js';
+import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import type { OverlayFs } from './overlayFs.js';
 
 export interface ToolGateResult {
@@ -47,7 +51,10 @@ const BOUNDARY_TOOLS = new Set<string>([
   ToolNames.MEMORY,
   ToolNames.ASK_USER_QUESTION,
   ToolNames.EXIT_PLAN_MODE,
+  ToolNames.ENTER_PLAN_MODE,
+  ToolNames.TEAM_PLAN_APPROVAL,
   ToolNames.WEB_FETCH,
+  ToolNames.WEB_SEARCH,
 ]);
 
 /**
@@ -57,6 +64,7 @@ const BOUNDARY_TOOLS = new Set<string>([
  * @param args - The tool call arguments
  * @param overlayFs - The overlay filesystem for path rewriting
  * @param approvalMode - The user's current approval mode
+ * @param cwd - Default execution directory for shell commands
  * @returns Gate result: allow, redirect, or boundary
  */
 export async function evaluateToolCall(
@@ -64,6 +72,7 @@ export async function evaluateToolCall(
   args: Record<string, unknown>,
   overlayFs: OverlayFs,
   approvalMode: ApprovalMode,
+  cwd?: string,
 ): Promise<ToolGateResult> {
   // Safe read-only tools — allow, but resolve paths through overlay
   if (SAFE_READ_ONLY_TOOLS.has(toolName)) {
@@ -76,6 +85,7 @@ export async function evaluateToolCall(
   if (WRITE_TOOLS.has(toolName)) {
     if (
       approvalMode === ApprovalMode.AUTO_EDIT ||
+      approvalMode === ApprovalMode.AUTO ||
       approvalMode === ApprovalMode.YOLO
     ) {
       return { action: 'redirect', reason: `write_tool:${toolName}` };
@@ -90,7 +100,16 @@ export async function evaluateToolCall(
   // Shell — use AST parser for accurate read-only detection
   if (toolName === ToolNames.SHELL) {
     const command = typeof args['command'] === 'string' ? args['command'] : '';
-    if (command && (await isShellCommandReadOnlyAST(command))) {
+    const directory =
+      typeof args['directory'] === 'string' && args['directory']
+        ? args['directory']
+        : cwd;
+    if (
+      command &&
+      (await (directory
+        ? classifyShellCommandSafetyInDirectory(command, directory)
+        : classifyShellCommandSafety(command))) === 'read-only'
+    ) {
       return { action: 'allow' };
     }
     return {
@@ -117,10 +136,11 @@ async function resolveReadPaths(
   args: Record<string, unknown>,
   overlayFs: OverlayFs,
 ): Promise<void> {
-  const pathKeys = ['file_path', 'filePath', 'path', 'notebook_path'];
-  for (const key of pathKeys) {
+  for (const key of PATH_ARG_KEYS) {
     if (typeof args[key] === 'string') {
-      args[key] = overlayFs.resolveReadPath(args[key] as string);
+      args[key] = overlayFs.resolveReadPath(
+        unescapePath(String(args[key]).trim()),
+      );
       return;
     }
   }
@@ -134,11 +154,11 @@ export async function rewritePathArgs(
   args: Record<string, unknown>,
   overlayFs: OverlayFs,
 ): Promise<void> {
-  // Common path argument names used by Edit and WriteFile tools
-  const pathKeys = ['file_path', 'filePath', 'path', 'notebook_path'];
-  for (const key of pathKeys) {
+  for (const key of PATH_ARG_KEYS) {
     if (typeof args[key] === 'string') {
-      args[key] = await overlayFs.redirectWrite(args[key] as string);
+      args[key] = await overlayFs.redirectWrite(
+        unescapePath(String(args[key]).trim()),
+      );
       return;
     }
   }

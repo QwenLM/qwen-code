@@ -29,10 +29,13 @@ export function ArenaStartDialog({
 }: ArenaStartDialogProps): React.JSX.Element {
   const config = useConfig();
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
 
   const modelItems = useMemo(() => {
     const allModels = config.getAllConfiguredModels();
-    const selectableModels = allModels.filter((model) => !model.isRuntimeModel);
+    const selectableModels = allModels.filter(
+      (model) => !model.isRuntimeModel && !model.imageOnly,
+    );
 
     return selectableModels.map((model) => {
       const token = `${model.authType}:${model.id}`;
@@ -95,6 +98,8 @@ export function ArenaStartDialog({
           <MultiSelect
             items={modelItems}
             initialIndex={0}
+            selectedKeys={selectedKeys}
+            onSelectedKeysChange={setSelectedKeys}
             onConfirm={handleConfirm}
             showNumbers
             showScrollArrows

@@ -7,6 +7,8 @@
 import { render } from 'ink-testing-library';
 import { AnsiOutputText } from './AnsiOutput.js';
 import type { AnsiOutput, AnsiToken } from '@qwen-code/qwen-code-core';
+import { getScreenBuffer } from '../selection/screen-buffer.js';
+import { getSelectedText } from '../selection/selection-text.js';
 
 // Helper to create a valid AnsiToken with default values
 const createAnsiToken = (overrides: Partial<AnsiToken>): AnsiToken => ({
@@ -78,6 +80,26 @@ describe('<AnsiOutputText />', () => {
     // matches the terminal it came from.
     expect(lines[1]).toBe('');
     expect(lines[2]).toBe('Third line');
+  });
+
+  it('copies styled rows with hard line boundaries', () => {
+    const data: AnsiOutput = [
+      [createAnsiToken({ text: 'first', bold: true })],
+      [createAnsiToken({ text: 'second', fg: '#ff0000' })],
+    ];
+    const { stdout } = render(<AnsiOutputText data={data} maxWidth={80} />);
+    const frame = getScreenBuffer(
+      stdout as unknown as NodeJS.WriteStream,
+    )!.frame!;
+
+    expect(
+      getSelectedText(frame, {
+        sx: 0,
+        sy: 0,
+        ex: frame.width - 1,
+        ey: frame.height - 1,
+      }),
+    ).toBe('first\nsecond');
   });
 
   it('respects the availableTerminalHeight prop and slices the lines correctly', () => {

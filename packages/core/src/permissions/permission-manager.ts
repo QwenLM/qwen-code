@@ -10,13 +10,23 @@ import {
   matchesRule,
   resolveToolName,
   splitCompoundCommand,
+  SHELL_TOOL_NAMES,
+  toolMatchesRuleToolName,
 } from './rule-parser.js';
 import type { PathMatchContext } from './rule-parser.js';
-import { extractShellOperations } from './shell-semantics.js';
+import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
-import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
-import { detectCommandSubstitution } from '../utils/shell-utils.js';
+import {
+  isShellCommandReadOnlyAST,
+  isShellCommandReadOnlyASTInDirectory,
+} from '../utils/shellAstParser.js';
+import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  findDangerousAllowRules,
+  isDangerousAllowRule,
+} from './dangerousRules.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -28,6 +38,23 @@ import type {
 } from './types.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
+
+/**
+ * How a tool participates in the registry for this session.
+ *
+ * - `registered`: fully registered; its schema is sent in the eager model
+ *   request.
+ * - `deferred`: registered but hidden from the eager model request — the
+ *   same treatment `shouldDefer` tools get. The tool stays listed in
+ *   `/tools`, discoverable and loadable via ToolSearch, and a call to it
+ *   goes through the normal approval flow. This is what happens to
+ *   built-in tools not named in an active `settings.tools.eager`
+ *   allowlist: their schemas stay out of the eager request (#9827) without
+ *   the tools silently disappearing from the session (#10075).
+ * - `disabled`: not registered at all (whole-tool deny rule, or unlisted in
+ *   the legacy `coreTools` allowlist).
+ */
+export type ToolRegistrationStatus = 'registered' | 'deferred' | 'disabled';
 
 /**
  * Numeric priority for each PermissionDecision.
@@ -62,6 +89,12 @@ export interface PermissionManagerConfig {
   /** Current working directory (for resolving path patterns). */
   getCwd?(): string;
   /**
+   * Live folder trust. Read on every permission decision for the session
+   * allow rules a project skill granted (`trustGated`): those apply only
+   * while the folder is trusted. Absent means trusted.
+   */
+  isTrustedFolder?(): boolean;
+  /**
    * Returns the current approval mode (plan/default/auto-edit/yolo).
    * Used by `getDefaultMode()` to determine the fallback when no rule matches.
    */
@@ -79,6 +112,20 @@ export interface PermissionManagerConfig {
    *             (e.g. `"Bash"` to block all shell commands) instead.
    */
   getCoreTools?(): string[] | undefined;
+
+  /**
+   * Returns the tool names from `settings.tools.eager`, the dedicated
+   * eager-schema allowlist.
+   *
+   * When this list is present, even if explicitly empty, eager-by-default
+   * built-in tools NOT named in it are demoted to deferred. Tools already
+   * deferred by default stay deferred even when named; `tools.visible`
+   * promotes those tools at startup. `undefined` means no restriction.
+   *
+   * This is deliberately a separate key from `permissions.allow`, which is
+   * pure auto-approval and never affects registration (#10075).
+   */
+  getEagerTools?(): readonly string[] | undefined;
 }
 
 /**
@@ -114,11 +161,46 @@ export class PermissionManager {
   };
 
   /**
+   * Allow rules temporarily removed while the user is in AUTO mode.
+   * Populated by `stripDangerousRulesForAutoMode` (called from
+   * `Config.setApprovalMode` on AUTO entry) and drained by
+   * `restoreDangerousRules` (called on AUTO exit). `undefined` means
+   * "not currently in AUTO mode" — distinct from "no rules stripped".
+   */
+  private strippedAllowRules?: {
+    persistent: PermissionRule[];
+    session: PermissionRule[];
+  };
+
+  /**
    * Canonical tool names from the legacy `coreTools` allowlist.
    * When non-null, `isToolEnabled()` rejects any tool not in this set.
    * Populated during `initialize()` from `config.getCoreTools()`.
    */
   private coreToolsAllowList: Set<string> | null = null;
+
+  /**
+   * Canonical tool names from the `settings.tools.eager` allowlist, or
+   * `null` when the setting is absent (the default — every tool keeps its
+   * normal registration). An empty array is NOT null: it is an active
+   * allowlist naming nothing, which defers every non-exempt tool.
+   *
+   * Matching goes through `toolMatchesRuleToolName`, the same helper the
+   * permission rules use, so aliases (`ListFiles`) and meta-categories
+   * (`Read` covers grep/glob/..., `Bash` covers `monitor`) behave exactly
+   * as they do in a rule — one less thing for users to learn.
+   *
+   * Snapshotted once in `initialize()`. Membership decides only whether a
+   * tool's schema rides in the EAGER model request; an omitted tool is
+   * `deferred`, never `disabled`, so nothing loses capability (#9827,
+   * #10075). Registry composition is a startup decision, consistent with
+   * the "Requires restart" semantics of the other tool-availability
+   * settings.
+   *
+   * Permission rules deliberately do NOT feed this set: `permissions.allow`
+   * is pure auto-approval and cannot demote, hide, or remove a tool.
+   */
+  private eagerToolAllowList: string[] | null = null;
 
   constructor(private readonly config: PermissionManagerConfig) {}
 
@@ -146,6 +228,63 @@ export class PermissionManager {
         rawCoreTools.map((t) => parseRule(t).toolName),
       );
     }
+
+    // When the session starts in AUTO (via `tools.approvalMode: 'auto'` in
+    // settings.json or `--approval-mode auto` on the CLI), the constructor
+    // sets approvalMode before PermissionManager is wired up. Catch that
+    // case here so AUTO-on-startup sessions get dangerous allow rules
+    // stripped, same as sessions that switch to AUTO via Shift+Tab.
+    if (this.config.getApprovalMode?.() === 'auto') {
+      this.stripDangerousRulesForAutoMode();
+    }
+
+    // Snapshot the `settings.tools.eager` allowlist. Only an ARRAY
+    // activates it: `undefined`, `null`, or any non-array value means no
+    // restriction, while an explicitly empty array is an active allowlist
+    // that names nothing and therefore defers every non-exempt tool.
+    // `tools.core` differs: its empty list is treated as unset.
+    //
+    // Entries are parsed with the same rule parser the permission rules
+    // use so alias forms (`ListFiles`) and stray specifiers
+    // (`Bash(npm test)`) normalise to a canonical tool name; the eager
+    // gate is tool-level, not invocation-level. Empty/whitespace-only and
+    // malformed entries are dropped, which can leave an active allowlist
+    // matching nothing — deferring more than intended is recoverable
+    // (ToolSearch still reaches every tool), whereas silently ignoring a
+    // configured list would resend exactly the schemas the user asked to
+    // keep out (#9827). Dropped entries are warned on the console because
+    // the debug log file is off in default runs.
+    const rawEagerTools = this.config.getEagerTools?.();
+    if (Array.isArray(rawEagerTools)) {
+      const canonicalNames: string[] = [];
+      const droppedEntries: string[] = [];
+      for (const entry of rawEagerTools) {
+        if (typeof entry !== 'string' || entry.trim() === '') {
+          droppedEntries.push(JSON.stringify(entry));
+          continue;
+        }
+        const rule = parseRule(entry);
+        if (rule.invalid) {
+          droppedEntries.push(JSON.stringify(entry));
+          continue;
+        }
+        canonicalNames.push(rule.toolName);
+      }
+      if (droppedEntries.length > 0) {
+        // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where this reshaping would otherwise be invisible
+        console.warn(
+          `tools.eager: ignoring ${droppedEntries.length} unusable entr${
+            droppedEntries.length === 1 ? 'y' : 'ies'
+          } (${droppedEntries.join(', ')}). ` +
+            `The allowlist stays active with ${canonicalNames.length} entr${
+              canonicalNames.length === 1 ? 'y' : 'ies'
+            }, so every other non-exempt tool is deferred to tool_search.`,
+        );
+      }
+      this.eagerToolAllowList = canonicalNames;
+    } else {
+      this.eagerToolAllowList = null;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -159,32 +298,75 @@ export class PermissionManager {
    * @returns A PermissionDecision indicating how to handle this tool call.
    */
   async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
+    ctx = this.normalizePermissionContext(ctx);
     const { command, toolName } = ctx;
 
-    // For shell commands, split compound commands and evaluate each
-    // sub-command independently, then return the most restrictive result.
-    // Priority order (most to least restrictive): deny > ask > allow
+    // ── Cross-command virtual-op pass (shell tools only) ─────────────────
+    // Run the compound-aware extractor on the FULL original command before
+    // splitting. This is the single source of truth for cd tracking and
+    // recursive shell-wrapper unwrapping — without it, splitting first
+    // would discard the cd context, so a rule like
+    // `deny: ["Write(.qwen/settings.json)"]` would miss
+    // `cd .qwen && bash -lc 'echo > settings.json'`.
+    //
+    // Virtual-op verdicts can only ESCALATE the overall decision; a
+    // 'default' here means "shell semantics have no opinion" and we still
+    // need to consult Bash rules below.
+    let virtualDecision: PermissionDecision = 'default';
+    if (command !== undefined && SHELL_TOOL_NAMES.has(toolName)) {
+      const pathCtx: PathMatchContext | undefined =
+        this.config.getProjectRoot && this.config.getCwd
+          ? {
+              projectRoot: this.config.getProjectRoot(),
+              cwd: ctx.cwd ?? this.config.getCwd(),
+            }
+          : undefined;
+      const cwd = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperationsAcrossCommand(command, cwd);
+      virtualDecision = this.evaluateShellVirtualOps(ops, pathCtx);
+      // deny short-circuits — most restrictive verdict possible.
+      if (virtualDecision === 'deny') return 'deny';
+    }
+
+    // ── Bash-rule pass: split compound commands and evaluate each
+    // sub-command independently against Bash(...) patterns, returning the
+    // most restrictive result. Priority: deny > ask > allow.
+    let bashDecision: PermissionDecision;
     if (command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
-        return this.evaluateCompoundCommand(ctx, subCommands);
+        bashDecision = await this.evaluateCompoundCommand(ctx, subCommands);
+      } else {
+        bashDecision = this.evaluateSingle(ctx);
+        // For shell commands, resolve 'default' to actual permission via AST
+        // analysis so the caller always sees a concrete verdict.
+        if (
+          bashDecision === 'default' &&
+          SHELL_TOOL_NAMES.has(toolName) &&
+          command !== undefined
+        ) {
+          bashDecision = await this.resolveDefaultPermission(
+            command,
+            ctx.cwd ?? this.config.getCwd?.(),
+          );
+        }
       }
+    } else {
+      bashDecision = this.evaluateSingle(ctx);
     }
 
-    const decision = this.evaluateSingle(ctx);
-
-    // For shell commands, resolve 'default' to actual permission using AST analysis
-    // This ensures 'default' is never returned for shell commands - they always get
-    // a concrete permission (deny/ask/allow) based on the command's readonly status.
+    // ── Merge: virtual-op verdict can ESCALATE the bash verdict (to ask /
+    // deny) but a 'default' virtual result means "shell semantics have no
+    // opinion" and must never override an explicit allow from a Bash
+    // rule. (DECISION_PRIORITY.default > DECISION_PRIORITY.allow so the
+    // guard is load-bearing.)
     if (
-      decision === 'default' &&
-      toolName === 'run_shell_command' &&
-      command !== undefined
+      virtualDecision !== 'default' &&
+      DECISION_PRIORITY[virtualDecision] > DECISION_PRIORITY[bashDecision]
     ) {
-      return this.resolveDefaultPermission(command);
+      return virtualDecision;
     }
-
-    return decision;
+    return bashDecision;
   }
 
   /**
@@ -194,18 +376,27 @@ export class PermissionManager {
    * of:
    *   1. The base decision from Bash / command-pattern rules.
    *   2. The decision derived from virtual file / network operations extracted
-   *      via `extractShellOperations` — allows Read/Edit/Write/WebFetch rules
+   *      via `extractShellOperationsAcrossCommand` — allows Read/Edit/Write/WebFetch rules
    *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
    */
   private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
-    const { toolName, command, filePath, domain, specifier } = ctx;
+    const {
+      toolName,
+      toolAliases,
+      command,
+      cwd,
+      filePath,
+      domain,
+      specifier,
+      toolParams,
+    } = ctx;
 
     // Build path context for resolving relative path patterns
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
         ? {
             projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
+            cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
 
@@ -216,28 +407,32 @@ export class PermissionManager {
       domain,
       pathCtx,
       specifier,
+      toolParams,
+      toolAliases,
     ] as const;
 
     // Compute the base decision from explicit Bash/file/domain rules.
     // Using an IIFE to keep the priority-cascade logic clean.
     const baseDecision: PermissionDecision = (() => {
+      // Restrictive rules follow canonical destinations; allow rules stay
+      // lexical so a symlink cannot widen what the user explicitly allowed.
       // Priority 1: deny rules (session first, then persistent)
       for (const rule of [
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs)) return 'deny';
+        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';
       }
       // Priority 2: ask rules
       for (const rule of [
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs)) return 'ask';
+        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';
       }
       // Priority 3: allow rules
       for (const rule of [
-        ...this.sessionRules.allow,
+        ...this.activeSessionAllowRules(),
         ...this.persistentRules.allow,
       ]) {
         if (matchesRule(rule, ...matchArgs)) return 'allow';
@@ -256,10 +451,16 @@ export class PermissionManager {
     // must never downgrade an explicit 'allow' decision from a Bash rule.
     // Example: `git status` has no file ops; an allow rule for `Bash(git *)`
     // should return 'allow', not be downgraded to 'default'.
-    if (toolName === 'run_shell_command' && command !== undefined) {
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
       const cwd = pathCtx?.cwd ?? process.cwd();
+      // Use the compound-aware extractor here too so a single
+      // `evaluateSingle` call on a segment like
+      // `bash -lc 'echo > .qwen/settings.json'` still surfaces the inner
+      // write to virtual-op rules. The cross-command cd-tracking pass at
+      // the top of `evaluate()` handles `cd && wrapper` patterns —
+      // per-segment unwrapping handles wrappers in isolation.
       const virtualDecision = this.evaluateShellVirtualOps(
-        extractShellOperations(command, cwd),
+        extractShellOperationsAcrossCommand(command, cwd),
         pathCtx,
       );
       if (
@@ -284,7 +485,7 @@ export class PermissionManager {
    */
   private evaluateShellVirtualOps(
     ops: ShellOperation[],
-    _pathCtx: PathMatchContext | undefined,
+    pathCtx: PathMatchContext | undefined,
   ): PermissionDecision {
     if (ops.length === 0) return 'default';
 
@@ -294,11 +495,24 @@ export class PermissionManager {
       // Evaluate the virtual operation using the standard rule-matching path.
       // Since op.virtualTool ≠ 'run_shell_command', this will not recurse back
       // into the shell-semantics branch.
-      const opDecision = this.evaluateSingle({
+      let opDecision = this.evaluateSingle({
         toolName: op.virtualTool,
+        cwd: pathCtx?.cwd,
         filePath: op.filePath,
         domain: op.domain,
       });
+
+      if (
+        op.cwdUnknown &&
+        op.pathMayDependOnCwd &&
+        DECISION_PRIORITY[opDecision] < DECISION_PRIORITY.ask &&
+        this.hasDenyOrAskRuleForTool(op.virtualTool)
+      ) {
+        debugLogger.info(
+          `PermissionManager: cwdUnknown escalation to 'ask' for virtualTool=${op.virtualTool} filePath=${op.filePath}`,
+        );
+        opDecision = 'ask';
+      }
 
       if (DECISION_PRIORITY[opDecision] > DECISION_PRIORITY[worst]) {
         worst = opDecision;
@@ -309,6 +523,18 @@ export class PermissionManager {
     return worst;
   }
 
+  private hasDenyOrAskRuleForTool(toolName: string): boolean {
+    return [
+      ...this.sessionRules.ask,
+      ...this.persistentRules.ask,
+      ...this.sessionRules.deny,
+      ...this.persistentRules.deny,
+    ].some(
+      (rule) =>
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
+    );
+  }
+
   /**
    * Evaluate a compound command by splitting it into sub-commands,
    * evaluating each independently, and returning the most restrictive result.
@@ -317,9 +543,8 @@ export class PermissionManager {
    *
    * When a sub-command returns 'default' (no rule matches), it is resolved to
    * the actual default permission using AST analysis:
-   *   - Command substitution detected → 'deny'
    *   - Read-only command (cd, ls, git status, etc.) → 'allow'
-   *   - Otherwise → 'ask'
+   *   - Otherwise (including command substitution) → 'ask'
    *
    * Example: with rules `allow: [git checkout *]`
    *   - "cd /path && git checkout -b feature" → allow (cd) + allow (rule) → allow
@@ -339,6 +564,9 @@ export class PermissionManager {
     };
 
     let mostRestrictive: ResolvedDecision = 'allow';
+    const changesDirectory = subCommands.some((command) =>
+      /^\s*(?:cd|pushd)(?:\s|$)/.test(command),
+    );
 
     for (const subCmd of subCommands) {
       const subCtx: PermissionCheckContext = {
@@ -351,7 +579,10 @@ export class PermissionManager {
       // (same logic as ShellToolInvocation.getDefaultPermission)
       const decision: ResolvedDecision =
         rawDecision === 'default'
-          ? await this.resolveDefaultPermission(subCmd)
+          ? await this.resolveDefaultPermission(
+              changesDirectory ? ctx.command! : subCmd,
+              ctx.cwd ?? this.config.getCwd?.(),
+            )
           : (rawDecision as ResolvedDecision);
 
       if (PRIORITY[decision] > PRIORITY[mostRestrictive]) {
@@ -371,28 +602,59 @@ export class PermissionManager {
    * Resolve 'default' permission to actual permission using AST analysis.
    * This mirrors the logic in ShellToolInvocation.getDefaultPermission().
    *
+   * Command substitution ($(), ``, <(), >()) is NOT a hard deny here — it
+   * falls through to 'ask' along with every other non-read-only command, so
+   * the user (or YOLO mode) can decide. The user-facing warning is surfaced
+   * by ShellToolInvocation.getConfirmationDetails so the confirmation prompt
+   * still flags the substitution clearly. See issue #4093 for why a hard
+   * deny here is wrong: it (a) cannot be overridden by YOLO mode and (b)
+   * fires inconsistently based on whether the PermissionManager has
+   * "relevant" rules for the surrounding compound command.
+   *
    * @param command - The shell command to analyze.
-   * @returns 'deny' for command substitution, 'allow' for read-only, 'ask' otherwise.
+   * @returns 'allow' for read-only, 'ask' otherwise.
    */
   private async resolveDefaultPermission(
     command: string,
-  ): Promise<'allow' | 'ask' | 'deny'> {
-    // Security: command substitution ($(), ``, <(), >()) → deny
-    if (detectCommandSubstitution(command)) {
-      return 'deny';
-    }
-
-    // AST-based read-only detection
+    cwd?: string,
+  ): Promise<'allow' | 'ask'> {
     try {
-      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      const isReadOnly = cwd
+        ? await isShellCommandReadOnlyASTInDirectory(command, cwd)
+        : await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {
         return 'allow';
       }
-    } catch {
-      // AST check failed, fall back to 'ask'
+    } catch (e) {
+      // Mirror the equivalent logging in `ShellToolInvocation.getDefaultPermission`
+      // (shell.ts) and `MonitorToolInvocation.getDefaultPermission` (monitor.ts).
+      // Pre-#4386 we had a regex `detectCommandSubstitution` safety net here;
+      // with that gone, the AST check is the sole gatekeeper, so a silent
+      // catch makes parser regressions invisible.
+      debugLogger.warn('AST read-only check failed, falling back to ask:', e);
     }
 
     return 'ask';
+  }
+
+  private normalizePermissionContext(
+    ctx: PermissionCheckContext,
+  ): PermissionCheckContext {
+    if (ctx.toolName !== 'monitor' || ctx.command === undefined) {
+      return ctx;
+    }
+
+    // Note on cwd: callers wired through `buildPermissionCheckContext`
+    // already populate `ctx.cwd` from the monitor's `directory` parameter
+    // (see permission-helpers.ts), and the spread below preserves it. That
+    // is what makes relative-path rules — including those derived from
+    // virtual shell ops in evaluateSingle() — resolve against the monitor's
+    // working directory rather than the global config cwd. Direct callers
+    // of `evaluate()` that bypass that helper must pass `cwd` themselves.
+    return {
+      ...ctx,
+      command: normalizeMonitorCommand(ctx.command).safetyCommand,
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -401,23 +663,56 @@ export class PermissionManager {
 
   /**
    * Core tools that are subject to the coreTools allowlist check.
-   * Tools not in this set (MCP, Skill, Agent, etc.) bypass the check.
+   *
+   * Tools NOT in this set bypass the check. Two categories live outside:
+   * - Dynamically discovered tools (MCP, Skill).
+   * - Synthetic system tools that the framework injects when a feature is
+   *   opted into and that have no meaning when missing — `agent`,
+   *   `exit_plan_mode`, `ask_user_question`, `task_stop`, `send_message`,
+   *   `structured_output` (registered only when `--json-schema` is set).
+   *   Excluding `structured_output` from `--core-tools` would leave a
+   *   `--json-schema` run with no terminal contract, so the synthetic
+   *   tool stays available regardless of the allowlist (deny rules still
+   *   apply).
    */
   private static readonly CORE_TOOLS = new Set([
     'read_file',
+    'zoom_image',
     'write_file',
     'edit',
+    'notebook_edit',
     'glob',
     'grep_search',
     'run_shell_command',
     'list_directory',
+    'read_mcp_resource',
     'web_fetch',
+    'web_search',
     'todo_write',
     'save_memory',
     'lsp',
     'cron_create',
     'cron_list',
     'cron_delete',
+    'loop_wakeup',
+    'create_sub_session',
+    'monitor',
+  ]);
+
+  /**
+   * Synthetic plan-mode lifecycle tools that must stay registered even under
+   * an active `settings.tools.eager` allowlist. The plan-mode system
+   * reminder instructs the model to present its plan by calling
+   * `exit_plan_mode`, and `enter_plan_mode` / `ask_user_question` are the
+   * sanctioned plan-flow entry and clarification tools; dropping their
+   * schemas makes the plan flow impossible to complete (#9827). They belong
+   * to the same exemption class as `structured_output` and the "synthetic
+   * system tools" the CORE_TOOLS docstring names — deny rules still apply.
+   */
+  private static readonly PLAN_LIFECYCLE_TOOLS: ReadonlySet<string> = new Set([
+    ToolNames.EXIT_PLAN_MODE,
+    ToolNames.ENTER_PLAN_MODE,
+    ToolNames.ASK_USER_QUESTION,
   ]);
 
   /**
@@ -428,39 +723,173 @@ export class PermissionManager {
   }
 
   /**
-   * Determine whether a tool should be present in the tool registry.
+   * Determine whether a tool is callable in this session.
    *
-   * A tool is disabled (returns false) when a `deny` rule without a specifier
-   * (i.e. a whole-tool deny) matches.  Specifier-based deny rules such as
-   * `"Bash(rm -rf *)"` do NOT remove the tool from the registry – they only
-   * deny specific invocations at runtime.
+   * Returns `true` for `registered` AND `deferred` tools: a deferred tool
+   * is still registered — it is merely hidden from the eager model request
+   * and loadable via ToolSearch — so a call to it must flow through the
+   * normal approval evaluation, not a permission error (#10075). Only
+   * `disabled` tools (whole-tool deny rule, or unlisted in the legacy
+   * `coreTools` allowlist) return `false`.
+   *
+   * Specifier-based deny rules such as `"Bash(rm -rf *)"` never disable the
+   * tool — they only deny specific invocations at runtime. Likewise,
+   * specifier-based allow rules such as `"Bash(npm test)"` cover the tool
+   * for allowlist membership — the allowlist is tool-level, not
+   * invocation-level.
    *
    * Non-core tools (MCP, Skill, Agent, etc.) skip the coreTools allowlist
    * check because they are dynamically discovered or essential for system
-   * operation.
+   * operation. The `settings.tools.eager` allowlist does apply to them
+   * (except the exempt families, see {@link getToolRegistrationStatus}),
+   * which is how e.g. `send_message` / `update_goal` schemas are kept out
+   * of the eager model request (#9827) — but it only ever demotes them to
+   * `deferred`, so this method still reports them enabled.
    */
   async isToolEnabled(toolName: string): Promise<boolean> {
+    return (await this.getToolRegistrationStatus(toolName)) !== 'disabled';
+  }
+
+  /**
+   * Whether a tool is excluded by the legacy `coreTools` allowlist
+   * (`--core-tools` / `tools.core`). Unlike `settings.tools.eager` — which
+   * demotes unlisted tools to `deferred` — the legacy coreTools knob keeps
+   * its documented hard-disable semantic: an unlisted core tool is not
+   * registered at all.
+   */
+  isToolDisabledByCoreToolsAllowList(toolName: string): boolean {
+    const canonicalName = resolveToolName(toolName);
+    return (
+      this.isCoreTool(canonicalName) &&
+      this.coreToolsAllowList !== null &&
+      this.coreToolsAllowList.size > 0 &&
+      !this.coreToolsAllowList.has(canonicalName)
+    );
+  }
+
+  /**
+   * Built-in/system tools that are exempt from the `settings.tools.eager`
+   * allowlist — always `registered` (subject to deny rules). See
+   * {@link getToolRegistrationStatus} for the per-family rationale.
+   */
+  private isExemptFromEagerAllowList(canonicalName: string): boolean {
+    return (
+      canonicalName === ToolNames.STRUCTURED_OUTPUT ||
+      PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) ||
+      canonicalName === ToolNames.TASK_STOP ||
+      canonicalName === ToolNames.TOOL_SEARCH ||
+      canonicalName.startsWith('mcp__') ||
+      canonicalName.startsWith('computer_use__')
+    );
+  }
+
+  /**
+   * Determine how a tool participates in the registry for this session.
+   *
+   * While the `settings.tools.eager` allowlist is active (see
+   * `isEagerToolAllowListActive`), a built-in tool not named in it is
+   * `deferred`, NOT `disabled`: it stays registered — listed in `/tools`,
+   * discoverable and loadable via ToolSearch — but its schema is kept out
+   * of the eager model request, which is the #9827 guarantee. Call-time
+   * approval for such a tool falls back to the normal permission
+   * evaluation (ask / approval-mode), so nothing loses capability
+   * silently (#10075).
+   *
+   * Permission rules are NOT consulted here. `permissions.allow` is pure
+   * auto-approval: it never demotes, hides, or removes a tool, which is
+   * the #10075 decoupling. Restricting the eager tool surface is the job
+   * of the dedicated `tools.eager` key.
+   *
+   * Exempt from the allowlist (always `registered` unless denied):
+   * - MCP tools (`mcp__*`): dynamically discovered and filtered via the
+   *   per-server `includeTools` / `excludeTools` and `tools.disabled`
+   *   knobs instead — same bypass the legacy coreTools allowlist had.
+   * - `structured_output`: the synthetic terminal contract for
+   *   `--json-schema` runs; removing it leaves such runs with no way to
+   *   finish (deny rules still apply to it).
+   * - Plan-mode lifecycle tools (`exit_plan_mode` / `enter_plan_mode` /
+   *   `ask_user_question`): the plan-mode system reminder tells the model
+   *   to call `exit_plan_mode` to present a plan, so their schemas must
+   *   reach the model for the sanctioned plan flow to complete (#9827).
+   * - `task_stop`: registered tools advertise it to the model —
+   *   `run_shell_command`'s schema says to use `task_stop` to stop a
+   *   background command (and not to use broad process-name kills), and
+   *   the background-promotion result instructs `task_stop({ task_id })`
+   *   verbatim. It is `shouldDefer=true` (task-stop.ts), the exact
+   *   property the computer_use__* exemption below cites: deferred
+   *   schemas never enter the eager model request, so gating it buys
+   *   nothing for the schema-shrink goal and only strips the sanctioned
+   *   stop flow while the tool that advertises it stays listed (#9827).
+   * - Computer Use tools (`computer_use__*`): the generated cua-driver
+   *   surface (35 tools, `computerUseEnabled` defaults to true) has no
+   *   alias entry, meta-category, or wildcard rule form — the wire names
+   *   churn on every cua-driver version bump (see tool-names.ts), so no
+   *   concise allow rule can keep the family listed. Every member is
+   *   `shouldDefer=true`, so the schemas never enter the eager model
+   *   request anyway: gating them buys nothing for the schema-shrink
+   *   goal and only strips capability, including ToolSearch
+   *   discoverability. The legacy `tools.core` gate never dropped them
+   *   either (non-core tools bypassed it) (#9827).
+   * - `tool_search`: the deferred-tool discovery surface itself. When
+   *   ToolSearch is absent from the registry, client.ts
+   *   (`resolveDeferredToolsForReminder`) eagerly force-reveals EVERY
+   *   registered deferred tool — all `mcp__*` tools and the deferred
+   *   `computer_use__*` family — into the eager model request, and
+   *   `preloadDeferredToolsWithinBudget` early-returns without it, so
+   *   gating tool_search under a narrow allowlist inverts the
+   *   schema-shrink goal into maximal schema bloat for exactly the
+   *   deferred families the exemptions above preserve for ToolSearch
+   *   discoverability. tool_search itself is never `shouldDefer`
+   *   (tool-search.ts), so its own schema cost is unchanged by keeping
+   *   it listed. Pre-#9827 it always bypassed the legacy coreTools gate
+   *   as a non-core tool (#9827). ToolSearch is precisely what makes the
+   *   deferred-not-disabled semantic usable (#10075).
+   *
+   * `disabled` is reserved for the hard gates: a whole-tool deny rule
+   * (deny always wins over eager-allowlist membership), or the legacy
+   * `coreTools` allowlist, whose documented semantic is hard exclusion
+   * and which — unlike `tools.eager` — predates the deferred demotion and
+   * is set deliberately (#9827).
+   */
+  async getToolRegistrationStatus(
+    toolName: string,
+  ): Promise<ToolRegistrationStatus> {
     const canonicalName = resolveToolName(toolName);
 
-    // Non-core tools bypass coreTools allowlist check
-    if (!this.isCoreTool(canonicalName)) {
-      const decision = await this.evaluate({ toolName: canonicalName });
-      return decision !== 'deny';
-    }
-
-    // Core tools: if a coreTools allowlist is active, only explicitly listed
-    // tools are registered. This mirrors the legacy `tools.core` whitelist
-    // semantic: any tool NOT in the allowlist is excluded from the registry.
-    if (this.coreToolsAllowList !== null && this.coreToolsAllowList.size > 0) {
-      if (!this.coreToolsAllowList.has(canonicalName)) {
-        return false;
-      }
-    }
-
-    // evaluate({ toolName }) without a command will only match rules that have
-    // no specifier, which is the correct registry-level check.
+    // Deny rules win over everything: a whole-tool deny removes the tool
+    // from the session regardless of eager-allowlist membership.
+    // evaluate({ toolName }) without a command will only match rules that
+    // have no specifier, which is the correct registry-level check.
     const decision = await this.evaluate({ toolName: canonicalName });
-    return decision !== 'deny';
+    if (decision === 'deny') {
+      return 'disabled';
+    }
+
+    // The legacy coreTools allowlist keeps its hard-disable semantic.
+    if (this.isToolDisabledByCoreToolsAllowList(canonicalName)) {
+      return 'disabled';
+    }
+
+    if (
+      this.eagerToolAllowList &&
+      !this.isExemptFromEagerAllowList(canonicalName) &&
+      !this.eagerToolAllowList.some((eagerName) =>
+        toolMatchesRuleToolName(eagerName, canonicalName),
+      )
+    ) {
+      return 'deferred';
+    }
+
+    return 'registered';
+  }
+
+  /**
+   * Whether the `settings.tools.eager` allowlist is active for this session.
+   * See the `eagerToolAllowList` field for the activation contract
+   * (snapshot at `initialize()`, restart-scoped).
+   */
+  isEagerToolAllowListActive(): boolean {
+    return this.eagerToolAllowList !== null;
   }
 
   /**
@@ -470,13 +899,23 @@ export class PermissionManager {
    * Useful for providing user-visible feedback about which rule caused a denial.
    */
   findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
-    const { toolName, command, filePath, domain, specifier } = ctx;
+    ctx = this.normalizePermissionContext(ctx);
+    const {
+      toolName,
+      toolAliases,
+      command,
+      cwd,
+      filePath,
+      domain,
+      specifier,
+      toolParams,
+    } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
         ? {
             projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
+            cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
 
@@ -487,13 +926,15 @@ export class PermissionManager {
       domain,
       pathCtx,
       specifier,
+      toolParams,
+      toolAliases,
     ] as const;
 
     for (const rule of [
       ...this.sessionRules.deny,
       ...this.persistentRules.deny,
     ]) {
-      if (matchesRule(rule, ...matchArgs)) {
+      if (matchesRule(rule, ...matchArgs, 'canonical')) {
         return rule.raw;
       }
     }
@@ -510,10 +951,14 @@ export class PermissionManager {
    * @param command - The shell command to evaluate.
    * @returns The PermissionDecision for this command.
    */
-  async isCommandAllowed(command: string): Promise<PermissionDecision> {
+  async isCommandAllowed(
+    command: string,
+    cwd?: string,
+  ): Promise<PermissionDecision> {
     return this.evaluate({
       toolName: 'run_shell_command',
       command,
+      cwd,
     });
   }
 
@@ -543,54 +988,55 @@ export class PermissionManager {
    * @returns true if at least one rule matches.
    */
   hasRelevantRules(ctx: PermissionCheckContext): boolean {
-    const { toolName, command, filePath, domain, specifier } = ctx;
-
-    if (ctx.toolName === 'run_shell_command' && command !== undefined) {
-      const subCommands = splitCompoundCommand(command);
-      if (subCommands.length > 1) {
-        return subCommands.some((subCmd) =>
-          this.hasRelevantRules({ ...ctx, command: subCmd }),
-        );
-      }
-    }
+    ctx = this.normalizePermissionContext(ctx);
+    const {
+      toolName,
+      toolAliases,
+      command,
+      cwd,
+      filePath,
+      domain,
+      specifier,
+      toolParams,
+    } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
         ? {
             projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
+            cwd: cwd ?? this.config.getCwd(),
           }
         : undefined;
 
-    const matchArgs = [
-      toolName,
-      command,
-      filePath,
-      domain,
-      pathCtx,
-      specifier,
-    ] as const;
-
-    const allRules = [
-      ...this.sessionRules.allow,
+    const allowRules = [
+      ...this.activeSessionAllowRules(),
       ...this.persistentRules.allow,
+    ];
+    const restrictiveRules = [
       ...this.sessionRules.ask,
       ...this.persistentRules.ask,
       ...this.sessionRules.deny,
       ...this.persistentRules.deny,
     ];
 
-    if (allRules.some((rule) => matchesRule(rule, ...matchArgs))) return true;
-
-    // For shell commands: also check whether any virtual file/network operation
-    // extracted from the command has a relevant rule. This ensures the PM is
-    // consulted (and the confirmation dialog shown) when Read/Edit/etc. rules
-    // would match equivalent shell commands.
-    if (ctx.toolName === 'run_shell_command' && ctx.command !== undefined) {
-      const cwd = pathCtx?.cwd ?? process.cwd();
-      const ops = extractShellOperations(ctx.command, cwd);
+    // ── Cross-command virtual-op pass (shell tools only) ─────────────────
+    // Run before the splitCompound recursion so cd tracking and recursive
+    // wrapper unwrapping see the FULL original command. Required so
+    // rules like `Write(.qwen/settings.json)` are recognised as relevant
+    // for `cd .qwen && bash -lc 'echo > settings.json'`.
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+      const cwdForOps = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
       if (
         ops.some((op) => {
+          if (
+            op.cwdUnknown &&
+            op.pathMayDependOnCwd &&
+            this.hasDenyOrAskRuleForTool(op.virtualTool)
+          ) {
+            return true;
+          }
+
           const opMatchArgs = [
             op.virtualTool,
             undefined,
@@ -599,14 +1045,51 @@ export class PermissionManager {
             pathCtx,
             undefined,
           ] as const;
-          return allRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+          return (
+            restrictiveRules.some((rule) =>
+              matchesRule(
+                rule,
+                ...opMatchArgs,
+                undefined,
+                undefined,
+                'canonical',
+              ),
+            ) ||
+            allowRules.some((rule) =>
+              matchesRule(rule, ...opMatchArgs, undefined),
+            )
+          );
         })
       ) {
         return true;
       }
     }
 
-    return false;
+    if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
+      const subCommands = splitCompoundCommand(command);
+      if (subCommands.length > 1) {
+        return subCommands.some((subCmd) =>
+          this.hasRelevantRules({ ...ctx, command: subCmd }),
+        );
+      }
+    }
+
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+      toolParams,
+      toolAliases,
+    ] as const;
+
+    return (
+      restrictiveRules.some((rule) =>
+        matchesRule(rule, ...matchArgs, 'canonical'),
+      ) || allowRules.some((rule) => matchesRule(rule, ...matchArgs))
+    );
   }
 
   /**
@@ -619,9 +1102,68 @@ export class PermissionManager {
    * real ask rule matched.
    */
   hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
-    const { toolName, command, filePath, domain, specifier } = ctx;
+    ctx = this.normalizePermissionContext(ctx);
+    const {
+      toolName,
+      toolAliases,
+      command,
+      cwd,
+      filePath,
+      domain,
+      specifier,
+      toolParams,
+    } = ctx;
 
-    if (ctx.toolName === 'run_shell_command' && command !== undefined) {
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: cwd ?? this.config.getCwd(),
+          }
+        : undefined;
+
+    const askRules = [...this.sessionRules.ask, ...this.persistentRules.ask];
+
+    // ── Cross-command virtual-op pass (shell tools only) ─────────────────
+    // See `hasRelevantRules` for the rationale; same cd-tracking and
+    // wrapper-unwrapping requirement applies to ask rules.
+    if (SHELL_TOOL_NAMES.has(toolName) && command !== undefined) {
+      const cwdForOps = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperationsAcrossCommand(command, cwdForOps);
+      if (
+        ops.some((op) => {
+          if (
+            op.cwdUnknown &&
+            op.pathMayDependOnCwd &&
+            this.hasAskRuleForTool(op.virtualTool)
+          ) {
+            return true;
+          }
+
+          const opMatchArgs = [
+            op.virtualTool,
+            undefined,
+            op.filePath,
+            op.domain,
+            pathCtx,
+            undefined,
+          ] as const;
+          return askRules.some((rule) =>
+            matchesRule(
+              rule,
+              ...opMatchArgs,
+              undefined,
+              undefined,
+              'canonical',
+            ),
+          );
+        })
+      ) {
+        return true;
+      }
+    }
+
+    if (SHELL_TOOL_NAMES.has(ctx.toolName) && command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
         return subCommands.some((subCmd) =>
@@ -630,14 +1172,6 @@ export class PermissionManager {
       }
     }
 
-    const pathCtx: PathMatchContext | undefined =
-      this.config.getProjectRoot && this.config.getCwd
-        ? {
-            projectRoot: this.config.getProjectRoot(),
-            cwd: this.config.getCwd(),
-          }
-        : undefined;
-
     const matchArgs = [
       toolName,
       command,
@@ -645,31 +1179,20 @@ export class PermissionManager {
       domain,
       pathCtx,
       specifier,
+      toolParams,
+      toolAliases,
     ] as const;
 
-    const askRules = [...this.sessionRules.ask, ...this.persistentRules.ask];
+    return askRules.some((rule) =>
+      matchesRule(rule, ...matchArgs, 'canonical'),
+    );
+  }
 
-    if (askRules.some((rule) => matchesRule(rule, ...matchArgs))) {
-      return true;
-    }
-
-    if (ctx.toolName === 'run_shell_command' && ctx.command !== undefined) {
-      const cwd = pathCtx?.cwd ?? process.cwd();
-      const ops = extractShellOperations(ctx.command, cwd);
-      return ops.some((op) => {
-        const opMatchArgs = [
-          op.virtualTool,
-          undefined,
-          op.filePath,
-          op.domain,
-          pathCtx,
-          undefined,
-        ] as const;
-        return askRules.some((rule) => matchesRule(rule, ...opMatchArgs));
-      });
-    }
-
-    return false;
+  private hasAskRuleForTool(toolName: string): boolean {
+    return [...this.sessionRules.ask, ...this.persistentRules.ask].some(
+      (rule) =>
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, toolName),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -677,18 +1200,78 @@ export class PermissionManager {
   // ---------------------------------------------------------------------------
 
   /**
+   * The session allow rules in force right now: every rule the user granted,
+   * plus the repository-granted (`trustGated`) ones only while the folder is
+   * trusted. Trust is re-read on every call — `Config.isTrustedFolder()` is
+   * live under an IDE connection — so a revocation mid-session suspends a
+   * project skill's grants at the next decision, and a later grant of trust
+   * restores them, the second side of the gate `applySideEffects` enforces
+   * on the way in.
+   */
+  private activeSessionAllowRules(): PermissionRule[] {
+    const trusted = this.config.isTrustedFolder?.() ?? true;
+    return trusted
+      ? this.sessionRules.allow
+      : this.sessionRules.allow.filter((rule) => !rule.trustGated);
+  }
+
+  /**
    * Add a session-level allow rule (in-memory, cleared when the session ends).
    * Used when the user clicks "Always allow for this session".
    *
+   * Purely an auto-approval grant: allow rules never affect registration, so
+   * this can neither reveal nor hide a tool (#10075).
+   *
    * @param raw - The raw rule string, e.g. "Bash(git status)".
+   * @param options - `trustGated`: the grant came from repository-controlled
+   *   configuration (a project skill's `allowedTools`) and applies only
+   *   while the folder is trusted — see `PermissionRule.trustGated`.
    */
-  addSessionAllowRule(raw: string): void {
+  addSessionAllowRule(raw: string, options?: { trustGated?: boolean }): void {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
+      if (options?.trustGated) rule.trustGated = true;
       if (rule.invalid) {
         debugLogger.warn(
           `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
         );
+        return;
+      }
+      // AUTO mode invariant: while dangerous allow rules are stripped,
+      // any newly added allow rule that is itself dangerous must be
+      // stashed alongside the strip rather than made active. Without
+      // this, a user clicking "Always allow" on a fallback prompt for
+      // a Bash invocation could persist `Bash` or `Bash(python *)` and
+      // every subsequent AUTO call would bypass the classifier. See
+      // dangerousRules.ts for the classifier-bypass criteria.
+      if (this.strippedAllowRules && isDangerousAllowRule(rule)) {
+        // Deduplicate on raw string — matches the persistent-stash branch
+        // in addPersistentRule. A repeated "Always allow" choice for the
+        // same rule must not pile copies into the session stash.
+        const exists = this.strippedAllowRules.session.some(
+          (r) => r.raw === rule.raw,
+        );
+        if (!exists) {
+          this.strippedAllowRules.session.push(rule);
+        }
+        debugLogger.info(
+          `Stashed newly added dangerous allow rule while in AUTO mode: ${rule.raw}`,
+        );
+        return;
+      }
+      // Deduplicate on raw string — mirrors addPersistentRule and the
+      // dangerous-stash branch above. Reload cycles (e.g. /unskill +
+      // re-invoke) re-run applySkillAllowedTools; without this guard the
+      // skill's allowedTools list would accumulate on every cycle.
+      // The kept entry's trust gating takes the WIDER of the two grants: a
+      // user grant of the same raw outranks a repo grant, so an ungated
+      // arrival clears the flag on the kept entry — otherwise the user's
+      // grant would inherit the repo grant's suspension when folder trust
+      // is revoked. A gated re-arrival (a skill reload) stays an
+      // idempotent skip and never re-gates a rule the user holds.
+      const existing = this.sessionRules.allow.find((r) => r.raw === rule.raw);
+      if (existing) {
+        if (!options?.trustGated) existing.trustGated = false;
         return;
       }
       this.sessionRules.allow.push(rule);
@@ -745,6 +1328,29 @@ export class PermissionManager {
     if (rule.invalid) {
       debugLogger.warn(
         `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
+      );
+      return rule;
+    }
+    // AUTO mode invariant: see addSessionAllowRule above. A dangerous
+    // allow rule persisted while in AUTO must not become active until
+    // the user exits AUTO — otherwise an "Always allow" choice on a
+    // fallback prompt would bypass the classifier from that point on.
+    // The settings.json write is still performed by the caller (this
+    // method only manages the in-memory ruleset), so the rule reaches
+    // disk and will activate normally on the next non-AUTO start.
+    if (
+      type === 'allow' &&
+      this.strippedAllowRules &&
+      isDangerousAllowRule(rule)
+    ) {
+      const exists = this.strippedAllowRules.persistent.some(
+        (r) => r.raw === rule.raw,
+      );
+      if (!exists) {
+        this.strippedAllowRules.persistent.push(rule);
+      }
+      debugLogger.info(
+        `Stashed newly added dangerous persistent allow rule while in AUTO mode: ${rule.raw}`,
       );
       return rule;
     }
@@ -828,7 +1434,7 @@ export class PermissionManager {
     addRules(this.persistentRules.deny, 'deny', 'user');
     addRules(this.sessionRules.ask, 'ask', 'session');
     addRules(this.persistentRules.ask, 'ask', 'user');
-    addRules(this.sessionRules.allow, 'allow', 'session');
+    addRules(this.activeSessionAllowRules(), 'allow', 'session');
     addRules(this.persistentRules.allow, 'allow', 'user');
 
     return result;
@@ -843,5 +1449,87 @@ export class PermissionManager {
       ...this.sessionRules.allow.map((r) => r.raw),
       ...this.persistentRules.allow.map((r) => r.raw),
     ];
+  }
+
+  // ---------------------------------------------------------------------------
+  // AUTO mode dangerous-rule stash
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Remove any allow rules whose breadth would defeat the AUTO classifier
+   * (see {@link findDangerousAllowRules}) and stash them for restore.
+   * Idempotent — calling twice while in AUTO is a no-op. Deny rules are
+   * never stripped; users intend deny rules as hard blocks regardless of
+   * mode.
+   */
+  stripDangerousRulesForAutoMode(): {
+    persistent: PermissionRule[];
+    session: PermissionRule[];
+  } {
+    if (this.strippedAllowRules) {
+      return this.strippedAllowRules;
+    }
+
+    const persistentDangerous = findDangerousAllowRules(
+      this.persistentRules.allow,
+    );
+    const sessionDangerous = findDangerousAllowRules(this.sessionRules.allow);
+
+    if (persistentDangerous.length === 0 && sessionDangerous.length === 0) {
+      this.strippedAllowRules = { persistent: [], session: [] };
+      return this.strippedAllowRules;
+    }
+
+    const persistentDangerousSet = new Set(persistentDangerous);
+    const sessionDangerousSet = new Set(sessionDangerous);
+
+    this.persistentRules.allow = this.persistentRules.allow.filter(
+      (r) => !persistentDangerousSet.has(r),
+    );
+    this.sessionRules.allow = this.sessionRules.allow.filter(
+      (r) => !sessionDangerousSet.has(r),
+    );
+
+    this.strippedAllowRules = {
+      persistent: persistentDangerous,
+      session: sessionDangerous,
+    };
+    return this.strippedAllowRules;
+  }
+
+  /**
+   * Reverse of {@link stripDangerousRulesForAutoMode}: re-attach previously
+   * stripped allow rules to their original scope. Idempotent when not
+   * currently in AUTO.
+   */
+  restoreDangerousRules(): void {
+    if (!this.strippedAllowRules) return;
+    if (this.strippedAllowRules.persistent.length > 0) {
+      this.persistentRules.allow = [
+        ...this.persistentRules.allow,
+        ...this.strippedAllowRules.persistent,
+      ];
+    }
+    if (this.strippedAllowRules.session.length > 0) {
+      this.sessionRules.allow = [
+        ...this.sessionRules.allow,
+        ...this.strippedAllowRules.session,
+      ];
+    }
+    this.strippedAllowRules = undefined;
+  }
+
+  /**
+   * Return a snapshot of currently-stashed dangerous allow rules.
+   * Used by the UI to surface a "the following rules are disabled in AUTO
+   * mode" notice. Returns `undefined` when not currently in AUTO.
+   */
+  getStrippedDangerousRules():
+    | {
+        persistent: readonly PermissionRule[];
+        session: readonly PermissionRule[];
+      }
+    | undefined {
+    return this.strippedAllowRules;
   }
 }

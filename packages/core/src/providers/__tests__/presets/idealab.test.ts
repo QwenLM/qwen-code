@@ -1,0 +1,109 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it } from 'vitest';
+import { AuthType } from '../../../core/contentGenerator.js';
+import { idealabProvider } from '../../presets/idealab.js';
+import { buildInstallPlan } from '../../provider-config.js';
+
+describe('idealabProvider', () => {
+  it('has correct provider config', () => {
+    expect(idealabProvider).toMatchObject({
+      id: 'idealab',
+      label: 'Idealab API Key',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+      envKey: 'IDEALAB_API_KEY',
+      uiGroup: 'third-party',
+    });
+  });
+
+  it('creates an install plan with per-model metadata for known IDs', () => {
+    const plan = buildInstallPlan(idealabProvider, {
+      baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+      apiKey: 'sk-idealab',
+      modelIds: ['Qwen3.6-Plus-DogFooding', 'bailian/deepseek-v4-pro'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models).toHaveLength(2);
+    expect(models?.[0]).toMatchObject({
+      id: 'Qwen3.6-Plus-DogFooding',
+      name: '[Idealab] Qwen3.6-Plus-DogFooding',
+      generationConfig: { contextWindowSize: 1000000 },
+    });
+    expect(models?.[1]).toMatchObject({
+      id: 'bailian/deepseek-v4-pro',
+      name: '[Idealab] bailian/deepseek-v4-pro',
+      generationConfig: {
+        extra_body: { enable_thinking: true },
+        contextWindowSize: 1000000,
+      },
+    });
+  });
+
+  it('does not mark DeepSeek models as multimodal', () => {
+    const plan = buildInstallPlan(idealabProvider, {
+      baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+      apiKey: 'sk-idealab',
+      modelIds: ['bailian/deepseek-v4-pro', 'bailian/deepseek-v4-flash'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models?.[0]?.generationConfig).toEqual({
+      extra_body: { enable_thinking: true },
+      contextWindowSize: 1000000,
+    });
+    expect(models?.[1]?.generationConfig).toEqual({
+      extra_body: { enable_thinking: true },
+      contextWindowSize: 1000000,
+    });
+  });
+
+  it('does not mark kimi-k2.6 as multimodal', () => {
+    const plan = buildInstallPlan(idealabProvider, {
+      baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+      apiKey: 'sk-idealab',
+      modelIds: ['bailian/kimi-k2.6'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models?.[0]?.generationConfig).toEqual({
+      extra_body: { enable_thinking: true },
+      contextWindowSize: 262144,
+    });
+  });
+
+  it('falls back gracefully for unknown model IDs', () => {
+    const plan = buildInstallPlan(idealabProvider, {
+      baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
+      apiKey: 'sk-idealab',
+      modelIds: ['Qwen3.6-Plus-DogFooding', 'some-new-model'],
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models).toHaveLength(2);
+    expect(models?.[0]).toMatchObject({
+      id: 'Qwen3.6-Plus-DogFooding',
+      name: '[Idealab] Qwen3.6-Plus-DogFooding',
+    });
+    expect(models?.[1]).toMatchObject({
+      id: 'some-new-model',
+      name: '[Idealab] some-new-model',
+    });
+    expect(models?.[1]?.generationConfig).toBeUndefined();
+  });
+
+  it('includes all four predefined models', () => {
+    expect(idealabProvider.models).toHaveLength(4);
+    expect(idealabProvider.models?.map((m) => m.id)).toEqual([
+      'Qwen3.6-Plus-DogFooding',
+      'bailian/deepseek-v4-pro',
+      'bailian/deepseek-v4-flash',
+      'bailian/kimi-k2.6',
+    ]);
+  });
+});

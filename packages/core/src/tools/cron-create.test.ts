@@ -1,11 +1,28 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CronCreateTool } from './cron-create.js';
 import { CronScheduler } from '../services/cronScheduler.js';
+import { readCronTasks } from '../services/cronTasksFile.js';
+import { Storage } from '../config/storage.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
+import type { CurrentSessionScheduledTaskCreator } from '../config/config.js';
 
-function makeConfig() {
-  const scheduler = new CronScheduler();
+let tmpDir: string;
+
+function makeConfig(
+  maxAgeDays = 7,
+  currentSessionCreator?: CurrentSessionScheduledTaskCreator,
+  sessionSourceType?: string,
+) {
+  const scheduler = new CronScheduler(tmpDir, maxAgeDays * 24 * 60 * 60 * 1000);
   return {
     getCronScheduler: () => scheduler,
+    getCronRecurringMaxAgeDays: () => maxAgeDays,
+    getProjectRoot: () => tmpDir,
+    getCurrentSessionScheduledTaskCreator: () => currentSessionCreator,
+    getSessionSourceType: () => sessionSourceType,
     _scheduler: scheduler,
   } as unknown as import('../config/config.js').Config & {
     _scheduler: CronScheduler;
@@ -16,9 +33,17 @@ describe('CronCreateTool', () => {
   let config: ReturnType<typeof makeConfig>;
   let tool: CronCreateTool;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'cron-create-test-'));
+    // Durable tasks persist under the user runtime dir, not the tree.
+    Storage.setRuntimeBaseDir(tmpDir);
     config = makeConfig();
     tool = new CronCreateTool(config);
+  });
+
+  afterEach(async () => {
+    Storage.setRuntimeBaseDir(null);
+    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it('has the correct name', () => {
@@ -33,8 +58,37 @@ describe('CronCreateTool', () => {
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Scheduled recurring job');
-    expect(result.llmContent).toContain('Auto-expires after 3 days');
+    expect(result.llmContent).toContain('Auto-expires after 7 days');
+    expect(result.llmContent).toContain('Session-only');
     expect(config._scheduler.list()).toHaveLength(1);
+  });
+
+  it('reports a configured recurring max age in days', async () => {
+    config = makeConfig(30);
+    tool = new CronCreateTool(config);
+    const invocation = tool.build({
+      cron: '*/5 * * * *',
+      prompt: 'check status',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('Auto-expires after 30 days');
+    expect(tool.description).toContain('auto-expire after 30 days');
+  });
+
+  it('reports no expiry when the recurring max age is disabled', async () => {
+    config = makeConfig(Infinity);
+    tool = new CronCreateTool(config);
+    const invocation = tool.build({
+      cron: '*/5 * * * *',
+      prompt: 'check status',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('Never auto-expires');
+    expect(tool.description).toContain('never auto-expire');
+    const job = config._scheduler.list()[0]!;
+    expect(job.expiresAt).toBe(Infinity);
   });
 
   it('creates a one-shot job when recurring=false', async () => {
@@ -52,6 +106,167 @@ describe('CronCreateTool', () => {
     expect(jobs[0]!.recurring).toBe(false);
   });
 
+  it('creates a durable job and writes to disk', async () => {
+    const invocation = tool.build({
+      cron: '*/5 * * * *',
+      prompt: 'durable check',
+      durable: true,
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain(
+      'Persisted to ~/.qwen/tmp/<project-hash>/scheduled_tasks.json',
+    );
+    expect(result.returnDisplay).toContain('[durable]');
+
+    // Verify file was written
+    const tasks = await readCronTasks(tmpDir);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.prompt).toBe('durable check');
+  });
+
+  it('rejects durable jobs for standalone sessions without touching storage', async () => {
+    config = makeConfig(7, undefined, 'standalone');
+    tool = new CronCreateTool(config);
+    const invocation = tool.build({
+      cron: '*/5 * * * *',
+      prompt: 'durable check',
+      durable: true,
+    });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('not supported');
+    expect(config._scheduler.list()).toHaveLength(0);
+    await expect(readCronTasks(tmpDir)).resolves.toEqual([]);
+  });
+
+  it('does not write to disk when durable=false', async () => {
+    const invocation = tool.build({
+      cron: '*/5 * * * *',
+      prompt: 'session only',
+    });
+    await invocation.execute(new AbortController().signal);
+
+    const tasks = await readCronTasks(tmpDir);
+    expect(tasks).toHaveLength(0);
+  });
+
+  it('creates a durable task in the current daemon session', async () => {
+    const requests: Array<Parameters<CurrentSessionScheduledTaskCreator>[0]> =
+      [];
+    config = makeConfig(7, async (request) => {
+      requests.push(request);
+      return { id: 'cron-current', cron: request.cron };
+    });
+    tool = new CronCreateTool(config);
+
+    const result = await promptIdContext.run('prompt-1', () =>
+      tool
+        .build({
+          cron: '*/5 * * * *',
+          prompt: '  keep working  ',
+          durable: true,
+          sessionMode: 'current',
+        })
+        .execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toContain('cron-current');
+    expect(result.returnDisplay).toContain('[current conversation]');
+    expect(result.llmContent).toContain('bound to the current conversation');
+    expect(requests).toEqual([
+      {
+        cron: '*/5 * * * *',
+        prompt: 'keep working',
+        recurring: true,
+        promptId: 'prompt-1',
+      },
+    ]);
+    expect(config._scheduler.list()).toHaveLength(0);
+    expect(await readCronTasks(tmpDir)).toHaveLength(0);
+  });
+
+  it('surfaces a plain-object daemon error for current-session mode', async () => {
+    const message = 'The caller session does not own the active prompt';
+    config = makeConfig(7, async () => {
+      throw { code: -32602, message };
+    });
+    tool = new CronCreateTool(config);
+
+    const result = await promptIdContext.run('prompt-1', () =>
+      tool
+        .build({
+          cron: '*/5 * * * *',
+          prompt: 'keep working',
+          durable: true,
+          sessionMode: 'current',
+        })
+        .execute(new AbortController().signal),
+    );
+
+    expect(result.llmContent).toBe(`Error creating cron job: ${message}`);
+    expect(result.returnDisplay).toBe(message);
+    expect(result.error).toEqual({ message });
+  });
+
+  it('rejects current-session mode for a session-only job', async () => {
+    const result = await tool
+      .build({
+        cron: '*/5 * * * *',
+        prompt: 'keep working',
+        sessionMode: 'current',
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('requires durable: true');
+    expect(config._scheduler.list()).toHaveLength(0);
+  });
+
+  it('rejects current-session mode without an active daemon prompt', async () => {
+    config = makeConfig(7, async () => ({
+      id: 'unexpected',
+      cron: '*/5 * * * *',
+    }));
+    tool = new CronCreateTool(config);
+
+    const result = await tool
+      .build({
+        cron: '*/5 * * * *',
+        prompt: 'keep working',
+        durable: true,
+        sessionMode: 'current',
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toContain('active daemon prompt');
+  });
+
+  it.each(['', '   '])('rejects blank prompt %j', (prompt) => {
+    expect(() =>
+      tool.build({
+        cron: '*/5 * * * *',
+        prompt,
+      }),
+    ).toThrow('Parameter "prompt" must be a non-empty string.');
+    expect(config._scheduler.list()).toHaveLength(0);
+  });
+
+  it('trims the prompt before scheduling the job', async () => {
+    const invocation = tool.build({
+      cron: '*/5 * * * *',
+      prompt: '  check status  ',
+    });
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    const jobs = config._scheduler.list();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.prompt).toBe('check status');
+  });
+
   it('returns error for invalid cron expression', async () => {
     const invocation = tool.build({
       cron: 'bad cron',
@@ -59,6 +274,19 @@ describe('CronCreateTool', () => {
     });
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeDefined();
+  });
+
+  it('rejects a cron that never matches a real date', async () => {
+    // Parses fine, but Feb 30 never exists — accepting it would
+    // schedule a job that silently never fires.
+    const invocation = tool.build({
+      cron: '0 0 30 2 *',
+      prompt: 'never fires',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('No matching fire time');
+    expect(config._scheduler.list()).toHaveLength(0);
   });
 
   it('validates required params', () => {

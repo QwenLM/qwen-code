@@ -1,0 +1,581 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it } from 'vitest';
+import type {
+  AgentResultDisplay,
+  AnsiOutputDisplay,
+  FileDiff,
+  FindingsResultDisplay,
+  McpAppResultDisplay,
+  McpToolProgressData,
+  PlanResultDisplay,
+  TaskListResultDisplay,
+  TeamResultDisplay,
+  TodoResultDisplay,
+} from '../tools/tools.js';
+import {
+  compactStringForHistory,
+  compactStringForRecording,
+  compactToolResultDisplayForHistory,
+  compactToolResultDisplayForRecording,
+  MAX_RETAINED_AGENT_FIELD_CHARS,
+  MAX_RETAINED_ANSI_OUTPUT_LINES,
+  MAX_RETAINED_FILE_CONTENT_CHARS,
+  MAX_RETAINED_FILE_DIFF_CHARS,
+  MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+} from './toolResultDisplayCompaction.js';
+
+function hasUnpairedSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) {
+        return true;
+      }
+      index++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+describe('toolResultDisplayCompaction', () => {
+  it('keeps short strings unchanged', () => {
+    const value = 'short output';
+
+    expect(compactStringForHistory(value)).toBe(value);
+  });
+
+  it('keeps head and tail when compacting long strings', () => {
+    const value = `start-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-end`;
+
+    const compacted = compactStringForHistory(value);
+
+    expect(compacted.length).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    expect(compacted).toContain('start-');
+    expect(compacted).toContain('-end');
+    expect(compacted).toContain('truncated from');
+  });
+
+  it('should preserve the unchanged flag through compaction', () => {
+    const display = {
+      type: 'todo_list' as const,
+      todos: [{ id: '1', content: 'Task', status: 'pending' as const }],
+      changes: { created: [], completed: [] },
+      unchanged: true,
+    };
+    const compacted = compactToolResultDisplayForHistory(display);
+    expect((compacted as TodoResultDisplay).unchanged).toBe(true);
+  });
+
+  it('uses saved session wording when compacting recording strings', () => {
+    const value = `start-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-end`;
+
+    const compacted = compactStringForRecording(value);
+
+    expect(compacted).toContain('truncated for saved session preview');
+    expect(compacted).toContain(`original length: ${value.length} characters`);
+    expect(compacted).not.toContain('CLI history display');
+  });
+
+  it('preserves unmatched surrogate code units when compacting', () => {
+    const value = `start-\uD800-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-end`;
+
+    const compacted = compactStringForHistory(value);
+
+    expect(compacted).toContain('\uD800');
+    expect(compacted).not.toContain('\uFFFD');
+  });
+
+  it('does not split surrogate pairs at compaction boundaries', () => {
+    const limit = 80;
+    const emoji = '😀';
+    // With this length and limit, the raw head/tail cuts land inside each emoji.
+    const value = `${'h'.repeat(8)}${emoji}${'m'.repeat(
+      183,
+    )}${emoji}${'t'.repeat(5)}`;
+
+    const compacted = compactStringForHistory(value, limit);
+
+    expect(compacted.length).toBeLessThanOrEqual(limit);
+    expect(hasUnpairedSurrogate(compacted)).toBe(false);
+  });
+
+  it('drops subagent display fields that are not rendered in CLI history', () => {
+    const nestedDisplay = `nested-${'x'.repeat(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    )}-done`;
+    const display: AgentResultDisplay = {
+      type: 'task_execution',
+      subagentName: 'researcher',
+      taskDescription: 'research',
+      taskPrompt: 'p'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS + 100),
+      status: 'completed',
+      toolCalls: [
+        {
+          callId: 'call-1',
+          name: 'read_file',
+          status: 'success',
+          args: { content: 'x'.repeat(100_000) },
+          responseParts: [{ text: 'x'.repeat(100_000) }],
+          result: 'x'.repeat(100_000),
+        },
+        {
+          callId: 'call-2',
+          name: 'agent',
+          status: 'success',
+          resultDisplay: nestedDisplay,
+        },
+      ],
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    expect(compacted.taskPrompt.length).toBeLessThanOrEqual(
+      MAX_RETAINED_AGENT_FIELD_CHARS,
+    );
+    expect(compacted.toolCalls?.[0]).not.toHaveProperty('args');
+    expect(compacted.toolCalls?.[0]).not.toHaveProperty('responseParts');
+    expect(compacted.toolCalls?.[0]).not.toHaveProperty('result');
+    expect(compacted.toolCalls?.[1].resultDisplay).toContain('nested-');
+    expect(compacted.toolCalls?.[1].resultDisplay).toContain('-done');
+    expect(compacted.toolCalls?.[1].resultDisplay).toContain('truncated from');
+  });
+
+  it('compacts file diffs through the history display path', () => {
+    const display: FileDiff = {
+      fileName: 'large.txt',
+      fileDiff: `diff-${'d'.repeat(MAX_RETAINED_FILE_DIFF_CHARS)}-done`,
+      originalContent: `old-${'o'.repeat(
+        MAX_RETAINED_FILE_CONTENT_CHARS,
+      )}-done`,
+      newContent: `new-${'n'.repeat(MAX_RETAINED_FILE_CONTENT_CHARS)}-done`,
+      diffStat: {
+        model_added_lines: 1,
+        model_removed_lines: 1,
+        model_added_chars: 1,
+        model_removed_chars: 1,
+        user_added_lines: 0,
+        user_removed_lines: 0,
+        user_added_chars: 0,
+        user_removed_chars: 0,
+      },
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    expect(compacted).not.toBe(display);
+    expect(compacted.fileDiff.length).toBeLessThanOrEqual(
+      MAX_RETAINED_FILE_DIFF_CHARS,
+    );
+    expect(compacted.originalContent?.length).toBeLessThanOrEqual(
+      MAX_RETAINED_FILE_CONTENT_CHARS,
+    );
+    expect(compacted.newContent.length).toBeLessThanOrEqual(
+      MAX_RETAINED_FILE_CONTENT_CHARS,
+    );
+    expect(compacted.truncatedForSession).toBe(true);
+    expect(compacted.fileDiffLength).toBe(display.fileDiff.length);
+    expect(compacted.originalContentLength).toBe(
+      display.originalContent?.length,
+    );
+    expect(compacted.newContentLength).toBe(display.newContent.length);
+    expect(compacted.fileDiffTruncated).toBe(true);
+    expect(compacted.originalContentTruncated).toBe(true);
+    expect(compacted.newContentTruncated).toBe(true);
+    expect(display.truncatedForSession).toBeUndefined();
+  });
+
+  it('preserves null original content when compacting file diffs', () => {
+    const display: FileDiff = {
+      fileName: 'new.txt',
+      fileDiff: 'new file',
+      originalContent: null,
+      newContent: `new-${'n'.repeat(MAX_RETAINED_FILE_CONTENT_CHARS)}-done`,
+      diffStat: {
+        model_added_lines: 1,
+        model_removed_lines: 0,
+        model_added_chars: 1,
+        model_removed_chars: 0,
+        user_added_lines: 0,
+        user_removed_lines: 0,
+        user_added_chars: 0,
+        user_removed_chars: 0,
+      },
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    expect(compacted.originalContent).toBeNull();
+    expect(compacted.originalContentLength).toBe(0);
+    expect(compacted.originalContentTruncated).toBe(false);
+    expect(compacted.newContentTruncated).toBe(true);
+  });
+
+  it('compacts ansi output tokens under the retained line limit', () => {
+    const display: AnsiOutputDisplay = {
+      totalLines: 1,
+      ansiOutput: [
+        [
+          {
+            text: `line-${'x'.repeat(
+              MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+            )}-done`,
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+            fg: '',
+            bg: '',
+          },
+        ],
+      ],
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    expect(compacted.ansiOutput).toHaveLength(1);
+    expect(compacted.totalLines).toBe(1);
+    expect(compacted.ansiOutput[0][0].text).toContain('line-');
+    expect(compacted.ansiOutput[0][0].text).toContain('-done');
+    expect(compacted.ansiOutput[0][0].text).toContain('truncated from');
+  });
+
+  it('keeps unchanged ansi output displays by reference', () => {
+    const display: AnsiOutputDisplay = {
+      totalLines: 1,
+      ansiOutput: [
+        [
+          {
+            text: 'short',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+            fg: '',
+            bg: '',
+          },
+        ],
+      ],
+    };
+
+    expect(compactToolResultDisplayForRecording(display)).toBe(display);
+  });
+
+  it('bounds long ansi output and keeps the tail lines', () => {
+    const display: AnsiOutputDisplay = {
+      ansiOutput: Array.from(
+        { length: MAX_RETAINED_ANSI_OUTPUT_LINES + 5 },
+        (_, index) => [
+          {
+            text: `line-${index}`,
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+            fg: '',
+            bg: '',
+          },
+        ],
+      ),
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    expect(compacted.ansiOutput).toHaveLength(MAX_RETAINED_ANSI_OUTPUT_LINES);
+    expect(compacted.ansiOutput[0][0].text).toContain('terminal lines omitted');
+    expect(compacted.ansiOutput.at(-1)?.[0].text).toBe(
+      `line-${MAX_RETAINED_ANSI_OUTPUT_LINES + 4}`,
+    );
+  });
+
+  it('uses saved session wording when compacting recording ansi output', () => {
+    const display: AnsiOutputDisplay = {
+      ansiOutput: Array.from(
+        { length: MAX_RETAINED_ANSI_OUTPUT_LINES + 5 },
+        (_, index) => [
+          {
+            text: `line-${index}`,
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+            fg: '',
+            bg: '',
+          },
+        ],
+      ),
+    };
+
+    const compacted = compactToolResultDisplayForRecording(display);
+
+    expect(compacted.ansiOutput[0][0].text).toContain(
+      'terminal lines omitted from saved session preview',
+    );
+    expect(compacted.ansiOutput[0][0].text).not.toContain(
+      'CLI history display',
+    );
+  });
+
+  it('compacts todo, plan, and MCP progress displays', () => {
+    const todoDisplay: TodoResultDisplay = {
+      type: 'todo_list',
+      todos: [
+        {
+          id: '1',
+          status: 'pending',
+          content: `todo-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+        },
+      ],
+    };
+    const planDisplay: PlanResultDisplay = {
+      type: 'plan_summary',
+      message: `message-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+      plan: `plan-${'x'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS)}-done`,
+    };
+    const progressDisplay: McpToolProgressData = {
+      type: 'mcp_tool_progress',
+      progress: 1,
+      message: `progress-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+    };
+
+    const compactedTodo = compactToolResultDisplayForHistory(todoDisplay);
+    const compactedPlan = compactToolResultDisplayForHistory(planDisplay);
+    const compactedProgress =
+      compactToolResultDisplayForHistory(progressDisplay);
+
+    expect(compactedTodo.todos[0].content).toContain('truncated from');
+    expect(compactedPlan.message).toContain('truncated from');
+    expect(compactedPlan.plan).toContain('truncated from');
+    expect(compactedProgress.message).toContain('truncated from');
+  });
+
+  it('compacts findings displays without touching their typed fields', () => {
+    const display: FindingsResultDisplay = {
+      type: 'findings_list',
+      level: 'high',
+      findings: [
+        {
+          id: 'R1-1',
+          severity: 'Critical',
+          confidence: 'high',
+          file: 'src/foo.ts',
+          line: 42,
+          summary: `summary-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          shortSummary: 'short',
+          failureScenario: `scenario-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          outcome: 'skipped',
+          outcomeNote: `note-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          direction: 'fails-closed',
+          baseline: 'new-surface',
+        },
+      ],
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+    expect(compacted.findings[0].direction).toBe('fails-closed');
+    expect(compacted.findings[0].baseline).toBe('new-surface');
+
+    expect(compacted.findings[0].summary).toContain('truncated from');
+    expect(compacted.findings[0].failureScenario).toContain('truncated from');
+    expect(compacted.findings[0].outcomeNote).toContain('truncated from');
+    expect(compacted.findings[0].severity).toBe('Critical');
+    expect(compacted.findings[0].outcome).toBe('skipped');
+    expect(compacted.findings[0].shortSummary).toBe('short');
+    expect(compacted.level).toBe('high');
+    expect(compacted.omittedFindings).toBeUndefined();
+  });
+
+  it('applies an aggregate budget across the list, keeping the most severe prefix', () => {
+    // The schema-maximal shape: 50 findings at the field maxima (summary
+    // 2000 / failureScenario 4000 / outcomeNote 1000). Per-field caps alone
+    // retained ~358 KB through compaction, bypassing the retained-display
+    // budget every other display type obeys. Severities are staggered so
+    // the sort order (most severe first) is observable in the retained
+    // prefix.
+    const severities = ['Critical', 'Suggestion', 'Nice to have'] as const;
+    const findings = Array.from({ length: 50 }, (_, i) => ({
+      id: `R1-${i + 1}`,
+      severity: severities[i % 3],
+      confidence: 'high' as const,
+      file: `src/f${i}.ts`,
+      summary: `s${i}-${'x'.repeat(1996)}`,
+      shortSummary: 'short',
+      failureScenario: `f${i}-${'y'.repeat(3996)}`,
+      outcome: 'skipped' as const,
+      outcomeNote: `n${i}-${'z'.repeat(996)}`,
+    }));
+    const display: FindingsResultDisplay = {
+      type: 'findings_list',
+      level: 'high',
+      findings,
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    // The retained prefix starts at the most severe entry and stays within
+    // the general retained-display budget; the evicted tail is counted.
+    expect(compacted.findings[0].id).toBe('R1-1');
+    expect(compacted.findings.length).toBeLessThan(50);
+    expect(compacted.findings.length).toBeGreaterThan(0);
+    expect(compacted.omittedFindings).toBe(50 - compacted.findings.length);
+    const retainedChars = compacted.findings.reduce(
+      (total, f) =>
+        total +
+        f.summary.length +
+        f.failureScenario.length +
+        (f.outcomeNote?.length ?? 0),
+      0,
+    );
+    expect(retainedChars).toBeLessThanOrEqual(
+      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+    );
+    // The retained prefix keeps the list's own order, unsorted.
+    expect(compacted.findings.map((f) => f.id)).toEqual(
+      findings.slice(0, compacted.findings.length).map((f) => f.id),
+    );
+  });
+
+  it('compacts task list and team result displays', () => {
+    const taskDisplay: TaskListResultDisplay = {
+      type: 'task_list',
+      tasks: [
+        {
+          id: '1',
+          status: 'pending',
+          subject: `task-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          owner: `owner-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+        },
+      ],
+    };
+    const teamDisplay: TeamResultDisplay = {
+      type: 'team_result',
+      action: 'created',
+      teamName: `team-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+    };
+
+    const compactedTask = compactToolResultDisplayForHistory(taskDisplay);
+    const compactedTeam = compactToolResultDisplayForHistory(teamDisplay);
+
+    expect(compactedTask.tasks[0].subject).toContain('truncated from');
+    expect(compactedTask.tasks[0].owner).toContain('truncated from');
+    expect(compactedTeam.teamName).toContain('truncated from');
+  });
+
+  it('drops MCP App HTML and tool results from retained displays', () => {
+    const marker = 'PROBE_MCP_APP_HTML_UNIQUE_MARKER';
+    const display: McpAppResultDisplay = {
+      type: 'mcp_app',
+      serverName: 'demo',
+      resourceUri: 'ui://demo/dashboard',
+      html: `<main>${marker}${'x'.repeat(2000)}</main>`,
+      toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+      toolArguments: { region: 'APAC' },
+      fallbackText: 'Dashboard ready',
+    };
+
+    const compacted = compactToolResultDisplayForHistory(display);
+
+    expect(compacted.html).toBe('');
+    expect(compacted.toolResult).toEqual({});
+    expect(compacted.fallbackText).toBe('Dashboard ready');
+    expect(JSON.stringify(compacted)).not.toContain(marker);
+  });
+});
+
+describe('compactString limit', () => {
+  // The compaction marker embeds the original length, so it is 60-80
+  // characters on its own. It used to be appended whatever the limit was,
+  // which meant a small caller-supplied limit got back more than it asked
+  // for -- and sometimes more than the string it was given.
+  it.each([
+    ['recording' as const, 70, 60],
+    ['history' as const, 64, 63],
+    ['history' as const, 100, 50],
+    ['recording' as const, 200, 10],
+    ['history' as const, 40, 0],
+  ])(
+    'keeps %s output within bounds for input %d at limit %d',
+    (purpose, inputLength, limit) => {
+      const value = 'x'.repeat(inputLength);
+      const compact =
+        purpose === 'recording'
+          ? compactStringForRecording(value, limit)
+          : compactStringForHistory(value, limit);
+
+      expect(compact.length).toBeLessThanOrEqual(limit);
+      // Compacting must never hand back more characters than it was given.
+      expect(compact.length).toBeLessThanOrEqual(value.length);
+    },
+  );
+
+  // Guards against over-correcting: when the limit does leave room for the
+  // marker, the marker must still be there. These pass before and after.
+  it.each([
+    ['recording' as const, 5000, 500],
+    ['history' as const, 5000, 200],
+    ['history' as const, 5000, 120],
+  ])(
+    'still explains the truncation for %s at input %d, limit %d',
+    (purpose, inputLength, limit) => {
+      const value = 'x'.repeat(inputLength);
+      const compact =
+        purpose === 'recording'
+          ? compactStringForRecording(value, limit)
+          : compactStringForHistory(value, limit);
+
+      expect(compact.length).toBeLessThanOrEqual(limit);
+      expect(compact).toContain('truncated');
+    },
+  );
+
+  // The `marker.length >= limit` path slices without a marker, so it has a
+  // boundary of its own to get right. The two surrogate-aware tests above both
+  // run at the default limit and take the head+marker+tail path, so neither
+  // reaches this one.
+  it.each([
+    ['history' as const, 9],
+    ['history' as const, 8],
+    ['recording' as const, 9],
+    ['recording' as const, 8],
+  ])(
+    'does not split a surrogate pair when the marker does not fit, for %s at limit %d',
+    (purpose, limit) => {
+      const value = '😀'.repeat(40);
+      const compact =
+        purpose === 'recording'
+          ? compactStringForRecording(value, limit)
+          : compactStringForHistory(value, limit);
+
+      expect(compact.length).toBeLessThanOrEqual(limit);
+      expect(hasUnpairedSurrogate(compact)).toBe(false);
+      // A whole number of pairs survived, so the cut backed off to a boundary
+      // rather than landing between a high and low surrogate.
+      expect(compact.length % 2).toBe(0);
+      // Confirms this really is the marker-does-not-fit path.
+      expect(compact).not.toContain('truncated');
+    },
+  );
+
+  it('returns a short string untouched regardless of the marker length', () => {
+    expect(compactStringForHistory('short', 1000)).toBe('short');
+  });
+});

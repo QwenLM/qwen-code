@@ -13,6 +13,7 @@ import {
   MessageType,
   type HistoryItemContextUsage,
   type ContextCategoryBreakdown,
+  type ContextTier,
   type ContextToolDetail,
   type ContextMemoryDetail,
   type ContextSkillDetail,
@@ -20,44 +21,42 @@ import {
 import {
   DiscoveredMCPTool,
   uiTelemetryService,
-  getCoreSystemPrompt,
+  getMainSessionBaseSystemPrompt,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildSkillLlmContent,
+  computeThresholds,
+  estimateContextTextTokens,
+  formatContextFileDisplayPath,
+  type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import * as path from 'node:path';
 
 /**
- * Default compression token threshold (triggers compression at 70% usage).
- * The autocompact buffer is (1 - threshold) * contextWindowSize.
+ * Classify a token count against the three-tier compaction ladder. Mirrors
+ * the gating logic in `chatCompressionService` / `llmChat` so the
+ * `/context` output's "current tier" label reflects exactly which tier the
+ * runtime would treat the session as sitting in.
  */
-const DEFAULT_COMPRESSION_THRESHOLD = 0.7;
-
-/**
- * Estimate token count for a string using a character-based heuristic.
- * ASCII chars ≈ 4 chars/token, CJK/non-ASCII chars ≈ 1.5 tokens/char.
- */
-function estimateTokens(text: string): number {
-  if (!text || text.length === 0) return 0;
-  let asciiChars = 0;
-  let nonAsciiChars = 0;
-  for (let i = 0; i < text.length; i++) {
-    const charCode = text.charCodeAt(i);
-    if (charCode < 128) {
-      asciiChars++;
-    } else {
-      nonAsciiChars++;
-    }
-  }
-  // CJK and other non-ASCII characters typically produce 1.5-2 tokens each
-  return Math.ceil(asciiChars / 4 + nonAsciiChars * 1.5);
+function currentTier(
+  tokens: number,
+  thresholds: CompactionThresholds,
+): ContextTier {
+  if (tokens >= thresholds.hard) return 'hard';
+  if (tokens >= thresholds.auto) return 'auto';
+  if (tokens >= thresholds.warn) return 'warn';
+  return 'safe';
 }
 
 /**
  * Parse concatenated memory content into individual file entries.
  * Memory content format: "--- Context from: <path> ---\n<content>\n--- End of Context from: <path> ---"
  */
-function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
+function parseMemoryFiles(
+  memoryContent: string,
+  workingDir: string,
+): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
   const results: ContextMemoryDetail[] = [];
@@ -70,8 +69,15 @@ function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
     const filePath = match[1]!;
     const content = match[2]!;
     results.push({
-      path: filePath,
-      tokens: estimateTokens(content),
+      // Marker paths are relative to the session working directory (where
+      // memory discovery ran, which may differ from process.cwd() in
+      // ACP/daemon-served sessions); shorten home-dir files to `~/...` so
+      // global memory files don't render as `../../..` chains.
+      path: formatContextFileDisplayPath(
+        path.resolve(workingDir, filePath),
+        workingDir,
+      ),
+      tokens: estimateContextTextTokens(content),
     });
   }
 
@@ -79,7 +85,7 @@ function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
   if (results.length === 0 && memoryContent.trim().length > 0) {
     results.push({
       path: t('memory'),
-      tokens: estimateTokens(memoryContent),
+      tokens: estimateContextTextTokens(memoryContent),
     });
   }
 
@@ -95,25 +101,49 @@ export async function collectContextData(
   const contextWindowSize =
     contentGeneratorConfig.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
 
-  const apiTotalTokens = uiTelemetryService.getLastPromptTokenCount();
+  // Prefer the per-session chat's API-reported count. `uiTelemetryService` is
+  // a process-global singleton shared by every session in a `serve` daemon, so
+  // reading it here reports whichever session most recently completed a turn
+  // (#5763). The active chat carries the correct per-session value; fall back
+  // to the global singleton only when no chat exists yet (first /context,
+  // --continue resume before any send).
+  const llmClient = config.getLlmClient?.();
+  const activeChat = llmClient?.isInitialized?.()
+    ? llmClient.getChat()
+    : undefined;
+  const apiTotalTokens = activeChat
+    ? activeChat.getLastPromptTokenCount()
+    : uiTelemetryService.getLastPromptTokenCount();
+  // Cached-content tokens have no per-chat mirror today (only the global
+  // singleton is written, llm-chat.ts), so this read stays global. It only
+  // refines the messages-vs-cache split, not the headline total or tier.
   const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
-  const systemPromptText = getCoreSystemPrompt(undefined, modelName);
-  const systemPromptTokens = estimateTokens(systemPromptText);
+  const systemPromptText = getMainSessionBaseSystemPrompt(config);
+  const systemPromptTokens = estimateContextTextTokens(systemPromptText);
 
   const toolRegistry = config.getToolRegistry();
   const allTools = toolRegistry ? toolRegistry.getAllTools() : [];
+  // Match what's actually sent to the model: deferred tools — MCP tools and
+  // low-frequency built-ins like web_fetch / monitor / cron_* — are absent
+  // from the prompt unless ToolSearch has revealed them this session. See
+  // client.ts which calls getFunctionDeclarations() with no args. The
+  // per-tool loop below applies the same filter so allToolsTokens stays
+  // aligned with the breakdown sum.
   const toolDeclarations = toolRegistry
     ? toolRegistry.getFunctionDeclarations()
     : [];
   const toolsJsonStr = JSON.stringify(toolDeclarations);
-  const allToolsTokens = estimateTokens(toolsJsonStr);
+  const allToolsTokens = estimateContextTextTokens(toolsJsonStr);
 
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
   for (const tool of allTools) {
+    if (toolRegistry?.isDeferredAndHidden(tool.name)) {
+      continue;
+    }
     const toolJsonStr = JSON.stringify(tool.schema);
-    const tokens = estimateTokens(toolJsonStr);
+    const tokens = estimateContextTextTokens(toolJsonStr);
     if (tool instanceof DiscoveredMCPTool) {
       mcpTools.push({
         name: `${tool.serverName}__${tool.serverToolName || tool.name}`,
@@ -128,12 +158,19 @@ export async function collectContextData(
   }
 
   const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(memoryContent);
+  const memoryFiles = parseMemoryFiles(memoryContent, config.getWorkingDir());
+  const autoMemoryPrompt = config.getAutoMemoryPrompt();
+  if (autoMemoryPrompt) {
+    memoryFiles.push({
+      path: t('auto memory'),
+      tokens: estimateContextTextTokens(autoMemoryPrompt),
+    });
+  }
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);
   const skillToolDefinitionTokens = skillTool
-    ? estimateTokens(JSON.stringify(skillTool.schema))
+    ? estimateContextTextTokens(JSON.stringify(skillTool.schema))
     : 0;
 
   const loadedSkillNames: ReadonlySet<string> =
@@ -145,9 +182,14 @@ export async function collectContextData(
 
   const skillManager = config.getSkillManager();
   const skillConfigs = skillManager ? await skillManager.listSkills() : [];
+  const enabledSkillNames = new Set(
+    skillConfigs
+      .filter((skill) => config.isSkillEnabled(skill))
+      .map((skill) => skill.name.toLowerCase()),
+  );
   let loadedBodiesTokens = 0;
   const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
-    const listingTokens = estimateTokens(
+    const listingTokens = estimateContextTextTokens(
       `<skill>\n<name>\n${skill.name}\n</name>\n<description>\n${skill.description} (${skill.level})\n</description>\n<location>\n${skill.level}\n</location>\n</skill>`,
     );
     const isLoaded = loadedSkillNames.has(skill.name);
@@ -156,7 +198,9 @@ export async function collectContextData(
       const baseDir = skill.filePath
         ? skill.filePath.replace(/\/[^/]+$/, '')
         : '';
-      bodyTokens = estimateTokens(buildSkillLlmContent(baseDir, skill.body));
+      bodyTokens = estimateContextTextTokens(
+        buildSkillLlmContent(baseDir, skill.body),
+      );
       loadedBodiesTokens += bodyTokens;
     }
     return {
@@ -169,13 +213,19 @@ export async function collectContextData(
 
   const skillsTokens = skillToolDefinitionTokens + loadedBodiesTokens;
 
-  const compressionThreshold =
-    config.getChatCompression()?.contextPercentageThreshold ??
-    DEFAULT_COMPRESSION_THRESHOLD;
-  const autocompactBuffer =
-    compressionThreshold > 0
-      ? Math.round((1 - compressionThreshold) * contextWindowSize)
-      : 0;
+  const thresholds = computeThresholds(
+    contextWindowSize,
+    config.getAutoCompactThreshold(),
+  );
+  // Keep the `(window - auto)` buffer for the legacy three-segment progress
+  // bar in ContextUsage.tsx — it visualizes the headroom between the auto
+  // threshold and the window edge, which is exactly `contextWindowSize -
+  // thresholds.auto`. New consumers should read `breakdown.thresholds`
+  // directly.
+  const autocompactBuffer = Math.max(
+    0,
+    Math.round(contextWindowSize - thresholds.auto),
+  );
 
   const rawOverhead =
     systemPromptTokens +
@@ -183,7 +233,9 @@ export async function collectContextData(
     memoryFilesTokens +
     loadedBodiesTokens;
 
-  const isEstimated = apiTotalTokens === 0;
+  const hasTokenCount = apiTotalTokens > 0;
+  const isEstimated =
+    !hasTokenCount || activeChat?.isLastPromptTokenCountEstimated() === true;
 
   const mcpToolsTotalTokens = mcpTools.reduce(
     (sum, tool) => sum + tool.tokens,
@@ -203,7 +255,7 @@ export async function collectContextData(
   let detailMemoryFiles: ContextMemoryDetail[];
   let detailSkills: ContextSkillDetail[];
 
-  if (isEstimated) {
+  if (!hasTokenCount) {
     totalTokens = 0;
     displaySystemPrompt = systemPromptTokens;
     displaySkills = skillsTokens;
@@ -282,6 +334,26 @@ export async function collectContextData(
         : skills;
   }
 
+  // Tier classification: prefer the API-reported total when available.
+  // When no API call has happened yet (first /context, --continue resume,
+  // sub-agent inheritance), classify against `rawOverhead` so a session
+  // dominated by system prompt / skills / MCP tools doesn't silently show
+  // "safe". (R2.2)
+  //
+  // SCOPE GAP (R5.1): `rawOverhead` excludes `messagesTokens` — the actual
+  // chat history. A `--continue` restore with 100K of historical messages
+  // (but small overhead) will still display "safe" here, even though the
+  // cheap-gate inside chatCompressionService will trigger compression on
+  // the very next send (it uses `estimatePromptTokens(history, ...)` which
+  // walks the real history). This is a UI/runtime divergence — for a
+  // single render — that resolves the moment any send happens.
+  //
+  // TODO: plumb the chat history into collectContextData and use
+  // estimatePromptTokens(history, undefined, 0, 0, imageTokenEstimate) here
+  // for same-source-of-truth as the cheap-gate. Defer because Config
+  // doesn't expose the active chat instance today.
+  const tierTokens = hasTokenCount ? apiTotalTokens : rawOverhead;
+
   const breakdown: ContextCategoryBreakdown = {
     systemPrompt: displaySystemPrompt,
     builtinTools: displayBuiltinTools,
@@ -291,6 +363,8 @@ export async function collectContextData(
     messages: messagesTokens,
     freeSpace,
     autocompactBuffer,
+    thresholds,
+    currentTier: currentTier(tierTokens, thresholds),
   };
 
   return {
@@ -302,7 +376,11 @@ export async function collectContextData(
     builtinTools: showDetails ? detailBuiltinTools : [],
     mcpTools: showDetails ? detailMcpTools : [],
     memoryFiles: showDetails ? detailMemoryFiles : [],
-    skills: showDetails ? detailSkills : [],
+    skills: showDetails
+      ? detailSkills.filter((skill) =>
+          enabledSkillNames.has(skill.name.toLowerCase()),
+        )
+      : [],
     isEstimated,
     showDetails,
   };
@@ -327,12 +405,20 @@ function fmtCategoryRow(
   contextWindowSize: number,
   indent = '  ',
 ): string {
-  const percentage = ((tokens / contextWindowSize) * 100).toFixed(1);
+  const percentage =
+    contextWindowSize > 0
+      ? ((tokens / contextWindowSize) * 100).toFixed(1)
+      : '0.0';
   const right = `${fmtTokens(tokens)} tokens (${percentage}%)`;
   const leftPart = `${indent}${label}`;
   const totalWidth = 56;
   const dots = Math.max(1, totalWidth - leftPart.length - right.length);
   return `${leftPart}${' '.repeat(dots)}${right}`;
+}
+
+/** Locale-grouped integer (e.g. 147000 -> "147,000"). */
+function formatNum(n: number): string {
+  return Math.round(n).toLocaleString('en-US');
 }
 
 /**
@@ -352,12 +438,13 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     isEstimated,
     showDetails,
   } = data;
+  const hasTokenCount = totalTokens > 0;
 
   const lines: string[] = [];
   lines.push('## Context Usage');
   lines.push('');
 
-  if (isEstimated) {
+  if (!hasTokenCount) {
     lines.push('*No API response yet. Send a message to see actual usage.*');
     lines.push('');
     lines.push('**Estimated pre-conversation overhead**');
@@ -370,15 +457,23 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
       `Model: ${modelName}  Context window: ${fmtTokens(contextWindowSize)} tokens`,
     );
     lines.push('');
+    if (isEstimated) {
+      lines.push(
+        '*Token usage is estimated until provider usage is received.*',
+      );
+      lines.push('');
+    }
     lines.push(fmtCategoryRow('Used', totalTokens, contextWindowSize));
     lines.push(fmtCategoryRow('Free', breakdown.freeSpace, contextWindowSize));
+    lines.push('');
+    lines.push('**Compaction thresholds**');
     lines.push(
-      fmtCategoryRow(
-        'Autocompact buffer',
-        breakdown.autocompactBuffer,
-        contextWindowSize,
-      ),
+      `  Effective window:   ${formatNum(breakdown.thresholds.effectiveWindow)}  (window − ${formatNum(contextWindowSize - breakdown.thresholds.effectiveWindow)} reserve)`,
     );
+    lines.push(`  Warn threshold:     ${formatNum(breakdown.thresholds.warn)}`);
+    lines.push(`  Auto threshold:     ${formatNum(breakdown.thresholds.auto)}`);
+    lines.push(`  Hard threshold:     ${formatNum(breakdown.thresholds.hard)}`);
+    lines.push(`  Current tier:       ${breakdown.currentTier}`);
     lines.push('');
     lines.push('**Usage by category**');
   }
@@ -398,7 +493,7 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     fmtCategoryRow('Memory files', breakdown.memoryFiles, contextWindowSize),
   );
   lines.push(fmtCategoryRow('Skills', breakdown.skills, contextWindowSize));
-  if (!isEstimated) {
+  if (hasTokenCount) {
     lines.push(
       fmtCategoryRow('Messages', breakdown.messages, contextWindowSize),
     );
@@ -478,9 +573,8 @@ export const contextCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext, args?: string) => {
-    const showDetails =
-      args?.trim().toLowerCase() === 'detail' ||
-      args?.trim().toLowerCase() === '-d';
+    const normalizedArgs = args?.trim().toLowerCase();
+    const showDetails = normalizedArgs === 'detail' || normalizedArgs === '-d';
     const executionMode = context.executionMode ?? 'interactive';
     const { config } = context.services;
     if (!config) {
@@ -506,13 +600,12 @@ export const contextCommand: SlashCommand = {
     if (executionMode === 'interactive') {
       context.ui.addItem(contextUsageItem, Date.now());
       return;
-    } else {
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: formatContextUsageText(contextUsageItem),
-      };
     }
+    return {
+      type: 'message',
+      messageType: 'info',
+      content: formatContextUsageText(contextUsageItem),
+    };
   },
   subCommands: [
     {

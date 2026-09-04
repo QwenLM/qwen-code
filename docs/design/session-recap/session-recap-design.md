@@ -21,16 +21,42 @@ returns:
 
 ## Triggers
 
-| Trigger    | Conditions                                                                                   | Implementation                                                    |
-| ---------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| **Manual** | User runs `/recap`                                                                           | `recapCommand.ts` calls the same underlying service               |
-| **Auto**   | Terminal blurred (DECSET 1004 focus protocol) for ≥ 5 min + focus returns + stream is `Idle` | `useAwaySummary.ts` — 5min blur timer + `useFocus` event listener |
+| Trigger         | Conditions                                                                                   | Implementation                                                                                                                                     |
+| --------------- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Manual**      | User runs `/recap`                                                                           | `recapCommand.ts` calls the same underlying service                                                                                                |
+| **Auto**        | Terminal blurred (DECSET 1004 focus protocol) for ≥ 5 min + focus returns + stream is `Idle` | `useAwaySummary.ts` — 5min blur timer + `useFocus` event listener                                                                                  |
+| **Daemon HTTP** | Remote client calls `POST /session/:id/recap`                                                | `server.ts` route → `bridge.generateSessionRecap` (ext-method roundtrip) → `acpAgent.ts` calls `generateSessionRecap(session.getConfig(), signal)` |
 
-Both paths funnel into a single function — `generateSessionRecap()` — to
-guarantee identical behavior. The auto-trigger is gated by
-`general.showSessionRecap` (default: off — explicit opt-in, so ambient
-LLM calls are never silently added to a user's bill); the manual
-command ignores that setting.
+All three paths funnel into the same `generateSessionRecap()` function
+in `core/services/sessionRecap.ts` to guarantee identical behavior. The
+auto-trigger is gated by `general.showSessionRecap` (default: off —
+explicit opt-in, so ambient LLM calls are never silently added to a
+user's bill); the manual command and daemon HTTP route ignore that
+setting (the caller is making an explicit request).
+
+### Daemon access path
+
+The daemon route is non-strict-gated (mirrors `/session/:id/prompt`'s
+posture — recap costs tokens but mutates no state). Capability tag
+`session_recap` advertises the route on `/capabilities.features`. SDK
+helpers: `DaemonClient.recapSession(sessionId, opts)` and
+`DaemonSessionClient.recap(opts)`. See
+`docs/developers/qwen-serve-protocol.md` § `POST /session/:id/recap`
+for the wire contract and error envelope.
+
+Cancellation is **absent in v1**. The route does not listen for HTTP
+client disconnect, no `AbortSignal` is threaded into
+`bridge.generateSessionRecap`, and the ACP child handler passes a
+never-aborting `AbortController().signal` to the core helper (no
+cross-process abort plumbing yet). The only ceilings are the bridge's
+60s `SESSION_RECAP_TIMEOUT_MS` backstop and the transport-closed race
+against ACP channel death. Wiring an HTTP-side AbortController in
+isolation would be cosmetic — the child-side LLM call would still run
+to completion, so e2e cancel is not achievable without the cross-
+process abort piece. This is acceptable for v1 because recap is short
+(single-attempt side-query, `maxOutputTokens: 300`, ~1–5s typical).
+A future request-id-based cancel ext-method can plumb full end-to-end
+cancellation if/when the bandwidth cost justifies it.
 
 ## Architecture
 

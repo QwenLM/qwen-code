@@ -13,25 +13,54 @@
       "type": "object",
       "additionalProperties": true
     },
+    "serve": {
+      "description": "Persistent qwen serve settings.",
+      "type": "object",
+      "properties": {
+        "channels": {
+          "description": "Messaging channels to start automatically when the daemon boots.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxConcurrentSubSessionsPerCaller": {
+          "description": "Per-session ceiling on concurrent in-flight sub-sessions spawned via the create_sub_session tool.",
+          "type": "integer",
+          "default": 16,
+          "minimum": 1
+        },
+        "maxConcurrentSubSessionsTotal": {
+          "description": "Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.",
+          "type": "integer",
+          "default": 24,
+          "minimum": 1,
+          "maximum": 1024
+        }
+      }
+    },
     "modelProviders": {
-      "description": "Model providers configuration grouped by authType. Each authType contains an array of model configurations.",
+      "description": "Model providers configuration keyed by provider id (a built-in AuthType such as \"openai\" or \"gemini\", or a custom id mapped via providerProtocol). Each entry is an array of model configurations.",
       "type": "object",
       "additionalProperties": true
     },
-    "codingPlan": {
-      "description": "Coding Plan template version tracking and configuration.",
+    "providerProtocol": {
+      "description": "Maps a custom modelProviders provider id to the SDK protocol that routes its requests (e.g. {\"idealab\": \"openai\"}). Lets a custom provider id reuse a built-in protocol. Built-in provider ids (openai, gemini, anthropic, vertex-ai, qwen-oauth) are routed automatically and need no entry.",
       "type": "object",
-      "properties": {
-        "version": {
-          "description": "SHA256 hash of the Coding Plan template. Used to detect template updates.",
-          "type": "string"
-        }
-      }
+      "additionalProperties": true
+    },
+    "plansDirectory": {
+      "description": "Custom directory for approved Plan Mode files. Relative paths are resolved from the project root, and the resolved path must stay within the project root. Defaults to ~/.qwen/plans.",
+      "type": "string"
     },
     "env": {
       "description": "Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.",
       "type": "object",
       "additionalProperties": true
+    },
+    "proxy": {
+      "description": "Proxy URL for CLI HTTP requests. Takes precedence over proxy environment variables when --proxy is not provided.",
+      "type": "string"
     },
     "general": {
       "description": "General application settings.",
@@ -41,10 +70,48 @@
           "description": "The preferred editor to open files in.",
           "type": "string"
         },
+        "outputStyle": {
+          "description": "Name of the output style that shapes how responses are written, for example \"Concise\" or \"Explanatory\". Leave unset for the default style. Change it with /output-style.",
+          "type": "string"
+        },
         "vimMode": {
           "description": "Enable Vim keybindings",
           "type": "boolean",
           "default": false
+        },
+        "voice": {
+          "description": "Voice dictation settings.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable voice dictation in the prompt input.",
+              "type": "boolean",
+              "default": false
+            },
+            "mode": {
+              "description": "How push-to-talk behaves: \"hold\" to talk while held, or \"tap\" to start and tap (or pause) to stop and submit. Options: hold, tap",
+              "enum": [
+                "hold",
+                "tap"
+              ],
+              "default": "hold"
+            },
+            "language": {
+              "description": "Preferred spoken language for voice transcription (e.g. \"english\", \"chinese\"). Leave empty to auto-detect.",
+              "type": "string",
+              "default": ""
+            },
+            "keytermsFile": {
+              "description": "Path to a custom keyterms file (one term per line, \"#\" for comments) that biases voice transcription toward domain-specific terms. Relative paths resolve from the workspace root; defaults to \".qwen/voice-keyterms.txt\" when present. The file contents are sent to the ASR provider and it is read only in trusted workspaces. Only applies to Qwen ASR models (qwen3-asr-*).",
+              "type": "string",
+              "default": ""
+            },
+            "refineTranscript": {
+              "description": "Clean up voice transcripts with the fast model before inserting them — removes filler words and fixes recognition errors while preserving meaning. Falls back to the raw transcript on failure, and is skipped when no fast model is configured.",
+              "type": "boolean",
+              "default": true
+            }
+          }
         },
         "enableAutoUpdate": {
           "description": "Enable automatic update checks and installations on startup.",
@@ -59,23 +126,41 @@
         "sessionRecapAwayThresholdMinutes": {
           "description": "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
           "type": "number",
-          "default": 5
+          "default": 5,
+          "minimum": 1
+        },
+        "cleanupPeriodDays": {
+          "description": "Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.",
+          "type": "number",
+          "default": 30,
+          "minimum": 0
         },
         "gitCoAuthor": {
-          "description": "Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.",
-          "type": "boolean",
-          "default": true
-        },
-        "checkpointing": {
-          "description": "Session checkpointing settings.",
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "description": "Enable session checkpointing for recovery",
-              "type": "boolean",
-              "default": false
+          "description": "Attribution added to git commits and pull requests created through Qwen Code.",
+          "default": {
+            "commit": true,
+            "pr": true
+          },
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "commit": {
+                  "description": "Add a Co-authored-by trailer to git commit messages AND attach a per-file AI-attribution git note (`refs/notes/ai-attribution`) for commits made through Qwen Code. Disabling skips both.",
+                  "type": "boolean",
+                  "default": true
+                },
+                "pr": {
+                  "description": "Append a Qwen Code attribution line to PR descriptions when running `gh pr create`.",
+                  "type": "boolean",
+                  "default": true
+                }
+              }
             }
-          }
+          ]
         },
         "debugKeystrokeLogging": {
           "description": "Enable debug logging of keystrokes to the console.",
@@ -83,7 +168,7 @@
           "default": false
         },
         "language": {
-          "description": "The language for the user interface. Use \"auto\" to detect from system settings. You can also use custom language codes (e.g., \"es\", \"fr\") by placing JS language files in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js). Options: auto, en, zh-TW, zh, ru, de, ja, pt, fr",
+          "description": "The language for the user interface. Use \"auto\" to detect from system settings. You can also use custom language codes (e.g., \"es\", \"fr\") by placing JS language files in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js). Options: auto, en, zh-TW, zh, ru, de, ja, pt, fr, ca",
           "enum": [
             "auto",
             "en",
@@ -93,17 +178,31 @@
             "de",
             "ja",
             "pt",
-            "fr"
+            "fr",
+            "ca"
           ],
           "default": "auto"
         },
         "outputLanguage": {
-          "description": "The language for LLM output. Use \"auto\" to detect from system settings, or set a specific language.",
+          "description": "The language for LLM output. Use \"auto\" to follow the user input language, or set a specific language.",
           "type": "string",
           "default": "auto"
         },
         "terminalBell": {
           "description": "Play terminal bell sound when response completes or needs approval.",
+          "type": "boolean",
+          "default": true
+        },
+        "notificationMode": {
+          "description": "Which unfocused-terminal events fire a bell/OS notification. \"all\" fires on every tool approval prompt AND on task completion (current behavior). \"task-complete\" suppresses the per-approval notification and only fires when a long task returns to idle. Requires `terminalBell` to be enabled; otherwise no notifications fire regardless of mode. Options: all, task-complete",
+          "enum": [
+            "all",
+            "task-complete"
+          ],
+          "default": "all"
+        },
+        "preventSystemSleep": {
+          "description": "Prevent the system from sleeping while Qwen Code is streaming a model response or executing tools. Idle prompt time and permission prompts do not inhibit sleep.",
           "type": "boolean",
           "default": true
         },
@@ -122,17 +221,77 @@
         }
       }
     },
+    "review": {
+      "description": "Settings for the /review skill.",
+      "type": "object",
+      "properties": {
+        "attribution": {
+          "description": "Append the attribution footer naming the model and CLI version (e.g. \"_— qwen3-coder via Qwen Code /review (v0.21.2)_\") to review bodies and inline comments posted to GitHub. Disable to post reviews without VISIBLE AI attribution: no footer, and no \"**[Critical]**\"/\"**[Suggestion]**\" severity markers on posted comments and body lists. Unattributed posts stay identifiable in the raw source: each posted comment carries an invisible severity marker (\"<!-- qwen-review critical -->\") and the review body carries a ledger marker (\"<!-- qwen-review-ledger ... -->\") — anything reading comment bodies (GitHub API automation, the workflows this setting couples to) still recognizes a /review artifact, and presubmit duplicate detection recognizes the reviewing account's earlier posts by the severity marker, though unattributed posts from other accounts escape it. Another consequence: qwen-autofix's Critical-only mode (engaged after round 5, or earlier when a counting window's diff-growth budget trips) no longer recognizes the posted findings as Critical and defers them. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.",
+          "type": "boolean",
+          "default": true
+        },
+        "sandbox": {
+          "description": "Run the REVIEWED repository's own commands — `npm ci` with its install scripts, the build, the test suite, and every mutation probe — inside a container instead of directly as you. A review executes the code it is reviewing, and today those commands inherit the review process's whole environment (on CI that includes the model and GitHub credentials). \"auto\" uses a container when docker or podman answers and runs directly when neither does; \"required\" refuses to run them unsandboxed, which makes the evidence that depends on execution (build/test findings, mutation verdicts, `Source: [probe]`) unavailable for that run rather than ending the review; \"off\" is today's behaviour and stays the default, because containerising a build by surprise changes what native modules compile against. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot switch off the containment that exists to contain it. Options: off, auto, required",
+          "enum": [
+            "off",
+            "auto",
+            "required"
+          ],
+          "default": "off"
+        },
+        "effort": {
+          "description": "Default effort for /review when neither --effort nor a project-remembered explicitly typed level applies. \"auto\" keeps the built-in rule (high for PRs, medium for local changes). An explicit or remembered level wins; an effective --comment still forces high and --fix still floors at medium. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers. Options: auto, low, medium, high",
+          "enum": [
+            "auto",
+            "low",
+            "medium",
+            "high"
+          ],
+          "default": "auto"
+        },
+        "comment": {
+          "description": "Treat every PR /review as if --comment was passed: findings are posted to the pull request without the flag. The post still binds to the PR named in the invocation. Enable only if you always want reviews published. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.",
+          "type": "boolean",
+          "default": false
+        },
+        "severityFloor": {
+          "description": "The lowest severity a PR /review posts when --severity-floor is not given. \"auto\" keeps the round-adaptive default: Suggestions post through round 5, and from round 6 only Criticals post while otherwise-postable high-confidence Suggestions are recorded and deferred (low-confidence and Nice-to-have findings stay terminal-only as ever); under \"auto\", rounds 2-5 additionally defer new Suggestions on code unchanged since the previous round — the same discipline that stops review rounds from ballooning a PR. \"critical\" applies that posture from round 1; \"suggestion\" keeps Suggestions posting at every round. Non-PR targets have no rounds and ignore this. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers. Options: auto, critical, suggestion",
+          "enum": [
+            "auto",
+            "critical",
+            "suggestion"
+          ],
+          "default": "auto"
+        },
+        "reverseAuditRounds": {
+          "description": "Lower the reverse-audit loop's round cap for every high-effort review. The cap is normally chosen from the diff topology (10 small / 5 chunked; a huge diff is 3 when the run has a review deadline and 5 when it does not, because that reduction answers a CI ceiling and applies only where one exists) because a round costs one agent on a small diff and ~90 minutes on a huge one; this setting can only LOWER whichever tier applies, never raise it — a value that is not a whole number above zero, or that is out of range (below 3, or above the plan's own tier), is ignored and leaves the tier alone — JSON Schema has no integer type here, so a fraction validates in an editor and is then discarded at runtime. Understand what it buys before enabling: the loop ends on two consecutive dry rounds, so cutting the cap does not make reviews converge sooner, it makes them stop before converging more often — and every such stop is disclosed as unreviewed scope and caps the verdict at Comment, so a cheaper review is also one that can no longer Approve. To spend LESS on reviews generally, prefer \"effort\". Nothing here makes a loop run LONGER: a review deadline bounds a run rather than extending it, and on a huge diff setting one lowers the cap from 5 to 3 rather than raising it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.",
+          "type": "number",
+          "default": 0
+        },
+        "approachRounds": {
+          "description": "How many rounds a pull request must reach before the review may add one advisory paragraph saying the shape of the change, rather than the current patch, looks like the open question. It appears only when the diff has also grown several times over since the review first measured it, and never on an Approve. It is disclosure only: it adds no finding, changes no verdict, and blocks nothing — it exists because every finding is anchored to a line in the current diff, so the review can report where an approach leaks but never that a different approach would retire all of the leaks at once. Leave at 0 to keep the built-in threshold of 5 rounds; raise it to make the paragraph appear later, and set it very high to silence it. A value that is not a whole number above zero is ignored. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.",
+          "type": "number",
+          "default": 0
+        }
+      }
+    },
     "output": {
       "description": "Settings for the CLI output.",
       "type": "object",
       "properties": {
         "format": {
-          "description": "The format of the CLI output. Options: text, json",
+          "description": "The format of the CLI output. With `stream-json`, runs started with a prompt behave as non-interactive (headless), matching `--output-format stream-json`. Flags validated at argv parse time (`--include-partial-messages`, `--input-format stream-json`) still require the explicit `--output-format stream-json` flag. Options: text, json, stream-json",
           "enum": [
             "text",
-            "json"
+            "json",
+            "stream-json"
           ],
           "default": "text"
+        },
+        "showTimestamps": {
+          "description": "Show [HH:MM:SS] timestamp before each assistant response.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
@@ -159,8 +318,13 @@
           "type": "string",
           "default": "Qwen Dark"
         },
+        "autoModeAcknowledged": {
+          "description": "True once the user has seen the first-time information message about the AUTO approval mode. Set automatically; not intended for manual configuration.",
+          "type": "boolean",
+          "default": false
+        },
         "statusLine": {
-          "description": "Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
+          "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (project name, git branch, model, context usage) is shown automatically; set to `null` to explicitly disable the status line.",
           "type": "object",
           "additionalProperties": true
         },
@@ -169,25 +333,59 @@
           "type": "object",
           "additionalProperties": true
         },
+        "hideBuiltinWorktreeIndicator": {
+          "description": "When true, the built-in `⎇ worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself — otherwise an active worktree silently has no UI affordance.",
+          "type": "boolean",
+          "default": false
+        },
         "hideWindowTitle": {
           "description": "Hide the window title bar",
           "type": "boolean",
           "default": false
         },
-        "showStatusInTitle": {
-          "description": "Show Qwen Code status and thoughts in the terminal window title",
+        "disableWorkflowKeywordTrigger": {
+          "description": "When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.",
           "type": "boolean",
           "default": false
+        },
+        "showStatusInTitle": {
+          "description": "Show Qwen Code session name and status in the terminal window title",
+          "type": "boolean",
+          "default": true
         },
         "hideTips": {
           "description": "Hide helpful tips in the UI",
           "type": "boolean",
           "default": false
         },
+        "history": {
+          "description": "History display settings.",
+          "type": "object",
+          "properties": {
+            "collapseOnResume": {
+              "description": "Whether to collapse history by default when resuming a session.",
+              "type": "boolean",
+              "default": false
+            },
+            "collapsePreviewCount": {
+              "description": "Number of most recent user turns to keep visible when collapsing history on resume. 0 collapses all restored history by default; -1 shows all restored history.",
+              "type": "number",
+              "default": 0
+            }
+          }
+        },
         "showLineNumbers": {
           "description": "Show line numbers in the code output.",
           "type": "boolean",
           "default": true
+        },
+        "renderMode": {
+          "description": "Default Markdown display mode. Use \"render\" for rich visual previews, or \"raw\" to show source-oriented Markdown by default. Toggle during a session with Alt/Option+M; on macOS the terminal must send Option as Meta. Options: render, raw",
+          "enum": [
+            "render",
+            "raw"
+          ],
+          "default": "render"
         },
         "showCitations": {
           "description": "Show citations for generated text in the chat.",
@@ -201,6 +399,11 @@
             "type": "string"
           }
         },
+        "showResponseTokensPerSecond": {
+          "description": "Show a live tokens/sec estimate next to the response token counter while the model is streaming. Takes effect in the next session.",
+          "type": "boolean",
+          "default": false
+        },
         "enableWelcomeBack": {
           "description": "Show welcome back dialog when returning to a project with conversation history. Choosing \"Start new chat session\" suppresses the dialog for that project until the project summary changes.",
           "type": "boolean",
@@ -212,9 +415,9 @@
           "default": true
         },
         "enableFollowupSuggestions": {
-          "description": "Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.",
+          "description": "Show context-aware follow-up suggestions after task completion. Press Tab, Right Arrow, or Enter to accept into the input buffer.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "enableCacheSharing": {
           "description": "Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).",
@@ -247,14 +450,108 @@
           "default": 0
         },
         "compactMode": {
-          "description": "Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).",
+          "description": "Retired: compact view is always on in both the TUI and the web shell. The key is kept so existing settings files do not warn.",
           "type": "boolean",
           "default": false
+        },
+        "useTerminalBuffer": {
+          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Enabled by default in compatible interactive terminals to avoid flicker, scroll-storm, and interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Screen reader mode and non-interactive output such as piped stdout or CI use append-only terminal output instead. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging. These mouse interactions are controlled by ui.mouseTracking; disable that setting to restore native right-click and OSC 8 hyperlink clicks.",
+          "type": "boolean",
+          "default": true
+        },
+        "showScrollbar": {
+          "description": "Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.",
+          "type": "boolean",
+          "default": true
+        },
+        "mouseTracking": {
+          "description": "Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, it cannot show native right-click context menus or open OSC 8 hyperlink clicks. Disable to restore native right-click and clickable URL links; this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).",
+          "type": "boolean",
+          "default": true
         },
         "shellOutputMaxLines": {
           "description": "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
           "type": "number",
           "default": 5
+        },
+        "hideBanner": {
+          "description": "Hide the startup ASCII banner and info panel.",
+          "type": "boolean",
+          "default": false
+        },
+        "customBannerTitle": {
+          "description": "Replace the default \">_ Qwen Code\" title shown in the banner info panel. The version suffix is always appended.",
+          "type": "string",
+          "default": ""
+        },
+        "customBannerSubtitle": {
+          "description": "Optional subtitle line rendered between the banner title and the auth/model line. When unset, the info panel keeps its blank spacer row.",
+          "type": "string",
+          "default": ""
+        },
+        "customAsciiArt": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "small": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "large": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ],
+          "description": "Replace the default QWEN ASCII art. Accepts an inline string, {\"path\": \"...\"}, or {\"small\": ..., \"large\": ...} for width-aware selection."
         }
       }
     },
@@ -286,12 +583,98 @@
       }
     },
     "telemetry": {
-      "description": "Telemetry configuration.",
       "type": "object",
-      "additionalProperties": true
+      "properties": {
+        "userId": {
+          "description": "Stable end-user identifier written to GenAI spans as gen_ai.user.id for ARMS session analysis. This value is linkable personal data: prefer a pseudonymous ID, and configure it only when one process represents one user.",
+          "type": "string"
+        },
+        "includeSensitiveSpanAttributes": {
+          "description": "When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.",
+          "type": "boolean",
+          "default": false
+        },
+        "sensitiveSpanAttributeMaxLength": {
+          "description": "Maximum JavaScript string length for each sensitive native OTel span attribute content payload. Default: 1048576 (1 MiB). Maximum: 104857600 (100 MiB). Set lower if your collector or backend rejects large span attributes.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 104857600,
+          "default": 1048576
+        },
+        "resourceAttributes": {
+          "description": "Static resource attributes attached to every span/log/metric the SDK exports (OTLP or file outfile — they share the same Resource). Merged with the OTEL_RESOURCE_ATTRIBUTES env var; settings win on key conflict. Reserved keys (service.version, session.id) are dropped with a warning.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "metrics": {
+          "description": "Per-signal cardinality controls for exported metrics.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "includeSessionId": {
+              "description": "Include session.id on every metric data point. WARNING: each CLI session creates a new value, causing unbounded metric time-series fan-out at the backend. Only enable for short-term debugging — spans and logs still carry session.id.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      },
+      "additionalProperties": true,
+      "description": "Telemetry configuration."
+    },
+    "outboundCorrelation": {
+      "type": "object",
+      "properties": {
+        "propagateTraceContext": {
+          "description": "Requires `telemetry.enabled: true`. Inject W3C `traceparent` on outbound `fetch` requests (LLM SDK calls, MCP StreamableHTTP, WebFetch, ...) AND as a `TRACEPARENT` environment variable in shell child processes (Bash tool, hooks, monitor). When enabled, any existing `TRACEPARENT` in the parent environment is overwritten with qwen-code's own trace context. Default: false — trace context stays internal to the operator's OTLP collector. Set true when you want cross-process trace stitching with an OTel-aware LLM provider (e.g. ARMS+DashScope) or need shell scripts / CLI tools to participate in distributed tracing.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "description": "SECURITY-RELEVANT. Controls what client-side correlation data qwen-code writes into outbound LLM API requests (DashScope, OpenAI, Anthropic, etc.) — separate from `telemetry.*` which governs data flow into the operator's OWN OTLP collector. All values default to off. Opt in only when the LLM provider also reports into your OTel collector for cross-process trace stitching (e.g. ARMS Tracing + DashScope)."
     },
     "fastModel": {
       "description": "Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.",
+      "type": "string",
+      "default": ""
+    },
+    "advisorModel": {
+      "description": "Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.",
+      "type": "string",
+      "default": ""
+    },
+    "visionModel": {
+      "description": "Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.",
+      "type": "string",
+      "default": ""
+    },
+    "compactionModel": {
+      "description": "Model used for chat compression (auto-compaction). Set with /model --compaction. Leave empty to fall back to the main model. A smaller/faster model reduces compression latency and cost.",
+      "type": "string",
+      "default": ""
+    },
+    "imageModel": {
+      "description": "Model used by the built-in image_gen tool. Set with /model --image. The selected route must set supportsImageGeneration: true (or legacy imageOnly: true) in modelProviders.",
+      "type": "string",
+      "default": ""
+    },
+    "visionBridgeTimeoutMs": {
+      "description": "Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "modelFallbacks": {
+      "description": "Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: \"qwen-plus,qwen-turbo\". Set via CLI with --fallback-model.",
+      "type": "string",
+      "default": ""
+    },
+    "voiceModel": {
+      "description": "Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.",
       "type": "string",
       "default": ""
     },
@@ -303,10 +686,45 @@
           "description": "The model to use for conversations.",
           "type": "string"
         },
+        "baseUrl": {
+          "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "type": "string",
+          "enum": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "description": "How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at \"high\"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default."
+        },
         "maxSessionTurns": {
-          "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
+          "description": "Maximum number of user/model/tool turns to keep in a session. Must be an integer; -1 means unlimited.",
+          "type": "integer",
+          "default": -1
+        },
+        "maxWallTimeSeconds": {
+          "description": "Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited; otherwise must be in [1, ~2,147,483] (sub-second values and values above ~24 days are rejected as typos). Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1.5h).",
           "type": "number",
           "default": -1
+        },
+        "goalTokenBudget": {
+          "description": "Autonomous spend window armed on each new Goal, in tokens as counted by the Goal meter (totalTokenCount summed over every model call the Goal makes in its own turns; side queries and checkpoint verification are not metered). When a Goal spends its window it gets one wind-down turn to hand off, then stops until you resume it, which arms another window. Unset uses the built-in default of 30,000,000; -1 means unlimited. Zero, values above 300,000,000 (10x the default, a typo guard), other negative, fractional, or non-number values are rejected at startup.",
+          "type": "integer"
+        },
+        "maxToolCalls": {
+          "description": "Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means \"no tool calls allowed\" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.",
+          "type": "number",
+          "default": -1
+        },
+        "maxSubagentDepth": {
+          "description": "Maximum sub-agent nesting depth (1-based levels: a top-level sub-agent is level 1). 1 keeps sub-agents available but disables nesting; the default 5 allows nesting up to five levels deep. Values clamp to the range 1-100; non-finite values fall back to the default. Teammates, forks, and workflow-spawned agents never nest regardless of this setting. Overridable via --max-subagent-depth.",
+          "type": "number",
+          "default": 5
         },
         "chatCompression": {
           "description": "Chat compression settings.",
@@ -322,10 +740,20 @@
           "type": "boolean",
           "default": true
         },
+        "skipWorkflowUsageWarning": {
+          "description": "Suppress the one-time Workflow tool usage banner that describes the QWEN_CODE_MAX_TOKENS_PER_WORKFLOW env knob. The banner fires at most once per session regardless of this setting.",
+          "type": "boolean",
+          "default": false
+        },
         "skipLoopDetection": {
-          "description": "Disable all loop detection checks (streaming and LLM).",
+          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. Daemon/ACP sessions run none of the other detectors; setting this to false also enables a global-duplicate tool-call halt there. Core-client sessions keep a minimal always-on guard regardless of this setting (consecutive identical tool calls, shell inspection-command stagnation, and a per-turn tool-call cap, see model.maxToolCallsPerTurn); daemon/ACP sessions keep the per-turn tool-call cap and an invalid-tool-params stagnation guard.",
           "type": "boolean",
           "default": true
+        },
+        "maxToolCallsPerTurn": {
+          "description": "Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
+          "type": "integer",
+          "default": 100
         },
         "skipStartupContext": {
           "description": "Avoid sending the workspace startup context at the beginning of each session.",
@@ -341,6 +769,12 @@
           "description": "Custom directory path for OpenAI API logs. If not specified, defaults to logs/openai in the current working directory.",
           "type": "string"
         },
+        "openAILogRetentionDays": {
+          "description": "Number of days to retain OpenAI API log files written when enableOpenAILogging is on. Completed background housekeeping passes run at most once per day in interactive, headless, stream-json SDK, and ACP sessions. Short-lived non-interactive processes make best-effort progress, while persistent processes scan to completion. Set to 0 for minimum retention (~1 hour). For a custom openAILoggingDir, configure this at user or system scope; workspace-scoped retention is skipped because one directory can be shared by multiple workspaces.",
+          "type": "number",
+          "default": 7,
+          "minimum": 0
+        },
         "generationConfig": {
           "description": "Generation configuration settings.",
           "type": "object",
@@ -348,6 +782,12 @@
             "timeout": {
               "description": "Request timeout in milliseconds.",
               "type": "number"
+            },
+            "streamIdleTimeoutMs": {
+              "description": "Maximum inactivity between streamed chunks for OpenAI-compatible and Anthropic models, in milliseconds. Set to 0 to disable the idle guard. For provider-backed models, configure this field in the selected modelProviders entry.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
             },
             "maxRetries": {
               "description": "Maximum number of retries for failed requests.",
@@ -357,10 +797,73 @@
               "description": "Maximum number of concurrent in-flight requests against this model. Useful when the upstream returns 429 \"Too many concurrent requests for this model\". 0 / unset means unlimited. Falls back to QWEN_REQUEST_CONCURRENCY env var.",
               "type": "number"
             },
+            "retryInitialDelayMs": {
+              "description": "Initial delay in milliseconds for stream rate-limit retries.",
+              "type": "number",
+              "minimum": 1
+            },
+            "retryMaxDelayMs": {
+              "description": "Maximum delay in milliseconds for stream rate-limit retries.",
+              "type": "number",
+              "minimum": 1
+            },
             "enableCacheControl": {
-              "description": "Enable cache control for DashScope providers.",
+              "description": "Enable provider prompt-cache controls.",
               "type": "boolean",
               "default": true
+            },
+            "forceGlobalCacheScope": {
+              "description": "Force scope:'global' on Anthropic cache_control entries even when the base URL is not an Anthropic-native origin (e.g. proxy providers like Routify, OpenRouter). Requires the proxy to forward cache_control fields and the prompt-caching-scope-2026-01-05 beta.",
+              "type": "boolean",
+              "default": false
+            },
+            "cacheRetention": {
+              "description": "Default Anthropic cache_control retention. 'ephemeral' uses the spec 5-minute default (no ttl on the wire). '1h' requests the extended cache tier (ttl: '1h') -- note the 1h tier writes at 2x base input token cost (vs 1.25x for the 5-minute default; cached reads stay 0.1x for both), so it only pays off when a prefix survives long enough between requests to outlast several 5-minute windows. Options: ephemeral, 1h",
+              "enum": [
+                "ephemeral",
+                "1h"
+              ]
+            },
+            "cacheRetentionByBlock": {
+              "type": "object",
+              "properties": {
+                "system": {
+                  "type": "string",
+                  "enum": [
+                    "ephemeral",
+                    "1h"
+                  ]
+                },
+                "tool": {
+                  "type": "string",
+                  "enum": [
+                    "ephemeral",
+                    "1h"
+                  ]
+                },
+                "user.last": {
+                  "type": "string",
+                  "enum": [
+                    "ephemeral",
+                    "1h"
+                  ]
+                }
+              },
+              "additionalProperties": false,
+              "description": "Optional per-anchor override for Anthropic cache retention. Keys (system, tool, user.last) override generationConfig.cacheRetention when present. Resolution is normalized so retention is monotonically non-increasing in wire order (tool -> system -> user.last, per Anthropic's 'longer TTL must precede shorter TTL' rule): setting one anchor to '1h' promotes every anchor before it on the wire to '1h' as well, so any combination here is valid."
+            },
+            "splitToolMedia": {
+              "description": "When true, media (images / audio / video / files) returned by tool calls — including the built-in read_file and MCP tools — is split into a follow-up user message instead of being embedded in the `role: \"tool\"` message. The OpenAI Chat Completions spec only permits text on tool messages, so strict OpenAI-compatible servers (e.g., doubao / new-api / LM Studio) silently drop or reject embedded media and the model never sees an image read via read_file (QwenLM/qwen-code#4876, #3616). Default true is spec-compliant and safe for permissive providers; set false only to restore the legacy embed-in-tool-message behavior.",
+              "type": "boolean",
+              "default": true
+            },
+            "toolResultContentFormat": {
+              "description": "Controls how text-only tool results are serialized in OpenAI-compatible requests. Use \"parts\" for the default content-part array shape. Use \"string\" only for legacy OpenAI-compatible runtimes whose tool templates ignore text content parts (for example older GLM-5.1 vLLM/SGLang templates; QwenLM/qwen-code#3361). Tool-returned media is still handled by splitToolMedia. Options: parts, string",
+              "enum": [
+                "parts",
+                "string"
+              ],
+              "default": "parts"
             },
             "schemaCompliance": {
               "description": "The compliance mode for tool schemas sent to the model. Use \"openapi_30\" for strict OpenAPI 3.0 compatibility (e.g., for Gemini). Options: auto, openapi_30",
@@ -378,18 +881,35 @@
         }
       }
     },
+    "modelPricing": {
+      "description": "Optional per-model pricing for cost estimation in /stats model. Example: {\"qwen3-coder\": {\"inputPerMillionTokens\": 0.30, \"outputPerMillionTokens\": 1.20}}",
+      "type": "object",
+      "additionalProperties": true
+    },
     "context": {
       "description": "Settings for managing context provided to the model.",
       "type": "object",
       "properties": {
         "fileName": {
-          "description": "The name of the context file.",
-          "type": "object",
-          "additionalProperties": true
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "The name of the context file or files."
         },
         "importFormat": {
-          "description": "The format to use when importing memory.",
-          "type": "string"
+          "description": "The format to use when importing memory. Options: tree, flat",
+          "enum": [
+            "tree",
+            "flat"
+          ]
         },
         "includeDirectories": {
           "description": "Additional directories to include in the workspace context. Missing directories will be skipped with a warning.",
@@ -404,7 +924,7 @@
           "default": false
         },
         "clearContextOnIdle": {
-          "description": "Settings for clearing stale context after idle periods. Use -1 to disable a threshold.",
+          "description": "Settings for clearing stale or oversized tool result context. Use -1 to disable a threshold.",
           "type": "object",
           "properties": {
             "toolResultsThresholdMinutes": {
@@ -413,9 +933,14 @@
               "default": 60
             },
             "toolResultsNumToKeep": {
-              "description": "Number of most-recent compactable tool results to preserve when clearing. Floor at 1.",
+              "type": "integer",
+              "default": 5,
+              "description": "Integer number of most-recent compactable tool results to preserve when clearing. Values below 1 are floored to 1."
+            },
+            "toolResultsTotalCharsThreshold": {
+              "description": "Total compactable tool result output characters allowed in history before clearing oldest results. When exceeded, oldest results are cleared down to half this threshold (best effort) to preserve the provider prompt cache on later turns. Use -1 to disable. This is a soft threshold: protected recent tool results may keep the total above it.",
               "type": "number",
-              "default": 5
+              "default": 500000
             }
           }
         },
@@ -429,9 +954,20 @@
               "default": true
             },
             "respectQwenIgnore": {
-              "description": "Respect .qwenignore files when searching",
+              "description": "Respect .qwenignore and configured custom ignore files when searching",
               "type": "boolean",
               "default": true
+            },
+            "customIgnoreFiles": {
+              "description": "Project-root-relative ignore files to use instead of the defaults (`.agentignore`, `.aiignore`) when respectQwenIgnore is enabled. .qwenignore is always included when respectQwenIgnore is enabled.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                ".agentignore",
+                ".aiignore"
+              ]
             },
             "enableRecursiveFileSearch": {
               "description": "Enable recursive file search functionality",
@@ -444,6 +980,12 @@
               "default": true
             }
           }
+        },
+        "autoCompactThreshold": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 1,
+          "description": "Target fraction of the context window at which auto-compaction triggers (greater than 0, up to 1). Acts as a ceiling on the trigger: on large windows this is the effective trigger (~85%); on smaller windows compaction may fire earlier to leave room to summarize. Default is 0.85 (85%)."
         }
       }
     },
@@ -459,6 +1001,36 @@
         "enableManagedAutoDream": {
           "description": "Enable automatic consolidation (dream) of collected memories.",
           "type": "boolean",
+          "default": true
+        },
+        "enableAutoSkill": {
+          "description": "Enable background review for reusable project skills after tool-heavy sessions.",
+          "type": "boolean",
+          "default": false
+        },
+        "autoSkillConfirm": {
+          "description": "Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.",
+          "type": "boolean",
+          "default": true
+        },
+        "agentTimeoutMinutes": {
+          "description": "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
+          "type": "number",
+          "minimum": 0
+        },
+        "agentMaxTurns": {
+          "description": "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit.",
+          "type": "number",
+          "minimum": 0
+        },
+        "enableTeamMemory": {
+          "description": "Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Off by default; writes to it are secret-scanned and reviewable in the git diff.",
+          "type": "boolean",
+          "default": false
+        },
+        "enableTeamMemorySync": {
+          "description": "When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.",
+          "type": "boolean",
           "default": false
         }
       }
@@ -469,6 +1041,53 @@
       "properties": {
         "disabled": {
           "description": "Slash command names to hide and refuse to execute. Matched case-insensitively against the final command name (for extension commands this is the disambiguated form, e.g. \"myext.deploy\"). Merged as a union across settings scopes, so workspace settings can add to but not remove entries defined in system/user settings.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "skills": {
+      "description": "Configuration for skills (SKILL.md-based capabilities) exposed to the model.",
+      "type": "object",
+      "properties": {
+        "disabledLevels": {
+          "description": "Skill discovery levels to skip entirely. Supported levels are project, user, extension, and bundled. UNION-merged across settings scopes.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "project",
+              "user",
+              "extension",
+              "bundled"
+            ]
+          }
+        },
+        "disabled": {
+          "description": "Skill names to hide. Matched case-insensitively against the skill name. Hidden skills do not appear in <available_skills> or as /<name> slash commands. UNION-merged across systemDefaults/user/workspace/system scopes — workspace cannot remove entries defined in higher scopes.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "defaultDisabled": {
+          "description": "Skill names disabled by default unless explicitly enabled through skills.enabled. Matched case-insensitively and UNION-merged across settings scopes. skills.disabled always wins.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "description": "Explicit opt-ins that override matching skills.defaultDisabled entries. Matched case-insensitively and UNION-merged across settings scopes. Cannot override skills.disabled.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "directories": {
+          "description": "Additional directories to scan for skills (SKILL.md files). Entries should be absolute paths or ~-prefixed; relative paths resolve against the working directory. Each directory is scanned one level deep for subdirectories containing a SKILL.md file. Skills from these directories are loaded at user level, after the default user skill directories; a custom skill with the same name as one in the default user directories will not override it. Only point this at trusted locations, since skills can define hooks and commands.",
           "type": "array",
           "items": {
             "type": "string"
@@ -500,6 +1119,100 @@
           "items": {
             "type": "string"
           }
+        },
+        "autoMode": {
+          "description": "Settings consumed by the AUTO approval mode classifier.",
+          "type": "object",
+          "properties": {
+            "classifier": {
+              "description": "Runtime controls for the AUTO approval mode classifier.",
+              "type": "object",
+              "properties": {
+                "timeouts": {
+                  "description": "Timeouts for the two AUTO classifier stages, in milliseconds.",
+                  "type": "object",
+                  "properties": {
+                    "stage1Ms": {
+                      "description": "Timeout in milliseconds for the fast stage-1 AUTO classifier.",
+                      "type": "number"
+                    },
+                    "stage2Ms": {
+                      "description": "Timeout in milliseconds for the stage-2 AUTO classifier review.",
+                      "type": "number"
+                    }
+                  }
+                },
+                "thinking": {
+                  "description": "Provider/API-level thinking controls for the AUTO classifier.",
+                  "type": "object",
+                  "properties": {
+                    "stage2Enabled": {
+                      "description": "Whether stage 2 may use provider/API-level thinking. Stage 1 always keeps thinking disabled.",
+                      "type": "boolean",
+                      "default": false
+                    }
+                  }
+                }
+              }
+            },
+            "hints": {
+              "description": "Natural-language hints injected into the classifier system prompt.",
+              "type": "object",
+              "properties": {
+                "allow": {
+                  "description": "Natural-language descriptions of actions AUTO mode should allow.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "softDeny": {
+                  "description": "Natural-language descriptions of destructive / irreversible actions AUTO mode should block unless the user explicitly authorised that exact action and scope.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "hardDeny": {
+                  "description": "Natural-language descriptions of security-boundary actions the AUTO classifier must block even when an autoMode allow hint or recent user request would normally authorise them. Does not override permissions.allow; use permissions.deny for deterministic hard permission rules.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "deny": {
+                  "description": "Deprecated alias for `softDeny`. Entries here are merged into the SOFT BLOCK user section so existing settings keep working; new configurations should use `softDeny` or `hardDeny` instead.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "environment": {
+              "description": "Environment / context lines injected into the classifier system prompt.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "classifyAllShell": {
+              "description": "Route ALL shell commands through the auto-mode classifier, including read-only commands that would otherwise be auto-approved. Provides defense-in-depth for production environments.",
+              "type": "boolean",
+              "default": false
+            },
+            "mcp": {
+              "description": "AUTO classifier controls for third-party MCP tools.",
+              "type": "object",
+              "properties": {
+                "forwardArguments": {
+                  "description": "Forward MCP tool arguments (bounded and truncated) to the AUTO classifier so it can judge what the agent is about to send to the server. When false the classifier sees only the tool name, which usually results in a conservative block.",
+                  "type": "boolean",
+                  "default": true
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -508,13 +1221,68 @@
       "type": "object",
       "properties": {
         "sandbox": {
-          "description": "Sandbox execution environment (can be a boolean or a path string).",
-          "type": "object",
-          "additionalProperties": true
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "description": "Sandbox execution environment (can be a boolean or a path string)."
         },
         "sandboxImage": {
           "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
           "type": "string"
+        },
+        "webSearch": {
+          "description": "Settings for the built-in WebSearch tool (DashScope Responses API backend). Opt-in: requires enabled=true and a search model. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable the built-in web_search tool. Also requires tools.webSearch.model. Env override: ENABLE_WEB_SEARCH.",
+              "type": "boolean",
+              "default": false
+            },
+            "model": {
+              "description": "Model selector for the search side request, resolved against modelProviders like fastModel (\"modelId\" or \"authType:modelId\"). Must resolve to a DashScope-compatible entry with an envKey. Recommended: qwen3.6-plus. Env override: WEB_SEARCH_MODEL.",
+              "type": "string"
+            },
+            "webExtractor": {
+              "description": "Let the search agent open and read result pages (DashScope web_extractor) for better-grounded answers. Billed separately by DashScope. Env override: WEB_SEARCH_EXTRACTOR.",
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "toolSearch": {
+          "description": "Settings for the ToolSearch discovery mechanism.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.",
+              "type": "boolean",
+              "default": true
+            },
+            "threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "default": 10,
+              "description": "Context-window percentage used as the session-start budget for preloading ordinary deferred tools (bundled built-ins and MCP alike). When every eligible deferred tool schema fits within the budget, all are declared upfront instead of loaded on demand, keeping the prompt prefix stable for KV caching. Tools demoted by tools.eager are excluded from this preload and stay on demand. Set 0 to always load deferred tools on demand."
+            }
+          }
+        },
+        "listDirectory": {
+          "description": "Settings for the built-in list_directory tool. Opt-in: the tool is disabled by default because glob covers directory listing in most cases.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable the built-in list_directory tool. Disabled by default; it is also re-enabled automatically when explicitly listed in the coreTools allowlist (--core-tools / tools.core).",
+              "type": "boolean",
+              "default": false
+            }
+          }
         },
         "shell": {
           "description": "Settings for shell execution.",
@@ -526,19 +1294,30 @@
               "default": true
             },
             "pager": {
-              "description": "The pager command to use for shell output. Defaults to `cat`.",
-              "type": "string",
-              "default": "cat"
+              "description": "The pager command to use for shell output. Defaults to `cat` on non-Windows platforms and unset on Windows. Set to an empty string to disable pager environment variables.",
+              "type": "string"
             },
             "showColor": {
               "description": "Show color in shell output.",
               "type": "boolean",
               "default": false
+            },
+            "defaultTimeoutMs": {
+              "description": "Default timeout, in milliseconds, for foreground shell commands started by the agent. A per-call timeout on the shell tool overrides this. When unset, foreground commands time out after 120000 ms (2 minutes). Set to 0 to disable the timeout.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 600000
+            },
+            "heartbeatIntervalMs": {
+              "description": "Interval, in milliseconds, between liveness heartbeats emitted while a foreground shell command produces no output. Heartbeats are forwarded to ACP clients and stream-json consumers so they can tell a silent command from a dead session. When unset, heartbeats fire every 10000 ms (10 seconds). Set to 0 to disable heartbeats.",
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 600000
             }
           }
         },
         "core": {
-          "description": "Deprecated. Use permissions.allow instead.",
+          "description": "Deprecated. permissions.allow cannot reproduce this registration restriction because it only auto-approves calls. Use tools.eager to defer unlisted eager-by-default tools or permissions.deny to remove tools. An empty list is treated as unset and disables nothing.",
           "type": "array",
           "items": {
             "type": "string"
@@ -558,15 +1337,37 @@
             "type": "string"
           }
         },
+        "disabled": {
+          "description": "Tool names hidden from the registry. Differs from permissions.deny: disabled tools are not registered at all, so they never appear in /tools and cannot be discovered by the model. Managed by the daemon mutation route POST /workspace/tools/:name/enable.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "visible": {
+          "description": "Deferred tool names made visible at startup without requiring tool_search. Listed tools appear alongside core tools in the initial session.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "eager": {
+          "description": "Allowlist of eager-by-default built-in tool names whose schemas remain eligible for the initial model request. Unlisted non-exempt tools are deferred but stay registered, listed in /tools, callable, and discoverable via tool_search. Tools already deferred by default stay on demand even when listed; use tools.visible to surface one at startup. tool_search, structured_output, plan-mode lifecycle tools, task_stop, MCP tools, and computer_use__* tools are unaffected. An explicitly empty list ([]) defers every non-exempt eager-by-default tool; omit the setting for no restriction. Pairs with tool_search: when ToolSearch is not registered (tools.toolSearch.enabled false, a tool_search deny rule, or the automatic opt-out for DeepSeek models) the schemas are still withheld but nothing can load them back, so the demoted tools are out of reach for that session and a warning is logged. Two carve-outs: demoted tools referenced in resumed session history get their schemas re-sent without a warning, and demoted tools listed in tools.visible are declared up front. Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves calls.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "approvalMode": {
-          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, yolo",
+          "description": "Approval mode for tool usage. Controls how tools are approved before execution. Options: plan, default, auto-edit, auto, yolo",
           "enum": [
             "plan",
             "default",
             "auto-edit",
+            "auto",
             "yolo"
           ],
-          "default": "default"
+          "default": "auto"
         },
         "autoAccept": {
           "description": "Automatically accept and execute tool calls that are considered safe (e.g., read-only operations) without explicit user confirmation.",
@@ -591,6 +1392,11 @@
           "type": "boolean",
           "default": true
         },
+        "workflowsEnabled": {
+          "description": "Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. Off by default; a run can dispatch many subagents and spend tokens accordingly. The QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 environment variables override this setting (disable wins). Unrelated to the Session Workflow plan-and-review view; to stop the \"workflow\" keyword from steering a turn, see Disable Workflow Keyword Trigger.",
+          "type": "boolean",
+          "default": false
+        },
         "truncateToolOutputThreshold": {
           "description": "Truncate tool output if it is larger than this many characters. Set to -1 to disable.",
           "type": "number",
@@ -600,6 +1406,32 @@
           "description": "The number of lines to keep when truncating tool output.",
           "type": "number",
           "default": 1000
+        },
+        "toolOutputBatchBudget": {
+          "description": "Per-message character budget for the combined text output of one batch of tool calls. Oversized batches are reduced deterministically and recoverable output is persisted when possible. Set to -1 to disable.",
+          "type": "number",
+          "default": 200000
+        }
+      }
+    },
+    "policy": {
+      "description": "Daemon multi-client coordination policies. Tool-level allow/deny rules live under `permissions`; this section is for runtime mediation behavior between concurrent HTTP clients sharing one `qwen serve` daemon.",
+      "type": "object",
+      "properties": {
+        "permissionStrategy": {
+          "description": "How permission requests resolve when multiple clients are attached. `first-responder` (default) = any client decides, first wins. `designated` = only the prompt originator decides; falls back to first-responder if originator is anonymous. NOTE: client identity comes from self-declared X-Qwen-Client-Id with no proof-of-possession (pair-token identity is not implemented yet), so any client observing originatorClientId on SSE frames can register with the same id and impersonate the originator. `consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, which means UNANIMITY for M=2 (quorum=2, both must agree) and supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). For M=2 specifically, split votes resolve only via the configured permission timeout, voter cancellation, or session cancellation. `local-only` = only loopback clients can RESOLVE; remote clients can still ABORT a pending permission via the cancel sentinel ({outcome:\"cancelled\"}) — cancel stays cross-policy for consistency. Strict-cancel-too deployments need a dedicated loopback-bound daemon. Requires daemon restart — read once at boot. Options: first-responder, designated, consensus, local-only",
+          "enum": [
+            "first-responder",
+            "designated",
+            "consensus",
+            "local-only"
+          ],
+          "default": "first-responder"
+        },
+        "consensusQuorum": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional fixed quorum size for consensus policy. Capped at M (count of registered voters at request issue time) to prevent unreachable quorum. Unset = floor(M/2)+1. Requires daemon restart — read once at boot."
         }
       }
     },
@@ -612,18 +1444,25 @@
           "type": "string"
         },
         "allowed": {
-          "description": "A list of MCP servers to allow.",
+          "description": "A list of MCP servers to allow. Supports glob patterns (e.g. \"*puppeteer*\").",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "excluded": {
-          "description": "A list of MCP servers to exclude.",
+          "description": "A list of MCP servers to exclude. Supports glob patterns (e.g. \"*puppeteer*\"). Takes precedence over mcp.allowed.",
           "type": "array",
           "items": {
             "type": "string"
           }
+        },
+        "toolIdleTimeoutMs": {
+          "description": "Idle timeout in milliseconds for MCP tool calls. If the MCP server does not produce any response or progress update within this time, the call is aborted. Default: 300000 (5 minutes). Can be overridden via QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.",
+          "type": "number",
+          "default": 300000,
+          "minimum": 10000,
+          "maximum": 3600000
         }
       }
     },
@@ -669,10 +1508,23 @@
           }
         },
         "allowedHttpHookUrls": {
-          "description": "Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).",
+          "description": "Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection). A value in Workspace settings is honored only when no User, System, or SystemDefaults scope sets one, so a cloned repository can narrow but never replace your whitelist.",
           "type": "array",
           "items": {
             "description": "URL pattern (supports * wildcard)",
+            "type": "string"
+          }
+        },
+        "allowPrivateNetworkHooks": {
+          "description": "When true, HTTP hooks may target private/link-local IP ranges (the SSRF IP-range checks are skipped). Cloud metadata hostnames (e.g. 169.254.169.254, metadata.google.internal) remain blocked. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored so a cloned repository cannot self-grant this bypass. Enable only in trusted, managed environments, and pair with security.allowedHttpHookUrls.",
+          "type": "boolean",
+          "default": false
+        },
+        "allowedInsecureVoiceBaseUrls": {
+          "description": "Complete voice base URLs that may use HTTP or private-network addresses. Entries must include an explicit http:// or https:// scheme and the full provider path; only URL serialization and trailing slashes are normalized. Wildcards are not supported; metadata, link-local, local-use NAT64, 6to4, and Teredo addresses remain blocked even when listed, as do hostnames that resolve to loopback; IPv4-mapped, IPv4-compatible, and well-known NAT64 (64:ff9b::/96) literals are classified by their embedded IPv4 address. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored. Enable only for trusted endpoints in managed private networks. Cleartext HTTP also exposes the provider API key transmitted in the Authorization header. An allowlisted hostname is only as trustworthy as its DNS; prefer IP-literal entries when the gateway address is stable.",
+          "type": "array",
+          "items": {
+            "description": "Complete voice provider base URL with explicit scheme and full path (no wildcards)",
             "type": "string"
           }
         }
@@ -688,8 +1540,11 @@
           "default": false
         },
         "dnsResolutionOrder": {
-          "description": "The DNS resolution order.",
-          "type": "string"
+          "description": "The DNS resolution order. Options: ipv4first, verbatim",
+          "enum": [
+            "ipv4first",
+            "verbatim"
+          ]
         },
         "excludedEnvVars": {
           "description": "Environment variables to exclude from project context.",
@@ -708,15 +1563,90 @@
           "additionalProperties": true
         },
         "runtimeOutputDir": {
-          "description": "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.",
+          "description": "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen (or QWEN_HOME if set). Env var QWEN_RUNTIME_DIR takes priority.",
           "type": "string"
         }
       }
     },
-    "agents": {
-      "description": "Settings for multi-agent collaboration features (Arena, Team, Swarm).",
+    "goals": {
+      "description": "Settings for session Goals (/goal).",
       "type": "object",
       "properties": {
+        "modelProposed": {
+          "description": "Controls the propose_goal tool, which lets the model propose a session Goal for you to approve. \"alwaysAsk\" (default) shows every proposal in an approval dialog and nothing is set until you accept it; \"disabled\" removes the tool. A typed /goal is unaffected. Consent-affecting, so this setting is only honored from User, System, or SystemDefaults scope; workspace values are ignored. Options: alwaysAsk, disabled",
+          "enum": [
+            "alwaysAsk",
+            "disabled"
+          ],
+          "default": "alwaysAsk"
+        }
+      }
+    },
+    "agents": {
+      "description": "Settings for built-in agents and multi-agent collaboration features (Arena, Team, Swarm).",
+      "type": "object",
+      "properties": {
+        "builtin": {
+          "description": "Settings for built-in subagents.",
+          "type": "object",
+          "properties": {
+            "exploreModel": {
+              "description": "Model selector for the built-in Explore subagent. Use \"inherit\" for the main session model, \"fast\" for fastModel, a model ID, or an authType:model-id selector. Custom same-name agents are unaffected.",
+              "type": "string",
+              "default": "inherit"
+            }
+          }
+        },
+        "crossSessionMessaging": {
+          "description": "Experimental. Let Qwen Code sessions on this machine send each other messages over a per-session local socket. Off by default; turning it on opens this session to peer messages, makes it discoverable to others, and lets its model address them from send_message.",
+          "type": "boolean",
+          "default": false
+        },
+        "crossSessionInbound": {
+          "description": "What happens to messages other sessions send this one. \"accept\" delivers them; \"hold\" parks them for your review without letting the model act; \"refuse\" opts this session out. Unset means approval-mode parity: a message auto-delivers only when this session reviews every action, or when both sessions declare a mode that can apply actions without per-action review. Other messages are held for you to review. Options: accept, hold, refuse",
+          "enum": [
+            "accept",
+            "hold",
+            "refuse"
+          ]
+        },
+        "crossSessionHeldExpiry": {
+          "description": "How long a message held for your review waits before it expires and the sending session is told nobody answered. \"never\" keeps held messages until the session ends. Only affects messages that are held; accepted and refused ones are settled on arrival. Options: 1m, 5m, 10m, never",
+          "enum": [
+            "1m",
+            "5m",
+            "10m",
+            "never"
+          ],
+          "default": "5m"
+        },
+        "modelGrades": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Maps semantic model grade names exposed to the Agent tool to concrete model selectors."
+        },
+        "allowedGrades": {
+          "description": "Optional whitelist of model grade names the Agent tool may use.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "maxParallelAgents": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Use maxParallelAgentsByModel to cap a specific model below this global limit."
+        },
+        "maxParallelAgentsByModel": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": "Per-model maximum number of background sub-agents that can run concurrently, keyed by model ID (e.g. { \"qwen3-max\": 2 }). Useful when a model has a lower concurrency capacity. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit."
+        },
         "displayMode": {
           "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
           "enum": [
@@ -763,6 +1693,12 @@
       "type": "boolean",
       "default": false
     },
+    "stopHookBlockingCap": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 8,
+      "description": "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP."
+    },
     "hooks": {
       "description": "Hook event configurations for extending CLI behavior at various lifecycle points.",
       "type": "object",
@@ -794,7 +1730,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -803,6 +1740,126 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "UserPromptExpansion": {
+          "description": "Hooks that execute when a slash command expands into a prompt.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http",
+                        "prompt"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -897,7 +1954,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -906,6 +1964,238 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "StopFailure": {
+          "description": "Hooks that execute when a turn ends due to an API error or loop detection, instead of the normal Stop hooks. Receives error type and details.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http",
+                        "prompt"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "MessageDisplay": {
+          "description": "Hooks that execute repeatedly as the assistant reply streams, before the After Agent (Stop) hooks fire.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http",
+                        "prompt"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1000,7 +2290,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1009,6 +2300,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1103,7 +2402,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1112,6 +2412,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1206,7 +2514,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1215,6 +2524,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1309,7 +2626,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1318,6 +2636,126 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "PostToolBatch": {
+          "description": "Hooks that execute once after all tool calls in a batch resolve.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http",
+                        "prompt"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1412,7 +2850,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1421,6 +2860,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1515,7 +2962,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1524,6 +2972,126 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
+                      "type": "string"
+                    },
+                    "headers": {
+                      "description": "HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "allowedEnvVars": {
+                      "description": "List of environment variables allowed for interpolation in headers and URL.",
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "name": {
+                      "description": "An optional name for the hook.",
+                      "type": "string"
+                    },
+                    "description": {
+                      "description": "An optional description of what the hook does.",
+                      "type": "string"
+                    },
+                    "timeout": {
+                      "description": "Timeout in seconds for the hook execution.",
+                      "type": "number"
+                    },
+                    "env": {
+                      "description": "Environment variables to set when executing the hook command.",
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "async": {
+                      "description": "Whether to execute the hook asynchronously (non-blocking, for \"command\" type only).",
+                      "type": "boolean"
+                    },
+                    "once": {
+                      "description": "Whether to execute the hook only once per session (for \"http\" type).",
+                      "type": "boolean"
+                    },
+                    "statusMessage": {
+                      "description": "A message to display while the hook is executing.",
+                      "type": "string"
+                    },
+                    "shell": {
+                      "description": "The shell to use for command execution.",
+                      "type": "string",
+                      "enum": [
+                        "bash",
+                        "powershell"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "hooks"
+            ]
+          }
+        },
+        "SessionDelete": {
+          "description": "Hooks that execute after an explicitly selected session is deleted.",
+          "type": "array",
+          "items": {
+            "description": "A hook definition with an optional matcher and a list of hook configurations.",
+            "type": "object",
+            "properties": {
+              "matcher": {
+                "description": "An optional matcher pattern to filter when this hook definition applies.",
+                "type": "string"
+              },
+              "sequential": {
+                "description": "Whether the hooks should be executed sequentially instead of in parallel.",
+                "type": "boolean"
+              },
+              "hooks": {
+                "description": "The list of hook configurations to execute.",
+                "type": "array",
+                "items": {
+                  "description": "A hook configuration entry that defines a hook to execute.",
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "description": "The type of hook. Note: \"function\" type is only available via SDK registration, not settings.json.",
+                      "type": "string",
+                      "enum": [
+                        "command",
+                        "http",
+                        "prompt"
+                      ]
+                    },
+                    "command": {
+                      "description": "The command to execute when the hook is triggered. Required for \"command\" type.",
+                      "type": "string"
+                    },
+                    "url": {
+                      "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1618,7 +3186,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1627,6 +3196,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1721,7 +3298,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1730,6 +3308,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1824,7 +3410,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1833,6 +3420,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -1927,7 +3522,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1936,6 +3532,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt to send to the model. Required for \"prompt\" type.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "The optional model to use for a \"prompt\" hook.",
                       "type": "string"
                     },
                     "headers": {
@@ -2009,17 +3613,174 @@
       "description": "Settings to enable experimental features.",
       "type": "object",
       "properties": {
-        "cron": {
-          "description": "Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.",
+        "liveVoice": {
+          "description": "Experimental realtime voice conversations through Qwen Live Host on macOS WebShell.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable experimental realtime voice conversations on macOS WebShell.",
+              "type": "boolean",
+              "default": false
+            },
+            "apiKey": {
+              "description": "Dedicated DashScope API key for qwen3.5-omni-plus-realtime.",
+              "type": "string",
+              "default": ""
+            },
+            "model": {
+              "description": "Upstream Realtime model used for Live Voice.",
+              "type": "string",
+              "default": "qwen3.5-omni-plus-realtime"
+            },
+            "endpoint": {
+              "description": "Advanced override for the DashScope Realtime WebSocket endpoint.",
+              "type": "string",
+              "default": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+            },
+            "voice": {
+              "description": "Voice used for Realtime model audio output.",
+              "type": "string",
+              "default": "Tina"
+            },
+            "shortcut": {
+              "description": "Electron accelerator registered globally by Qwen Live Host.",
+              "type": "string",
+              "default": "Command+E"
+            }
+          }
+        },
+        "sessionWorkflow": {
+          "description": "Enable the daemon Web Shell Session Workflow DAG and present Plan mode as Plan & Review. Disabled by default; Workflow markers, approval gates, and visualization stay off until enabled. Todo updates preserve omitted active dependencies in every mode.",
           "type": "boolean",
           "default": false
+        },
+        "cron": {
+          "description": "Enable in-session cron/loop tools. When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can be disabled via QWEN_CODE_DISABLE_CRON=1 environment variable.",
+          "type": "boolean",
+          "default": true
+        },
+        "todoStopGuard": {
+          "description": "Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.",
+          "type": "boolean",
+          "default": false
+        },
+        "sessionWriterLease": {
+          "description": "Enable cross-process write fencing for persisted ACP and daemon sessions. The effective value is frozen when the ACP or daemon process starts. Every concurrent ACP or daemon writer must enable the setting; interactive and headless writers remain outside the protocol.",
+          "type": "boolean",
+          "default": false
+        },
+        "cronRecurringMaxAgeDays": {
+          "type": "number",
+          "minimum": 0,
+          "default": 7,
+          "description": "Days a recurring cron/loop job lives before auto-expiring (it fires one final time, then is deleted). Set to 0 to disable expiry so jobs run until deleted — useful for long-running daemon deployments. Can be overridden via the QWEN_CODE_CRON_MAX_AGE_DAYS environment variable."
+        },
+        "agentTeam": {
+          "description": "Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.",
+          "type": "boolean",
+          "default": false
+        },
+        "artifact": {
+          "description": "Enable artifact tools. Enabled by default. In interactive, non-SDK sessions, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Non-SDK daemon sessions can use the metadata-only record_artifact tool. Set this to false or use QWEN_CODE_DISABLE_ARTIFACT=1 to disable both.",
+          "type": "boolean",
+          "default": true
+        },
+        "emitToolUseSummaries": {
+          "description": "Generate a short LLM-based label after each tool batch completes. For a completed tool group the label replaces the generic `Tool × N` header; when the group is force-expanded it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.",
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "artifact": {
+      "description": "Configuration for artifact publishing. Selects the publish backend and, for the host backend, the upload command and shareable URL template.",
+      "type": "object",
+      "properties": {
+        "autoOpen": {
+          "description": "Open published artifacts in the browser automatically. Set to false to publish without launching a browser. QWEN_ARTIFACT_NO_AUTO_OPEN=1 overrides this setting.",
+          "type": "boolean",
+          "default": true
+        },
+        "publisher": {
+          "description": "Where artifacts are published: 'local' (a file:// page on disk, the default), 'host' (upload via artifact.host.uploadCommand and return a shareable link), or 'oss' (native Aliyun OSS upload). Options: local, host, oss",
+          "enum": [
+            "local",
+            "host",
+            "oss"
+          ],
+          "default": "local"
+        },
+        "host": {
+          "description": "Host-backend config, used when artifact.publisher is \"host\".",
+          "type": "object",
+          "properties": {
+            "uploadCommand": {
+              "description": "Command that uploads the artifact, run with execFile (no shell). {file} = local HTML path, {key} = remote object key. e.g. \"aws s3 cp {file} s3://bucket/{key} --content-type text/html\".",
+              "type": "string",
+              "default": ""
+            },
+            "urlTemplate": {
+              "description": "Shareable URL template; {key} is substituted. e.g. \"https://bucket.example.com/{key}\".",
+              "type": "string",
+              "default": ""
+            },
+            "keyPrefix": {
+              "description": "Remote key prefix; the object key is \"{prefix}/{id}/index.html\".",
+              "type": "string",
+              "default": "artifacts"
+            }
+          }
+        },
+        "oss": {
+          "description": "Native Aliyun OSS backend, used when artifact.publisher is \"oss\". Credentials are read from OSS_ACCESS_KEY_ID / OSS_ACCESS_KEY_SECRET (or ALIBABA_CLOUD_*), never from settings.",
+          "type": "object",
+          "properties": {
+            "bucket": {
+              "description": "OSS bucket name.",
+              "type": "string",
+              "default": ""
+            },
+            "endpoint": {
+              "description": "OSS endpoint host, e.g. \"oss-cn-hangzhou.aliyuncs.com\".",
+              "type": "string",
+              "default": ""
+            },
+            "keyPrefix": {
+              "description": "Remote key prefix; the object key is \"{prefix}/{id}/index.html\".",
+              "type": "string",
+              "default": "artifacts"
+            },
+            "acl": {
+              "description": "Object ACL applied on upload. \"public-read\" (default) makes the link shareable.",
+              "type": "string",
+              "default": "public-read"
+            },
+            "publicBaseUrl": {
+              "description": "Optional CDN / custom-domain base for the returned URL. Upload still goes through endpoint. e.g. \"https://cdn.example.com\".",
+              "type": "string",
+              "default": ""
+            }
+          }
+        }
+      }
+    },
+    "worktree": {
+      "description": "Configuration for general-purpose git worktrees created by the CLI (the `enter_worktree` tool, the `agent isolation: \"worktree\"` parameter, and the startup `--worktree` flag). Does NOT affect Agent Arena worktrees — see `agents.arena.worktreeBaseDir` for those.",
+      "type": "object",
+      "properties": {
+        "symlinkDirectories": {
+          "description": "Directories under the main repository to symlink into every general-purpose worktree on creation. Useful for sharing large opt-in dirs like `node_modules` so the model can run tests / builds inside the worktree without a fresh install. Paths must be relative to the repo root; absolute paths, anything containing `..`, and any path inside `.git` or `.qwen` (the CLI-managed metadata tree, which contains the worktrees directory itself) are rejected. Missing source dirs and existing destination paths are silently skipped (no overwrite, no failure).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
     "$version": {
       "type": "number",
       "description": "Settings schema version for migration tracking.",
-      "default": 3
+      "default": 4
     }
   },
   "additionalProperties": true

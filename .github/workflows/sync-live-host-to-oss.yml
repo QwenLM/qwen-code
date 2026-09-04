@@ -1,0 +1,222 @@
+name: 'Sync Qwen Live Host to Aliyun OSS'
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: 'string'
+      source:
+        required: true
+        type: 'string'
+    secrets:
+      ALIYUN_OSS_ACCESS_KEY_ID:
+        required: true
+      ALIYUN_OSS_ACCESS_KEY_SECRET:
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Stable Live Host version to mirror, for example 0.1.0 or v0.1.0.'
+        required: true
+        type: 'string'
+      source:
+        description: 'Download the assets from the matching GitHub release.'
+        required: true
+        default: 'release'
+        type: 'choice'
+        options:
+          - 'release'
+
+concurrency:
+  group: 'sync-live-host-to-oss'
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: 'Mirror Qwen Live Host to Aliyun OSS'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 30
+    environment:
+      name: 'production-release'
+    permissions:
+      actions: 'read'
+      contents: 'read'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Resolve release'
+        id: 'release'
+        env:
+          INPUT_VERSION: '${{ inputs.version }}'
+          INPUT_SOURCE: '${{ inputs.source }}'
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Live Host OSS mirrors require a stable X.Y.Z version (got '$INPUT_VERSION')."
+            exit 1
+          fi
+          if [[ "$INPUT_SOURCE" != 'artifact' && "$INPUT_SOURCE" != 'release' ]]; then
+            echo "::error::Live Host mirror source must be artifact or release (got '$INPUT_SOURCE')."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source=$INPUT_SOURCE" >> "$GITHUB_OUTPUT"
+
+      - name: 'Download release workflow artifact'
+        if: "${{ steps.release.outputs.source == 'artifact' }}"
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'qwen-live-host-macos'
+          path: 'dist/live-host'
+
+      - name: 'Download GitHub release assets'
+        if: "${{ steps.release.outputs.source == 'release' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          VERSION: '${{ steps.release.outputs.version }}'
+        run: |
+          set -euo pipefail
+          metadata="$(gh release view "live-host-v${VERSION}" --json isDraft,isPrerelease)"
+          if ! jq -e '.isDraft == false and .isPrerelease == false' <<<"$metadata" >/dev/null; then
+            echo "::error::live-host-v${VERSION} is not a published stable release."
+            exit 1
+          fi
+          mkdir -p dist/live-host
+          gh release download "live-host-v${VERSION}" \
+            --dir dist/live-host \
+            --pattern 'Qwen-Live-Host-manifest.json' \
+            --pattern 'Qwen-Live-Host-arm64.zip' \
+            --pattern 'Qwen-Live-Host-x64.zip'
+
+      - name: 'Verify release assets'
+        env:
+          VERSION: '${{ steps.release.outputs.version }}'
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016
+          node --input-type=module -e '
+            import { createHash } from "node:crypto";
+            import { readFileSync, statSync } from "node:fs";
+            const directory = "dist/live-host";
+            const manifest = JSON.parse(readFileSync(`${directory}/Qwen-Live-Host-manifest.json`, "utf8"));
+            if (manifest.version !== process.env.VERSION) throw new Error(`Manifest version ${manifest.version} does not match ${process.env.VERSION}.`);
+            for (const architecture of ["arm64", "x64"]) {
+              const name = `Qwen-Live-Host-${architecture}.zip`;
+              const file = `${directory}/${name}`;
+              const asset = manifest.assets?.[architecture];
+              const checksum = createHash("sha256").update(readFileSync(file)).digest("hex");
+              if (asset?.name !== name || asset.size !== statSync(file).size || asset.sha256 !== checksum) throw new Error(`Manifest asset verification failed for ${architecture}.`);
+            }
+          '
+
+      - name: 'Install ossutil'
+        env:
+          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
+          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          curl -fsSL --connect-timeout 15 --max-time 300 "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
+          echo "$OSSUTIL_SHA256  $tmp_dir/ossutil.zip" | sha256sum -c -
+          unzip -q "$tmp_dir/ossutil.zip" -d "$tmp_dir"
+          ossutil_path="$(find "$tmp_dir" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
+          if [[ -z "$ossutil_path" ]]; then echo '::error::ossutil binary not found'; exit 1; fi
+          chmod +x "$ossutil_path"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$ossutil_path" "$HOME/.local/bin/ossutil"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          rm -rf "$tmp_dir"
+          "$HOME/.local/bin/ossutil" >/dev/null
+
+      - name: 'Configure Aliyun OSS credentials'
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |
+          set -euo pipefail
+          if [[ -z "$ALIYUN_OSS_ACCESS_KEY_ID" || -z "$ALIYUN_OSS_ACCESS_KEY_SECRET" ]]; then
+            echo '::error::Missing Aliyun OSS credentials in the production-release environment.'
+            exit 1
+          fi
+          ossutil config -e "$ALIYUN_OSS_ENDPOINT" -i "$ALIYUN_OSS_ACCESS_KEY_ID" -k "$ALIYUN_OSS_ACCESS_KEY_SECRET" -L EN -c "$RUNNER_TEMP/.ossutilconfig"
+
+      - name: 'Upload versioned assets to Aliyun OSS'
+        env:
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          VERSION: '${{ steps.release.outputs.version }}'
+        run: |
+          set -euo pipefail
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "$ALIYUN_OSS_BUCKET" \
+            --config "$RUNNER_TEMP/.ossutilconfig" \
+            --prefix "live-host/v${VERSION}" \
+            dist/live-host/Qwen-Live-Host-arm64.zip \
+            dist/live-host/Qwen-Live-Host-x64.zip \
+            dist/live-host/Qwen-Live-Host-manifest.json
+
+      - name: 'Verify versioned assets on Aliyun OSS'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          VERSION: '${{ steps.release.outputs.version }}'
+        run: |
+          set -euo pipefail
+          base="$ALIYUN_OSS_PUBLIC_BASE_URL/live-host/v${VERSION}"
+          directory="$(mktemp -d)"
+          trap 'rm -rf "$directory"' EXIT
+          for asset in Qwen-Live-Host-manifest.json Qwen-Live-Host-arm64.zip Qwen-Live-Host-x64.zip; do
+            curl -fsSL --connect-timeout 15 --max-time 3600 "$base/$asset" -o "$directory/$asset"
+          done
+          # shellcheck disable=SC2016
+          VERSION="$VERSION" DIRECTORY="$directory" node --input-type=module -e '
+            import { createHash } from "node:crypto";
+            import { readFileSync, statSync } from "node:fs";
+            const manifest = JSON.parse(readFileSync(`${process.env.DIRECTORY}/Qwen-Live-Host-manifest.json`, "utf8"));
+            if (manifest.version !== process.env.VERSION) throw new Error("Mirrored manifest version mismatch.");
+            for (const architecture of ["arm64", "x64"]) {
+              const name = `Qwen-Live-Host-${architecture}.zip`;
+              const file = `${process.env.DIRECTORY}/${name}`;
+              const asset = manifest.assets?.[architecture];
+              const checksum = createHash("sha256").update(readFileSync(file)).digest("hex");
+              if (asset?.name !== name || asset.size !== statSync(file).size || asset.sha256 !== checksum) throw new Error(`Mirrored asset verification failed for ${architecture}.`);
+            }
+          '
+
+      - name: 'Confirm latest manifest matches GitHub stable feed'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+        run: |
+          set -euo pipefail
+          directory="$(mktemp -d)"
+          trap 'rm -rf "$directory"' EXIT
+          gh release download 'live-host-latest' \
+            --dir "$directory" \
+            --pattern 'Qwen-Live-Host-manifest.json'
+          cmp dist/live-host/Qwen-Live-Host-manifest.json \
+            "$directory/Qwen-Live-Host-manifest.json"
+
+      - name: 'Publish latest manifest to Aliyun OSS'
+        env:
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+        run: |
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "$ALIYUN_OSS_BUCKET" \
+            --config "$RUNNER_TEMP/.ossutilconfig" \
+            --prefix 'live-host/latest' \
+            dist/live-host/Qwen-Live-Host-manifest.json
+
+      - name: 'Verify latest manifest on Aliyun OSS'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |
+          set -euo pipefail
+          curl -fsSL --connect-timeout 15 --max-time 300 "$ALIYUN_OSS_PUBLIC_BASE_URL/live-host/latest/Qwen-Live-Host-manifest.json" -o "$RUNNER_TEMP/Qwen-Live-Host-manifest.json"
+          cmp dist/live-host/Qwen-Live-Host-manifest.json "$RUNNER_TEMP/Qwen-Live-Host-manifest.json"
+
+      - name: 'Cleanup Aliyun OSS credentials'
+        if: '${{ always() }}'
+        run: 'rm -f "$RUNNER_TEMP/.ossutilconfig"'

@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Code
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook } from '@testing-library/react';
@@ -34,6 +35,10 @@ function userMsg(text: string): HistoryItem {
   return { id: Math.random(), type: 'user', text };
 }
 
+function steerMsg(text: string): HistoryItem {
+  return { id: Math.random(), type: 'user', text, sentToModel: false };
+}
+
 const THREE_USER_HISTORY: HistoryItem[] = [
   userMsg('one'),
   userMsg('two'),
@@ -54,10 +59,7 @@ describe('useAwaySummary', () => {
     const recordSlashCommand = vi.fn();
     const config = makeConfig(recordSlashCommand);
     const addItem = vi.fn();
-    generateSessionRecapMock.mockResolvedValue({
-      text: 'recap text',
-      modelUsed: 'fast',
-    });
+    generateSessionRecapMock.mockResolvedValue('recap text');
 
     // Mount blurred to set the away-start timestamp.
     const { rerender } = renderHook(
@@ -100,14 +102,49 @@ describe('useAwaySummary', () => {
     );
   });
 
+  it('excludes sentToModel-false steer items from user message counts', async () => {
+    const recordSlashCommand = vi.fn();
+    const config = makeConfig(recordSlashCommand);
+    const addItem = vi.fn();
+    generateSessionRecapMock.mockResolvedValue('should not appear');
+
+    // 2 real user messages + 1 steer → only 2 real turns, below the
+    // MIN_USER_MESSAGES_TO_FIRE threshold of 3.
+    const historyWithSteer: HistoryItem[] = [
+      userMsg('one'),
+      userMsg('two'),
+      steerMsg('steer during tool run'),
+    ];
+
+    const { rerender } = renderHook(
+      ({ isFocused }: { isFocused: boolean }) =>
+        useAwaySummary({
+          enabled: true,
+          config,
+          isFocused,
+          isIdle: true,
+          addItem,
+          history: historyWithSteer,
+          awayThresholdMinutes: 0.1,
+        }),
+      { initialProps: { isFocused: false } },
+    );
+
+    vi.advanceTimersByTime(7000);
+    rerender({ isFocused: true });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(generateSessionRecapMock).not.toHaveBeenCalled();
+    expect(addItem).not.toHaveBeenCalled();
+  });
+
   it('skips the recap when shouldFireRecap returns false (no new user turns since last recap)', async () => {
     const recordSlashCommand = vi.fn();
     const config = makeConfig(recordSlashCommand);
     const addItem = vi.fn();
-    generateSessionRecapMock.mockResolvedValue({
-      text: 'should not appear',
-      modelUsed: 'fast',
-    });
+    generateSessionRecapMock.mockResolvedValue('should not appear');
 
     const historyWithRecentRecap: HistoryItem[] = [
       ...THREE_USER_HISTORY,

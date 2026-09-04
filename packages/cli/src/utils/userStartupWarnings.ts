@@ -5,7 +5,6 @@
  */
 
 import fs from 'node:fs/promises';
-import * as os from 'node:os';
 import path from 'node:path';
 import { canUseRipgrep } from '@qwen-code/qwen-code-core';
 
@@ -21,25 +20,6 @@ type WarningCheck = {
 };
 
 // Individual warning checks
-const homeDirectoryCheck: WarningCheck = {
-  id: 'home-directory',
-  check: async (options: WarningCheckOptions) => {
-    try {
-      const [workspaceRealPath, homeRealPath] = await Promise.all([
-        fs.realpath(options.workspaceRoot),
-        fs.realpath(os.homedir()),
-      ]);
-
-      if (workspaceRealPath === homeRealPath) {
-        return 'You are running Qwen Code in your home directory. It is recommended to run in a project-specific directory.';
-      }
-      return null;
-    } catch (_err: unknown) {
-      return 'Could not verify the current directory due to a file system error.';
-    }
-  },
-};
-
 const rootDirectoryCheck: WarningCheck = {
   id: 'root-directory',
   check: async (options: WarningCheckOptions) => {
@@ -81,7 +61,6 @@ const ripgrepAvailabilityCheck: WarningCheck = {
 
 // All warning checks
 const WARNING_CHECKS: readonly WarningCheck[] = [
-  homeDirectoryCheck,
   rootDirectoryCheck,
   ripgrepAvailabilityCheck,
 ];

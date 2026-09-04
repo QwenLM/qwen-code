@@ -9,16 +9,51 @@ import { Text, Box } from 'ink';
 import wrapAnsi from 'wrap-ansi';
 import stripAnsi from 'strip-ansi';
 import { getCachedStringWidth } from './textUtils.js';
+import { TABLE_MAX_ROW_LINES as MAX_ROW_LINES } from './pending-rendered-height.js';
 import { theme } from '../semantic-colors.js';
+import { renderInlineLatex } from './latexRenderer.js';
+import {
+  INLINE_CODE_SPAN_PATTERN_SOURCE,
+  mergeInlineMathMatches,
+  unescapeMarkdownBeforeMath,
+  unescapeMarkdownDollars,
+} from './inline-math.js';
+import {
+  BARE_URL_PATTERN,
+  MD_LINK_CAPTURE,
+  MD_LINK_PATTERN,
+  isSafeOscScheme,
+  labelMayDeceive,
+  osc8Close,
+  osc8Open,
+  sanitizeForOsc,
+  shouldWrapMarkdownLink,
+  supportsHyperlinks,
+  trimTrailingUrlPunctuation,
+} from './osc8.js';
 
 /** Minimum column width to prevent degenerate layouts */
 const MIN_COLUMN_WIDTH = 3;
 
-/** Maximum number of lines per row before switching to vertical format */
-const MAX_ROW_LINES = 4;
+// MAX_ROW_LINES (the wrap-height threshold that switches a row to the vertical
+// layout) is imported from pending-rendered-height so the renderer and the
+// pending-height estimator can never disagree on the format decision.
+
+/**
+ * Below this width the column-aware budget (see `minHorizontalTableWidth`
+ * below) is bypassed and we always switch to vertical: even a 1-column
+ * table is barely readable horizontally under ~24 cols of content.
+ */
+const ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH = 24;
 
 /** Safety margin to account for terminal resize races */
 const SAFETY_MARGIN = 4;
+
+const INLINE_MARKDOWN_REGEX = new RegExp(
+  String.raw`(\*\*.*?\*\*|\*.*?\*|(?<![\w\u3400-\u9fff])_(?!_)[^_]*_(?![\w\u3400-\u9fff])|~~.*?~~|${MD_LINK_PATTERN}|` +
+    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|${BARE_URL_PATTERN})`,
+  'g',
+);
 
 export type ColumnAlign = 'left' | 'center' | 'right';
 
@@ -28,6 +63,22 @@ interface TableRendererProps {
   contentWidth: number;
   /** Per-column alignment parsed from markdown separator line */
   aligns?: ColumnAlign[];
+  enableInlineMath?: boolean;
+  /**
+   * True while THIS table is still streaming its rows (the frontier). The
+   * horizontal-vs-vertical decision is then anchored to the first row so the
+   * format cannot flip as later rows arrive; a completed table (false/undefined)
+   * — committed, or a mid-content table already closed by following text —
+   * measures every row for the most readable layout.
+   */
+  isStreaming?: boolean;
+  /**
+   * Maximum rendered text lines the table may occupy. When set (streaming
+   * preview) and the fully rendered table exceeds it, output is clipped to
+   * `maxHeight - 1` lines plus a cue. Backstop against a wrapped-cell table
+   * overflowing the viewport and triggering the scroll-to-top lock.
+   */
+  maxHeight?: number;
 }
 
 /** Map Ink-compatible named colors to ANSI foreground codes */
@@ -53,6 +104,7 @@ const INK_COLOR_TO_ANSI: Record<string, number> = {
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+const ESC = '\x1b';
 
 /** Get raw ANSI foreground color escape (without reset) for re-application */
 function getColorCode(color: string): string {
@@ -94,6 +146,98 @@ function recolorAfterResets(text: string, colorCode: string): string {
     .join(fullReset + colorCode);
 }
 
+function updateActiveForeground(
+  activeForeground: string,
+  paramsText: string,
+): string {
+  const params =
+    paramsText.length > 0
+      ? paramsText.split(';').map((param) => Number(param))
+      : [0];
+  let foreground = activeForeground;
+
+  for (let index = 0; index < params.length; index++) {
+    const code = params[index];
+    if (!Number.isFinite(code)) {
+      continue;
+    }
+
+    if (code === 0 || code === 39) {
+      foreground = '';
+    } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+      foreground = `\x1b[${code}m`;
+    } else if (code === 38) {
+      const mode = params[index + 1];
+      if (mode === 5 && Number.isFinite(params[index + 2])) {
+        foreground = `\x1b[38;5;${params[index + 2]}m`;
+        index += 2;
+      } else if (
+        mode === 2 &&
+        Number.isFinite(params[index + 2]) &&
+        Number.isFinite(params[index + 3]) &&
+        Number.isFinite(params[index + 4])
+      ) {
+        foreground = `\x1b[38;2;${params[index + 2]};${params[index + 3]};${params[index + 4]}m`;
+        index += 4;
+      }
+    }
+  }
+
+  return foreground;
+}
+
+function readSgrSequence(
+  text: string,
+  index: number,
+): { sequence: string; paramsText: string; endIndex: number } | null {
+  if (text[index] !== ESC || text[index + 1] !== '[') {
+    return null;
+  }
+  const endIndex = text.indexOf('m', index + 2);
+  if (endIndex === -1) {
+    return null;
+  }
+  const paramsText = text.slice(index + 2, endIndex);
+  if (!/^[0-9;]*$/.test(paramsText)) {
+    return null;
+  }
+  return {
+    sequence: text.slice(index, endIndex + 1),
+    paramsText,
+    endIndex,
+  };
+}
+
+function preserveForegroundAcrossLineBreaks(text: string): string {
+  let activeForeground = '';
+  let result = '';
+  let lastIndex = 0;
+  let index = 0;
+
+  while (index < text.length) {
+    const sgr = readSgrSequence(text, index);
+    if (!sgr) {
+      index += 1;
+      continue;
+    }
+
+    const segment = text.slice(lastIndex, index);
+    result += activeForeground
+      ? segment.replace(/\n/g, `\x1b[39m\n${activeForeground}`)
+      : segment;
+    result += sgr.sequence;
+    activeForeground = updateActiveForeground(activeForeground, sgr.paramsText);
+    index = sgr.endIndex + 1;
+    lastIndex = index;
+  }
+
+  const segment = text.slice(lastIndex);
+  result += activeForeground
+    ? segment.replace(/\n/g, `\x1b[39m\n${activeForeground}`)
+    : segment;
+  return result;
+}
+
 /** ANSI text formatting helpers (always produce escape codes, unlike chalk) */
 const ansiFmt = {
   bold: (t: string) => `\x1b[1m${t}\x1b[22m`,
@@ -106,16 +250,37 @@ const ansiFmt = {
  * Convert inline markdown to ANSI-styled text.
  * Mirrors RenderInline's behavior but outputs strings instead of React nodes.
  */
-function renderMarkdownToAnsi(text: string): string {
-  const inlineRegex =
-    /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
+  // Capability is stable for the duration of one cell render — read it once
+  // here instead of per matched token.
+  const canHyperlink = supportsHyperlinks();
 
   let result = '';
   let lastIndex = 0;
-  let match;
 
-  while ((match = inlineRegex.exec(text)) !== null) {
-    result += text.slice(lastIndex, match.index);
+  for (const token of mergeInlineMathMatches(
+    text,
+    INLINE_MARKDOWN_REGEX,
+    enableInlineMath,
+  )) {
+    const index =
+      token.kind === 'math' ? token.span.index : (token.match.index ?? 0);
+    const prose = text.slice(lastIndex, index);
+    result +=
+      token.kind === 'math'
+        ? unescapeMarkdownBeforeMath(prose)
+        : unescapeMarkdownDollars(prose);
+
+    if (token.kind === 'math') {
+      result += applyColor(
+        renderInlineLatex(unescapeMarkdownDollars(token.span.content)),
+        theme.text.accent,
+      );
+      lastIndex = index + token.span.raw.length;
+      continue;
+    }
+
+    const match = token.match;
     const fullMatch = match[0]!;
     let rendered: string | null = null;
 
@@ -124,27 +289,31 @@ function renderMarkdownToAnsi(text: string): string {
       fullMatch.endsWith('**') &&
       fullMatch.length > 4
     ) {
-      rendered = ansiFmt.bold(fullMatch.slice(2, -2));
+      rendered = ansiFmt.bold(unescapeMarkdownDollars(fullMatch.slice(2, -2)));
     } else if (
       fullMatch.length > 2 &&
       ((fullMatch.startsWith('*') && fullMatch.endsWith('*')) ||
         (fullMatch.startsWith('_') && fullMatch.endsWith('_'))) &&
-      !/\w/.test(text.substring(match.index - 1, match.index)) &&
+      !/\w/.test(text.substring(index - 1, index)) &&
       !/\w/.test(
-        text.substring(inlineRegex.lastIndex, inlineRegex.lastIndex + 1),
+        text.substring(index + fullMatch.length, index + fullMatch.length + 1),
       ) &&
-      !/\S[./\\]/.test(text.substring(match.index - 2, match.index)) &&
+      !/\S[./\\]/.test(text.substring(index - 2, index)) &&
       !/[./\\]\S/.test(
-        text.substring(inlineRegex.lastIndex, inlineRegex.lastIndex + 2),
+        text.substring(index + fullMatch.length, index + fullMatch.length + 2),
       )
     ) {
-      rendered = ansiFmt.italic(fullMatch.slice(1, -1));
+      rendered = ansiFmt.italic(
+        unescapeMarkdownDollars(fullMatch.slice(1, -1)),
+      );
     } else if (
       fullMatch.startsWith('~~') &&
       fullMatch.endsWith('~~') &&
       fullMatch.length > 4
     ) {
-      rendered = ansiFmt.strikethrough(fullMatch.slice(2, -2));
+      rendered = ansiFmt.strikethrough(
+        unescapeMarkdownDollars(fullMatch.slice(2, -2)),
+      );
     } else if (
       fullMatch.startsWith('`') &&
       fullMatch.endsWith('`') &&
@@ -159,25 +328,67 @@ function renderMarkdownToAnsi(text: string): string {
       fullMatch.includes('](') &&
       fullMatch.endsWith(')')
     ) {
-      const linkMatch = fullMatch.match(/\[(.*?)\]\((.*?)\)/);
+      const linkMatch = fullMatch.match(MD_LINK_CAPTURE);
       if (linkMatch) {
-        rendered = `${linkMatch[1]} ${applyColor(`(${linkMatch[2]})`, theme.text.link)}`;
+        const labelText = unescapeMarkdownDollars(linkMatch[1] ?? '');
+        const url = linkMatch[2] ?? '';
+        // When OSC 8 wraps, show only the label — long URLs in narrow
+        // table cells were the worst offender for layout cluttering, so
+        // this matters especially here. Fall back to the legacy
+        // `label (url)` rendering when wrapping is off so the cell is
+        // byte-identical to today on unsupported terminals / unsafe
+        // schemes / whitespace URLs.
+        if (shouldWrapMarkdownLink(url, canHyperlink)) {
+          // Strip bidi / C0 / C1 from BOTH the visible label and any URL
+          // bytes that end up as visible text (empty-label fallback,
+          // deceptive-label `(url)` suffix). The OSC target inside
+          // `osc8Open` is already sanitized, but raw `url` reaching the
+          // visible region would let U+202E etc. spoof the rendered text.
+          const safeLabel = sanitizeForOsc(labelText);
+          const safeUrl = sanitizeForOsc(url);
+          const visibleLabel = applyColor(
+            safeLabel || safeUrl,
+            theme.text.link,
+          );
+          const envelope = `${osc8Open(url)}${visibleLabel}${osc8Close()}`;
+          // When the label looks like a (mismatched) URL, keep the `(url)`
+          // suffix so the user can see where the click actually goes — same
+          // mitigation as the React renderer.
+          rendered = labelMayDeceive(safeLabel, safeUrl)
+            ? `${envelope} ${applyColor(`(${safeUrl})`, theme.text.link)}`
+            : envelope;
+        } else {
+          rendered = `${labelText} ${applyColor(`(${url})`, theme.text.link)}`;
+        }
       }
     } else if (
       fullMatch.startsWith('<u>') &&
       fullMatch.endsWith('</u>') &&
       fullMatch.length > 7
     ) {
-      rendered = ansiFmt.underline(fullMatch.slice(3, -4));
+      rendered = ansiFmt.underline(
+        unescapeMarkdownDollars(fullMatch.slice(3, -4)),
+      );
     } else if (/^https?:\/\//.test(fullMatch)) {
-      rendered = applyColor(fullMatch, theme.text.link);
+      const visible = applyColor(fullMatch, theme.text.link);
+      if (canHyperlink) {
+        const trimmedUrl = trimTrailingUrlPunctuation(
+          fullMatch,
+          text[index + fullMatch.length],
+        );
+        rendered = isSafeOscScheme(trimmedUrl)
+          ? `${osc8Open(trimmedUrl)}${visible}${osc8Close()}`
+          : visible;
+      } else {
+        rendered = visible;
+      }
     }
 
-    result += rendered ?? fullMatch;
-    lastIndex = inlineRegex.lastIndex;
+    result += rendered ?? unescapeMarkdownDollars(fullMatch);
+    lastIndex = index + fullMatch.length;
   }
 
-  result += text.slice(lastIndex);
+  result += unescapeMarkdownDollars(text.slice(lastIndex));
   return result;
 }
 
@@ -220,7 +431,7 @@ function wrapText(
     trim: false,
     wordWrap: true,
   });
-  const lines = wrapped.split('\n');
+  const lines = preserveForegroundAcrossLineBreaks(wrapped).split('\n');
   // Trim trailing empty lines (wrap-ansi artifacts) but preserve internal ones
   while (lines.length > 1 && lines[lines.length - 1]!.length === 0) {
     lines.pop();
@@ -246,6 +457,9 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   rows,
   contentWidth,
   aligns,
+  enableInlineMath = false,
+  isStreaming = false,
+  maxHeight,
 }) => {
   const colCount = headers.length;
 
@@ -254,9 +468,21 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     return <Box />;
   }
 
+  // Clip the fully-rendered table to `maxHeight` text lines (streaming preview
+  // backstop). Operates on the final joined string so it is exact for wrapped
+  // rows and the vertical fallback alike.
+  const clampToMaxHeight = (text: string): string => {
+    if (maxHeight === undefined) return text;
+    const all = text.split('\n');
+    if (all.length <= maxHeight) return text;
+    const kept = all.slice(0, Math.max(1, maxHeight - 1));
+    kept.push(applyColor('… more rows streaming …', theme.text.secondary));
+    return kept.join('\n');
+  };
+
   // ── Precompute per-cell metrics to avoid repeated renderMarkdownToAnsi calls ──
   const computeMetrics = (text: string) => {
-    const rendered = renderMarkdownToAnsi(text);
+    const rendered = renderMarkdownToAnsi(text, enableInlineMath);
     const visible = stripAnsi(rendered);
     const words = visible.split(/\s+/).filter((w) => w.length > 0);
     return {
@@ -298,7 +524,10 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   });
 
   // ── Step 2: Calculate available space ──
-  // Border overhead: │ content │ content │ = 1 + (width + 3) per column
+  // Border overhead: │ content │ content │ = 1 + (width + 3) per column.
+  // NOTE: this value is reused below in the horizontal-vs-vertical threshold
+  // (`minHorizontalTableWidth`). Any change to this formula will silently
+  // shift the layout threshold — adjust both call sites together.
   const borderOverhead = 1 + colCount * 3;
   const availableWidth = Math.max(
     contentWidth - borderOverhead - SAFETY_MARGIN,
@@ -346,27 +575,65 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   // ── Step 4: Check max row lines to decide vertical fallback ──
+  // While STREAMING (isStreaming), measure only the header + the FIRST data row.
+  // Using every row lets a later, taller row push maxRowLines over the threshold
+  // and flip an already-horizontal table to vertical mid-stream — a visible
+  // format change. The first row is representative for the common case, so
+  // anchoring to it keeps the format stable as rows stream in. A COMPLETED table
+  // (committed, or a mid-content table already closed by text) has all its rows
+  // and no flip concern, so it measures EVERY row for the most readable layout (a
+  // short first row followed by tall rows still goes vertical). Column WIDTHS
+  // always track all rows (redraw-on-wider is unchanged); only the
+  // horizontal-vs-vertical CHOICE is anchored to the first row while streaming.
   function calculateMaxRowLines(): number {
     let maxLines = 1;
+    const rowsToMeasure = isStreaming ? rowMetrics.slice(0, 1) : rowMetrics;
     for (let i = 0; i < colCount; i++) {
-      const wrapped = wrapText(headerMetrics[i]!.rendered, columnWidths[i]!, {
-        hard: needsHardWrap,
-      });
-      maxLines = Math.max(maxLines, wrapped.length);
+      const headerWrapped = wrapText(
+        headerMetrics[i]!.rendered,
+        columnWidths[i]!,
+        {
+          hard: needsHardWrap,
+        },
+      );
+      maxLines = Math.max(maxLines, headerWrapped.length);
     }
-    for (const row of rowMetrics) {
+    for (const row of rowsToMeasure) {
       for (let i = 0; i < colCount; i++) {
-        const wrapped = wrapText(row[i]!.rendered, columnWidths[i]!, {
+        const cellWrapped = wrapText(row[i]!.rendered, columnWidths[i]!, {
           hard: needsHardWrap,
         });
-        maxLines = Math.max(maxLines, wrapped.length);
+        maxLines = Math.max(maxLines, cellWrapped.length);
       }
     }
     return maxLines;
   }
 
   const maxRowLines = calculateMaxRowLines();
-  const useVerticalFormat = maxRowLines > MAX_ROW_LINES;
+  // Column-aware horizontal-vs-vertical decision: a horizontal table needs
+  // at least `MIN_COLUMN_WIDTH` per column plus the border overhead computed
+  // above, with a safety margin. This avoids the prior fixed 60-col floor
+  // that forced vertical mode for a 2-col table on a 50-col terminal even
+  // when content fit comfortably. The downstream `maxLineWidth` safety
+  // check still catches content that would actually overflow.
+  const minHorizontalTableWidth = Math.max(
+    ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH,
+    colCount * MIN_COLUMN_WIDTH + borderOverhead + SAFETY_MARGIN,
+  );
+  // The horizontal-vs-vertical decision is the SAME while streaming and once
+  // committed, so a table never flips format mid-stream (which reads as a jump).
+  // A zero-row table is the live streaming header box: never vertical — the
+  // vertical fallback iterates the rows and with none would render an empty
+  // string (a blank box) on a narrow terminal where the width trigger fires.
+  //
+  // The vertical trigger is anchored to the header + first row (see
+  // calculateMaxRowLines) so appending rows does not flip the format. Residual
+  // corner: a very wide later row can force a proportional column shrink that
+  // re-wraps the first row taller; that is rare and only for genuinely
+  // overflowing tables, where vertical is the right call anyway.
+  const useVerticalFormat =
+    rowMetrics.length > 0 &&
+    (contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES);
 
   // ── Helper: Get alignment for a column ──
   const getAlign = (colIndex: number): ColumnAlign =>
@@ -465,7 +732,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
       }
       for (let colIndex = 0; colIndex < colCount; colIndex++) {
         const rawLabel = headers[colIndex] ?? `Column ${colIndex + 1}`;
-        const label = renderMarkdownToAnsi(rawLabel);
+        const label = renderMarkdownToAnsi(rawLabel, enableInlineMath);
         const value = row[colIndex]!.rendered.trim()
           .replace(/\n+/g, ' ')
           .replace(/\s+/g, ' ')
@@ -494,7 +761,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   if (useVerticalFormat) {
     return (
       <Box marginY={1}>
-        <Text>{renderVerticalFormat()}</Text>
+        <Text>{clampToMaxHeight(renderVerticalFormat())}</Text>
       </Box>
     );
   }
@@ -504,29 +771,38 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   const tableLines: string[] = [];
   tableLines.push(renderBorderLine('top'));
   tableLines.push(...renderRowLines(headerRendered, true));
-  tableLines.push(renderBorderLine('middle'));
-  rowMetrics.forEach((row, rowIndex) => {
-    tableLines.push(
-      ...renderRowLines(
-        row.map((m) => m.rendered),
-        false,
-      ),
-    );
-    if (rowIndex < rows.length - 1) {
-      tableLines.push(renderBorderLine('middle'));
-    }
-  });
+  // With no data rows yet (a live table whose first row is still streaming),
+  // skip the header/body divider so the box reads as a clean header — otherwise
+  // the divider stacked directly on the bottom border looks like an empty row.
+  if (rowMetrics.length > 0) {
+    tableLines.push(renderBorderLine('middle'));
+    rowMetrics.forEach((row, rowIndex) => {
+      tableLines.push(
+        ...renderRowLines(
+          row.map((m) => m.rendered),
+          false,
+        ),
+      );
+      if (rowIndex < rows.length - 1) {
+        tableLines.push(renderBorderLine('middle'));
+      }
+    });
+  }
   tableLines.push(renderBorderLine('bottom'));
 
   // ── Safety check: verify no line exceeds content width ──
   const maxLineWidth = Math.max(
     ...tableLines.map((line) => getCachedStringWidth(stripAnsi(line))),
   );
-  if (maxLineWidth > contentWidth - SAFETY_MARGIN) {
-    // Fallback to vertical format to prevent terminal resize flicker
+  if (rowMetrics.length > 0 && maxLineWidth > contentWidth - SAFETY_MARGIN) {
+    // Fallback to vertical format to prevent terminal resize flicker. Skipped
+    // for a zero-row streaming header box: the vertical format iterates the
+    // rows and would render an empty string (a blank box). Better to keep the
+    // horizontal header — even if it slightly overflows a very narrow terminal
+    // — than to make the box the PR draws immediately vanish.
     return (
       <Box marginY={1}>
-        <Text>{renderVerticalFormat()}</Text>
+        <Text>{clampToMaxHeight(renderVerticalFormat())}</Text>
       </Box>
     );
   }
@@ -534,7 +810,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   // Render as a single Text block to prevent Ink wrapping mid-row
   return (
     <Box flexDirection="column" marginY={1}>
-      <Text>{tableLines.join('\n')}</Text>
+      <Text>{clampToMaxHeight(tableLines.join('\n'))}</Text>
     </Box>
   );
 };

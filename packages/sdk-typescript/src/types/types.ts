@@ -46,6 +46,20 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+  forkSession?: boolean;
+  maxToolCalls?: number;
+  maxSubagentDepth?: number;
+  includeDirectories?: string[];
+  extraArgs?: string[];
+  extensions?: string[];
+  allowedMcpServerNames?: string[];
+  fallbackModel?: string[];
+  proxy?: string;
+  sandbox?: boolean;
+  safeMode?: boolean;
+  insecure?: boolean;
+  worktree?: boolean;
+  disabledSlashCommands?: string[];
 };
 
 export interface QuerySystemPromptPreset {
@@ -128,6 +142,7 @@ export interface CLIMcpServerConfig {
   tcp?: string;
   // Common
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
   trust?: boolean;
   // Metadata
   description?: string;
@@ -179,6 +194,24 @@ export interface CLIMcpServerConfig {
  * ```
  */
 export type McpServerConfig = CLIMcpServerConfig | SDKMcpServerConfig;
+
+export type EffortTier = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+export interface EffortOverride {
+  source: 'extra_body' | 'samplingParams';
+  field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
+}
+
+export interface EffortStatus {
+  applied: boolean;
+  override: EffortOverride | null;
+  /**
+   * Human-readable reason assembled by the CLI for why the effort was not
+   * applied. Absent when the CLI predates this field or the effort applied;
+   * derive a fallback from `applied`/`override` when missing.
+   */
+  reason?: string;
+}
 
 /**
  * Type guard to check if a config is an SDK MCP server
@@ -254,6 +287,10 @@ export interface QueryOptions {
    * - 'plan': Blocks all write tools, instructing AI to present a plan first.
    *   Read-only tools execute normally.
    * - 'auto-edit': Auto-approve edit tools (edit, write_file) while other tools require confirmation.
+   * - 'auto': An LLM classifier evaluates each tool call and auto-approves
+   *   safe ones / blocks risky ones. Fail-closed: classifier outages route
+   *   the call to manual approval. Best for long autonomous sessions in
+   *   trusted projects. See `docs/users/features/auto-mode.md`.
    * - 'yolo': All tools execute automatically without confirmation.
    *
    * **Priority Chain (highest to lowest):**
@@ -261,15 +298,16 @@ export interface QueryOptions {
    * 2. `permissionMode: 'plan'` - Blocks non-read-only tools (except exit_plan_mode)
    * 3. `permissionMode: 'yolo'` - Auto-approves all tools
    * 4. `allowedTools` - Auto-approves matching tools
-   * 5. `canUseTool` callback - Custom approval logic
-   * 6. Default behavior - Auto-deny in SDK mode
+   * 5. `permissionMode: 'auto'` - Classifier-mediated approval for the rest
+   * 6. `canUseTool` callback - Custom approval logic
+   * 7. Default behavior - Auto-deny in SDK mode
    *
    * @default 'default'
    * @see canUseTool For custom permission handling
    * @see allowedTools For auto-approving specific tools
    * @see excludeTools For blocking specific tools
    */
-  permissionMode?: 'default' | 'plan' | 'auto-edit' | 'yolo';
+  permissionMode?: PermissionMode;
 
   /**
    * Custom permission handler for tool execution approval.
@@ -362,15 +400,41 @@ export interface QueryOptions {
   maxSessionTurns?: number;
 
   /**
-   * Equivalent to `tool.core` in settings.json.
-   * List of core tools to enable for the session.
-   * If specified, only these tools will be available to the AI.
-   * @example ['read_file', 'write_file', 'run_terminal_cmd']
+   * Uses the legacy `coreTools` / CLI `--core-tools` allowlist semantics.
+   * If specified, only matching core tools are registered for the session
+   * (non-core built-ins such as `send_message` are unaffected). It is the
+   * only allowlist-style knob that restricts built-in tool registration;
+   * a whole-tool `permissions.deny` rule (and `tools.disabled`) also
+   * removes a tool from the registry, while a deny rule carrying a
+   * specifier (such as `Bash(rm *)`) only denies matching invocations at
+   * runtime. MCP tools are exempt from deny-based removal — hide them with
+   * the per-server `excludeTools` / `tools.disabled` filters instead.
+   * Separately, `tools.eager` in settings.json (requires restart) selects
+   * which eager-by-default tool schemas remain eligible for the initial
+   * model request. Unlisted non-exempt tools are demoted to deferred and stay
+   * loadable via `tool_search` while ToolSearch is registered; when ToolSearch
+   * is not registered (`tools.toolSearch.enabled: false`, a `tool_search` deny
+   * rule, or the automatic DeepSeek opt-out) the demoted tools are out of
+   * reach for that session and a warning is logged. Two carve-outs: demoted
+   * tools referenced in resumed session history get their schemas re-sent
+   * without a warning, and demoted tools listed in `tools.visible` are
+   * declared up front. Tools already deferred by
+   * default remain on
+   * demand even when listed; `tools.visible` surfaces one at startup. The
+   * allowlist does not affect MCP tools, the `--json-schema`
+   * `structured_output` contract, plan-mode lifecycle tools, `task_stop`,
+   * `tool_search`, or the `computer_use__*` family (#9827, #10075).
+   * `permissions.allow` plays no part in this — it
+   * is pure auto-approval and never removes or hides a tool. Aliases like
+   * 'Read', 'Edit', and 'Bash' also work but resolve to single tools.
+   * Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
+   * tool registration, not invocation.
+   * @example ['read_file', 'edit', 'run_shell_command']
    */
   coreTools?: string[];
 
   /**
-   * Equivalent to `tool.exclude` in settings.json.
+   * Equivalent to `permissions.deny` in settings.json.
    * List of tools to exclude from the session.
    *
    * **Behavior:**
@@ -379,17 +443,17 @@ export interface QueryOptions {
    * - Tools will not be available to the AI, even if in `coreTools` or `allowedTools`
    *
    * **Pattern matching:**
-   * - Tool name: `'write_file'`, `'run_shell_command'`
-   * - Tool class: `'WriteTool'`, `'ShellTool'`
-   * - Shell command prefix: `'ShellTool(git commit)'` (matches commands starting with "git commit")
+   * - Tool name: `'write_file'`
+   * - Shell command prefix: `'Bash(rm *)'`
+   * - Path patterns: `'Read(.env)'`, `'Edit(/src/**)'`
    *
-   * @example ['run_terminal_cmd', 'delete_file', 'ShellTool(rm )']
+   * @example ['Bash(rm *)', 'Read(.env)', 'Edit(/secrets/**)']
    * @see allowedTools For allowing specific tools
    */
   excludeTools?: string[];
 
   /**
-   * Equivalent to `tool.allowed` in settings.json.
+   * Equivalent to `permissions.allow` in settings.json for auto-approval.
    * List of tools that are allowed to run without confirmation.
    *
    * **Behavior:**
@@ -398,18 +462,30 @@ export interface QueryOptions {
    * - Checked after `excludeTools` but before `canUseTool` callback
    * - Does not override `permissionMode: 'plan'` (plan mode blocks all write tools)
    * - Has no effect in `permissionMode: 'yolo'` (already auto-approved)
+   * - Does NOT restrict tool registration: this parameter maps to the CLI
+   *   `--allowed-tools` flag and is pure auto-approval, as is
+   *   `permissions.allow` in settings.json (#10075). To keep unlisted
+   *   eager-by-default built-in schemas out of the initial model request, set
+   *   `tools.eager` in settings.json (requires restart); tools omitted
+   *   there are demoted to deferred — still registered and loadable via
+   *   `tool_search` while ToolSearch is registered; when ToolSearch is not
+   *   registered (`tools.toolSearch.enabled: false`, a `tool_search` deny
+   *   rule, or the automatic DeepSeek opt-out) the demoted tools are out of
+   *   reach for that session and a warning is logged — except demoted tools
+   *   referenced in resumed session history (re-sent without a warning) or
+   *   listed in `tools.visible` (declared up front) (#9827)
    *
    * **Pattern matching:**
-   * - Tool name: `'write_file'`, `'run_shell_command'`
-   * - Tool class: `'WriteTool'`, `'ShellTool'`
-   * - Shell command prefix: `'ShellTool(git status)'` (matches commands starting with "git status")
+   * - Tool name: `'write_file'`
+   * - Shell command prefix: `'Bash(git status)'`
+   * - Path patterns: `'Read(.env)'`, `'Edit(/src/**)'`
    *
    * **Use cases:**
-   * - Auto-approve safe shell commands: `['ShellTool(git status)', 'ShellTool(ls)']`
+   * - Auto-approve safe shell commands: `['Bash(git status)', 'Bash(ls)']`
    * - Auto-approve specific tools: `['write_file', 'edit']`
    * - Combine with `permissionMode: 'default'` to selectively auto-approve tools
    *
-   * @example ['read_file', 'ShellTool(git status)', 'ShellTool(npm test)']
+   * @example ['Read', 'Bash(git status)', 'Bash(npm test)']
    * @see canUseTool For custom approval logic
    * @see excludeTools For blocking specific tools
    */
@@ -418,10 +494,10 @@ export interface QueryOptions {
   /**
    * Authentication type for the AI service.
    * - 'openai': Use OpenAI-compatible authentication
-   * - 'qwen-oauth': Use Qwen OAuth authentication
-   *
-   * Though we support 'qwen-oauth', it's not recommended to use it in the SDK.
-   * Because the credentials are stored in `~/.qwen` and may need to refresh periodically.
+   * - 'anthropic': Use Anthropic-compatible authentication
+   * - 'qwen-oauth': Legacy Qwen OAuth authentication
+   * - 'gemini': Use Gemini authentication
+   * - 'vertex-ai': Use Vertex AI authentication
    */
   authType?: AuthType;
 
@@ -432,6 +508,23 @@ export interface QueryOptions {
    * The tool use of these agent is marked with the parent_tool_use_id of the `task` tool use.
    */
   agents?: SubagentConfig[];
+
+  /**
+   * Initial reasoning effort tier requested at session start.
+   *
+   * Controls the depth of model reasoning/thinking. Higher tiers produce more
+   * thorough reasoning at the cost of latency and tokens. Provider adapters
+   * clamp the tier to what the active model supports.
+   *
+   * - `'low'`: Minimal reasoning, fastest responses
+   * - `'medium'`: Balanced reasoning and speed
+   * - `'high'`: More thorough reasoning
+   * - `'xhigh'`: Extended reasoning for complex tasks
+   * - `'max'`: Maximum reasoning depth
+   *
+   * Use {@link Query.setEffort} to change the tier at runtime.
+   */
+  effort?: EffortTier;
 
   /**
    * Include partial messages in the response stream.
@@ -455,6 +548,96 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   sessionId?: string;
+
+  /**
+   * Fork from an existing session instead of starting fresh.
+   * Equivalent to CLI's `--fork-session` flag.
+   * @default false
+   */
+  forkSession?: boolean;
+
+  /**
+   * Maximum cumulative tool calls. -1 means no limit.
+   * Equivalent to CLI's `--max-tool-calls` flag.
+   */
+  maxToolCalls?: number;
+
+  /**
+   * Maximum nesting depth for sub-agents (1-100).
+   * Equivalent to CLI's `--max-subagent-depth` flag.
+   */
+  maxSubagentDepth?: number;
+
+  /**
+   * Additional directories to include in the workspace.
+   * Equivalent to CLI's `--include-directories` flag.
+   */
+  includeDirectories?: string[];
+
+  /**
+   * Additional CLI arguments to pass through directly.
+   * Cannot contain SDK-managed or security-sensitive flags (e.g. `--model`,
+   * `--auth-type`, `--approval-mode`, `--insecure`, `--dangerously-skip-permissions`).
+   */
+  extraArgs?: string[];
+
+  /**
+   * Extensions to enable for this session.
+   * Equivalent to CLI's `--extensions` flag.
+   */
+  extensions?: string[];
+
+  /**
+   * Whitelist of MCP server names to allow.
+   * Equivalent to CLI's `--allowed-mcp-server-names` flag.
+   */
+  allowedMcpServerNames?: string[];
+
+  /**
+   * Fallback model(s) for capacity errors (429/503/529).
+   * Up to 3 models, tried in order when the primary model is unavailable.
+   */
+  fallbackModel?: string[];
+
+  /**
+   * Proxy URL for the Qwen CLI process.
+   * @deprecated Use the "proxy" setting in settings.json instead.
+   */
+  proxy?: string;
+
+  /**
+   * Run in sandbox mode.
+   * Equivalent to CLI's `--sandbox` flag.
+   * @default false
+   */
+  sandbox?: boolean;
+
+  /**
+   * Disable all customizations for troubleshooting.
+   * Equivalent to CLI's `--safe-mode` flag.
+   * @default false
+   */
+  safeMode?: boolean;
+
+  /**
+   * Skip TLS certificate verification for API connections.
+   * Equivalent to CLI's `--insecure` flag.
+   * @default false
+   */
+  insecure?: boolean;
+
+  /**
+   * Enable Git worktree mode.
+   * Equivalent to CLI's `--worktree` flag.
+   * @default false
+   */
+  worktree?: boolean;
+
+  /**
+   * Slash command names to hide/disable.
+   * Equivalent to CLI's `--disabled-slash-commands` flag.
+   */
+  disabledSlashCommands?: string[];
 
   /**
    * Timeout configuration for various SDK operations.

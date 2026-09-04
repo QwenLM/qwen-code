@@ -18,6 +18,7 @@ import {
 } from 'vitest';
 import {
   escapePath,
+  formatDisplayPath,
   resolvePath,
   validatePath,
   resolveAndValidatePath,
@@ -25,7 +26,10 @@ import {
   isSubpath,
   shortenPath,
   tildeifyPath,
+  expandHomeDir,
   getProjectHash,
+  realpathNearestExisting,
+  realpathNearestExistingAsync,
   _resetValidatePathCacheForTest,
 } from './paths.js';
 import type { Config } from '../config/config.js';
@@ -185,88 +189,104 @@ describe('escapePath', () => {
   });
 
   it('should handle paths with only special characters', () => {
-    expect(escapePath(' ()[]{};&|*?$`\'"#!~<>')).toBe(
-      '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>',
+    expect(escapePath(' ()[]{};&|*?$`\'"#!~<>,')).toBe(
+      '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>\\,',
     );
   });
 });
 
 describe('unescapePath', () => {
-  it('should unescape spaces', () => {
-    expect(unescapePath('my\\ file.txt')).toBe('my file.txt');
-  });
+  const isWindows = process.platform === 'win32';
 
-  it('should unescape tabs', () => {
-    expect(unescapePath('file\\\twith\\\ttabs.txt')).toBe(
-      'file\twith\ttabs.txt',
+  // On Windows, backslashes are path separators, not shell escape chars.
+  // unescapePath is intentionally a no-op on win32.
+  it.skipIf(!isWindows)('should be a no-op on Windows', () => {
+    expect(unescapePath('C:\\Users\\my file.txt')).toBe(
+      'C:\\Users\\my file.txt',
+    );
+    expect(unescapePath('C:\\(v2)\\file.txt')).toBe('C:\\(v2)\\file.txt');
+    expect(unescapePath('path\\to\\file\\ name.txt')).toBe(
+      'path\\to\\file\\ name.txt',
     );
   });
 
-  it('should unescape parentheses', () => {
-    expect(unescapePath('file\\(1\\).txt')).toBe('file(1).txt');
-  });
-
-  it('should unescape square brackets', () => {
-    expect(unescapePath('file\\[backup\\].txt')).toBe('file[backup].txt');
-  });
-
-  it('should unescape curly braces', () => {
-    expect(unescapePath('file\\{temp\\}.txt')).toBe('file{temp}.txt');
-  });
-
-  it('should unescape multiple special characters', () => {
-    expect(unescapePath('my\\ file\\ \\(backup\\)\\ \\[v1.2\\].txt')).toBe(
-      'my file (backup) [v1.2].txt',
-    );
-  });
-
-  it('should handle paths without escaped characters', () => {
-    expect(unescapePath('normalfile.txt')).toBe('normalfile.txt');
-    expect(unescapePath('path/to/normalfile.txt')).toBe(
-      'path/to/normalfile.txt',
-    );
-  });
-
-  it('should handle all special characters', () => {
-    expect(
-      unescapePath(
-        '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>',
-      ),
-    ).toBe(' ()[]{};&|*?$`\'"#!~<>');
-  });
-
-  it('should be the inverse of escapePath', () => {
-    const testCases = [
-      'my file.txt',
-      'file(1).txt',
-      'file[backup].txt',
-      'My Documents/Project (2024)/file [backup].txt',
-      'file with $special &chars!.txt',
-      ' ()[]{};&|*?$`\'"#!~<>',
-      'file\twith\ttabs.txt',
-    ];
-
-    testCases.forEach((testCase) => {
-      expect(unescapePath(escapePath(testCase))).toBe(testCase);
+  describe.skipIf(isWindows)('on Unix', () => {
+    it('should unescape spaces', () => {
+      expect(unescapePath('my\\ file.txt')).toBe('my file.txt');
     });
-  });
 
-  it('should handle empty strings', () => {
-    expect(unescapePath('')).toBe('');
-  });
+    it('should unescape tabs', () => {
+      expect(unescapePath('file\\\twith\\\ttabs.txt')).toBe(
+        'file\twith\ttabs.txt',
+      );
+    });
 
-  it('should not affect backslashes not followed by special characters', () => {
-    expect(unescapePath('file\\name.txt')).toBe('file\\name.txt');
-    expect(unescapePath('path\\to\\file.txt')).toBe('path\\to\\file.txt');
-  });
+    it('should unescape parentheses', () => {
+      expect(unescapePath('file\\(1\\).txt')).toBe('file(1).txt');
+    });
 
-  it('should handle escaped backslashes in unescaping', () => {
-    // Should correctly unescape when there are escaped backslashes
-    expect(unescapePath('path\\\\\\ file.txt')).toBe('path\\\\ file.txt');
-    expect(unescapePath('path\\\\\\\\\\ file.txt')).toBe(
-      'path\\\\\\\\ file.txt',
-    );
-    expect(unescapePath('file\\\\\\(test\\).txt')).toBe('file\\\\(test).txt');
+    it('should unescape square brackets', () => {
+      expect(unescapePath('file\\[backup\\].txt')).toBe('file[backup].txt');
+    });
+
+    it('should unescape curly braces', () => {
+      expect(unescapePath('file\\{temp\\}.txt')).toBe('file{temp}.txt');
+    });
+
+    it('should unescape multiple special characters', () => {
+      expect(unescapePath('my\\ file\\ \\(backup\\)\\ \\[v1.2\\].txt')).toBe(
+        'my file (backup) [v1.2].txt',
+      );
+    });
+
+    it('should handle paths without escaped characters', () => {
+      expect(unescapePath('normalfile.txt')).toBe('normalfile.txt');
+      expect(unescapePath('path/to/normalfile.txt')).toBe(
+        'path/to/normalfile.txt',
+      );
+    });
+
+    it('should handle all special characters', () => {
+      expect(
+        unescapePath(
+          '\\ \\(\\)\\[\\]\\{\\}\\;\\&\\|\\*\\?\\$\\`\\\'\\"\\#\\!\\~\\<\\>',
+        ),
+      ).toBe(' ()[]{};&|*?$`\'"#!~<>');
+    });
+
+    it('should be the inverse of escapePath', () => {
+      const testCases = [
+        'my file.txt',
+        'file(1).txt',
+        'file[backup].txt',
+        'My Documents/Project (2024)/file [backup].txt',
+        'file with $special &chars!.txt',
+        ' ()[]{};&|*?$`\'"#!~<>',
+        'file\twith\ttabs.txt',
+      ];
+
+      testCases.forEach((testCase) => {
+        expect(unescapePath(escapePath(testCase))).toBe(testCase);
+      });
+    });
+
+    it('should handle empty strings', () => {
+      expect(unescapePath('')).toBe('');
+    });
+
+    it('should not affect backslashes not followed by special characters', () => {
+      expect(unescapePath('file\\name.txt')).toBe('file\\name.txt');
+      expect(unescapePath('path\\to\\file.txt')).toBe('path\\to\\file.txt');
+    });
+
+    it('should handle escaped backslashes in unescaping', () => {
+      // Should correctly unescape when there are escaped backslashes
+      expect(unescapePath('path\\\\\\ file.txt')).toBe('path\\\\ file.txt');
+      expect(unescapePath('path\\\\\\\\\\ file.txt')).toBe(
+        'path\\\\\\\\ file.txt',
+      );
+      expect(unescapePath('file\\\\\\(test\\).txt')).toBe('file\\\\(test).txt');
+    });
   });
 });
 
@@ -384,6 +404,11 @@ describe('resolvePath', () => {
     expect(result).toBe(path.resolve(cwd, 'src/main.ts'));
   });
 
+  it('resolves empty paths against the provided base directory', () => {
+    const result = resolvePath('/base/dir', '');
+    expect(result).toBe(path.resolve('/base/dir', ''));
+  });
+
   it('returns absolute paths unchanged', () => {
     const absolutePath = '/absolute/path/to/file.ts';
     const result = resolvePath('/some/base', absolutePath);
@@ -400,6 +425,12 @@ describe('resolvePath', () => {
     const homeDir = os.homedir();
     const result = resolvePath(undefined, '~/documents/file.txt');
     expect(result).toBe(path.join(homeDir, 'documents/file.txt'));
+  });
+
+  it('expands Windows-style tilde-prefixed paths to home directory', () => {
+    const homeDir = os.homedir();
+    const result = resolvePath('/some/base', '~\\documents\\file.txt');
+    expect(result).toBe(path.join(homeDir, 'documents', 'file.txt'));
   });
 
   it('uses baseDir when provided for relative paths', () => {
@@ -602,6 +633,9 @@ describe('resolveAndValidatePath', () => {
       expect(resolveAndValidatePath(configWithHome, '~/project')).toBe(
         homeSubdir,
       );
+      expect(resolveAndValidatePath(configWithHome, '~\\project')).toBe(
+        homeSubdir,
+      );
       expect(resolveAndValidatePath(configWithHome, '~')).toBe(fakeHome);
     } finally {
       homedirSpy.mockRestore();
@@ -650,8 +684,8 @@ describe('resolveAndValidatePath', () => {
 describe('tildeifyPath', () => {
   it('replaces home directory with tilde', () => {
     const homeDir = os.homedir();
-    const result = tildeifyPath(`${homeDir}/documents/file.txt`);
-    expect(result).toBe('~/documents/file.txt');
+    const result = tildeifyPath(path.join(homeDir, 'documents', 'file.txt'));
+    expect(result).toBe(`~${path.sep}documents${path.sep}file.txt`);
   });
 
   it('returns path unchanged if it does not start with home directory', () => {
@@ -665,12 +699,218 @@ describe('tildeifyPath', () => {
     expect(result).toBe('~');
   });
 
+  it('does not replace paths that only share the home directory prefix', () => {
+    const homeDir = os.homedir();
+    const siblingPath = `${homeDir}2${path.sep}project${path.sep}file.txt`;
+    const result = tildeifyPath(siblingPath);
+    expect(result).toBe(siblingPath);
+  });
+
   it('handles paths with home directory in the middle', () => {
     const homeDir = os.homedir();
     const result = tildeifyPath(`/mnt/backup${homeDir}/data`);
     // Should not replace home dir in the middle
     expect(result).toBe(`/mnt/backup${homeDir}/data`);
   });
+});
+
+describe('formatDisplayPath', () => {
+  const root = path.resolve(path.sep, 'projects', 'my-app');
+
+  it('renders project-internal paths relative to the root', () => {
+    const target = path.join(root, 'src', 'index.ts');
+    expect(formatDisplayPath(target, root)).toBe(path.join('src', 'index.ts'));
+  });
+
+  it('renders the project root itself as .', () => {
+    expect(formatDisplayPath(root, root)).toBe('.');
+  });
+
+  it('resolves relative input against the root before formatting', () => {
+    expect(formatDisplayPath(path.join('src', 'app'), root)).toBe(
+      path.join('src', 'app'),
+    );
+    expect(formatDisplayPath('.', root)).toBe('.');
+  });
+
+  it('keeps paths outside the project absolute', () => {
+    const outside = path.resolve(path.sep, 'other', 'place', 'file.txt');
+    expect(formatDisplayPath(outside, root)).toBe(outside);
+  });
+
+  it('shortens the home directory to ~ for paths outside the project', () => {
+    const homeDir = os.homedir();
+    const target = path.join(homeDir, 'elsewhere', 'file.txt');
+    expect(formatDisplayPath(target, root)).toBe(
+      `~${path.sep}elsewhere${path.sep}file.txt`,
+    );
+  });
+
+  it('does not tildeify project-internal paths when the project is under home', () => {
+    const homeRoot = path.join(os.homedir(), 'work', 'proj');
+    const target = path.join(homeRoot, 'src', 'main.ts');
+    expect(formatDisplayPath(target, homeRoot)).toBe(
+      path.join('src', 'main.ts'),
+    );
+  });
+
+  it('expands a tilde-prefixed input like other tool paths', () => {
+    expect(formatDisplayPath(path.join('~', 'data'), root)).toBe(
+      `~${path.sep}data`,
+    );
+  });
+
+  it('compresses overlong paths with shortenPath semantics', () => {
+    const target = path.join(
+      root,
+      'very',
+      'deeply',
+      'nested',
+      'directory',
+      'structure',
+      'file.ts',
+    );
+    const result = formatDisplayPath(target, root, 25);
+    expect(result.length).toBeLessThanOrEqual(25);
+    expect(result).toContain('...');
+    expect(result).toContain('file.ts');
+  });
+});
+
+describe('realpathNearestExisting', () => {
+  let root: string;
+
+  beforeAll(() => {
+    // realpathSync the base itself so assertions do not trip over macOS's
+    // /var -> /private/var symlink.
+    root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'realpath-nearest-')),
+    );
+    fs.mkdirSync(path.join(root, 'real'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'real', 'file.txt'), 'x', 'utf8');
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('returns an existing path canonicalized', () => {
+    const target = path.join(root, 'real', 'file.txt');
+    expect(realpathNearestExisting(target)).toBe(target);
+  });
+
+  it('appends segments that do not exist yet to the resolved prefix', () => {
+    expect(realpathNearestExisting(path.join(root, 'real', 'a', 'b.txt'))).toBe(
+      path.join(root, 'real', 'a', 'b.txt'),
+    );
+  });
+
+  it('returns the lexical path when no ancestor can be resolved', () => {
+    const absent = path.resolve(path.sep, 'no', 'such', 'ancestor', 'x');
+    expect(realpathNearestExisting(absent)).toBe(absent);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'follows a symlink to its target',
+    () => {
+      const link = path.join(root, 'link-to-file');
+      fs.symlinkSync(path.join(root, 'real', 'file.txt'), link);
+      expect(realpathNearestExisting(link)).toBe(
+        path.join(root, 'real', 'file.txt'),
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'follows a dangling symlink to its non-existent target',
+    () => {
+      // fs.existsSync() follows links and reports a dangling one as missing,
+      // so a naive nearest-existing walk would classify this by where the
+      // link sits rather than where it points.
+      const link = path.join(root, 'dangling');
+      fs.symlinkSync(path.join(root, 'real', 'absent.txt'), link);
+      expect(realpathNearestExisting(link)).toBe(
+        path.join(root, 'real', 'absent.txt'),
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'resolves an intermediate directory symlink',
+    () => {
+      const dirLink = path.join(root, 'dirlink');
+      fs.symlinkSync(path.join(root, 'real'), dirLink, 'dir');
+      expect(realpathNearestExisting(path.join(dirLink, 'file.txt'))).toBe(
+        path.join(root, 'real', 'file.txt'),
+      );
+      expect(realpathNearestExisting(path.join(dirLink, 'absent.txt'))).toBe(
+        path.join(root, 'real', 'absent.txt'),
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'resolves a relative symlink target against the real parent of the link',
+    () => {
+      const link = path.join(root, 'real', 'rel-link');
+      fs.symlinkSync('file.txt', link);
+      expect(realpathNearestExisting(link)).toBe(
+        path.join(root, 'real', 'file.txt'),
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'gives up safely on a symlink cycle instead of looping forever',
+    () => {
+      const a = path.join(root, 'cycle-a');
+      const b = path.join(root, 'cycle-b');
+      fs.symlinkSync(b, a);
+      fs.symlinkSync(a, b);
+      // Bounded by SYMLOOP_MAX hops; the caller still range-checks the result.
+      expect(() => realpathNearestExisting(a)).not.toThrow();
+    },
+  );
+});
+
+describe('realpathNearestExistingAsync', () => {
+  let root: string;
+
+  beforeAll(() => {
+    root = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'realpath-nearest-async-')),
+    );
+    fs.mkdirSync(path.join(root, 'real'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'real', 'file.txt'), 'x', 'utf8');
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('matches the sync variant across the canonicalization cases', async () => {
+    const cases = [
+      path.join(root, 'real', 'file.txt'),
+      path.join(root, 'real', 'a', 'b.txt'),
+      path.resolve(path.sep, 'no', 'such', 'ancestor', 'x'),
+    ];
+    for (const target of cases) {
+      await expect(realpathNearestExistingAsync(target)).resolves.toBe(
+        realpathNearestExisting(target),
+      );
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'follows a dangling symlink to its non-existent target',
+    async () => {
+      const link = path.join(root, 'dangling-async');
+      fs.symlinkSync(path.join(root, 'real', 'absent.txt'), link);
+      await expect(realpathNearestExistingAsync(link)).resolves.toBe(
+        path.join(root, 'real', 'absent.txt'),
+      );
+    },
+  );
 });
 
 describe('shortenPath', () => {
@@ -893,5 +1133,95 @@ describe('getProjectHash', () => {
     }
 
     platformSpy.mockRestore();
+  });
+});
+
+describe('expandHomeDir', () => {
+  const homeDir = os.homedir();
+
+  it('should return empty string for empty input', () => {
+    expect(expandHomeDir('')).toBe('');
+  });
+
+  it('should expand ~ to home directory', () => {
+    expect(expandHomeDir('~')).toBe(path.normalize(homeDir));
+  });
+
+  it('should preserve trailing separators for home directory paths', () => {
+    expect(expandHomeDir('~/')).toBe(path.normalize(homeDir + path.sep));
+    expect(expandHomeDir('~\\')).toBe(path.normalize(homeDir + path.sep));
+  });
+
+  it('should expand ~/path to home directory path', () => {
+    expect(expandHomeDir('~/documents')).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should expand Windows-style ~\\path to home directory path', () => {
+    expect(expandHomeDir('~\\documents')).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should preserve trailing separators in Windows-style tilde paths', () => {
+    expect(expandHomeDir('~\\documents\\')).toBe(
+      path.normalize(path.join(homeDir, 'documents') + path.sep),
+    );
+  });
+
+  it('should handle mixed separators in Windows-style tilde paths', () => {
+    expect(expandHomeDir('~\\foo/bar\\baz')).toBe(
+      path.join(homeDir, 'foo', 'bar', 'baz'),
+    );
+  });
+
+  it('should preserve legacy POSIX tilde path semantics', () => {
+    expect(expandHomeDir('~/foo\\bar')).toBe(
+      path.normalize(path.join(homeDir, 'foo\\bar')),
+    );
+  });
+
+  it('should not expand ~path (no slash)', () => {
+    expect(expandHomeDir('~documents')).toBe('~documents');
+  });
+
+  it('should expand %userprofile% (case-insensitive) to home directory', () => {
+    expect(expandHomeDir('%userprofile%')).toBe(path.normalize(homeDir));
+    expect(expandHomeDir('%USERPROFILE%')).toBe(path.normalize(homeDir));
+  });
+
+  it('should expand %userprofile%\\path to home directory path', () => {
+    const result = expandHomeDir('%userprofile%\\documents');
+    expect(result).toBe(path.join(homeDir, 'documents'));
+  });
+
+  it('should expand %USERPROFILE%/path with forward-slash separator', () => {
+    expect(expandHomeDir('%USERPROFILE%/documents')).toBe(
+      path.join(homeDir, 'documents'),
+    );
+  });
+
+  it('should preserve trailing separators for %USERPROFILE% paths', () => {
+    expect(expandHomeDir('%USERPROFILE%/')).toBe(
+      path.normalize(homeDir + path.sep),
+    );
+    expect(expandHomeDir('%USERPROFILE%\\documents\\')).toBe(
+      path.normalize(path.join(homeDir, 'documents') + path.sep),
+    );
+  });
+
+  it('should preserve legacy %USERPROFILE% prefix semantics without a separator', () => {
+    expect(expandHomeDir('%USERPROFILE%foo')).toBe(
+      path.normalize(`${homeDir}foo`),
+    );
+  });
+
+  it('should return regular absolute path unchanged (but normalized)', () => {
+    expect(expandHomeDir('/absolute/path')).toBe(
+      path.normalize('/absolute/path'),
+    );
+  });
+
+  it('should return relative path unchanged (but normalized)', () => {
+    expect(expandHomeDir('relative/path')).toBe(
+      path.normalize('relative/path'),
+    );
   });
 });

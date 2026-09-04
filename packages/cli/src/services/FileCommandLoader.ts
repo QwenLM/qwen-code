@@ -171,7 +171,12 @@ export class FileCommandLoader implements ICommandLoader {
     if (this.config) {
       const activeExtensions = this.config
         .getExtensions()
-        .filter((ext) => ext.isActive)
+        .filter(
+          (ext) =>
+            ext.isActive &&
+            ext.format !== 'agent-plugins-v1' &&
+            ext.installMetadata?.originSource !== 'AgentPlugins',
+        )
         .sort((a, b) => a.name.localeCompare(b.name)); // Sort alphabetically for deterministic loading
 
       // Collect command directories from each extension
@@ -182,7 +187,7 @@ export class FileCommandLoader implements ICommandLoader {
         for (const cmdPath of commandsPaths) {
           dirs.push({
             path: cmdPath,
-            extensionName: ext.name,
+            extensionName: ext.displayName ?? ext.name,
           });
         }
       }
@@ -355,6 +360,7 @@ export class FileCommandLoader implements ICommandLoader {
           ? validDef.frontmatter.description
           : undefined,
       whenToUse: validDef.frontmatter?.when_to_use,
+      argumentHint: validDef.frontmatter?.['argument-hint'],
       disableModelInvocation:
         validDef.frontmatter?.['disable-model-invocation'],
     };

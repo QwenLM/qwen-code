@@ -32,7 +32,6 @@ export function partToString(
   // Cast to Part, assuming it might contain project-specific fields
   const part = value as Part & {
     videoMetadata?: unknown;
-    thought?: string;
     codeExecutionResult?: unknown;
     executableCode?: unknown;
   };
@@ -41,8 +40,14 @@ export function partToString(
     if (part.videoMetadata !== undefined) {
       return `[Video Metadata]`;
     }
-    if (part.thought !== undefined) {
-      return `[Thought: ${part.thought}]`;
+    // `thought` is a boolean flag and the reasoning itself is in `part.text` --
+    // that is what `createOpenAIReasoningThoughtPart` builds and what every
+    // other consumer reads. Interpolating the flag rendered every thought as
+    // the literal `[Thought: true]`, dropping the reasoning entirely, and
+    // testing `!== undefined` also caught a part carrying `thought: false`,
+    // which is an ordinary part and should render as its own text.
+    if (part.thought) {
+      return part.text ? `[Thought: ${part.text}]` : `[Thought]`;
     }
     if (part.codeExecutionResult !== undefined) {
       return `[Code Execution Result]`;
@@ -163,6 +168,48 @@ export function appendToLastTextPart(
     };
   } else {
     newPrompt.push({ text: `${separator}${textToAppend}` });
+  }
+
+  return newPrompt;
+}
+
+/**
+ * Prepends text to the first text part of a prompt, or inserts a new text part
+ * before non-text content when the prompt has no text parts.
+ */
+export function prependToFirstTextPart(
+  prompt: PartUnion[],
+  textToPrepend: string,
+  separator = '\n\n',
+): PartUnion[] {
+  if (!textToPrepend) {
+    return prompt;
+  }
+
+  if (prompt.length === 0) {
+    return [{ text: textToPrepend }];
+  }
+
+  const textPartIndex = prompt.findIndex(
+    (part) =>
+      typeof part === 'string' ||
+      (typeof part === 'object' && part !== null && 'text' in part),
+  );
+
+  if (textPartIndex === -1) {
+    return [{ text: textToPrepend }, ...prompt];
+  }
+
+  const newPrompt = [...prompt];
+  const textPart = newPrompt[textPartIndex];
+
+  if (typeof textPart === 'string') {
+    newPrompt[textPartIndex] = `${textToPrepend}${separator}${textPart}`;
+  } else {
+    newPrompt[textPartIndex] = {
+      ...textPart,
+      text: `${textToPrepend}${separator}${textPart.text ?? ''}`,
+    };
   }
 
   return newPrompt;

@@ -4,27 +4,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * Enum for approval modes with UI-friendly labels
- * Represents the different approval modes available in the ACP protocol
- * with their corresponding user-facing display names
- */
-export enum ApprovalMode {
-  PLAN = 'plan',
-  DEFAULT = 'default',
-  AUTO_EDIT = 'auto-edit',
-  YOLO = 'yolo',
-}
+import {
+  DAEMON_APPROVAL_MODES,
+  type DaemonApprovalMode,
+} from '@qwen-code/sdk/daemon';
+
+type ApprovalModeByValue = {
+  [Mode in DaemonApprovalMode]: Mode;
+};
+
+const APPROVAL_MODE_BY_VALUE = Object.fromEntries(
+  DAEMON_APPROVAL_MODES.map((mode) => [mode, mode]),
+) as ApprovalModeByValue;
+
+export const ApprovalMode = {
+  PLAN: APPROVAL_MODE_BY_VALUE.plan,
+  DEFAULT: APPROVAL_MODE_BY_VALUE.default,
+  AUTO_EDIT: APPROVAL_MODE_BY_VALUE['auto-edit'],
+  AUTO: APPROVAL_MODE_BY_VALUE.auto,
+  YOLO: APPROVAL_MODE_BY_VALUE.yolo,
+} as const;
+
+export type ApprovalMode = DaemonApprovalMode;
 
 /**
  * Mapping from string values to enum values for runtime conversion
  */
-export const APPROVAL_MODE_MAP: Record<string, ApprovalMode> = {
-  plan: ApprovalMode.PLAN,
-  default: ApprovalMode.DEFAULT,
-  'auto-edit': ApprovalMode.AUTO_EDIT,
-  yolo: ApprovalMode.YOLO,
-};
+export const APPROVAL_MODE_MAP: Record<string, ApprovalMode> =
+  APPROVAL_MODE_BY_VALUE;
 
 /**
  * UI display information for each approval mode
@@ -50,6 +57,12 @@ export const APPROVAL_MODE_INFO: Record<
   [ApprovalMode.AUTO_EDIT]: {
     label: 'Edit automatically',
     title: 'Qwen will edit files automatically. Click to switch modes.',
+    iconType: 'auto',
+  },
+  [ApprovalMode.AUTO]: {
+    label: 'Auto',
+    title:
+      'Qwen will use a classifier to auto-approve safe tools and block risky ones. Click to switch modes.',
     iconType: 'auto',
   },
   [ApprovalMode.YOLO]: {

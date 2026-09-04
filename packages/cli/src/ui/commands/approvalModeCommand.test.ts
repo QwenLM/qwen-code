@@ -79,8 +79,22 @@ describe('approvalModeCommand', () => {
 
       expect(result.type).toBe('message');
       expect(result.messageType).toBe('info');
-      expect(result.content).toContain('yolo');
+      expect(result.content).toContain('YOLO');
       expect(mockSetApprovalMode).toHaveBeenCalledWith('yolo');
+    });
+
+    it('should emit the entry notice when switching to auto mode', async () => {
+      const result = (await approvalModeCommand.action?.(
+        mockContext,
+        'auto',
+      )) as MessageActionReturn;
+
+      expect(result.type).toBe('message');
+      expect(mockSetApprovalMode).toHaveBeenCalledWith('auto');
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'info' }),
+        expect.any(Number),
+      );
     });
 
     it('should set approval mode to "auto-edit" when argument is "auto-edit"', async () => {
@@ -91,7 +105,7 @@ describe('approvalModeCommand', () => {
 
       expect(result.type).toBe('message');
       expect(result.messageType).toBe('info');
-      expect(result.content).toContain('auto-edit');
+      expect(result.content).toContain('auto-accept edits');
       expect(mockSetApprovalMode).toHaveBeenCalledWith('auto-edit');
     });
 
@@ -103,7 +117,8 @@ describe('approvalModeCommand', () => {
 
       expect(result.type).toBe('message');
       expect(result.messageType).toBe('info');
-      expect(result.content).toContain('default');
+      // "default" is displayed using its formatted name, not the raw enum value.
+      expect(result.content).toContain('Ask permissions');
       expect(mockSetApprovalMode).toHaveBeenCalledWith('default');
     });
 

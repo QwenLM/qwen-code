@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { AnyToolInvocation } from '../index.js';
+import type { AnyDeclarativeTool, AnyToolInvocation } from '../tools/tools.js';
 import type { Config } from '../config/config.js';
 import os from 'node:os';
 import path from 'node:path';
 import { parse, quote } from 'shell-quote';
-import { doesToolInvocationMatch } from './tool-utils.js';
+import { isTool } from './is-tool.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   execFile,
@@ -19,6 +19,72 @@ import {
 import { accessSync, constants as fsConstants } from 'node:fs';
 
 const SHELL_TOOL_NAMES = ['run_shell_command', 'ShellTool'];
+
+/**
+ * Checks if a tool invocation matches any of a list of patterns.
+ *
+ * @param toolOrToolName The tool object or the name of the tool being invoked.
+ * @param invocation The invocation object for the tool.
+ * @param patterns A list of patterns to match against.
+ *   Patterns can be:
+ *   - A tool name (e.g., "ReadFileTool") to match any invocation of that tool.
+ *   - A tool name with a prefix (e.g., "ShellTool(git status)") to match
+ *     invocations where the arguments start with that prefix.
+ * @returns True if the invocation matches any pattern, false otherwise.
+ */
+export function doesToolInvocationMatch(
+  toolOrToolName: AnyDeclarativeTool | string,
+  invocation: AnyToolInvocation,
+  patterns: string[],
+): boolean {
+  let toolNames: string[];
+  if (isTool(toolOrToolName)) {
+    toolNames = [toolOrToolName.name, toolOrToolName.constructor.name];
+  } else {
+    toolNames = [toolOrToolName as string];
+  }
+
+  if (toolNames.some((name) => SHELL_TOOL_NAMES.includes(name))) {
+    toolNames = [...new Set([...toolNames, ...SHELL_TOOL_NAMES])];
+  }
+
+  for (const pattern of patterns) {
+    const openParen = pattern.indexOf('(');
+
+    if (openParen === -1) {
+      // No arguments, just a tool name
+      if (toolNames.includes(pattern)) {
+        return true;
+      }
+      continue;
+    }
+
+    const patternToolName = pattern.substring(0, openParen);
+    if (!toolNames.includes(patternToolName)) {
+      continue;
+    }
+
+    if (!pattern.endsWith(')')) {
+      continue;
+    }
+
+    const argPattern = pattern.substring(openParen + 1, pattern.length - 1);
+
+    if (
+      'command' in invocation.params &&
+      toolNames.includes('run_shell_command')
+    ) {
+      const argValue = String(
+        (invocation.params as { command: string }).command,
+      );
+      if (argValue === argPattern || argValue.startsWith(argPattern + ' ')) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
 
 /**
  * An identifier for the shell type.
@@ -208,6 +274,12 @@ export function splitCommands(command: string): string[] {
   let currentCommand = '';
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
+  let inBackticks = false;
+  let substitutionDepth = 0;
+  // Quote state of each enclosing level, saved on `$(` and restored on the
+  // matching `)`, so a substitution body's quotes cannot leak outwards and the
+  // surrounding quotes cannot mask the body's closing paren.
+  const quoteStack: Array<{ single: boolean; double: boolean }> = [];
   let i = 0;
 
   const previousNonWhitespaceChar = (index: number): string | undefined => {
@@ -224,19 +296,72 @@ export function splitCommands(command: string): string[] {
     const char = command[i];
     const nextChar = command[i + 1];
 
-    if (char === '\\' && i < command.length - 1) {
+    if (!inSingleQuotes && char === '\\' && nextChar === '\n') {
+      i += 2;
+      continue;
+    }
+
+    // Inside single quotes the shell treats a backslash as a literal
+    // character — it escapes nothing, so `'a\'` closes the quote. Consuming
+    // the following character here would keep the parser "inside" the quote
+    // and swallow every separator to the end of the line, hiding whole
+    // commands from the permission checks that consume these segments.
+    if (!inSingleQuotes && char === '\\' && i < command.length - 1) {
       currentCommand += char + command[i + 1];
       i += 2;
       continue;
     }
 
-    if (char === "'" && !inDoubleQuotes) {
+    if (!inSingleQuotes && char === '`') {
+      inBackticks = !inBackticks;
+    } else if (
+      !inSingleQuotes &&
+      !inBackticks &&
+      char === '$' &&
+      nextChar === '('
+    ) {
+      // A substitution body is quoted independently of its surroundings, so
+      // save the enclosing quote state and start the body unquoted. `"$(...)"`
+      // is the common case: the double quote belongs to the outer command and
+      // must not make the body's `)` look quoted.
+      quoteStack.push({ single: inSingleQuotes, double: inDoubleQuotes });
+      inSingleQuotes = false;
+      inDoubleQuotes = false;
+      substitutionDepth++;
+      currentCommand += '$(';
+      i += 2;
+      continue;
+    } else if (
+      !inBackticks &&
+      substitutionDepth > 0 &&
+      char === ')' &&
+      !inSingleQuotes &&
+      !inDoubleQuotes
+    ) {
+      // A quoted `)` inside the body is data, not the closing paren. Closing
+      // on it ended the substitution early and left the body's closing quote
+      // to flip the parser into "in quote" state, which then swallowed every
+      // separator to the end of the line -- so `echo $(echo ')') ; rm -rf x`
+      // came back as one segment with `rm` nowhere in it.
+      const enclosing = quoteStack.pop();
+      inSingleQuotes = enclosing?.single ?? false;
+      inDoubleQuotes = enclosing?.double ?? false;
+      substitutionDepth--;
+    } else if (!inBackticks && char === "'" && !inDoubleQuotes) {
+      // Tracked at every depth, not just the top level: without this the
+      // quotes inside a substitution body are invisible and the `)` guard
+      // above has nothing to test.
       inSingleQuotes = !inSingleQuotes;
-    } else if (char === '"' && !inSingleQuotes) {
+    } else if (!inBackticks && char === '"' && !inSingleQuotes) {
       inDoubleQuotes = !inDoubleQuotes;
     }
 
-    if (!inSingleQuotes && !inDoubleQuotes) {
+    if (
+      !inSingleQuotes &&
+      !inDoubleQuotes &&
+      !inBackticks &&
+      substitutionDepth === 0
+    ) {
       if (
         (char === '&' && nextChar === '&') ||
         (char === '|' && (nextChar === '|' || nextChar === '&'))
@@ -289,6 +414,68 @@ export function splitCommands(command: string): string[] {
 }
 
 /**
+ * A parameter expansion standing in command position — `$VAR`, `"$VAR"`,
+ * `${VAR}`, `"${VAR:-default}"`, `${VAR-default}` — resolved the way the shell
+ * will resolve it at execution time.
+ *
+ * Without this, such a command had NO identifiable root: the tokenizer turns
+ * the expansion into a non-string (or empty) token, `getCommandRoot` returns
+ * undefined, and the shell tool hard-refuses the command before any approval
+ * mode is consulted — including YOLO. Dogfooded live: the bundled /review
+ * skill invokes every command as `"${QWEN_CODE_CLI:-qwen}" review …`, and each
+ * run opened with "Could not identify command root to obtain permission from
+ * user" until the model hand-resolved the variable itself.
+ *
+ * Resolution mirrors POSIX: `:-` substitutes the default when the variable is
+ * unset OR empty; `-` only when unset. Quoting then decides what happens,
+ * exactly as it does in the shell. A QUOTED expansion is one word: empty means
+ * an empty command name, which has nothing to name and stays refusable. An
+ * UNQUOTED expansion field-splits: an empty result is REMOVED and the next
+ * token is the command (`$VAR printf OK` with VAR unset runs `printf`), and a
+ * multi-word value's FIRST field is the command (`$VAR OK` with
+ * VAR='/usr/bin/env printf' runs `env`). The environment consulted is this
+ * process's own, which is what the spawned shell inherits.
+ */
+const PARAMETER_EXPANSION_COMMAND =
+  /^("?)\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))\1$/;
+
+function resolveLeadingParameterExpansion(command: string): string | undefined {
+  let rest = command;
+  // Leading env assignments come first (`FOO=1 "${BAR:-baz}" …`), exactly as
+  // the plain-token path below skips them.
+  while (true) {
+    const t = takeLeadingToken(rest);
+    if (!t || !isEnvAssignmentToken(t.token)) break;
+    rest = t.rest;
+  }
+  const head = takeLeadingToken(rest);
+  if (!head) return undefined;
+  const m = PARAMETER_EXPANSION_COMMAND.exec(head.token);
+  if (!m) return undefined;
+  const quoted = m[1] === '"';
+  const name = (m[2] ?? m[5]) as string;
+  const op = m[3];
+  const value = process.env[name];
+  const useDefault =
+    op === undefined ? false : op === ':-' ? !value : value === undefined;
+  const resolved = useDefault
+    ? stripSymmetricQuotes(m[4] ?? '').value
+    : (value ?? '');
+  if (quoted) {
+    // One word, splitting suppressed — empty is an empty command name.
+    return resolved || undefined;
+  }
+  // Unquoted: the shell field-splits the expansion before command lookup.
+  const fields = resolved.split(/[ \t\n]+/).filter(Boolean);
+  if (fields.length === 0) {
+    // The empty expansion is removed; the command is whatever follows it.
+    const next = head.rest.trim();
+    return next ? getCommandRoot(next) : undefined;
+  }
+  return fields[0];
+}
+
+/**
  * Extracts the root command from a given shell command string.
  * Skips leading env var assignments (VAR=value) so that
  * `PYTHONPATH=/tmp python3 -c "..."` returns `python3`.
@@ -297,6 +484,11 @@ export function getCommandRoot(command: string): string | undefined {
   const trimmedCommand = command.trim();
   if (!trimmedCommand) {
     return undefined;
+  }
+
+  const expanded = resolveLeadingParameterExpansion(trimmedCommand);
+  if (expanded !== undefined) {
+    return expanded.split(/[\\/]/).pop();
   }
 
   try {
@@ -334,19 +526,1061 @@ export function getCommandRoots(command: string): string[] {
 }
 
 export function stripShellWrapper(command: string): string {
-  const pattern = /^\s*(?:sh|bash|zsh|cmd.exe)\s+(?:\/c|-c)\s+/;
-  const match = command.match(pattern);
-  if (match) {
-    let newCommand = command.substring(match[0].length).trim();
-    if (
-      (newCommand.startsWith('"') && newCommand.endsWith('"')) ||
-      (newCommand.startsWith("'") && newCommand.endsWith("'"))
-    ) {
-      newCommand = newCommand.substring(1, newCommand.length - 1);
-    }
-    return newCommand;
+  const trimmed = command.trim();
+  let rest = trimmed;
+
+  // Skip leading env assignments (e.g. `FOO=bar bash -c '...'`)
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token || !isEnvAssignmentToken(token.token)) break;
+    rest = token.rest;
   }
-  return command.trim();
+
+  // Check for a known shell wrapper (bash, sh, zsh, cmd.exe — with or
+  // without absolute path like /bin/bash or /usr/bin/zsh).
+  const wrapperToken = takeLeadingToken(rest);
+  if (!wrapperToken || !isKnownMonitorWrapperToken(wrapperToken.token)) {
+    return trimmed;
+  }
+  rest = wrapperToken.rest;
+
+  // Consume wrapper flags (e.g. -e, -x, -o pipefail, -lc) until we
+  // hit the -c / /c command marker.
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token) return trimmed;
+
+    if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
+      const commandToken = takeLeadingToken(token.rest);
+      if (!commandToken) return trimmed;
+      const { value: innerCommand, quote } = stripSymmetricQuotes(
+        commandToken.token,
+      );
+      if (!quote && shellWrapperCommandConsumesRest(wrapperToken.token)) {
+        return token.rest.trimStart() || trimmed;
+      }
+      return innerCommand || trimmed;
+    }
+
+    // Non-wrapper-option token — not a wrapper.
+    const normalized = getNormalizedShellToken(token.token);
+    if (!isShellWrapperFlagToken(normalized)) {
+      return trimmed;
+    }
+
+    rest = token.rest;
+    if (shellWrapperFlagConsumesOperand(token.token)) {
+      const operandToken = takeLeadingToken(rest);
+      if (!operandToken) return trimmed;
+      rest = operandToken.rest;
+    }
+  }
+}
+
+const SELF_KILL_PROCESS_PATTERN =
+  /(^|[^a-z0-9_-])(node(?:\.exe)?|qwen(?:-code)?(?:\.exe)?)(?=$|[^a-z0-9_-])/i;
+const QWEN_PROCESS_PATTERN =
+  /(^|[^a-z0-9_-])qwen(?:-code)?(?:\.exe)?(?=$|[^a-z0-9_-])/i;
+const TASKKILL_IMAGE_FILTER_PATTERN = /\bimagename\s+eq\s+(.+)$/i;
+
+const SUDO_OPTIONS_WITH_VALUES = new Set([
+  '-u',
+  '--user',
+  '-g',
+  '--group',
+  '-h',
+  '--host',
+  '-p',
+  '--prompt',
+  '-C',
+  '--close-from',
+  '-T',
+  '--command-timeout',
+]);
+
+const COMMAND_OPTIONS_WITH_VALUES = new Set<string>();
+
+const ENV_OPTIONS_WITH_VALUES = new Set([
+  '-u',
+  '--unset',
+  '-S',
+  '--split-string',
+  '-C',
+  '--chdir',
+]);
+
+const KILLALL_OPTIONS_WITH_VALUES = new Set([
+  '-n',
+  '--ns',
+  '-o',
+  '--older-than',
+  '-s',
+  '--signal',
+  '-t',
+  '--tty',
+  '-u',
+  '--user',
+  '-y',
+  '--younger-than',
+  '-Z',
+  '--context',
+]);
+
+const PKILL_OPTIONS_WITH_VALUES = new Set([
+  '-F',
+  '--pidfile',
+  '-G',
+  '--group',
+  '-g',
+  '--pgroup',
+  '-P',
+  '--parent',
+  '-s',
+  '--session',
+  '-t',
+  '--terminal',
+  '-T',
+  '--thread',
+  '-U',
+  '--uid',
+  '-u',
+  '--euid',
+]);
+
+const XARGS_OPTIONS_WITH_VALUES = new Set([
+  '-I',
+  '-n',
+  '-P',
+  '-s',
+  '-E',
+  '-d',
+  '-L',
+  '-l',
+  '-a',
+  '-J',
+  '-R',
+  '--replace',
+  '--max-args',
+  '--max-procs',
+  '--max-chars',
+  '--eof',
+  '--delimiter',
+  '--max-lines',
+  '--arg-file',
+]);
+
+export const SHELL_SELF_KILL_REJECTION =
+  'Blocked: this command may terminate the running qwen-code process because it targets all node/qwen-code processes. Use task_stop for managed background shells, or kill a specific PID instead.';
+
+function parseShellSegment(segment: string): string[] | null {
+  try {
+    return parse(segment, (key) => '$' + key)
+      .map((token) => {
+        if (typeof token === 'string') {
+          return token;
+        }
+        if (
+          typeof token === 'object' &&
+          token !== null &&
+          'pattern' in token &&
+          typeof token.pattern === 'string'
+        ) {
+          return token.pattern;
+        }
+        return null;
+      })
+      .filter((token): token is string => token !== null);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeExecutableName(token: string): string {
+  const executable = token.split(/[\\/]/).pop() ?? token;
+  return executable.toLowerCase().replace(/\.exe$/, '');
+}
+
+function isOptionToken(token: string): boolean {
+  return token.startsWith('-');
+}
+
+function optionKey(token: string): string {
+  return token.startsWith('--') ? token.toLowerCase() : token;
+}
+
+function optionHasInlineValue(token: string): boolean {
+  return token.includes('=') || token.includes(':');
+}
+
+function shortOptionBundleHasFlag(token: string, flag: string): boolean {
+  return (
+    token.startsWith('-') &&
+    !token.startsWith('--') &&
+    token.length > 2 &&
+    token.slice(1).toLowerCase().includes(flag.toLowerCase().slice(1))
+  );
+}
+
+function matchesSelfProcessPattern(value: string): boolean {
+  return SELF_KILL_PROCESS_PATTERN.test(value);
+}
+
+function matchesQwenProcessPattern(value: string): boolean {
+  return QWEN_PROCESS_PATTERN.test(value);
+}
+
+function isBroadNodeFullPattern(value: string): boolean {
+  const normalized = value
+    .trim()
+    .replace(/^(\^|\\b|\.\*)+/, '')
+    .replace(/(\$|\\b|\.\*)+$/, '');
+  const base = normalized.split(/[\\/]/).pop()?.toLowerCase();
+  return (
+    base === 'node' ||
+    base === 'node.exe' ||
+    /^node(?:\.exe)?[*?]+$/.test(base ?? '')
+  );
+}
+
+function consumeOptionsWithValues(
+  tokens: string[],
+  startIndex: number,
+  optionsWithValues: Set<string>,
+): number {
+  let index = startIndex;
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    const normalized = optionKey(token);
+    if (!isOptionToken(token)) {
+      break;
+    }
+
+    index++;
+    if (
+      (optionsWithValues.has(normalized) ||
+        [...optionsWithValues].some((option) =>
+          shortOptionBundleHasFlag(token, option),
+        )) &&
+      !optionHasInlineValue(token)
+    ) {
+      index++;
+    }
+  }
+  return index;
+}
+
+function unwrapExecutionPrefixes(tokens: string[]): string[] {
+  let index = 0;
+  while (index < tokens.length && ENV_ASSIGNMENT_REGEX.test(tokens[index]!)) {
+    index++;
+  }
+
+  while (index < tokens.length) {
+    const root = normalizeExecutableName(tokens[index]!);
+    if (root === 'sudo') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        SUDO_OPTIONS_WITH_VALUES,
+      );
+      continue;
+    }
+
+    if (root === 'command') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        COMMAND_OPTIONS_WITH_VALUES,
+      );
+      continue;
+    }
+
+    if (root === 'env') {
+      index = consumeOptionsWithValues(
+        tokens,
+        index + 1,
+        ENV_OPTIONS_WITH_VALUES,
+      );
+      while (
+        index < tokens.length &&
+        ENV_ASSIGNMENT_REGEX.test(tokens[index]!)
+      ) {
+        index++;
+      }
+      continue;
+    }
+
+    break;
+  }
+
+  return tokens.slice(index);
+}
+
+function getCommandSegments(command: string, depth = 0): string[] {
+  const segments: string[] = [];
+  for (const segment of splitCommands(command)) {
+    const stripped = stripShellWrapper(segment);
+    if (stripped !== segment && depth < 3) {
+      segments.push(...getCommandSegments(stripped, depth + 1));
+    } else if (stripped !== segment) {
+      segments.push(stripped);
+    } else {
+      segments.push(segment);
+    }
+  }
+  return segments;
+}
+
+function commandArguments(tokens: string[], optionsWithValues: Set<string>) {
+  const args: string[] = [];
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      args.push(...tokens.slice(index + 1));
+      break;
+    }
+
+    const normalized = optionKey(token);
+    if (isOptionToken(token)) {
+      if (optionsWithValues.has(normalized) && !optionHasInlineValue(token)) {
+        index++;
+      }
+      continue;
+    }
+
+    args.push(token);
+  }
+  return args;
+}
+
+function taskkillTargetsSelf(tokens: string[]): boolean {
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    const normalized = token.toLowerCase();
+
+    if (normalized === '/im' || normalized === '-im') {
+      const imageName = tokens[index + 1];
+      if (imageName && matchesSelfProcessPattern(imageName)) {
+        return true;
+      }
+      index++;
+      continue;
+    }
+
+    if (normalized.startsWith('/im:') || normalized.startsWith('-im:')) {
+      if (matchesSelfProcessPattern(token.slice(4))) {
+        return true;
+      }
+      continue;
+    }
+
+    if (normalized === '/fi' || normalized === '-fi') {
+      const filter = tokens[index + 1];
+      const imageName = filter?.match(TASKKILL_IMAGE_FILTER_PATTERN)?.[1];
+      if (imageName && matchesSelfProcessPattern(imageName)) {
+        return true;
+      }
+      index++;
+      continue;
+    }
+
+    if (normalized.startsWith('/fi:') || normalized.startsWith('-fi:')) {
+      const imageName = token
+        .slice(4)
+        .match(TASKKILL_IMAGE_FILTER_PATTERN)?.[1];
+      if (imageName && matchesSelfProcessPattern(imageName)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function killallTargetsSelf(tokens: string[]): boolean {
+  return commandArguments(tokens, KILLALL_OPTIONS_WITH_VALUES).some((arg) =>
+    matchesSelfProcessPattern(arg),
+  );
+}
+
+function pkillTargetsSelf(tokens: string[]): boolean {
+  let usesFullCommandLine = false;
+  const args: string[] = [];
+  for (let index = 1; index < tokens.length; index++) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      args.push(...tokens.slice(index + 1));
+      break;
+    }
+
+    const normalized = optionKey(token);
+    if (
+      normalized === '-f' ||
+      normalized === '--full' ||
+      shortOptionBundleHasFlag(token, '-f')
+    ) {
+      usesFullCommandLine = true;
+      continue;
+    }
+
+    if (isOptionToken(token)) {
+      if (
+        PKILL_OPTIONS_WITH_VALUES.has(normalized) &&
+        !optionHasInlineValue(token)
+      ) {
+        index++;
+      }
+      continue;
+    }
+
+    args.push(token);
+  }
+
+  if (usesFullCommandLine) {
+    return args.some(
+      (arg) => matchesQwenProcessPattern(arg) || isBroadNodeFullPattern(arg),
+    );
+  }
+
+  return args.some((arg) => matchesSelfProcessPattern(arg));
+}
+
+function pgrepTargetsSelf(tokens: string[]): boolean {
+  return pkillTargetsSelf(['pkill', ...tokens.slice(1)]);
+}
+
+function pgrepSubstitutionArgs(segment: string): string[] {
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  const args: string[] = [];
+
+  for (let index = 0; index < segment.length; index++) {
+    const char = segment[index]!;
+
+    if (quote === "'") {
+      if (char === "'") quote = '';
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      quote = quote === '"' ? '' : '"';
+      continue;
+    }
+
+    if (char === "'" && quote === '') {
+      quote = "'";
+      continue;
+    }
+
+    if (char === '`') {
+      let end = index + 1;
+      let innerEscaped = false;
+      for (; end < segment.length; end++) {
+        const innerChar = segment[end]!;
+        if (innerEscaped) {
+          innerEscaped = false;
+          continue;
+        }
+        if (innerChar === '\\') {
+          innerEscaped = true;
+          continue;
+        }
+        if (innerChar === '`') break;
+      }
+      if (end >= segment.length) {
+        break;
+      }
+
+      const inner = segment.slice(index + 1, end).trim();
+      const match = inner.match(/^pgrep\b(.*)$/i);
+      if (match) {
+        args.push(match[1] ?? '');
+      }
+      index = end;
+      continue;
+    }
+
+    if (char !== '$' || segment[index + 1] !== '(') {
+      continue;
+    }
+
+    const end = segment.indexOf(')', index + 2);
+    if (end === -1) {
+      break;
+    }
+
+    const inner = segment.slice(index + 2, end).trim();
+    const match = inner.match(/^pgrep\b(.*)$/i);
+    if (match) {
+      args.push(match[1] ?? '');
+    }
+    index = end;
+  }
+
+  return args;
+}
+
+function killCommandTargetsSelf(segment: string): boolean {
+  return pgrepSubstitutionArgs(segment).some((args) => {
+    const parsed = parseShellSegment(`pgrep ${args}`);
+    return parsed !== null && pgrepTargetsSelf(parsed);
+  });
+}
+
+function xargsInvokesKill(segment: string | undefined): boolean {
+  if (!segment) {
+    return false;
+  }
+  const parsed = parseShellSegment(segment);
+  if (!parsed) {
+    return false;
+  }
+  const tokens = unwrapExecutionPrefixes(parsed);
+  if (normalizeExecutableName(tokens[0] ?? '') !== 'xargs') {
+    return false;
+  }
+
+  const commandTokens = unwrapExecutionPrefixes(
+    commandArguments(tokens, XARGS_OPTIONS_WITH_VALUES),
+  );
+  const command = commandTokens.find((token) => !isOptionToken(token));
+  return normalizeExecutableName(command ?? '') === 'kill';
+}
+
+export function detectSelfKillCommand(command: string): boolean {
+  if (!/kill/i.test(command)) {
+    return false;
+  }
+
+  const segments = getCommandSegments(command);
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index]!;
+    const parsed = parseShellSegment(segment);
+    if (!parsed) {
+      continue;
+    }
+
+    const tokens = unwrapExecutionPrefixes(parsed);
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    const root = normalizeExecutableName(tokens[0]!);
+    if (root === 'taskkill' && taskkillTargetsSelf(tokens)) {
+      return true;
+    }
+    if (root === 'killall' && killallTargetsSelf(tokens)) {
+      return true;
+    }
+    if (root === 'pkill' && pkillTargetsSelf(tokens)) {
+      return true;
+    }
+    if (root === 'kill' && killCommandTargetsSelf(segment)) {
+      return true;
+    }
+    if (root === 'pgrep' && pgrepTargetsSelf(tokens)) {
+      for (let j = index + 1; j < segments.length; j++) {
+        if (xargsInvokesKill(segments[j])) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Strip a single bare trailing `&` (bash background operator) from a
+ * command string. Returns the input unchanged if the trailing form is
+ * `&&` (logical AND), `\&` (escaped literal `&`), or there is no `&`
+ * at the end at all.
+ */
+export function stripTrailingBackgroundAmp(command: string): string {
+  const trimmed = command.trimEnd();
+  if (!trimmed.endsWith('&')) return command;
+  if (trimmed.endsWith('&&')) return command;
+  if (trimmed.endsWith('\\&')) return command;
+  return trimmed.slice(0, -1).trimEnd();
+}
+
+export function hasNonFinalTopLevelBackgroundOperator(
+  command: string,
+): boolean {
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  let inBackticks = false;
+  let commandSubstitutionDepth = 0;
+
+  const previousNonWhitespace = (index: number): string | undefined => {
+    for (let i = index - 1; i >= 0; i--) {
+      const char = command[i];
+      if (char !== undefined && !/\s/.test(char)) return char;
+    }
+    return undefined;
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i]!;
+
+    if (quote === "'") {
+      if (char === "'") quote = '';
+      continue;
+    }
+
+    if (quote === '"') {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        quote = '';
+      }
+      continue;
+    }
+
+    if (inBackticks) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '`') {
+        inBackticks = false;
+      }
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+
+    if (char === '`') {
+      inBackticks = true;
+      continue;
+    }
+
+    if (
+      (char === '$' || char === '<' || char === '>') &&
+      command[i + 1] === '('
+    ) {
+      commandSubstitutionDepth++;
+      i++;
+      continue;
+    }
+
+    if (char === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      continue;
+    }
+
+    if (char !== '&' || commandSubstitutionDepth > 0) {
+      continue;
+    }
+
+    const next = command[i + 1];
+    const previous = previousNonWhitespace(i);
+    if (
+      next === '&' ||
+      next === '>' ||
+      previous === '&' ||
+      previous === '>' ||
+      previous === '<' ||
+      previous === '|'
+    ) {
+      continue;
+    }
+
+    return command.slice(i + 1).trim().length > 0;
+  }
+
+  return false;
+}
+
+interface ParsedMonitorShellWrapper {
+  wrapperTokens?: string[];
+  innerCommand: string;
+  innerQuote: '"' | "'" | '';
+  innerArgsSuffix?: string;
+}
+
+export interface NormalizedMonitorCommand {
+  analysisCommand: string;
+  safetyCommand: string;
+  spawnCommand: string;
+  strippedTrailingAmp: boolean;
+}
+
+function takeLeadingToken(
+  input: string,
+): { token: string; rest: string } | null {
+  const trimmed = input.trimStart();
+  if (!trimmed) {
+    return null;
+  }
+
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  let inBackticks = false;
+  let commandSubstitutionDepth = 0;
+  let idx = 0;
+
+  while (idx < trimmed.length) {
+    const char = trimmed[idx];
+    if (!char) {
+      break;
+    }
+
+    if (quote === "'") {
+      if (char === "'") {
+        quote = '';
+      }
+      idx++;
+      continue;
+    }
+
+    if (quote === '"') {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        quote = '';
+      }
+      idx++;
+      continue;
+    }
+
+    if (inBackticks) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '`') {
+        inBackticks = false;
+      }
+      idx++;
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      idx++;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      idx++;
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      idx++;
+      continue;
+    }
+
+    if (char === '`') {
+      inBackticks = true;
+      idx++;
+      continue;
+    }
+
+    if (
+      (char === '$' || char === '<' || char === '>') &&
+      trimmed[idx + 1] === '('
+    ) {
+      commandSubstitutionDepth++;
+      idx += 2;
+      continue;
+    }
+
+    if (char === ')' && commandSubstitutionDepth > 0) {
+      commandSubstitutionDepth--;
+      idx++;
+      continue;
+    }
+
+    if (/\s/.test(char) && commandSubstitutionDepth === 0) {
+      break;
+    }
+
+    idx++;
+  }
+
+  if (
+    idx === 0 ||
+    quote ||
+    escaped ||
+    inBackticks ||
+    commandSubstitutionDepth
+  ) {
+    return null;
+  }
+
+  return {
+    token: trimmed.slice(0, idx),
+    rest: trimmed.slice(idx),
+  };
+}
+
+function stripSymmetricQuotes(command: string): {
+  value: string;
+  quote: '"' | "'" | '';
+} {
+  const trimmed = command.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return {
+      value: trimmed.substring(1, trimmed.length - 1),
+      quote: trimmed[0] as '"' | "'",
+    };
+  }
+
+  return { value: trimmed, quote: '' };
+}
+
+function getNormalizedShellToken(token: string): string {
+  return stripSymmetricQuotes(token).value.replace(/\\/g, '/').toLowerCase();
+}
+
+function isEnvAssignmentToken(token: string): boolean {
+  return ENV_ASSIGNMENT_REGEX.test(stripSymmetricQuotes(token).value);
+}
+
+function getShellWrapperBase(token: string): string | undefined {
+  return getNormalizedShellToken(token).split('/').pop();
+}
+
+function isKnownMonitorWrapperToken(token: string): boolean {
+  const base = getShellWrapperBase(token);
+  return (
+    base === 'sh' ||
+    base === 'sh.exe' ||
+    base === 'bash' ||
+    base === 'bash.exe' ||
+    base === 'zsh' ||
+    base === 'zsh.exe' ||
+    base === 'cmd' ||
+    base === 'cmd.exe' ||
+    base === 'powershell' ||
+    base === 'powershell.exe' ||
+    base === 'pwsh' ||
+    base === 'pwsh.exe'
+  );
+}
+
+function isShellWrapperFlagToken(normalizedToken: string): boolean {
+  return (
+    normalizedToken.startsWith('-') ||
+    normalizedToken.startsWith('/') ||
+    normalizedToken === '+o'
+  );
+}
+
+function shellWrapperFlagConsumesOperand(token: string): boolean {
+  const normalized = getNormalizedShellToken(token);
+  if (optionHasInlineValue(token)) {
+    return false;
+  }
+  return (
+    normalized === '-o' ||
+    normalized === '+o' ||
+    normalized === '-executionpolicy' ||
+    normalized === '-file' ||
+    normalized === '-encodedcommand'
+  );
+}
+
+function shellWrapperCommandConsumesRest(wrapperToken: string): boolean {
+  const base = getShellWrapperBase(wrapperToken);
+  // POSIX shells pass exactly one argument after -c as the command string.
+  // cmd.exe and PowerShell treat the remaining tokens after /c or -Command as
+  // the command, so unquoted inner commands need the full rest of the line.
+  return (
+    base === 'cmd' ||
+    base === 'cmd.exe' ||
+    base === 'powershell' ||
+    base === 'powershell.exe' ||
+    base === 'pwsh' ||
+    base === 'pwsh.exe'
+  );
+}
+
+function isMonitorCommandMarker(wrapperToken: string, token: string): boolean {
+  const base = getShellWrapperBase(wrapperToken);
+  const normalized = getNormalizedShellToken(token);
+
+  if (base === 'cmd' || base === 'cmd.exe') {
+    return normalized === '/c';
+  }
+
+  if (
+    base === 'powershell' ||
+    base === 'powershell.exe' ||
+    base === 'pwsh' ||
+    base === 'pwsh.exe'
+  ) {
+    return normalized === '-command' || normalized === '-c';
+  }
+
+  return normalized === '-c' || /^-[a-z]*c[a-z]*$/i.test(normalized);
+}
+
+function parseMonitorShellWrapper(command: string): ParsedMonitorShellWrapper {
+  const trimmed = command.trim();
+  let rest = trimmed;
+  const leadingEnvTokens: string[] = [];
+
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token || !isEnvAssignmentToken(token.token)) {
+      break;
+    }
+    leadingEnvTokens.push(token.token);
+    rest = token.rest;
+  }
+
+  const wrapperToken = takeLeadingToken(rest);
+  if (!wrapperToken || !isKnownMonitorWrapperToken(wrapperToken.token)) {
+    return {
+      innerCommand: trimmed,
+      innerQuote: '',
+    };
+  }
+
+  rest = wrapperToken.rest;
+  const wrapperTokens = [...leadingEnvTokens, wrapperToken.token];
+
+  while (true) {
+    const token = takeLeadingToken(rest);
+    if (!token) {
+      return {
+        innerCommand: trimmed,
+        innerQuote: '',
+      };
+    }
+
+    if (isMonitorCommandMarker(wrapperToken.token, token.token)) {
+      wrapperTokens.push(token.token);
+      const commandToken = takeLeadingToken(token.rest);
+      if (!commandToken) {
+        return {
+          innerCommand: trimmed,
+          innerQuote: '',
+        };
+      }
+      const { value: innerCommand, quote: innerQuote } = stripSymmetricQuotes(
+        commandToken.token,
+      );
+      return {
+        wrapperTokens,
+        innerCommand,
+        innerQuote,
+        innerArgsSuffix: commandToken.rest.trimStart(),
+      };
+    }
+
+    const normalized = getNormalizedShellToken(token.token);
+    if (!isShellWrapperFlagToken(normalized)) {
+      return {
+        innerCommand: trimmed,
+        innerQuote: '',
+      };
+    }
+
+    wrapperTokens.push(token.token);
+    rest = token.rest;
+    if (shellWrapperFlagConsumesOperand(token.token)) {
+      const operandToken = takeLeadingToken(rest);
+      if (!operandToken) {
+        return {
+          innerCommand: trimmed,
+          innerQuote: '',
+        };
+      }
+      wrapperTokens.push(operandToken.token);
+      rest = operandToken.rest;
+    }
+  }
+}
+
+export function normalizeMonitorCommand(
+  command: string,
+): NormalizedMonitorCommand {
+  const { wrapperTokens, innerCommand, innerQuote, innerArgsSuffix } =
+    parseMonitorShellWrapper(command);
+  const leadingEnvTokens =
+    wrapperTokens?.filter((token) => isEnvAssignmentToken(token)) ?? [];
+  const analysisCommand = stripTrailingBackgroundAmp(innerCommand);
+  const rawInnerArgsSuffix = innerArgsSuffix?.trim() ?? '';
+  const normalizedInnerArgsSuffix =
+    stripTrailingBackgroundAmp(rawInnerArgsSuffix);
+  // Permission safety focuses on command text that the shell may expand or
+  // execute: leading env assignments, the -c script, and argv suffixes. Wrapper
+  // flags are preserved in spawnCommand, but are not converted into Bash(...)
+  // command-rule surface.
+  const safetyParts = [
+    ...(wrapperTokens ? leadingEnvTokens : []),
+    analysisCommand,
+    ...(normalizedInnerArgsSuffix ? [normalizedInnerArgsSuffix] : []),
+  ];
+  const safetyCommand =
+    wrapperTokens && safetyParts.length > 0
+      ? safetyParts.join(' ').trim()
+      : analysisCommand;
+  const strippedTrailingAmp =
+    analysisCommand !== innerCommand ||
+    normalizedInnerArgsSuffix !== rawInnerArgsSuffix;
+  const spawnCommand = wrapperTokens
+    ? [
+        wrapperTokens.join(' '),
+        innerQuote
+          ? `${innerQuote}${analysisCommand}${innerQuote}`
+          : analysisCommand,
+        normalizedInnerArgsSuffix,
+      ]
+        .filter(Boolean)
+        .join(' ')
+    : analysisCommand;
+
+  return {
+    analysisCommand,
+    safetyCommand,
+    spawnCommand,
+    strippedTrailingAmp,
+  };
+}
+
+export function hasUnsafeMonitorBackgroundOperator(command: string): boolean {
+  const { innerCommand, innerArgsSuffix } = parseMonitorShellWrapper(command);
+  return (
+    hasNonFinalTopLevelBackgroundOperator(innerCommand) ||
+    hasNonFinalTopLevelBackgroundOperator(innerArgsSuffix ?? '')
+  );
 }
 
 /**
@@ -656,6 +1890,23 @@ export function detectCommandSubstitution(command: string): boolean {
 
     // Handle escaping - only works outside single quotes
     if (char === '\\' && !inSingleQuotes) {
+      if (nextChar === '\n' && command[i - 1] === '$') {
+        let dollarStart = i - 1;
+        while (dollarStart > 0 && command[dollarStart - 1] === '$') {
+          dollarStart--;
+        }
+        let escapeStart = dollarStart;
+        while (escapeStart > 0 && command[escapeStart - 1] === '\\') {
+          escapeStart--;
+        }
+        if (
+          (i - dollarStart) % 2 === 1 &&
+          (dollarStart - escapeStart) % 2 === 0 &&
+          command[i + 2] === '('
+        ) {
+          return true;
+        }
+      }
       i += 2; // Skip the escaped character
       continue;
     }
@@ -694,6 +1945,14 @@ export function detectCommandSubstitution(command: string): boolean {
         return true;
       }
 
+      if (
+        char === '$' &&
+        nextChar === '{' &&
+        /^\$\{[A-Za-z_][A-Za-z0-9_]*@P\}/.test(command.slice(i))
+      ) {
+        return true;
+      }
+
       // <(...) process substitution - works unquoted only (not in double quotes)
       if (char === '<' && nextChar === '(' && !inDoubleQuotes && !inBackticks) {
         return true;
@@ -717,6 +1976,68 @@ export function detectCommandSubstitution(command: string): boolean {
   // If there are pending heredocs but no newline/body, there is nothing left to
   // scan for heredoc-body substitutions.
   return false;
+}
+
+/**
+ * User-facing warning emitted when a shell-tool invocation contains
+ * command substitution (`$(...)`, backticks, `<(...)`, `>(...)`, or
+ * `${parameter@P}`).
+ * Shared across the shell-tool and monitor-tool confirmation paths so
+ * the wording can't drift between sites — see #4386 review (round 3).
+ */
+export const COMMAND_SUBSTITUTION_WARNING =
+  'Contains command substitution ($(...), backticks, <(...), >(...), or ${parameter@P}).';
+
+/**
+ * Single dual-check predicate: does the command contain shell command
+ * substitution either as written (raw) or after `stripShellWrapper`
+ * unwraps it? The raw check catches substitution that lives inside
+ * leading env-prefix tokens (e.g. `FOO=$(curl evil) bash -c 'echo ok'`,
+ * where stripShellWrapper discards the env-prefix AND unwraps to
+ * `echo ok`, leaving no trace of the substitution). The stripped
+ * check catches substitution inside the wrapper's quoted body
+ * (e.g. `bash -c 'echo $(cat secret)'`, where the raw `$(` sits inside
+ * outer single quotes and is invisible to a raw-only check).
+ *
+ * Used by `buildShellExecWarnings` (UI warning surface),
+ * `shouldAuditSubstitutionBypass` (audit log gate), and the
+ * pre-AST gates in `ShellToolInvocation.getDefaultPermission`,
+ * `MonitorToolInvocation.getDefaultPermission`, and
+ * `PermissionManager.resolveDefaultPermission`. Centralising the
+ * dual-check here keeps detection semantics in lockstep across all
+ * surfaces (a change here propagates to every consumer). See PR #4386
+ * round 6 for the env-prefix wrapper regression that motivated this.
+ */
+export function hasShellSubstitution(rawCommand: string): boolean {
+  if (typeof rawCommand !== 'string' || rawCommand.length === 0) return false;
+  if (detectCommandSubstitution(rawCommand)) return true;
+  const stripped = stripShellWrapper(rawCommand);
+  return stripped !== rawCommand && detectCommandSubstitution(stripped);
+}
+
+/**
+ * Build the warnings array for a shell-like tool's exec confirmation.
+ * Returns `undefined` when nothing to flag — callers should only assign
+ * the `warnings` field when the result is truthy, mirroring the
+ * existing `if (warnings.length > 0)` pattern at each call site.
+ *
+ * Delegates the detection logic to `hasShellSubstitution` so the
+ * dual-check semantics stay in one place; the historical 2-arg
+ * signature is kept for callers that already have both forms in scope.
+ */
+export function buildShellExecWarnings(
+  strippedCommand: string,
+  rawCommand: string,
+): string[] | undefined {
+  // Either input may carry the substitution. Use the dual-aware
+  // predicate so the detection logic is identical to the audit-log path.
+  if (
+    hasShellSubstitution(rawCommand) ||
+    detectCommandSubstitution(strippedCommand)
+  ) {
+    return [COMMAND_SUBSTITUTION_WARNING];
+  }
+  return undefined;
 }
 
 /**
@@ -756,7 +2077,7 @@ export async function checkCommandPermissions(
       allAllowed: false,
       disallowedCommands: [command],
       blockReason:
-        'Command substitution using $(), `` ` ``, <(), or >() is not allowed for security reasons',
+        'Command substitution using $(), `` ` ``, <(), >(), or ${parameter@P} is not allowed for security reasons',
       isHardDenial: true,
     };
   }

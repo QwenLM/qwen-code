@@ -10,13 +10,16 @@ interface GaxiosError {
   };
 }
 
+const MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH = 1000;
+
 export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
 }
 
 /**
- * Check if the error is an abort error (user cancellation).
- * This handles both DOMException-style AbortError and Node.js abort errors.
+ * Check if the error is an abort error (user cancellation). Handles
+ * DOMException-style AbortError, Node.js abort errors, and the provider SDKs'
+ * `APIUserAbortError` (matched by class name).
  */
 export function isAbortError(error: unknown): boolean {
   if (!error || typeof error !== 'object') {
@@ -33,16 +36,179 @@ export function isAbortError(error: unknown): boolean {
     return true;
   }
 
+  // A user cancel on a provider SDK path surfaces as `APIUserAbortError`. That
+  // class does not set `.name` (it stays 'Error') and carries no ABORT_ERR
+  // code, so the checks above miss it — leaving user cancels logged as
+  // api_errors and classified 'unknown' rather than 'abort'. Both SDKs this
+  // package depends on (`openai`, `@anthropic-ai/sdk`) are Stainless-generated
+  // and share this class name, so one check covers both. Match on the class
+  // name — as `getErrorType` below already does for SDK errors — so this
+  // provider-agnostic util needs no SDK import. The CLI bundle preserves class
+  // names (esbuild `keepNames: true` in esbuild.config.js); other bundles that
+  // minify without keepNames (e.g. vscode-ide-companion) do not, but they don't
+  // drive provider SDK requests, so the match holds where it runs.
+  if (
+    error instanceof Error &&
+    error.constructor?.name === 'APIUserAbortError'
+  ) {
+    return true;
+  }
+
   return false;
+}
+
+/**
+ * Best-effort one-line description of an error's `cause`, used to surface the
+ * underlying syscall behind opaque wrappers like undici's `TypeError: fetch
+ * failed` (whose own message carries nothing). Returns `undefined` when there
+ * is no useful detail.
+ *
+ * Handles three shapes:
+ *   - `AggregateError` (undici retries multiple addresses, e.g. IPv6 `::1` then
+ *     IPv4 `127.0.0.1`): its own `message` is empty, so unwrap `.errors[]`.
+ *   - a plain `Error` with a Node `code` (e.g. `ECONNREFUSED`) but possibly an
+ *     empty message — prefer `code`, combine with message when both add signal.
+ *   - nested `.cause` chains: walk through opaque wrappers to the deepest code.
+ *   - any other value — stringify.
+ */
+function describeErrorCause(cause: unknown): string | undefined {
+  if (cause == null) return undefined;
+  return (
+    describeCodedCause(cause, 0, new Set<object>()) ??
+    describeCauseFallback(cause)
+  );
+}
+
+function describeCauseFallback(cause: unknown): string | undefined {
+  if (cause instanceof AggregateError && Array.isArray(cause.errors)) {
+    const inner = cause.errors
+      .map((error) => describeSingleError(error))
+      .filter((detail): detail is string => Boolean(detail));
+    if (inner.length > 0) {
+      return [...new Set(inner)].join('; ');
+    }
+  }
+  return describeSingleError(cause);
+}
+
+function describeCodedCause(
+  cause: unknown,
+  depth: number,
+  visited: Set<object>,
+): string | undefined {
+  if (
+    cause == null ||
+    depth >= 8 ||
+    typeof cause !== 'object' ||
+    visited.has(cause)
+  ) {
+    return undefined;
+  }
+
+  visited.add(cause);
+
+  if (cause instanceof AggregateError && Array.isArray(cause.errors)) {
+    const inner = cause.errors
+      .map((error) => describeCodedCause(error, depth + 1, visited))
+      .filter((detail): detail is string => Boolean(detail));
+    if (inner.length > 0) {
+      return [...new Set(inner)].join('; ');
+    }
+  }
+
+  const nested = describeCodedCause(
+    (cause as { cause?: unknown }).cause,
+    depth + 1,
+    visited,
+  );
+  if (nested) {
+    return nested;
+  }
+
+  const code = (cause as { code?: unknown }).code;
+  return typeof code === 'string' && code
+    ? describeSingleError(cause)
+    : undefined;
+}
+
+function describeSingleError(err: unknown): string | undefined {
+  if (err instanceof Error) {
+    const code = (err as { code?: unknown }).code;
+    const codeStr = typeof code === 'string' ? code : undefined;
+    const msg = err.message?.trim();
+    if (msg && codeStr && !msg.includes(codeStr)) {
+      return `${codeStr}: ${msg}`;
+    }
+    return msg || codeStr || (err.name !== 'Error' ? err.name : undefined);
+  }
+  if (err && typeof err === 'object' && !Array.isArray(err)) {
+    const rec = err as Record<string, unknown>;
+    const code = rec['code'];
+    const codeStr =
+      typeof code === 'string' && code
+        ? code
+        : typeof code === 'number'
+          ? String(code)
+          : undefined;
+    const message = rec['message'];
+    const msg =
+      typeof message === 'string' && message.trim()
+        ? message.trim()
+        : undefined;
+    if (msg && codeStr && !msg.includes(codeStr)) {
+      return `${codeStr}: ${msg}`;
+    }
+    return msg || codeStr;
+  }
+  const str = String(err);
+  return str && str !== '[object Object]' ? str : undefined;
+}
+
+function truncateStringifiedErrorMessage(message: string): string {
+  if (message.length <= MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH) {
+    return message;
+  }
+  return `${message.slice(0, MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH - 3)}...`;
 }
 
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
-    const cause = error.cause;
-    if (cause instanceof Error && cause.message !== error.message) {
-      return `${error.message} (cause: ${cause.message})`;
+    const detail = describeErrorCause(error.cause);
+    if (detail && detail !== error.message) {
+      return truncateStringifiedErrorMessage(
+        `${error.message} (cause: ${detail})`,
+      );
     }
-    return error.message;
+    // Capped like every other branch. Returning `error.message` raw made the
+    // limit depend on details of the error that have nothing to do with how
+    // long it is: the same string was capped as `{ message }` or once a
+    // distinct `cause` was attached, and uncapped only for a bare `Error`.
+    // That is the shape a provider SDK throws when it packs a whole response
+    // body into the message, and the result flows straight into `llmContent`.
+    return truncateStringifiedErrorMessage(error.message);
+  }
+  if (error !== null && typeof error === 'object' && !Array.isArray(error)) {
+    const { message, cause } = error as {
+      message?: unknown;
+      cause?: unknown;
+    };
+    if (typeof message === 'string' && message.trim()) {
+      const detail = describeErrorCause(cause);
+      const result =
+        detail && detail !== message
+          ? `${message} (cause: ${detail})`
+          : message;
+      return truncateStringifiedErrorMessage(result);
+    }
+    try {
+      const serialized = JSON.stringify(error);
+      return serialized
+        ? truncateStringifiedErrorMessage(serialized)
+        : String(error);
+    } catch {
+      const detail = describeSingleError(error);
+      return detail ? truncateStringifiedErrorMessage(detail) : String(error);
+    }
   }
   try {
     return String(error);
@@ -181,15 +347,33 @@ export class FatalToolExecutionError extends FatalError {
     super(message, 54);
   }
 }
+/**
+ * Raised when a headless / unattended run exceeds a configured budget
+ * (`--max-wall-time`, `--max-tool-calls`). Distinct exit code from
+ * `FatalTurnLimitedError` (53) so CI scripts can branch on
+ * "run exhausted its budget" vs. "run hit the turn cap." See issue
+ * QwenLM/qwen-code#4103.
+ */
+export class FatalBudgetExceededError extends FatalError {
+  constructor(message: string) {
+    super(message, 55);
+  }
+}
 export class FatalCancellationError extends FatalError {
   constructor(message: string) {
     super(message, 130); // Standard exit code for SIGINT
   }
 }
 
-export class ForbiddenError extends Error {}
-export class UnauthorizedError extends Error {}
-export class BadRequestError extends Error {}
+export class ForbiddenError extends Error {
+  readonly status = 403;
+}
+export class UnauthorizedError extends Error {
+  readonly status = 401;
+}
+export class BadRequestError extends Error {
+  readonly status = 400;
+}
 
 interface ResponseData {
   error?: {

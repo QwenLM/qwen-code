@@ -1,0 +1,85 @@
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--foreground);
+}
+
+.panel :global(button:disabled) {
+  pointer-events: auto;
+  cursor: not-allowed;
+}
+
+.tableViewport {
+  overflow: hidden;
+}
+
+.notice {
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--warning-color);
+  background: color-mix(in srgb, var(--warning-color) 12%, transparent);
+}
+
+.colorDot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 999px;
+}
+
+.empty {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+/* The "Current" tag on the active session — green so it stands out from the
+   muted status/workspace badges. */
+.currentBadge {
+  color: var(--success-color);
+  background: color-mix(in srgb, var(--success-color) 14%, transparent);
+}
+
+/* The running indicator mirrors the sidebar's session-loading spinner: only
+   shown while a turn is active, so idle sessions stay visually quiet. */
+.loading {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  display: inline-flex;
+  border: 1.5px solid
+    color-mix(in srgb, var(--muted-foreground) 28%, transparent);
+  border-top-color: var(--muted-foreground);
+  border-radius: 999px;
+  animation: overviewSpin 0.8s linear infinite;
+}
+
+@keyframes overviewSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Color tags mirror the sidebar's session-group palette. */
+.colorRed {
+  background: var(--accent-red);
+}
+.colorOrange {
+  background: var(--accent-orange);
+}
+.colorYellow {
+  background: var(--accent-yellow);
+}
+.colorGreen {
+  background: var(--accent-green);
+}
+.colorBlue {
+  background: var(--agent-blue-500);
+}
+.colorPurple {
+  background: var(--agent-purple-600);
+}

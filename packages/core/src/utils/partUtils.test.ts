@@ -10,7 +10,9 @@ import {
   getResponseText,
   flatMapTextParts,
   appendToLastTextPart,
+  prependToFirstTextPart,
 } from './partUtils.js';
+import { createOpenAIReasoningThoughtPart } from './thoughtUtils.js';
 import type { GenerateContentResponse, Part, PartUnion } from '@google/genai';
 
 const mockResponse = (
@@ -85,9 +87,35 @@ describe('partUtils', () => {
       expect(partToString(part, verboseOptions)).toBe('[Video Metadata]');
     });
 
-    it('should return descriptive string for thought part', () => {
-      const part = { thought: 'thinking' } as unknown as Part;
+    // `Part.thought` is a boolean flag; the reasoning is in `part.text`. The
+    // previous expectation was built from `{ thought: 'thinking' }`, a shape
+    // that only type-checks through `as unknown as Part` and that the SDK
+    // never produces.
+    it('should return the reasoning text for a thought part', () => {
+      const part: Part = { thought: true, text: 'thinking' };
       expect(partToString(part, verboseOptions)).toBe('[Thought: thinking]');
+    });
+
+    it('should label a thought part that carries no text', () => {
+      const part: Part = { thought: true };
+      expect(partToString(part, verboseOptions)).toBe('[Thought]');
+    });
+
+    it('should render a part flagged thought: false as its own text', () => {
+      const part: Part = { thought: false, text: 'ordinary' };
+      expect(partToString(part, verboseOptions)).toBe('ordinary');
+    });
+
+    it('should render a thought part built by the real constructor', () => {
+      const part = createOpenAIReasoningThoughtPart('step one');
+      expect(partToString(part, verboseOptions)).toBe('[Thought: step one]');
+    });
+
+    // Guard against over-correcting: without verbose, a thought part is still
+    // just its text. Passes both before and after.
+    it('should return the plain text for a thought part when not verbose', () => {
+      const part: Part = { thought: true, text: 'thinking' };
+      expect(partToString(part)).toBe('thinking');
     });
 
     it('should return descriptive string for codeExecutionResult part', () => {
@@ -296,6 +324,47 @@ describe('partUtils', () => {
       const prompt: PartUnion[] = ['first part'];
       const result = appendToLastTextPart(prompt, 'new text', '---');
       expect(result).toEqual(['first part---new text']);
+    });
+  });
+
+  describe('prependToFirstTextPart', () => {
+    it('should prepend to an empty prompt', () => {
+      expect(prependToFirstTextPart([], 'new text')).toEqual([
+        { text: 'new text' },
+      ]);
+    });
+
+    it('should prepend to a prompt with a string as the first text part', () => {
+      expect(prependToFirstTextPart(['first part'], 'new text')).toEqual([
+        'new text\n\nfirst part',
+      ]);
+    });
+
+    it('should prepend to a prompt with a text part object', () => {
+      expect(
+        prependToFirstTextPart([{ text: 'first part' }], 'new text'),
+      ).toEqual([{ text: 'new text\n\nfirst part' }]);
+    });
+
+    it('should insert a new text part before prompts without text parts', () => {
+      const nonTextPart: Part = { functionCall: { name: 'do_stuff' } };
+
+      expect(prependToFirstTextPart([nonTextPart], 'new text')).toEqual([
+        { text: 'new text' },
+        nonTextPart,
+      ]);
+    });
+
+    it('should not prepend anything if the text to prepend is empty', () => {
+      const prompt: PartUnion[] = ['first part'];
+
+      expect(prependToFirstTextPart(prompt, '')).toBe(prompt);
+    });
+
+    it('should use a custom separator', () => {
+      expect(prependToFirstTextPart(['first part'], 'new text', '---')).toEqual(
+        ['new text---first part'],
+      );
     });
   });
 });

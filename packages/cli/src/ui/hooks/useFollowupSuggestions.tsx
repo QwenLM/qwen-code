@@ -45,7 +45,7 @@ export interface UseFollowupSuggestionsReturn {
   /** Accept the current suggestion */
   accept: (
     method?: 'tab' | 'enter' | 'right',
-    options?: { skipOnAccept?: boolean },
+    options?: { skipOnAccept?: boolean; fallbackText?: string },
   ) => void;
   /** Dismiss the current suggestion */
   dismiss: () => void;
@@ -104,6 +104,7 @@ export function useFollowupSuggestionsCLI(
     (params: {
       outcome: 'accepted' | 'ignored';
       accept_method?: 'tab' | 'enter' | 'right';
+      accept_source?: 'live' | 'fallback';
       time_ms: number;
       suggestion_length: number;
     }) => {
@@ -114,10 +115,15 @@ export function useFollowupSuggestionsCLI(
         new PromptSuggestionEvent({
           outcome: params.outcome,
           accept_method: params.accept_method,
+          accept_source: params.accept_source,
           ...(params.outcome === 'accepted'
             ? { time_to_accept_ms: params.time_ms }
             : { time_to_ignore_ms: params.time_ms }),
-          ...(firstKeystrokeAtRef.current > 0 &&
+          // Skip for fallback accepts: the suggestion was never shown via the
+          // timer (shownAt stayed 0), so `prevShownAtRef` still holds a previous
+          // suggestion's timestamp and the delta would be meaningless.
+          ...(params.accept_source !== 'fallback' &&
+            firstKeystrokeAtRef.current > 0 &&
             prevShownAtRef.current > 0 && {
               time_to_first_keystroke_ms:
                 firstKeystrokeAtRef.current - prevShownAtRef.current,

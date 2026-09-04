@@ -9,11 +9,10 @@ import { useAppContext } from '../contexts/AppContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { theme } from '../semantic-colors.js';
 import { StreamingState } from '../types.js';
-import { UpdateNotification } from './UpdateNotification.js';
 
 export const Notifications = () => {
   const { startupWarnings } = useAppContext();
-  const { initError, streamingState, updateInfo } = useUIState();
+  const { initError, streamingState } = useUIState();
 
   const showStartupWarnings = startupWarnings.length > 0;
   const showInitError =
@@ -21,7 +20,6 @@ export const Notifications = () => {
 
   return (
     <>
-      {updateInfo && <UpdateNotification message={updateInfo.message} />}
       {showStartupWarnings && (
         <Box
           borderStyle="round"

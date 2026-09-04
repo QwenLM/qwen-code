@@ -1,6 +1,67 @@
 import { z } from 'zod';
 import type { CanUseTool } from './types.js';
 import type { SubagentConfig } from './protocol.js';
+import { PERMISSION_MODES } from './permission-mode.js';
+
+const RESERVED_CLI_FLAGS = new Set([
+  '--input-format',
+  '--output-format',
+  '-o',
+  '--channel',
+  '--model',
+  '-m',
+  '--auth-type',
+  '--fallback-model',
+  '--approval-mode',
+  '--yolo',
+  '-y',
+  '--insecure',
+  '--no-insecure',
+  '--core-tools',
+  '--exclude-tools',
+  '--allowed-tools',
+  '--max-tool-calls',
+  '--max-subagent-depth',
+  '--resume',
+  '-r',
+  '--continue',
+  '-c',
+  '--session-id',
+  '--fork-session',
+  '--max-session-turns',
+  '--system-prompt',
+  '--append-system-prompt',
+  '--include-directories',
+  '--add-dir',
+  '--allowed-mcp-server-names',
+  '--extensions',
+  '-e',
+  '--proxy',
+  '--sandbox',
+  '--no-sandbox',
+  '-s',
+  '--sandbox-image',
+  '--sandbox-session-id',
+  '--safe-mode',
+  '--no-safe-mode',
+  '--worktree',
+  '--disabled-slash-commands',
+  '--include-partial-messages',
+  '--chat-recording',
+  '--openai-logging',
+  '--openai-logging-dir',
+  '--openai-base-url',
+  '--openai-api-key',
+  '--mcp-config',
+  '--prompt',
+  '-p',
+  '--prompt-interactive',
+  '-i',
+  '--json-schema',
+  '--json-fd',
+  '--json-file',
+  '--input-file',
+]);
 
 /**
  * OAuth configuration for MCP servers
@@ -47,6 +108,7 @@ export const CLIMcpServerConfigSchema = z.object({
   tcp: z.string().optional(),
   // Common
   timeout: z.number().optional(),
+  versionNegotiation: z.enum(['auto', 'legacy']).optional(),
   trust: z.boolean().optional(),
   // Metadata
   description: z.string().optional(),
@@ -140,7 +202,7 @@ export const QueryOptionsSchema = z
         QuerySystemPromptPresetSchema,
       ])
       .optional(),
-    permissionMode: z.enum(['default', 'plan', 'auto-edit', 'yolo']).optional(),
+    permissionMode: z.enum(PERMISSION_MODES).optional(),
     canUseTool: z
       .custom<CanUseTool>((val) => typeof val === 'function', {
         message: 'canUseTool must be a function',
@@ -155,7 +217,7 @@ export const QueryOptionsSchema = z
       >((val) => typeof val === 'function', { message: 'stderr must be a function' })
       .optional(),
     logLevel: z.enum(['debug', 'info', 'warn', 'error']).optional(),
-    maxSessionTurns: z.number().optional(),
+    maxSessionTurns: z.number().int().optional(),
     coreTools: z.array(z.string()).optional(),
     excludeTools: z.array(z.string()).optional(),
     allowedTools: z.array(z.string()).optional(),
@@ -166,19 +228,87 @@ export const QueryOptionsSchema = z
       .array(
         z.custom<SubagentConfig>(
           (val) =>
-            val &&
-            typeof val === 'object' &&
-            'name' in val &&
-            'description' in val &&
-            'systemPrompt' in val && {
-              message: 'agents must be an array of SubagentConfig objects',
-            },
+            !!(
+              val &&
+              typeof val === 'object' &&
+              val.name &&
+              val.description &&
+              val.systemPrompt
+            ),
+          {
+            message:
+              'agents must be an array of SubagentConfig objects with non-empty name, description, and systemPrompt',
+          },
         ),
       )
       .optional(),
+    effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).optional(),
     includePartialMessages: z.boolean().optional(),
+    continue: z.boolean().optional(),
     resume: z.string().optional(),
     sessionId: z.string().optional(),
+    forkSession: z.boolean().optional(),
+    maxToolCalls: z.number().int().min(-1).optional(),
+    maxSubagentDepth: z.number().int().min(1).max(100).optional(),
+    includeDirectories: z
+      .array(
+        z.string().refine((s) => !s.includes(','), {
+          message: 'includeDirectories items cannot contain commas',
+        }),
+      )
+      .optional(),
+    extraArgs: z
+      .array(z.string().min(1, 'extraArgs items cannot be empty'))
+      .refine(
+        (args) =>
+          !args.some((arg) => RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? '')),
+        (args) => {
+          const blocked = args.find((arg) =>
+            RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? ''),
+          );
+          return {
+            message: `extraArgs cannot contain reserved flag: ${blocked}`,
+          };
+        },
+      )
+      .optional(),
+    extensions: z
+      .array(
+        z.string().refine((s) => !s.includes(','), {
+          message: 'extensions items cannot contain commas',
+        }),
+      )
+      .optional(),
+    allowedMcpServerNames: z
+      .array(
+        z.string().refine((s) => !s.includes(','), {
+          message: 'allowedMcpServerNames items cannot contain commas',
+        }),
+      )
+      .optional(),
+    fallbackModel: z
+      .array(
+        z.string().refine((s) => !s.includes(','), {
+          message: 'fallbackModel items cannot contain commas',
+        }),
+      )
+      .max(3, 'fallbackModel supports a maximum of 3 models')
+      .optional(),
+    proxy: z.string().trim().min(1, 'proxy cannot be empty').optional(),
+    sandbox: z.boolean().optional(),
+    safeMode: z.boolean().optional(),
+    insecure: z.boolean().optional(),
+    worktree: z.boolean().optional(),
+    disabledSlashCommands: z
+      .array(
+        z.string().refine((s) => !s.includes(','), {
+          message: 'disabledSlashCommands items cannot contain commas',
+        }),
+      )
+      .optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
-  .strict();
+  .strict()
+  .refine((data) => !data.forkSession || data.resume || data.continue, {
+    message: 'forkSession requires resume or continue to be set',
+  });

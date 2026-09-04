@@ -524,6 +524,25 @@ describe('ShellProcessor', () => {
       ]);
     });
 
+    it('should not report PTY signal 0 as a termination', async () => {
+      const processor = new ShellProcessor('test-command');
+      const prompt: PromptPipelineContent =
+        createPromptPipelineContent('!{cmd}');
+      mockShellExecute.mockReturnValue({
+        result: Promise.resolve({
+          ...SUCCESS_RESULT,
+          output: 'output',
+          stderr: '',
+          exitCode: 0,
+          signal: 0,
+        }),
+      });
+
+      const result = await processor.process(prompt, context);
+
+      expect(result).toEqual([{ text: 'output' }]);
+    });
+
     it('should throw a detailed error if the shell fails to spawn', async () => {
       const processor = new ShellProcessor('test-command');
       const prompt: PromptPipelineContent =

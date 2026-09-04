@@ -1,0 +1,4127 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+
+// Mock @qwen-code/qwen-code-core to avoid the undici dependency chain.
+// This is required so @qwen-code/acp-bridge/status can load (it imports
+// SkillError from core).
+vi.mock('@qwen-code/qwen-code-core', () => {
+  class SkillError extends Error {
+    code: string;
+    constructor(message: string, code: string) {
+      super(message);
+      this.name = 'SkillError';
+      this.code = code;
+    }
+  }
+  class FatalConfigError extends Error {}
+  const noopLogger = {
+    debug: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+  };
+  class Storage {
+    constructor(private readonly workspace: string) {}
+
+    static getGlobalQwenDir() {
+      return process.env['QWEN_HOME'] ?? '/tmp/.qwen';
+    }
+
+    static getGlobalSettingsPath() {
+      return `${Storage.getGlobalQwenDir()}/settings.json`;
+    }
+
+    getWorkspaceSettingsPath() {
+      return `${this.workspace}/.qwen/settings.json`;
+    }
+  }
+
+  class ModelsConfig {
+    getAllConfiguredModels() {
+      return [];
+    }
+  }
+
+  return {
+    SkillError,
+    FatalConfigError,
+    ApprovalMode: {
+      DEFAULT: 'default',
+      AUTO_EDIT: 'autoEdit',
+      YOLO: 'yolo',
+    },
+    OutputFormat: {
+      TEXT: 'text',
+      JSON: 'json',
+      STREAM_JSON: 'stream-json',
+    },
+    REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+    DEFAULT_STOP_HOOK_BLOCK_CAP: 5,
+    DEFAULT_MAX_SUBAGENT_DEPTH: 5,
+    DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,
+    DEFAULT_TOOL_OUTPUT_BATCH_BUDGET: 100_000,
+    DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD: 100_000,
+    DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 2000,
+    DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 100_000,
+    DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
+    SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
+    DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES: ['.agentignore', '.aiignore'],
+    QWEN_DIR: '.qwen',
+    Storage,
+    ModelsConfig,
+    atomicWriteFileSync: vi.fn(),
+    createDebugLogger: () => noopLogger,
+    getErrorMessage: (error: unknown) =>
+      error instanceof Error ? error.message : String(error),
+    ideContextStore: {
+      get: () => undefined,
+    },
+    isWithinRoot: (location: string, root: string) =>
+      location === root || location.startsWith(`${root}/`),
+    stripRuntimeSnapshotPrefix: (value: string) => value,
+  };
+});
+
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+
+vi.mock('../../../utils/stdioHelpers.js', () => ({
+  writeStderrLine: mockWriteStderrLine,
+  writeStderrLineSafe: mockWriteStderrLine,
+}));
+
+const { createDaemonWorkspaceService } = await import('../index.js');
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  BridgeChannelClosedError,
+  type ServeWorkspaceSkillsStatus,
+} from '@qwen-code/acp-bridge/status';
+import {
+  resetHomeEnvBootstrapForTesting,
+  SettingScope,
+  SETTINGS_DIRECTORY_NAME,
+} from '../../../config/settings.js';
+import {
+  resetTrustedFoldersForTesting,
+  TRUSTED_FOLDERS_FILENAME,
+  TrustLevel,
+} from '../../../config/trustedFolders.js';
+import { WorkspaceVoiceError } from '../../../services/voice-service.js';
+import {
+  WorkspacePermissionRulesSessionRequiredError,
+  WorkspaceSettingsPartialPersistError,
+} from '../types.js';
+import type {
+  DaemonWorkspaceServiceDeps,
+  InvokeWorkspaceCommandFn,
+  QueryWorkspaceStatusFn,
+  WorkspaceRequestContext,
+  WorkspaceSkillToggleActivation,
+} from '../types.js';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function makeDeps(
+  overrides: Partial<DaemonWorkspaceServiceDeps> = {},
+): DaemonWorkspaceServiceDeps {
+  return {
+    boundWorkspace: '/workspace',
+    isWorkspaceTrusted: () => true,
+    contextFilename: 'QWEN.md',
+    persistDisabledTools: vi.fn().mockResolvedValue(undefined),
+    persistDisabledSkills: vi.fn().mockResolvedValue({
+      changed: true,
+      disabled: [],
+    }),
+    persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+      outcomes: [],
+      settingsChanges: [],
+    }),
+    queryWorkspaceStatus: vi
+      .fn()
+      .mockImplementation((_method: string, idle: () => unknown) =>
+        Promise.resolve(idle()),
+      ),
+    invokeWorkspaceCommand: vi.fn().mockResolvedValue({
+      serverName: 'test',
+      restarted: true,
+      durationMs: 42,
+    }),
+    publishWorkspaceEvent: vi.fn(),
+    ...overrides,
+  };
+}
+
+function makeCtx(
+  overrides: Partial<WorkspaceRequestContext> = {},
+): WorkspaceRequestContext {
+  return {
+    route: 'TEST /test',
+    workspaceCwd: '/workspace',
+    originatorClientId: 'client-1',
+    ...overrides,
+  };
+}
+
+function skillToggleSettingsChanged(args: {
+  key: 'skills.disabled' | 'skills.enabled';
+  value: unknown;
+  skills: Array<{ name: string; enabled: boolean }>;
+  activation: WorkspaceSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  originatorClientId?: string;
+}) {
+  return {
+    type: 'settings_changed',
+    data: {
+      key: args.key,
+      value: args.value,
+      scope: 'workspace',
+      mutation: {
+        id: expect.any(String),
+        kind: 'skill_toggle',
+        skills: args.skills,
+        activation: args.activation,
+        sessionsRefreshed: args.sessionsRefreshed,
+        sessionsFailed: args.sessionsFailed,
+      },
+    },
+    originatorClientId: args.originatorClientId ?? 'client-1',
+  };
+}
+
+async function withIsolatedQwenHome<T>(fn: () => Promise<T>): Promise<T> {
+  return withIsolatedWorkspace(() => fn());
+}
+
+async function writeJson(file: string, value: unknown): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, JSON.stringify(value, null, 2), 'utf8');
+}
+
+async function withIsolatedWorkspace<T>(
+  fn: (paths: { home: string; workspace: string }) => Promise<T>,
+): Promise<T> {
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'facade-ws-'));
+  const home = path.join(scratch, 'home');
+  const workspace = path.join(scratch, 'workspace');
+  const originalQwenHome = process.env['QWEN_HOME'];
+  const originalTrustedFoldersPath =
+    process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+  await fs.mkdir(home, { recursive: true });
+  await fs.mkdir(workspace, { recursive: true });
+  process.env['QWEN_HOME'] = home;
+  process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] = path.join(
+    home,
+    TRUSTED_FOLDERS_FILENAME,
+  );
+  resetHomeEnvBootstrapForTesting();
+  resetTrustedFoldersForTesting();
+  try {
+    return await fn({ home, workspace });
+  } finally {
+    await fs.rm(scratch, { recursive: true, force: true });
+    if (originalQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalQwenHome;
+    }
+    if (originalTrustedFoldersPath === undefined) {
+      delete process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'];
+    } else {
+      process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'] =
+        originalTrustedFoldersPath;
+    }
+    resetHomeEnvBootstrapForTesting();
+    resetTrustedFoldersForTesting();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+describe('createDaemonWorkspaceService', () => {
+  beforeEach(() => {
+    mockWriteStderrLine.mockClear();
+  });
+
+  describe('workspace voice', () => {
+    it('reports missing voice settings persistence as a structured voice error', async () => {
+      const svc = createDaemonWorkspaceService(makeDeps());
+
+      let caught: unknown;
+      try {
+        await svc.setWorkspaceVoiceSettings(makeCtx(), { enabled: false });
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(WorkspaceVoiceError);
+      expect(caught).toMatchObject({
+        name: 'WorkspaceVoiceError',
+        status: 501,
+        code: 'not_implemented',
+      });
+    });
+
+    it('persists voice settings through batch persistence and publishes events', async () => {
+      await withIsolatedQwenHome(async () => {
+        const persistSettings = vi.fn(async () => {});
+        const publishWorkspaceEvent = vi.fn();
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ persistSettings, publishWorkspaceEvent }),
+        );
+
+        const result = await svc.setWorkspaceVoiceSettings(
+          makeCtx({ originatorClientId: 'voice-client' }),
+          { enabled: false, mode: 'tap', language: 'english' },
+        );
+
+        expect(persistSettings).toHaveBeenCalledWith(
+          '/workspace',
+          [
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.mode',
+              value: 'tap',
+            },
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.language',
+              value: 'english',
+            },
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.enabled',
+              value: false,
+            },
+          ],
+          undefined,
+        );
+        expect(publishWorkspaceEvent).toHaveBeenCalledTimes(3);
+        expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+          type: 'settings_changed',
+          data: {
+            key: 'general.voice.enabled',
+            value: false,
+            scope: 'user',
+          },
+          originatorClientId: 'voice-client',
+        });
+        expect(result.v).toBe(1);
+      });
+    });
+
+    it('forces qualified ACP Voice writes into the workspace scope', async () => {
+      await withIsolatedQwenHome(async () => {
+        const persistSettings = vi.fn(async () => {});
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            persistSettings,
+            voiceSettingsScope: SettingScope.Workspace,
+            voiceEnv: {},
+          }),
+        );
+
+        await svc.setWorkspaceVoiceSettings(makeCtx(), {
+          enabled: false,
+          mode: 'tap',
+          language: 'english',
+        });
+
+        expect(persistSettings).toHaveBeenCalledWith(
+          '/workspace',
+          [
+            {
+              scope: SettingScope.Workspace,
+              key: 'general.voice.mode',
+              value: 'tap',
+            },
+            {
+              scope: SettingScope.Workspace,
+              key: 'general.voice.language',
+              value: 'english',
+            },
+            {
+              scope: SettingScope.Workspace,
+              key: 'general.voice.enabled',
+              value: false,
+            },
+          ],
+          undefined,
+        );
+      });
+    });
+
+    it('rejects invalid voice settings before persisting', async () => {
+      await withIsolatedQwenHome(async () => {
+        const persistSettings = vi.fn(async () => {});
+        const publishWorkspaceEvent = vi.fn();
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ persistSettings, publishWorkspaceEvent }),
+        );
+
+        await expect(
+          svc.setWorkspaceVoiceSettings(makeCtx(), {
+            voiceModel: 'not-configured',
+          }),
+        ).rejects.toMatchObject({ code: 'unknown_voice_model' });
+        await expect(
+          svc.setWorkspaceVoiceSettings(makeCtx(), {}),
+        ).rejects.toMatchObject({ code: 'invalid_voice_update' });
+
+        expect(persistSettings).not.toHaveBeenCalled();
+        expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+      });
+    });
+
+    it('publishes committed fallback voice writes when a later write fails', async () => {
+      await withIsolatedQwenHome(async () => {
+        const persistSetting = vi.fn(
+          async (
+            _workspace: string,
+            _scope: SettingScope,
+            key: string,
+            _value: unknown,
+          ) => {
+            if (key === 'general.voice.language') {
+              throw new Error('disk full');
+            }
+          },
+        );
+        const publishWorkspaceEvent = vi.fn();
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ persistSetting, publishWorkspaceEvent }),
+        );
+
+        await expect(
+          svc.setWorkspaceVoiceSettings(
+            makeCtx({ originatorClientId: 'voice-client' }),
+            { mode: 'tap', language: 'english' },
+          ),
+        ).rejects.toMatchObject({
+          name: 'WorkspaceSettingsPartialPersistError',
+          committedWrites: [
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.mode',
+              value: 'tap',
+            },
+          ],
+          cause: expect.objectContaining({ message: 'disk full' }),
+        });
+
+        expect(publishWorkspaceEvent).toHaveBeenCalledOnce();
+        expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+          type: 'settings_changed',
+          data: {
+            key: 'general.voice.mode',
+            value: 'tap',
+            scope: 'user',
+          },
+          originatorClientId: 'voice-client',
+        });
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          expect.stringContaining('partial persist error'),
+        );
+      });
+    });
+
+    it('publishes committed batch voice writes when batch persistence partially fails', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const persistSettings = vi.fn(async (_workspace, writes) => {
+        throw new WorkspaceSettingsPartialPersistError(
+          'batch failed',
+          [writes[0]!],
+          new Error('disk full'),
+        );
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ persistSettings, publishWorkspaceEvent }),
+      );
+
+      await expect(
+        svc.setWorkspaceVoiceSettings(
+          makeCtx({ originatorClientId: 'voice-client' }),
+          { mode: 'tap', language: 'english' },
+        ),
+      ).rejects.toThrow(WorkspaceSettingsPartialPersistError);
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1);
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: {
+          key: 'general.voice.mode',
+          value: 'tap',
+          scope: 'user',
+        },
+        originatorClientId: 'voice-client',
+      });
+    });
+  });
+
+  describe('workspace permissions', () => {
+    it('sets permission rules through the ACP command when a session is live', async () => {
+      const acpResult = {
+        v: 1,
+        user: {
+          path: '/user/settings.json',
+          rules: { allow: [], ask: [], deny: [] },
+        },
+        workspace: {
+          path: '/workspace/.qwen/settings.json',
+          rules: { allow: ['Shell(*)'], ask: [], deny: [] },
+        },
+        merged: { allow: ['Shell(*)'], ask: [], deny: [] },
+        isTrusted: true,
+      };
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue(acpResult);
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, publishWorkspaceEvent }),
+      );
+
+      const result = await svc.setWorkspacePermissionRules(
+        makeCtx({ originatorClientId: 'perm-client' }),
+        { scope: 'workspace', ruleType: 'allow', rules: ['Shell(*)'] },
+      );
+
+      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/permissions/setRules',
+        {
+          cwd: '/workspace',
+          scope: 'workspace',
+          ruleType: 'allow',
+          rules: ['Shell(*)'],
+        },
+      );
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: {
+          key: 'permissions.allow',
+          value: ['Shell(*)'],
+          scope: 'workspace',
+        },
+        originatorClientId: 'perm-client',
+      });
+      expect(result).toBe(acpResult);
+    });
+
+    it('rejects permission updates when ACP has no live session', async () => {
+      await withIsolatedQwenHome(async () => {
+        const invokeWorkspaceCommand = vi
+          .fn()
+          .mockRejectedValue(new SessionNotFoundError('session-1'));
+        const persistSetting = vi.fn(async () => {});
+        const publishWorkspaceEvent = vi.fn();
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            invokeWorkspaceCommand,
+            persistSetting,
+            publishWorkspaceEvent,
+          }),
+        );
+
+        await expect(
+          svc.setWorkspacePermissionRules(
+            makeCtx({ originatorClientId: 'perm-client' }),
+            { scope: 'user', ruleType: 'deny', rules: ['Shell(rm -rf *)'] },
+          ),
+        ).rejects.toThrow(WorkspacePermissionRulesSessionRequiredError);
+
+        expect(persistSetting).not.toHaveBeenCalled();
+        expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+      });
+    });
+
+    it('rethrows non-session permission command errors without fallback persistence', async () => {
+      const invokeWorkspaceCommand = vi
+        .fn()
+        .mockRejectedValue(new Error('bridge failed'));
+      const persistSetting = vi.fn(async () => {});
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          invokeWorkspaceCommand,
+          persistSetting,
+          publishWorkspaceEvent,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspacePermissionRules(makeCtx(), {
+          scope: 'workspace',
+          ruleType: 'allow',
+          rules: ['Shell(*)'],
+        }),
+      ).rejects.toThrow('bridge failed');
+
+      expect(persistSetting).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('status methods', () => {
+    it('getWorkspaceTrustStatus reads current settings and trusted folders', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+          [workspace]: TrustLevel.TRUST_FOLDER,
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        const result = await svc.getWorkspaceTrustStatus(makeCtx());
+
+        expect(result).toMatchObject({
+          v: 1,
+          workspaceCwd: workspace,
+          folderTrustEnabled: true,
+          effective: { state: 'trusted', source: 'file' },
+          explicitTrustLevel: TrustLevel.TRUST_FOLDER,
+        });
+      });
+    });
+
+    it('getWorkspacePermissionsStatus reads scoped and merged settings', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          permissions: {
+            allow: ['Shell(git *)'],
+            deny: ['Read(.env)'],
+          },
+        });
+        await writeJson(
+          path.join(workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+          {
+            permissions: {
+              allow: ['Read(src/**)'],
+              ask: ['Shell(npm *)'],
+            },
+          },
+        );
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        const result = await svc.getWorkspacePermissionsStatus(makeCtx());
+
+        expect(result).toMatchObject({
+          v: 1,
+          user: {
+            path: `${home}/settings.json`,
+            rules: {
+              allow: ['Shell(git *)'],
+              ask: [],
+              deny: ['Read(.env)'],
+            },
+          },
+          workspace: {
+            path: `${workspace}/${SETTINGS_DIRECTORY_NAME}/settings.json`,
+            rules: {
+              allow: ['Read(src/**)'],
+              ask: ['Shell(npm *)'],
+              deny: [],
+            },
+          },
+          merged: {
+            allow: ['Shell(git *)', 'Read(src/**)'],
+            ask: ['Shell(npm *)'],
+            deny: ['Read(.env)'],
+          },
+        });
+      });
+    });
+
+    it('getWorkspaceVoiceStatus reads daemon-local voice settings', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          voiceModel: 'qwen3-asr-flash',
+          general: {
+            voice: {
+              enabled: true,
+              mode: 'tap',
+              language: 'english',
+            },
+          },
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        const result = await svc.getWorkspaceVoiceStatus(makeCtx());
+
+        expect(result).toMatchObject({
+          v: 1,
+          workspaceCwd: workspace,
+          enabled: true,
+          mode: 'tap',
+          language: 'english',
+          voiceModel: 'qwen3-asr-flash',
+          availableVoiceModels: [],
+        });
+      });
+    });
+
+    it('getWorkspaceMcpStatus delegates to queryWorkspaceStatus with correct method', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValue({ v: 1, servers: [] });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus }),
+      );
+
+      await svc.getWorkspaceMcpStatus(makeCtx());
+
+      expect(queryWorkspaceStatus).toHaveBeenCalledWith(
+        'qwen/status/workspace/mcp',
+        expect.any(Function),
+      );
+    });
+
+    it('getWorkspaceMcpStatus idle fallback returns correct envelope', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          boundWorkspace: '/my/ws',
+        }),
+      );
+
+      const result = await svc.getWorkspaceMcpStatus(makeCtx());
+
+      expect(result.workspaceCwd).toBe('/my/ws');
+      expect(result.initialized).toBe(false);
+      expect(result.servers).toEqual([]);
+    });
+
+    it('does not replay a stale MCP snapshot when the status provider is idle', async () => {
+      const liveStatus = {
+        v: 1 as const,
+        workspaceCwd: '/ws',
+        initialized: true,
+        discoveryState: 'completed' as const,
+        servers: [
+          {
+            kind: 'mcp_server' as const,
+            status: 'ok' as const,
+            name: 'docs',
+            mcpStatus: 'connected' as const,
+            transport: 'stdio' as const,
+            disabled: false,
+            hasOAuthTokens: false,
+          },
+        ],
+      };
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce(liveStatus)
+        .mockImplementationOnce((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      await svc.getWorkspaceMcpStatus(makeCtx());
+      const result = await svc.getWorkspaceMcpStatus(makeCtx());
+
+      expect(result.initialized).toBe(false);
+      expect(result.discoveryState).toBe('not_started');
+      expect(result.servers).toEqual([]);
+    });
+
+    it('getWorkspaceSkillsStatus delegates with correct method', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValue({ v: 1, skills: [] });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus }),
+      );
+
+      await svc.getWorkspaceSkillsStatus(makeCtx());
+
+      expect(queryWorkspaceStatus).toHaveBeenCalledWith(
+        'qwen/status/workspace/skills',
+        expect.any(Function),
+      );
+    });
+
+    it('getWorkspaceSkillsStatus idle fallback returns correct envelope', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      const result = await svc.getWorkspaceSkillsStatus(makeCtx());
+
+      expect(result.workspaceCwd).toBe('/ws');
+      expect(result.initialized).toBe(false);
+      expect(result.skills).toEqual([]);
+    });
+
+    it('getWorkspaceSkillsStatus replays the last live child status when the channel is idle', async () => {
+      const liveStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review changed code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      };
+      let channelLive = true;
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(channelLive ? liveStatus : idle()),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      // Channel live: authoritative skills from the ACP child, cached.
+      const first = await svc.getWorkspaceSkillsStatus(makeCtx());
+      expect(first.initialized).toBe(true);
+      expect(first.skills.map((s) => s.name)).toEqual(['review']);
+
+      // Channel reaped: queryWorkspaceStatus falls back to the empty idle
+      // placeholder, but the facade replays the last live status so
+      // skill-backed slash commands (e.g. /review) keep autocompleting.
+      channelLive = false;
+      const second = await svc.getWorkspaceSkillsStatus(makeCtx());
+      expect(second.initialized).toBe(true);
+      expect(second.skills.map((s) => s.name)).toEqual(['review']);
+    });
+
+    it('getWorkspaceSkillsStatus reuses the snapshot until it is invalidated', async () => {
+      const statuses = [
+        {
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: true,
+          skills: [{ kind: 'skill', status: 'ok', name: 'review' }],
+        },
+        {
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: true,
+          skills: [
+            { kind: 'skill', status: 'ok', name: 'review' },
+            { kind: 'skill', status: 'ok', name: 'plan' },
+          ],
+        },
+      ];
+      let call = 0;
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation(() => Promise.resolve(statuses[call++]));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      await svc.getWorkspaceSkillsStatus(makeCtx());
+      const cached = await svc.getWorkspaceSkillsStatus(makeCtx());
+      expect(cached.skills.map((s) => s.name)).toEqual(['review']);
+      expect(queryWorkspaceStatus).toHaveBeenCalledOnce();
+
+      svc.invalidateWorkspaceSkillsStatus();
+      const refreshed = await svc.getWorkspaceSkillsStatus(makeCtx());
+      expect(refreshed.skills.map((s) => s.name)).toEqual(['review', 'plan']);
+      expect(queryWorkspaceStatus).toHaveBeenCalledTimes(2);
+    });
+
+    it('revalidates the workspace skills snapshot after its freshness window', async () => {
+      let now = 10_000;
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: true,
+          skills: [
+            {
+              kind: 'skill',
+              status: 'ok',
+              name: 'review',
+              description: 'Review code',
+              level: 'bundled',
+              modelInvocable: true,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: true,
+          skills: [
+            {
+              kind: 'skill',
+              status: 'ok',
+              name: 'plan',
+              description: 'Plan changes',
+              level: 'bundled',
+              modelInvocable: true,
+            },
+          ],
+        });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      try {
+        const initial = await svc.getWorkspaceSkillsStatus(makeCtx());
+        now += 4_999;
+        const cached = await svc.getWorkspaceSkillsStatus(makeCtx());
+        now += 1;
+        const refreshed = await svc.getWorkspaceSkillsStatus(makeCtx());
+
+        expect(initial.skills.map((skill) => skill.name)).toEqual(['review']);
+        expect(cached).toEqual(initial);
+        expect(refreshed.skills.map((skill) => skill.name)).toEqual(['plan']);
+        expect(queryWorkspaceStatus).toHaveBeenCalledTimes(2);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it('does not let a superseded read extend the freshness window', async () => {
+      // A read that started before an invalidation still serves the snapshot a
+      // later read committed, but must not push that snapshot's TTL out —
+      // otherwise a post-mutation snapshot goes unrevalidated for longer than
+      // the window.
+      let now = 10_000;
+      const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+      const stale = deferred<ServeWorkspaceSkillsStatus>();
+      const skill = (name: string) =>
+        ({
+          kind: 'skill',
+          status: 'ok',
+          name,
+          description: name,
+          level: 'bundled',
+          modelInvocable: true,
+        }) as ServeWorkspaceSkillsStatus['skills'][number];
+      const fresh: ServeWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [skill('review')],
+      };
+      const later: ServeWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [skill('plan')],
+      };
+      const query = vi
+        .fn()
+        .mockImplementationOnce(() => stale.promise)
+        .mockResolvedValueOnce(fresh)
+        .mockResolvedValueOnce(later);
+      const queryWorkspaceStatus: QueryWorkspaceStatusFn = async <T>() =>
+        (await query()) as T;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      try {
+        const supersededRead = svc.getWorkspaceSkillsStatus(makeCtx());
+        svc.invalidateWorkspaceSkillsStatus();
+        await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+          fresh,
+        );
+
+        now += 4_000;
+        // The superseded read answers late and uninitialized, so it falls back
+        // to the committed snapshot.
+        stale.resolve({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: false,
+          skills: [],
+        });
+        await expect(supersededRead).resolves.toEqual(fresh);
+
+        // 5_001ms after `fresh` was committed: the window is over regardless of
+        // when the superseded read happened to finish.
+        now += 1_001;
+        await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+          later,
+        );
+        expect(query).toHaveBeenCalledTimes(3);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it('shares one workspace skills query between concurrent readers', async () => {
+      const pending = deferred<ServeWorkspaceSkillsStatus>();
+      const query = vi.fn(() => pending.promise);
+      const queryWorkspaceStatus: QueryWorkspaceStatusFn = async <T>() =>
+        (await query()) as T;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      const first = svc.getWorkspaceSkillsStatus(makeCtx());
+      const second = svc.getWorkspaceSkillsStatus(makeCtx());
+      pending.resolve({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      });
+
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        expect.objectContaining({ initialized: true }),
+        expect.objectContaining({ initialized: true }),
+      ]);
+      expect(query).toHaveBeenCalledOnce();
+    });
+
+    it('does not cache a workspace skills query invalidated while in flight', async () => {
+      const stale = deferred<ServeWorkspaceSkillsStatus>();
+      const freshStatus: ServeWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'plan',
+            description: 'Plan changes',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      };
+      const query = vi
+        .fn()
+        .mockImplementationOnce(() => stale.promise)
+        .mockResolvedValueOnce(freshStatus);
+      const queryWorkspaceStatus: QueryWorkspaceStatusFn = async <T>() =>
+        (await query()) as T;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      const staleRead = svc.getWorkspaceSkillsStatus(makeCtx());
+      svc.invalidateWorkspaceSkillsStatus();
+      const freshRead = svc.getWorkspaceSkillsStatus(makeCtx());
+
+      await expect(freshRead).resolves.toEqual(freshStatus);
+      stale.resolve({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      });
+      await expect(staleRead).resolves.toEqual(freshStatus);
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        freshStatus,
+      );
+      expect(query).toHaveBeenCalledTimes(2);
+    });
+
+    it('invalidateWorkspaceSkillsStatus drops the cached child skills answer', async () => {
+      const liveStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'pdf',
+            description: 'PDF skill',
+            level: 'extension',
+            extensionName: 'pdf-tools',
+            modelInvocable: true,
+          },
+        ],
+      };
+      let channelLive = true;
+      const localStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [],
+      };
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(channelLive ? liveStatus : idle()),
+        );
+      const workspaceSkillsStatusProvider = vi
+        .fn()
+        .mockResolvedValue(localStatus);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      await svc.getWorkspaceSkillsStatus(makeCtx());
+      channelLive = false;
+      svc.invalidateWorkspaceSkillsStatus();
+
+      const result = await svc.getWorkspaceSkillsStatus(makeCtx());
+      expect(result.skills).toEqual([]);
+      expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
+    });
+
+    it('getWorkspaceSkillsStatus falls back to the daemon-local provider when the child never answered', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const workspaceSkillsStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review changed code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      const result = await svc.getWorkspaceSkillsStatus(makeCtx());
+      const cached = await svc.getWorkspaceSkillsStatus(makeCtx());
+
+      expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
+      expect(workspaceSkillsStatusProvider).toHaveBeenCalledOnce();
+      expect(result.initialized).toBe(true);
+      expect(result.skills.map((s) => s.name)).toEqual(['review']);
+      expect(cached).toEqual(result);
+    });
+
+    it('getWorkspaceSkillsStatus prefers the cached child answer over the daemon-local provider', async () => {
+      const liveStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [{ kind: 'skill', status: 'ok', name: 'review' }],
+      };
+      let channelLive = true;
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(channelLive ? liveStatus : idle()),
+        );
+      const workspaceSkillsStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      await svc.getWorkspaceSkillsStatus(makeCtx()); // warms cache (child live)
+      channelLive = false;
+      const result = await svc.getWorkspaceSkillsStatus(makeCtx());
+
+      expect(result.skills.map((s) => s.name)).toEqual(['review']);
+      expect(workspaceSkillsStatusProvider).not.toHaveBeenCalled();
+    });
+
+    it('getWorkspaceSkillsStatus does not use the daemon-local provider while the child answers', async () => {
+      const liveStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [{ kind: 'skill', status: 'ok', name: 'review' }],
+      };
+      const queryWorkspaceStatus = vi.fn().mockResolvedValue(liveStatus);
+      const workspaceSkillsStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, workspaceSkillsStatusProvider }),
+      );
+
+      await svc.getWorkspaceSkillsStatus(makeCtx());
+
+      expect(workspaceSkillsStatusProvider).not.toHaveBeenCalled();
+    });
+
+    it('getWorkspaceSkillsStatus replays the cache when the query throws mid-flight', async () => {
+      const liveStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [{ kind: 'skill', status: 'ok', name: 'review' }],
+      };
+      let shouldThrow = false;
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation(() =>
+          shouldThrow
+            ? Promise.reject(new Error('channel closed mid-request'))
+            : Promise.resolve(liveStatus),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      await svc.getWorkspaceSkillsStatus(makeCtx()); // warms cache (live)
+      shouldThrow = true;
+      const result = await svc.getWorkspaceSkillsStatus(makeCtx());
+
+      // Mid-flight failure resolves to the cached answer, not a rejection.
+      expect(result.skills.map((s) => s.name)).toEqual(['review']);
+    });
+
+    it('getWorkspaceSkillsStatus falls back to daemon-local when the query throws with no cache', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockRejectedValue(new Error('channel closed mid-request'));
+      const workspaceSkillsStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [{ kind: 'skill', status: 'ok', name: 'review' }],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      const result = await svc.getWorkspaceSkillsStatus(makeCtx());
+
+      expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
+      expect(result.skills.map((s) => s.name)).toEqual(['review']);
+    });
+
+    it('getWorkspaceSkillsStatus degrades to the idle placeholder when the daemon-local provider throws', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const workspaceSkillsStatusProvider = vi
+        .fn()
+        .mockRejectedValue(new Error('local enumeration blew up'));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      // A throwing injected provider must not fail the request.
+      const result = await svc.getWorkspaceSkillsStatus(makeCtx());
+
+      expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
+      expect(result.initialized).toBe(false);
+      expect(result.skills).toEqual([]);
+      expect(mockWriteStderrLine).toHaveBeenCalled();
+    });
+
+    it('getWorkspaceProvidersStatus uses daemon-local provider when present', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValue({ v: 1, providers: [] });
+      const workspaceProvidersStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        acpChannelLive: false,
+        current: {
+          authType: 'USE_OPENAI',
+          modelId: 'fresh-model(USE_OPENAI)',
+        },
+        providers: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceProvidersStatusProvider,
+          isChannelLive: () => false,
+        }),
+      );
+
+      const result = await svc.getWorkspaceProvidersStatus(makeCtx());
+
+      expect(result.current?.modelId).toBe('fresh-model(USE_OPENAI)');
+      expect(result.acpChannelLive).toBe(false);
+      expect(workspaceProvidersStatusProvider).toHaveBeenCalledWith(
+        '/workspace',
+        false,
+      );
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+    });
+
+    it('getWorkspaceProvidersStatus keeps ACP fallback without daemon-local provider', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValue({ v: 1, providers: [] });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus }),
+      );
+
+      await svc.getWorkspaceProvidersStatus(makeCtx());
+
+      expect(queryWorkspaceStatus).toHaveBeenCalledWith(
+        'qwen/status/workspace/providers',
+        expect.any(Function),
+      );
+    });
+
+    it('getWorkspaceEnvStatus uses statusProvider instead of queryWorkspaceStatus', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValue({ v: 1, cells: [] });
+      const statusProvider: DaemonWorkspaceServiceDeps['statusProvider'] = {
+        getEnvStatus: vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          acpChannelLive: false,
+          cells: [
+            { kind: 'runtime', name: 'node', status: 'ok', present: true },
+          ],
+        }),
+        getDaemonPreflightCells: vi.fn().mockResolvedValue([]),
+      };
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          statusProvider,
+        }),
+      );
+
+      const result = await svc.getWorkspaceEnvStatus(makeCtx());
+
+      // Env status is daemon-local — queryWorkspaceStatus must NOT be called.
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+      expect(statusProvider.getEnvStatus).toHaveBeenCalledWith(
+        '/workspace',
+        false,
+      );
+      expect(result.initialized).toBe(true);
+    });
+
+    it('getWorkspaceEnvStatus fallback has acpChannelLive=false when no statusProvider', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          statusProvider: undefined,
+        }),
+      );
+
+      const result = await svc.getWorkspaceEnvStatus(makeCtx());
+
+      expect(result.acpChannelLive).toBe(false);
+      expect(result.initialized).toBe(true);
+    });
+
+    it('getWorkspacePreflightStatus queries ACP only when channel is live', async () => {
+      const queryWorkspaceStatus = vi.fn().mockResolvedValue({
+        cells: [{ kind: 'auth', status: 'ok', locality: 'acp' }],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await svc.getWorkspacePreflightStatus(makeCtx());
+
+      expect(queryWorkspaceStatus).toHaveBeenCalledWith(
+        'qwen/status/workspace/preflight',
+        expect.any(Function),
+      );
+    });
+
+    it('getWorkspaceEnvStatus falls back to idle envelope when statusProvider throws', async () => {
+      const statusProvider: DaemonWorkspaceServiceDeps['statusProvider'] = {
+        getEnvStatus: vi.fn().mockRejectedValue(new Error('provider boom')),
+        getDaemonPreflightCells: vi.fn().mockResolvedValue([]),
+      };
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          statusProvider,
+          boundWorkspace: '/ws',
+          isChannelLive: () => true,
+        }),
+      );
+
+      const result = await svc.getWorkspaceEnvStatus(makeCtx());
+
+      expect(result.workspaceCwd).toBe('/ws');
+      expect(result.acpChannelLive).toBe(true);
+      expect(result.initialized).toBe(true);
+    });
+
+    it('getWorkspacePreflightStatus falls back to empty daemon cells when getDaemonPreflightCells throws', async () => {
+      const statusProvider: DaemonWorkspaceServiceDeps['statusProvider'] = {
+        getEnvStatus: vi.fn().mockResolvedValue({ v: 1, cells: [] }),
+        getDaemonPreflightCells: vi
+          .fn()
+          .mockRejectedValue(new Error('daemon cells boom')),
+      };
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          statusProvider,
+          boundWorkspace: '/ws',
+          isChannelLive: () => false,
+        }),
+      );
+
+      const result = await svc.getWorkspacePreflightStatus(makeCtx());
+
+      // Daemon cells failed → no daemon-locality cells in the result.
+      const daemonCells = result.cells.filter((c) => c.locality === 'daemon');
+      expect(daemonCells).toHaveLength(0);
+      // ACP idle cells should still be present (channel is not live).
+      expect(result.cells.length).toBeGreaterThan(0);
+    });
+
+    it('getWorkspacePreflightStatus builds error entry when ACP query throws', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockRejectedValue(new Error('acp channel down'));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          isChannelLive: () => true,
+        }),
+      );
+
+      const result = await svc.getWorkspacePreflightStatus(makeCtx());
+
+      expect(result.errors).toBeDefined();
+      expect(result.errors!.length).toBeGreaterThan(0);
+      expect(result.errors![0]!.kind).toBe('preflight');
+      expect(result.errors![0]!.status).toBe('error');
+      expect(result.errors![0]!.error).toContain('acp channel down');
+    });
+
+    it('getWorkspacePreflightStatus idle fallback includes ACP placeholder cells', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          isChannelLive: () => false,
+        }),
+      );
+
+      const result = await svc.getWorkspacePreflightStatus(makeCtx());
+
+      expect(result.acpChannelLive).toBe(false);
+      // When no statusProvider is given, daemon cells are empty; only ACP idle cells.
+      const acpCells = result.cells.filter((c) => c.locality === 'acp');
+      expect(acpCells.length).toBe(6);
+      expect(acpCells.every((c) => c.status === 'not_started')).toBe(true);
+      // queryWorkspaceStatus should NOT be called when channel is not live.
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setWorkspaceToolEnabled', () => {
+    it('calls persistDisabledTools with workspace, toolName, and enabled', async () => {
+      const persistDisabledTools = vi.fn().mockResolvedValue(undefined);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          persistDisabledTools,
+          boundWorkspace: '/my/workspace',
+        }),
+      );
+
+      await svc.setWorkspaceToolEnabled(makeCtx(), 'Bash', false);
+
+      expect(persistDisabledTools).toHaveBeenCalledWith(
+        '/my/workspace',
+        'Bash',
+        false,
+        undefined,
+      );
+    });
+
+    it('publishes tool_toggled event with originatorClientId', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ publishWorkspaceEvent }),
+      );
+
+      await svc.setWorkspaceToolEnabled(
+        makeCtx({ originatorClientId: 'c-42' }),
+        'Read',
+        true,
+      );
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'tool_toggled',
+        data: { toolName: 'Read', enabled: true },
+        originatorClientId: 'c-42',
+      });
+    });
+
+    it('returns the toolName and enabled state', async () => {
+      const svc = createDaemonWorkspaceService(makeDeps());
+
+      const result = await svc.setWorkspaceToolEnabled(
+        makeCtx(),
+        'WebSearch',
+        false,
+      );
+
+      expect(result).toEqual({ toolName: 'WebSearch', enabled: false });
+    });
+
+    it('does not publish toggle event when persistDisabledTools rejects', async () => {
+      const persistDisabledTools = vi
+        .fn()
+        .mockRejectedValue(new Error('disk full'));
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ persistDisabledTools, publishWorkspaceEvent }),
+      );
+
+      await expect(
+        svc.setWorkspaceToolEnabled(makeCtx(), 'Bash', false),
+      ).rejects.toThrow('disk full');
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+
+    it('does not publish after persistence closes the runtime generation', async () => {
+      let generationOpen = true;
+      const assertGenerationOpen = () => {
+        if (!generationOpen) throw new Error('generation closed');
+      };
+      const persistDisabledTools = vi.fn(async () => {
+        generationOpen = false;
+      });
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          assertGenerationOpen,
+          persistDisabledTools,
+          publishWorkspaceEvent,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceToolEnabled(makeCtx(), 'Bash', false),
+      ).rejects.toThrow('generation closed');
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setWorkspaceSkillEnabled', () => {
+    const skillStatus = (
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      kind: 'skill',
+      status: 'ok',
+      name: 'review',
+      description: 'Review changed code',
+      level: 'bundled',
+      modelInvocable: true,
+      ...overrides,
+    });
+    const statusQuery = (skill = skillStatus()) =>
+      vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills: [skill],
+      });
+
+    it('uses the requested skill name and refreshes every active session', async () => {
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(vi.fn(), {
+        invalidate,
+      });
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['review'],
+      });
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        sessionsRefreshed: 2,
+        sessionsFailed: 0,
+      });
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery(),
+          workspaceSkillsStatusProvider,
+          persistDisabledSkills,
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      const result = await svc.setWorkspaceSkillEnabled(
+        makeCtx({ originatorClientId: 'client-1' }),
+        'ReViEw',
+        false,
+      );
+
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        '/workspace',
+        'ReViEw',
+        false,
+        undefined,
+      );
+      expect(invalidate).toHaveBeenCalledWith('/workspace');
+      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/skills/refresh',
+        { cwd: '/workspace', reason: 'settings' },
+      );
+      expect(result).toEqual({
+        skillName: 'ReViEw',
+        enabled: false,
+        changed: true,
+        activation: 'applied',
+        sessionsRefreshed: 2,
+        sessionsFailed: 0,
+      });
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
+          key: 'skills.disabled',
+          value: ['review'],
+          skills: [{ name: 'ReViEw', enabled: false }],
+          activation: 'applied',
+          sessionsRefreshed: 2,
+          sessionsFailed: 0,
+        }),
+      );
+    });
+
+    it('shares mutation ids within a request and renews them across requests', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery(),
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: true,
+            disabled: [],
+            settingsChanges: [
+              { key: 'skills.disabled', value: undefined },
+              { key: 'skills.enabled', value: ['review'] },
+            ],
+          }),
+          publishWorkspaceEvent,
+          isChannelLive: () => false,
+        }),
+      );
+
+      await svc.setWorkspaceSkillEnabled(makeCtx(), 'review', true);
+      await svc.setWorkspaceSkillEnabled(makeCtx(), 'review', true);
+
+      const mutationIds = publishWorkspaceEvent.mock.calls.map(
+        ([event]) => event.data.mutation.id,
+      );
+      expect(mutationIds).toHaveLength(4);
+      expect(mutationIds[0]).toBe(mutationIds[1]);
+      expect(mutationIds[2]).toBe(mutationIds[3]);
+      expect(mutationIds[0]).not.toBe(mutationIds[2]);
+    });
+
+    it('does not retain a status snapshot read while a settings refresh is in flight', async () => {
+      const refresh = deferred<{
+        sessionsRefreshed: number;
+        sessionsFailed: number;
+      }>();
+      const oldSkill: ServeWorkspaceSkillsStatus['skills'][number] = {
+        kind: 'skill',
+        status: 'ok',
+        name: 'review',
+        description: 'Review changed code',
+        level: 'bundled',
+        modelInvocable: true,
+      };
+      const oldStatus: ServeWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills: [oldSkill],
+      };
+      const newStatus: ServeWorkspaceSkillsStatus = {
+        ...oldStatus,
+        skills: [
+          {
+            ...oldSkill,
+            status: 'disabled',
+            disabledReason: 'hard',
+          },
+        ],
+      };
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce(oldStatus)
+        .mockResolvedValueOnce(newStatus);
+      const invokeWorkspaceCommand = vi.fn(
+        () => refresh.promise,
+      ) as unknown as InvokeWorkspaceCommandFn;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: true,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand,
+          isChannelLive: () => true,
+        }),
+      );
+
+      const toggle = svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false);
+      await vi.waitFor(() =>
+        expect(invokeWorkspaceCommand).toHaveBeenCalledOnce(),
+      );
+
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        oldStatus,
+      );
+      refresh.resolve({ sessionsRefreshed: 1, sessionsFailed: 0 });
+      await toggle;
+
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        newStatus,
+      );
+      expect(queryWorkspaceStatus).toHaveBeenCalledTimes(2);
+    });
+
+    it('publishes an explicit enabled override for a default-disabled skill', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery(),
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: true,
+            disabled: ['orphan'],
+            settingsChanges: [{ key: 'skills.enabled', value: ['review'] }],
+          }),
+          invokeWorkspaceCommand: vi.fn().mockResolvedValue({
+            sessionsRefreshed: 1,
+            sessionsFailed: 0,
+          }),
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'review', true),
+      ).resolves.toMatchObject({
+        skillName: 'review',
+        enabled: true,
+        activation: 'applied',
+      });
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
+          key: 'skills.enabled',
+          value: ['review'],
+          skills: [{ name: 'review', enabled: true }],
+          activation: 'applied',
+          sessionsRefreshed: 1,
+          sessionsFailed: 0,
+        }),
+      );
+    });
+
+    it('reports partial activation when a session refresh fails', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery(),
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: true,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand: vi.fn().mockResolvedValue({
+            sessionsRefreshed: 1,
+            sessionsFailed: 1,
+          }),
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
+      ).resolves.toMatchObject({
+        activation: 'partial',
+        sessionsRefreshed: 1,
+        sessionsFailed: 1,
+      });
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
+          key: 'skills.disabled',
+          value: ['review'],
+          skills: [{ name: 'review', enabled: false }],
+          activation: 'partial',
+          sessionsRefreshed: 1,
+          sessionsFailed: 1,
+        }),
+      );
+    });
+
+    it('defers refresh when no child exists or the child closes mid-refresh', async () => {
+      const noChildCommand = vi.fn();
+      const noChild = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery(),
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: true,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand: noChildCommand,
+          isChannelLive: () => false,
+        }),
+      );
+      await expect(
+        noChild.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
+      ).resolves.toMatchObject({
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      });
+      expect(noChildCommand).not.toHaveBeenCalled();
+
+      const closedChild = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery(),
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: true,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand: vi
+            .fn()
+            .mockRejectedValue(
+              new BridgeChannelClosedError('mid-request (workspace status)'),
+            ),
+          isChannelLive: () => true,
+        }),
+      );
+      await expect(
+        closedChild.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
+      ).resolves.toMatchObject({
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      });
+    });
+
+    it('defers refresh when the child reports no session', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery(),
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: true,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand: vi
+            .fn()
+            .mockRejectedValue(new SessionNotFoundError('session-1')),
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
+      ).resolves.toMatchObject({
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      });
+    });
+
+    it('reports partial activation on an unexpected refresh error', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery(),
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: true,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand: vi
+            .fn()
+            .mockRejectedValue(new Error('network timeout')),
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
+      ).resolves.toMatchObject({
+        activation: 'partial',
+        sessionsRefreshed: 0,
+        sessionsFailed: 1,
+      });
+    });
+
+    it('does not refresh or publish an idempotent mutation', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery(),
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: false,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
+      ).resolves.toMatchObject({ changed: false, activation: 'applied' });
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+
+    it('persists by requested name without reading the runtime Skill catalog', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockRejectedValue(new Error('runtime unavailable'));
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['future-skill'],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          persistDisabledSkills,
+          isChannelLive: () => false,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'future-skill', false),
+      ).resolves.toMatchObject({
+        skillName: 'future-skill',
+        enabled: false,
+        changed: true,
+      });
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        '/workspace',
+        'future-skill',
+        false,
+        undefined,
+      );
+    });
+
+    it('does not validate unknown, hidden, or inactive Extension names', async () => {
+      const queryWorkspaceStatus = vi.fn();
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: false,
+        disabled: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, persistDisabledSkills }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'missing', false),
+      ).resolves.toMatchObject({ skillName: 'missing', enabled: false });
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'hidden', false),
+      ).resolves.toMatchObject({ skillName: 'hidden', enabled: false });
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'inactive', true),
+      ).resolves.toMatchObject({ skillName: 'inactive', enabled: true });
+
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+      expect(persistDisabledSkills.mock.calls).toEqual([
+        ['/workspace', 'missing', false, undefined],
+        ['/workspace', 'hidden', false, undefined],
+        ['/workspace', 'inactive', true, undefined],
+      ]);
+    });
+
+    it('does not infer a legacy inactive Extension from runtime status', async () => {
+      await withIsolatedWorkspace(async ({ workspace }) => {
+        const queryWorkspaceStatus = statusQuery(
+          skillStatus({
+            status: 'disabled',
+            disabledReason: undefined,
+            level: 'extension',
+            extensionName: 'review-ext',
+          }),
+        );
+        const persistDisabledSkills = vi.fn().mockResolvedValue({
+          changed: false,
+          disabled: [],
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            boundWorkspace: workspace,
+            queryWorkspaceStatus,
+            persistDisabledSkills,
+          }),
+        );
+        await expect(
+          svc.setWorkspaceSkillEnabled(makeCtx(), 'review', true),
+        ).resolves.toMatchObject({ skillName: 'review', enabled: true });
+        expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+        expect(persistDisabledSkills).toHaveBeenCalledWith(
+          workspace,
+          'review',
+          true,
+          undefined,
+        );
+      });
+    });
+
+    it('allows toggling a legacy extension skill that is disabled by settings', async () => {
+      await withIsolatedWorkspace(async ({ workspace }) => {
+        await writeJson(
+          path.join(workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+          { skills: { disabled: ['review'] } },
+        );
+        const persistDisabledSkills = vi.fn().mockResolvedValue({
+          changed: true,
+          disabled: [],
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            boundWorkspace: workspace,
+            queryWorkspaceStatus: statusQuery(
+              skillStatus({
+                status: 'disabled',
+                disabledReason: undefined,
+                level: 'extension',
+                extensionName: 'review-ext',
+              }),
+            ),
+            persistDisabledSkills,
+            isChannelLive: () => false,
+          }),
+        );
+        await expect(
+          svc.setWorkspaceSkillEnabled(makeCtx(), 'review', true),
+        ).resolves.toMatchObject({
+          skillName: 'review',
+          enabled: true,
+          changed: true,
+        });
+        expect(persistDisabledSkills).toHaveBeenCalledWith(
+          workspace,
+          'review',
+          true,
+          undefined,
+        );
+      });
+    });
+
+    it('does not refresh or publish when persistence fails', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: statusQuery(),
+          persistDisabledSkills: vi
+            .fn()
+            .mockRejectedValue(new Error('disk full')),
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
+      ).rejects.toThrow('disk full');
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('setWorkspaceSkillsEnabled', () => {
+    const skills = [
+      {
+        kind: 'skill' as const,
+        status: 'ok' as const,
+        name: 'review',
+        description: 'Review changed code',
+        level: 'bundled' as const,
+        modelInvocable: true,
+      },
+      {
+        kind: 'skill' as const,
+        status: 'ok' as const,
+        name: 'deploy',
+        description: 'Deploy code',
+        level: 'bundled' as const,
+        modelInvocable: true,
+      },
+      {
+        kind: 'skill' as const,
+        status: 'ok' as const,
+        name: 'hidden',
+        description: 'Hidden skill',
+        level: 'bundled' as const,
+        modelInvocable: true,
+        userInvocable: false,
+      },
+      {
+        kind: 'skill' as const,
+        status: 'disabled' as const,
+        name: 'inactive',
+        description: 'Inactive extension skill',
+        level: 'extension' as const,
+        extensionName: 'demo',
+        modelInvocable: true,
+        disabledReason: 'inactive_extension' as const,
+      },
+      {
+        kind: 'skill' as const,
+        status: 'disabled' as const,
+        name: 'locked',
+        description: 'Locked skill',
+        level: 'bundled' as const,
+        modelInvocable: true,
+        disabledReason: 'hard' as const,
+        lockedScope: 'user' as const,
+      },
+      {
+        kind: 'skill' as const,
+        status: 'disabled' as const,
+        name: 'legacy-inactive',
+        description: 'Legacy inactive extension skill',
+        level: 'extension' as const,
+        extensionName: 'demo',
+        modelInvocable: true,
+      },
+    ];
+
+    it('accepts enabling a Skill before installation as an idempotent result', async () => {
+      const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
+        outcomes: [{ skillName: 'future-skill', changed: false }],
+        settingsChanges: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch,
+          isChannelLive: () => false,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(makeCtx(), ['future-skill'], true),
+      ).resolves.toMatchObject({
+        results: [{ skillName: 'future-skill', enabled: true, changed: false }],
+        errors: [],
+      });
+      expect(persistDisabledSkillsBatch).toHaveBeenCalledWith(
+        '/workspace',
+        ['future-skill'],
+        true,
+        undefined,
+      );
+    });
+
+    it('persists every requested name without reading the runtime Skill catalog', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockRejectedValue(new Error('runtime unavailable'));
+      const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
+        outcomes: [
+          { skillName: 'hidden', changed: true },
+          { skillName: 'inactive', changed: true },
+        ],
+        settingsChanges: [
+          { key: 'skills.disabled', value: ['hidden', 'inactive'] },
+        ],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          persistDisabledSkillsBatch,
+          isChannelLive: () => false,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(makeCtx(), ['hidden', 'inactive'], false),
+      ).resolves.toMatchObject({
+        results: [
+          { skillName: 'hidden', enabled: false, changed: true },
+          { skillName: 'inactive', enabled: false, changed: true },
+        ],
+        errors: [],
+      });
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+      expect(persistDisabledSkillsBatch).toHaveBeenCalledWith(
+        '/workspace',
+        ['hidden', 'inactive'],
+        false,
+        undefined,
+      );
+    });
+
+    it('persists and refreshes once while preserving ordered target outcomes', async () => {
+      const queryWorkspaceStatus = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills,
+      });
+      const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
+        outcomes: [
+          { skillName: 'deploy', changed: true },
+          { skillName: 'locked', changed: true },
+          { skillName: 'inactive', changed: true },
+          { skillName: 'hidden', changed: true },
+          { skillName: 'missing', changed: true },
+          { skillName: 'Review', changed: true },
+        ],
+        settingsChanges: [
+          {
+            key: 'skills.disabled',
+            value: [
+              'Review',
+              'missing',
+              'hidden',
+              'inactive',
+              'locked',
+              'deploy',
+            ],
+          },
+        ],
+      });
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        sessionsRefreshed: 2,
+        sessionsFailed: 0,
+      });
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          persistDisabledSkillsBatch,
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      const result = await svc.setWorkspaceSkillsEnabled(
+        makeCtx({ originatorClientId: 'client-1' }),
+        ['Review', 'missing', 'hidden', 'inactive', 'locked', 'deploy'],
+        false,
+      );
+
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+      expect(persistDisabledSkillsBatch).toHaveBeenCalledOnce();
+      expect(persistDisabledSkillsBatch).toHaveBeenCalledWith(
+        '/workspace',
+        ['Review', 'missing', 'hidden', 'inactive', 'locked', 'deploy'],
+        false,
+        undefined,
+      );
+      expect(invokeWorkspaceCommand).toHaveBeenCalledOnce();
+      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/skills/refresh',
+        { cwd: '/workspace', reason: 'settings' },
+      );
+      expect(result).toEqual({
+        enabled: false,
+        activation: 'applied',
+        sessionsRefreshed: 2,
+        sessionsFailed: 0,
+        results: [
+          { skillName: 'Review', enabled: false, changed: true },
+          { skillName: 'missing', enabled: false, changed: true },
+          { skillName: 'hidden', enabled: false, changed: true },
+          { skillName: 'inactive', enabled: false, changed: true },
+          { skillName: 'locked', enabled: false, changed: true },
+          { skillName: 'deploy', enabled: false, changed: true },
+        ],
+        errors: [],
+      });
+      expect(publishWorkspaceEvent).toHaveBeenCalledOnce();
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
+          key: 'skills.disabled',
+          value: [
+            'Review',
+            'missing',
+            'hidden',
+            'inactive',
+            'locked',
+            'deploy',
+          ],
+          skills: [
+            { name: 'Review', enabled: false },
+            { name: 'missing', enabled: false },
+            { name: 'hidden', enabled: false },
+            { name: 'inactive', enabled: false },
+            { name: 'locked', enabled: false },
+            { name: 'deploy', enabled: false },
+          ],
+          activation: 'applied',
+          sessionsRefreshed: 2,
+          sessionsFailed: 0,
+        }),
+      );
+    });
+
+    it('fails the whole batch when persistence fails unexpectedly', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi
+            .fn()
+            .mockRejectedValue(new Error('disk full')),
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(makeCtx(), ['review'], false),
+      ).rejects.toThrow('disk full');
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+
+    it('fails the whole batch when a persisted outcome is missing for a valid target', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [{ skillName: 'review', changed: true }],
+            settingsChanges: [],
+          }),
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(makeCtx(), ['review', 'deploy'], false),
+      ).rejects.toThrow('Missing persisted Skill batch outcome: deploy');
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+
+    it('persists hidden and inactive Extension names without validation errors', async () => {
+      const queryWorkspaceStatus = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills,
+      });
+      const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
+        outcomes: [
+          { skillName: 'hidden', changed: true },
+          { skillName: 'inactive', changed: true },
+        ],
+        settingsChanges: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          persistDisabledSkillsBatch,
+          isChannelLive: () => false,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(makeCtx(), ['hidden', 'inactive'], false),
+      ).resolves.toMatchObject({
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+        results: [
+          { skillName: 'hidden', enabled: false, changed: true },
+          { skillName: 'inactive', enabled: false, changed: true },
+        ],
+        errors: [],
+      });
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+      expect(persistDisabledSkillsBatch).toHaveBeenCalledWith(
+        '/workspace',
+        ['hidden', 'inactive'],
+        false,
+        undefined,
+      );
+    });
+
+    it('persists a legacy inactive Extension name like the single-toggle path', async () => {
+      await withIsolatedWorkspace(async ({ workspace }) => {
+        const queryWorkspaceStatus = vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: workspace,
+          initialized: true,
+          skills,
+        });
+        const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
+          outcomes: [{ skillName: 'legacy-inactive', changed: true }],
+          settingsChanges: [],
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            boundWorkspace: workspace,
+            queryWorkspaceStatus,
+            persistDisabledSkillsBatch,
+          }),
+        );
+
+        await expect(
+          svc.setWorkspaceSkillsEnabled(makeCtx(), ['legacy-inactive'], false),
+        ).resolves.toMatchObject({
+          results: [
+            {
+              skillName: 'legacy-inactive',
+              enabled: false,
+              changed: true,
+            },
+          ],
+          errors: [],
+        });
+        expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+        expect(persistDisabledSkillsBatch).toHaveBeenCalledWith(
+          workspace,
+          ['legacy-inactive'],
+          false,
+          undefined,
+        );
+      });
+    });
+
+    it('allows batch-toggling a legacy extension skill disabled by settings', async () => {
+      await withIsolatedWorkspace(async ({ workspace }) => {
+        await writeJson(
+          path.join(workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+          { skills: { disabled: ['legacy-inactive'] } },
+        );
+        const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
+          outcomes: [{ skillName: 'legacy-inactive', changed: true }],
+          settingsChanges: [{ key: 'skills.disabled', value: undefined }],
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            boundWorkspace: workspace,
+            queryWorkspaceStatus: vi.fn().mockResolvedValue({
+              v: 1,
+              workspaceCwd: workspace,
+              initialized: true,
+              skills,
+            }),
+            persistDisabledSkillsBatch,
+            isChannelLive: () => false,
+          }),
+        );
+
+        await expect(
+          svc.setWorkspaceSkillsEnabled(makeCtx(), ['legacy-inactive'], true),
+        ).resolves.toMatchObject({
+          enabled: true,
+          results: [
+            { skillName: 'legacy-inactive', enabled: true, changed: true },
+          ],
+          errors: [],
+        });
+        expect(persistDisabledSkillsBatch).toHaveBeenCalledWith(
+          workspace,
+          ['legacy-inactive'],
+          true,
+          undefined,
+        );
+      });
+    });
+
+    it('passes enabled:true through to persistence, results, and events', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
+        outcomes: [{ skillName: 'review', changed: true }],
+        settingsChanges: [{ key: 'skills.disabled', value: undefined }],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch,
+          publishWorkspaceEvent,
+          isChannelLive: () => false,
+        }),
+      );
+
+      const result = await svc.setWorkspaceSkillsEnabled(
+        makeCtx({ originatorClientId: 'client-1' }),
+        ['review'],
+        true,
+      );
+
+      expect(persistDisabledSkillsBatch).toHaveBeenCalledWith(
+        '/workspace',
+        ['review'],
+        true,
+        undefined,
+      );
+      expect(result).toMatchObject({
+        enabled: true,
+        results: [{ skillName: 'review', enabled: true, changed: true }],
+      });
+      expect(publishWorkspaceEvent).toHaveBeenCalledOnce();
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
+          key: 'skills.disabled',
+          value: undefined,
+          skills: [{ name: 'review', enabled: true }],
+          activation: 'deferred',
+          sessionsRefreshed: 0,
+          sessionsFailed: 0,
+        }),
+      );
+    });
+
+    it('publishes one settings_changed event per settingsChanges entry in order', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [{ skillName: 'review', changed: true }],
+            settingsChanges: [
+              { key: 'skills.disabled', value: undefined },
+              { key: 'skills.enabled', value: ['review'] },
+            ],
+          }),
+          publishWorkspaceEvent,
+          isChannelLive: () => false,
+        }),
+      );
+
+      await svc.setWorkspaceSkillsEnabled(
+        makeCtx({ originatorClientId: 'client-1' }),
+        ['review'],
+        true,
+      );
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(2);
+      expect(publishWorkspaceEvent).toHaveBeenNthCalledWith(
+        1,
+        skillToggleSettingsChanged({
+          key: 'skills.disabled',
+          value: undefined,
+          skills: [{ name: 'review', enabled: true }],
+          activation: 'deferred',
+          sessionsRefreshed: 0,
+          sessionsFailed: 0,
+        }),
+      );
+      expect(publishWorkspaceEvent).toHaveBeenNthCalledWith(
+        2,
+        skillToggleSettingsChanged({
+          key: 'skills.enabled',
+          value: ['review'],
+          skills: [{ name: 'review', enabled: true }],
+          activation: 'deferred',
+          sessionsRefreshed: 0,
+          sessionsFailed: 0,
+        }),
+      );
+      const firstMutation = publishWorkspaceEvent.mock.calls[0]?.[0]?.data
+        ?.mutation as { id?: string } | undefined;
+      const secondMutation = publishWorkspaceEvent.mock.calls[1]?.[0]?.data
+        ?.mutation as { id?: string } | undefined;
+      expect(firstMutation?.id).toEqual(expect.any(String));
+      expect(firstMutation?.id).toBe(secondMutation?.id);
+    });
+
+    it('reports partial activation when the shared batch refresh fails', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const failedSessions = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [{ skillName: 'review', changed: true }],
+            settingsChanges: [{ key: 'skills.disabled', value: ['review'] }],
+          }),
+          invokeWorkspaceCommand: vi.fn().mockResolvedValue({
+            sessionsRefreshed: 1,
+            sessionsFailed: 1,
+          }),
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+      await expect(
+        failedSessions.setWorkspaceSkillsEnabled(makeCtx(), ['review'], false),
+      ).resolves.toMatchObject({
+        activation: 'partial',
+        sessionsRefreshed: 1,
+        sessionsFailed: 1,
+      });
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
+          key: 'skills.disabled',
+          value: ['review'],
+          skills: [{ name: 'review', enabled: false }],
+          activation: 'partial',
+          sessionsRefreshed: 1,
+          sessionsFailed: 1,
+        }),
+      );
+
+      const unexpectedError = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [{ skillName: 'review', changed: true }],
+            settingsChanges: [{ key: 'skills.disabled', value: ['review'] }],
+          }),
+          invokeWorkspaceCommand: vi
+            .fn()
+            .mockRejectedValue(new Error('network timeout')),
+          isChannelLive: () => true,
+        }),
+      );
+      await expect(
+        unexpectedError.setWorkspaceSkillsEnabled(makeCtx(), ['review'], false),
+      ).resolves.toMatchObject({
+        activation: 'partial',
+        sessionsRefreshed: 0,
+        sessionsFailed: 1,
+      });
+    });
+
+    it('defers batch refresh when sessions or the channel disappear', async () => {
+      const missingSession = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [{ skillName: 'review', changed: true }],
+            settingsChanges: [{ key: 'skills.disabled', value: ['review'] }],
+          }),
+          invokeWorkspaceCommand: vi
+            .fn()
+            .mockRejectedValue(new SessionNotFoundError('session-1')),
+          isChannelLive: () => true,
+        }),
+      );
+      await expect(
+        missingSession.setWorkspaceSkillsEnabled(makeCtx(), ['review'], false),
+      ).resolves.toMatchObject({
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      });
+
+      const closedChannel = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [{ skillName: 'review', changed: true }],
+            settingsChanges: [{ key: 'skills.disabled', value: ['review'] }],
+          }),
+          invokeWorkspaceCommand: vi
+            .fn()
+            .mockRejectedValue(
+              new BridgeChannelClosedError('mid-request (batch toggle)'),
+            ),
+          isChannelLive: () => true,
+        }),
+      );
+      await expect(
+        closedChannel.setWorkspaceSkillsEnabled(makeCtx(), ['review'], false),
+      ).resolves.toMatchObject({
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      });
+
+      const deadChannelCommand = vi.fn();
+      const deadChannel = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [{ skillName: 'review', changed: true }],
+            settingsChanges: [{ key: 'skills.disabled', value: ['review'] }],
+          }),
+          invokeWorkspaceCommand: deadChannelCommand,
+          isChannelLive: () => false,
+        }),
+      );
+      await expect(
+        deadChannel.setWorkspaceSkillsEnabled(makeCtx(), ['review'], false),
+      ).resolves.toMatchObject({
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
+      });
+      expect(deadChannelCommand).not.toHaveBeenCalled();
+    });
+
+    it('does not refresh or publish when every batch target is unchanged', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [
+              { skillName: 'review', changed: false },
+              { skillName: 'deploy', changed: false },
+            ],
+            settingsChanges: [],
+          }),
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(makeCtx(), ['review', 'deploy'], false),
+      ).resolves.toMatchObject({
+        activation: 'applied',
+        sessionsRefreshed: 0,
+      });
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+
+    it('refreshes and publishes when any batch target changed', async () => {
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        sessionsRefreshed: 1,
+        sessionsFailed: 0,
+      });
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus: vi.fn().mockResolvedValue({
+            v: 1,
+            workspaceCwd: '/workspace',
+            initialized: true,
+            skills,
+          }),
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [
+              { skillName: 'review', changed: false },
+              { skillName: 'deploy', changed: true },
+            ],
+            settingsChanges: [{ key: 'skills.disabled', value: ['deploy'] }],
+          }),
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillsEnabled(makeCtx(), ['review', 'deploy'], false),
+      ).resolves.toMatchObject({
+        activation: 'applied',
+        results: [
+          { skillName: 'review', enabled: false, changed: false },
+          { skillName: 'deploy', enabled: false, changed: true },
+        ],
+      });
+      expect(invokeWorkspaceCommand).toHaveBeenCalledOnce();
+      expect(publishWorkspaceEvent).toHaveBeenCalledOnce();
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        skillToggleSettingsChanged({
+          key: 'skills.disabled',
+          value: ['deploy'],
+          skills: [{ name: 'deploy', enabled: false }],
+          activation: 'applied',
+          sessionsRefreshed: 1,
+          sessionsFailed: 0,
+        }),
+      );
+    });
+
+    it('drops the cached skill snapshot after a changed batch like the single-toggle path', async () => {
+      const beforeStatus = {
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills,
+      };
+      const afterStatus = {
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'disabled',
+            name: 'review',
+            description: 'Review changed code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      };
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce(beforeStatus)
+        .mockResolvedValueOnce(afterStatus);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [{ skillName: 'review', changed: true }],
+            settingsChanges: [{ key: 'skills.disabled', value: ['review'] }],
+          }),
+          isChannelLive: () => false,
+        }),
+      );
+
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        beforeStatus,
+      );
+      await svc.setWorkspaceSkillsEnabled(makeCtx(), ['review'], false);
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        afterStatus,
+      );
+      expect(queryWorkspaceStatus).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not retain a status snapshot read while a batch settings refresh is in flight', async () => {
+      const refresh = deferred<{
+        sessionsRefreshed: number;
+        sessionsFailed: number;
+      }>();
+      const beforeStatus = {
+        v: 1,
+        workspaceCwd: '/workspace',
+        initialized: true,
+        skills,
+      };
+      const afterStatus = {
+        ...beforeStatus,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'disabled',
+            name: 'review',
+            description: 'Review changed code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      };
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce(beforeStatus)
+        .mockResolvedValueOnce(afterStatus);
+      const invokeWorkspaceCommand = vi.fn(
+        () => refresh.promise,
+      ) as unknown as InvokeWorkspaceCommandFn;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
+            outcomes: [{ skillName: 'review', changed: true }],
+            settingsChanges: [{ key: 'skills.disabled', value: ['review'] }],
+          }),
+          invokeWorkspaceCommand,
+          isChannelLive: () => true,
+        }),
+      );
+
+      const toggle = svc.setWorkspaceSkillsEnabled(
+        makeCtx(),
+        ['review'],
+        false,
+      );
+      await vi.waitFor(() =>
+        expect(invokeWorkspaceCommand).toHaveBeenCalledOnce(),
+      );
+
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        beforeStatus,
+      );
+      refresh.resolve({ sessionsRefreshed: 1, sessionsFailed: 0 });
+      await toggle;
+
+      await expect(svc.getWorkspaceSkillsStatus(makeCtx())).resolves.toEqual(
+        afterStatus,
+      );
+      expect(queryWorkspaceStatus).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('requestWorkspaceTrustChange', () => {
+    it('publishes trust_change_requested with originatorClientId', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ boundWorkspace: '/my/workspace', publishWorkspaceEvent }),
+      );
+
+      const result = await svc.requestWorkspaceTrustChange(
+        makeCtx({ originatorClientId: 'c-42' }),
+        { desiredState: 'untrusted', reason: 'remote user request' },
+      );
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'trust_change_requested',
+        data: {
+          workspaceCwd: '/my/workspace',
+          desiredState: 'untrusted',
+          reason: 'remote user request',
+        },
+        originatorClientId: 'c-42',
+      });
+      expect(result).toEqual({
+        accepted: false,
+        desiredState: 'untrusted',
+        requiresOperatorAction: true,
+      });
+    });
+  });
+
+  describe('refreshExtensionsForAllSessions', () => {
+    it('delegates to the all-session refresh callback', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const refreshExtensionsForAllSessions = vi
+        .fn()
+        .mockResolvedValue({ refreshed: 2, failed: 1 });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, refreshExtensionsForAllSessions }),
+      );
+
+      const result = await svc.refreshExtensionsForAllSessions();
+
+      expect(result).toEqual({ refreshed: 2, failed: 1 });
+      expect(refreshExtensionsForAllSessions).toHaveBeenCalledOnce();
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+    });
+
+    it('returns a failed result when the refresh callback is not wired', async () => {
+      const svc = createDaemonWorkspaceService(makeDeps());
+
+      await expect(svc.refreshExtensionsForAllSessions()).resolves.toEqual({
+        refreshed: 0,
+        failed: 1,
+      });
+    });
+
+    it('returns a failed result when the refresh callback rejects', async () => {
+      const refreshExtensionsForAllSessions = vi
+        .fn()
+        .mockRejectedValue(new Error('bridge down'));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ refreshExtensionsForAllSessions }),
+      );
+
+      await expect(svc.refreshExtensionsForAllSessions()).resolves.toEqual({
+        refreshed: 0,
+        failed: 1,
+      });
+    });
+  });
+
+  describe('preheatAcpChild', () => {
+    it('returns the current ACP channel status', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => true }),
+      );
+
+      await expect(svc.getWorkspaceAcpStatus(makeCtx())).resolves.toEqual({
+        channelLive: true,
+      });
+    });
+
+    it('renews the idle window when the channel is already live', async () => {
+      const preheatAcpChild = vi.fn().mockResolvedValue(undefined);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => true, preheatAcpChild }),
+      );
+
+      const result = await svc.preheatAcpChild(makeCtx());
+
+      expect(result).toMatchObject({ ready: true, channelLive: true });
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
+    });
+
+    it('returns an error when ACP preheat is unavailable', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => false }),
+      );
+
+      await expect(svc.preheatAcpChild(makeCtx())).resolves.toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'error',
+        error: 'ACP preheat is unavailable',
+      });
+    });
+
+    it('preheats the ACP child when the channel is not live', async () => {
+      let live = false;
+      const preheatAcpChild = vi.fn().mockImplementation(async () => {
+        live = true;
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => live, preheatAcpChild }),
+      );
+
+      const result = await svc.preheatAcpChild(makeCtx());
+
+      expect(result).toMatchObject({ ready: true, channelLive: true });
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
+    });
+
+    it('returns timeout when preheat does not finish before the deadline', async () => {
+      const preheatAcpChild = vi.fn(() => new Promise<void>(() => undefined));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => false, preheatAcpChild }),
+      );
+
+      const result = await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1 });
+      const retry = await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1 });
+
+      expect(result).toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'timeout',
+      });
+      expect(retry).toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'timeout',
+      });
+      expect(preheatAcpChild).toHaveBeenCalledTimes(2);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat timed out after 1ms',
+      );
+    });
+
+    it('forwards every concurrent observer to the bridge', async () => {
+      const pending = deferred<void>();
+      let live = false;
+      const preheatAcpChild = vi.fn(() => pending.promise);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => live, preheatAcpChild }),
+      );
+
+      const first = svc.preheatAcpChild(makeCtx(), {
+        timeoutMs: 1000,
+      });
+      const second = svc.preheatAcpChild(makeCtx(), {
+        timeoutMs: 1000,
+      });
+      live = true;
+      pending.resolve();
+
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        expect.objectContaining({ ready: true, channelLive: true }),
+        expect.objectContaining({ ready: true, channelLive: true }),
+      ]);
+      expect(preheatAcpChild).toHaveBeenCalledTimes(2);
+      expect(preheatAcpChild).toHaveBeenNthCalledWith(1);
+      expect(preheatAcpChild).toHaveBeenNthCalledWith(2);
+    });
+
+    it('allows a new attempt after a timed-out observer', async () => {
+      const firstAttempt = deferred<void>();
+      let live = false;
+      const preheatAcpChild = vi
+        .fn()
+        .mockImplementationOnce(() => firstAttempt.promise)
+        .mockImplementationOnce(async () => {
+          live = true;
+        });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => live, preheatAcpChild }),
+      );
+
+      await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1 });
+      firstAttempt.resolve();
+      await firstAttempt.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      const retry = await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
+
+      expect(retry).toMatchObject({ ready: true, channelLive: true });
+      expect(preheatAcpChild).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns ready when the channel becomes live at the timeout boundary', async () => {
+      let live = false;
+      const preheatAcpChild = vi.fn(() => new Promise<void>(() => undefined));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => live, preheatAcpChild }),
+      );
+
+      const resultPromise = svc.preheatAcpChild(makeCtx(), { timeoutMs: 1 });
+      live = true;
+
+      await expect(resultPromise).resolves.toMatchObject({
+        ready: true,
+        channelLive: true,
+      });
+      const result = await resultPromise;
+      expect(result).not.toHaveProperty('reason');
+      expect(result).not.toHaveProperty('error');
+    });
+
+    it('returns an error when preheat resolves without a live channel', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          isChannelLive: () => false,
+          preheatAcpChild: vi.fn().mockResolvedValue(undefined),
+        }),
+      );
+
+      await expect(
+        svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 }),
+      ).resolves.toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'error',
+        error: 'ACP preheat did not produce a live channel',
+      });
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat resolved without a live channel',
+      );
+    });
+
+    it('returns error when preheat fails before the deadline', async () => {
+      const preheatAcpChild = vi
+        .fn()
+        .mockRejectedValue(new Error('preheat failed'));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => false, preheatAcpChild }),
+      );
+
+      const result = await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
+
+      expect(result).toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'error',
+        error: 'ACP preheat failed',
+      });
+      expect(Number.isInteger(result.durationMs)).toBe(true);
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat failed: preheat failed',
+      );
+    });
+
+    it('logs a preheat failure that arrives after the observer times out', async () => {
+      const pending = deferred<void>();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          isChannelLive: () => false,
+          preheatAcpChild: vi.fn(() => pending.promise),
+        }),
+      );
+
+      await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1 });
+      pending.reject(new Error('late preheat failure'));
+      await pending.promise.catch(() => undefined);
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat failed: late preheat failure',
+      );
+    });
+
+    it('logs a shared preheat failure once for concurrent observers', async () => {
+      const pending = deferred<void>();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          isChannelLive: () => false,
+          preheatAcpChild: vi.fn(() => pending.promise),
+        }),
+      );
+      const first = svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
+      const second = svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
+
+      pending.reject(new Error('shared preheat failure'));
+      await Promise.all([first, second]);
+
+      expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat failed: shared preheat failure',
+      );
+    });
+
+    it('sanitizes a synchronous bridge failure', async () => {
+      const preheatAcpChild = vi.fn(() => {
+        throw new Error('child command contained a secret');
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => false, preheatAcpChild }),
+      );
+
+      await expect(
+        svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 }),
+      ).resolves.toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'error',
+        error: 'ACP preheat failed',
+      });
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat failed: child command contained a secret',
+      );
+    });
+  });
+
+  describe('restartMcpServer', () => {
+    it('calls invokeWorkspaceCommand with correct method and params', async () => {
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        serverName: 'myServer',
+        restarted: true,
+        durationMs: 100,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+
+      await svc.restartMcpServer(makeCtx(), 'myServer');
+
+      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/mcp/restart',
+        { serverName: 'myServer' },
+        { timeoutMs: 300_000 },
+      );
+    });
+
+    it('passes entryIndex when provided', async () => {
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        serverName: 's',
+        restarted: true,
+        durationMs: 50,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+
+      await svc.restartMcpServer(makeCtx(), 'poolServer', { entryIndex: 3 });
+
+      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/mcp/restart',
+        { serverName: 'poolServer', entryIndex: 3 },
+        { timeoutMs: 300_000 },
+      );
+    });
+
+    it('publishes mcp_server_restarted event after success', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const invokeResult = { serverName: 'x', restarted: true, durationMs: 10 };
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue(invokeResult);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+        }),
+      );
+
+      await svc.restartMcpServer(makeCtx({ originatorClientId: 'c-7' }), 'x');
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'mcp_server_restarted',
+        data: { serverName: 'x', durationMs: 10 },
+        originatorClientId: 'c-7',
+      });
+    });
+
+    it('returns the result from invokeWorkspaceCommand', async () => {
+      const invokeResult = {
+        serverName: 'srv',
+        restarted: false,
+        skipped: true,
+        reason: 'disabled',
+      };
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue(invokeResult);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+
+      const result = await svc.restartMcpServer(makeCtx(), 'srv');
+
+      expect(result).toEqual(invokeResult);
+    });
+
+    it('publishes mcp_server_restart_refused event when restarted is false', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const invokeResult = {
+        serverName: 'blocked',
+        restarted: false,
+        skipped: true,
+        reason: 'in_flight',
+      };
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue(invokeResult);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, publishWorkspaceEvent }),
+      );
+
+      await svc.restartMcpServer(
+        makeCtx({ originatorClientId: 'c-1' }),
+        'blocked',
+      );
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_server_restart_refused',
+          data: expect.objectContaining({ serverName: 'blocked' }),
+          originatorClientId: 'c-1',
+        }),
+      );
+    });
+
+    it('translates mcp_server_not_found errorKind into McpServerNotFoundError', async () => {
+      const err = Object.assign(new Error('not found'), {
+        data: { errorKind: 'mcp_server_not_found', serverName: 'ghost' },
+      });
+      const invokeWorkspaceCommand = vi.fn().mockRejectedValue(err);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+
+      await expect(svc.restartMcpServer(makeCtx(), 'ghost')).rejects.toThrow(
+        /ghost/,
+      );
+    });
+
+    it('translates mcp_restart_failed errorKind into McpServerRestartFailedError', async () => {
+      const err = Object.assign(new Error('restart failed'), {
+        data: {
+          errorKind: 'mcp_restart_failed',
+          serverName: 'broken',
+          mcpStatus: 'disconnected',
+        },
+      });
+      const invokeWorkspaceCommand = vi.fn().mockRejectedValue(err);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+
+      await expect(svc.restartMcpServer(makeCtx(), 'broken')).rejects.toThrow(
+        /broken/,
+      );
+    });
+
+    it('re-throws non-errorKind errors without translation', async () => {
+      const err = new Error('generic boom');
+      const invokeWorkspaceCommand = vi.fn().mockRejectedValue(err);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+
+      await expect(svc.restartMcpServer(makeCtx(), 'srv')).rejects.toThrow(
+        'generic boom',
+      );
+    });
+
+    it('lets SessionNotFoundError pass through for 404 mapping', async () => {
+      const err = new SessionNotFoundError('some-session-id');
+      const invokeWorkspaceCommand = vi.fn().mockRejectedValue(err);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand }),
+      );
+
+      await expect(
+        svc.restartMcpServer(makeCtx(), 'my-mcp-server'),
+      ).rejects.toThrow(SessionNotFoundError);
+    });
+
+    it('fans out per-entry events in pool-mode', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const invokeResult = {
+        serverName: 'pool-srv',
+        entries: [
+          { entryIndex: 0, restarted: true, durationMs: 50 },
+          { entryIndex: 1, restarted: false, reason: 'in_flight' },
+        ],
+      };
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue(invokeResult);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, publishWorkspaceEvent }),
+      );
+
+      await svc.restartMcpServer(
+        makeCtx({ originatorClientId: 'c-pool' }),
+        'pool-srv',
+      );
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(2);
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_server_restarted',
+          data: expect.objectContaining({ entryIndex: 0, durationMs: 50 }),
+        }),
+      );
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_server_restart_refused',
+          data: expect.objectContaining({ entryIndex: 1 }),
+        }),
+      );
+    });
+
+    it('skips malformed pool entries without crashing', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const invokeResult = {
+        serverName: 'pool-srv',
+        entries: [
+          null,
+          { entryIndex: 0, restarted: true, durationMs: 10 },
+          'not-an-object',
+        ],
+      };
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue(invokeResult);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ invokeWorkspaceCommand, publishWorkspaceEvent }),
+      );
+
+      await svc.restartMcpServer(makeCtx(), 'pool-srv');
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1);
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'mcp_server_restarted',
+          data: expect.objectContaining({ entryIndex: 0 }),
+        }),
+      );
+    });
+  });
+
+  describe('reload', () => {
+    it('surfaces a parent runtime environment reload failure', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        env: { updatedKeys: ['CHILD_ENV'], removedKeys: [] },
+        changedKeys: ['env'],
+        sessionsRefreshed: ['session-1'],
+        sessionsSkipped: [],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          reloadDaemonEnv: vi.fn().mockResolvedValue({
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          }),
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+        }),
+      );
+
+      await expect(svc.reload(makeCtx())).resolves.toMatchObject({
+        childReloaded: true,
+        runtimeEnvironmentApplied: false,
+      });
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'settings_reloaded',
+          data: expect.objectContaining({
+            childReloaded: true,
+            runtimeEnvironmentApplied: false,
+          }),
+        }),
+      );
+    });
+
+    it('stops before child reload when the runtime generation closes', async () => {
+      let generationClosed = false;
+      const assertGenerationOpen = vi.fn(() => {
+        if (generationClosed) throw new Error('generation closed');
+      });
+      const reloadDaemonEnv = vi.fn(
+        async (_workspace: string, commitGuard?: () => void) => {
+          commitGuard?.();
+          generationClosed = true;
+          return { updatedKeys: [], removedKeys: [] };
+        },
+      );
+      const invokeWorkspaceCommand = vi.fn();
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          assertGenerationOpen,
+          reloadDaemonEnv,
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+        }),
+      );
+
+      await expect(svc.reload(makeCtx())).rejects.toThrow('generation closed');
+      expect(reloadDaemonEnv).toHaveBeenCalledWith(
+        '/workspace',
+        assertGenerationOpen,
+      );
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('reloadModelProviders', () => {
+    it('uses the provider-specific environment refresh when configured', async () => {
+      const reloadDaemonEnv = vi.fn();
+      const reloadModelProvidersDaemonEnv = vi.fn().mockResolvedValue({
+        updatedKeys: [],
+        removedKeys: [],
+        runtimeEnvironmentApplied: true,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          reloadDaemonEnv,
+          reloadModelProvidersDaemonEnv,
+          invokeWorkspaceCommand: vi.fn().mockResolvedValue({
+            configsRefreshed: 1,
+            configsFailed: 0,
+          }),
+        }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'applied',
+      });
+      expect(reloadModelProvidersDaemonEnv).toHaveBeenCalledWith(
+        '/workspace',
+        undefined,
+      );
+      expect(reloadDaemonEnv).not.toHaveBeenCalled();
+    });
+
+    it('refreshes the runtime environment before the ACP child', async () => {
+      const reloadDaemonEnv = vi.fn().mockResolvedValue({
+        updatedKeys: ['OPENAI_API_KEY'],
+        removedKeys: [],
+        runtimeEnvironmentApplied: true,
+      });
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        configsRefreshed: 3,
+        configsFailed: 0,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ reloadDaemonEnv, invokeWorkspaceCommand }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'applied',
+      });
+      expect(reloadDaemonEnv).toHaveBeenCalledWith('/workspace', undefined);
+      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+        'qwen/control/workspace/model-providers/reload',
+        { cwd: '/workspace' },
+        { timeoutMs: 30_000 },
+      );
+      expect(reloadDaemonEnv.mock.invocationCallOrder[0]).toBeLessThan(
+        invokeWorkspaceCommand.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('reports failed when the runtime environment or a child config is degraded', async () => {
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        configsRefreshed: 2,
+        configsFailed: 1,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          reloadDaemonEnv: vi.fn().mockResolvedValue({
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: false,
+          }),
+          invokeWorkspaceCommand,
+        }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'failed',
+      });
+      expect(invokeWorkspaceCommand).toHaveBeenCalledOnce();
+    });
+
+    it('still refreshes the child when the parent environment reload rejects', async () => {
+      const reloadDaemonEnv = vi
+        .fn()
+        .mockRejectedValue(new Error('environment reload failed'));
+      const invokeWorkspaceCommand = vi.fn().mockResolvedValue({
+        configsRefreshed: 2,
+        configsFailed: 0,
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ reloadDaemonEnv, invokeWorkspaceCommand }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'failed',
+      });
+      expect(invokeWorkspaceCommand).toHaveBeenCalledOnce();
+    });
+
+    it('reports deferred only when no child is live and the parent refresh succeeded', async () => {
+      const invokeWorkspaceCommand = vi
+        .fn()
+        .mockRejectedValue(new SessionNotFoundError('/workspace'));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          reloadDaemonEnv: vi.fn().mockResolvedValue({
+            updatedKeys: [],
+            removedKeys: [],
+            runtimeEnvironmentApplied: true,
+          }),
+          invokeWorkspaceCommand,
+        }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+        status: 'deferred',
+      });
+    });
+
+    it.each([
+      { runtimeEnvironmentApplied: true, expectedStatus: 'deferred' },
+      { runtimeEnvironmentApplied: false, expectedStatus: 'failed' },
+    ])(
+      'reports $expectedStatus when the ACP channel closes during child refresh',
+      async ({ runtimeEnvironmentApplied, expectedStatus }) => {
+        const invokeWorkspaceCommand = vi
+          .fn()
+          .mockRejectedValue(
+            new BridgeChannelClosedError('mid-request (model providers)'),
+          );
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            reloadDaemonEnv: vi.fn().mockResolvedValue({
+              updatedKeys: [],
+              removedKeys: [],
+              runtimeEnvironmentApplied,
+            }),
+            invokeWorkspaceCommand,
+          }),
+        );
+
+        await expect(svc.reloadModelProviders(makeCtx())).resolves.toEqual({
+          status: expectedStatus,
+        });
+      },
+    );
+
+    it('stops before the child when its runtime generation closes', async () => {
+      let generationClosed = false;
+      const assertGenerationOpen = vi.fn(() => {
+        if (generationClosed) throw new Error('generation closed');
+      });
+      const reloadDaemonEnv = vi.fn(async () => {
+        generationClosed = true;
+        return {
+          updatedKeys: [],
+          removedKeys: [],
+          runtimeEnvironmentApplied: true,
+        };
+      });
+      const invokeWorkspaceCommand = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          assertGenerationOpen,
+          reloadDaemonEnv,
+          invokeWorkspaceCommand,
+        }),
+      );
+
+      await expect(svc.reloadModelProviders(makeCtx())).rejects.toThrow(
+        'generation closed',
+      );
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('initWorkspace', () => {
+    let tmpDir: string;
+
+    beforeEach(async () => {
+      tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'facade-test-'));
+    });
+
+    afterEach(async () => {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    });
+
+    it('creates a new file and returns action=created', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+          publishWorkspaceEvent,
+        }),
+      );
+
+      const result = await svc.initWorkspace(
+        makeCtx({ workspaceCwd: tmpDir }),
+        {},
+      );
+
+      expect(result.action).toBe('created');
+      expect(result.path).toBe(path.join(tmpDir, 'QWEN.md'));
+      const stat = await fs.stat(result.path);
+      expect(stat.isFile()).toBe(true);
+    });
+
+    it('rechecks the runtime generation before creating the context file', async () => {
+      let checks = 0;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+          assertGenerationOpen: () => {
+            checks += 1;
+            if (checks === 2) throw new Error('generation closed');
+          },
+        }),
+      );
+
+      await expect(
+        svc.initWorkspace(makeCtx({ workspaceCwd: tmpDir }), {}),
+      ).rejects.toThrow('generation closed');
+      expect(checks).toBe(2);
+      await expect(fs.stat(path.join(tmpDir, 'QWEN.md'))).rejects.toMatchObject(
+        {
+          code: 'ENOENT',
+        },
+      );
+    });
+
+    it('publishes workspace_initialized event on create', async () => {
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+          publishWorkspaceEvent,
+        }),
+      );
+
+      await svc.initWorkspace(makeCtx({ originatorClientId: 'c-9' }), {});
+
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'workspace_initialized',
+        data: { path: path.join(tmpDir, 'QWEN.md'), action: 'created' },
+        originatorClientId: 'c-9',
+      });
+    });
+
+    it('returns noop when file exists but is whitespace-only', async () => {
+      const target = path.join(tmpDir, 'QWEN.md');
+      await fs.writeFile(target, '   \n  ', 'utf8');
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      const result = await svc.initWorkspace(makeCtx(), {});
+
+      expect(result.action).toBe('noop');
+    });
+
+    it('throws when file has content and force is not set', async () => {
+      const target = path.join(tmpDir, 'QWEN.md');
+      await fs.writeFile(target, '# Hello', 'utf8');
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+        /already exists/,
+      );
+    });
+
+    it('overwrites existing file when force=true', async () => {
+      const target = path.join(tmpDir, 'QWEN.md');
+      await fs.writeFile(target, '# Existing content', 'utf8');
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      const result = await svc.initWorkspace(makeCtx(), { force: true });
+
+      expect(result.action).toBe('overwrote');
+      const content = await fs.readFile(target, 'utf8');
+      expect(content).toBe('');
+    });
+
+    it('throws for escaping filename', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: '../escape.md',
+        }),
+      );
+
+      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+        /resolves outside/,
+      );
+    });
+
+    it('throws when target is a symlink', async () => {
+      const realFile = path.join(tmpDir, 'real.md');
+      const linkFile = path.join(tmpDir, 'QWEN.md');
+      await fs.writeFile(realFile, '', 'utf8');
+      await fs.symlink(realFile, linkFile);
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(/symlink/);
+    });
+
+    it('throws when target is a non-regular file', async () => {
+      const target = path.join(tmpDir, 'QWEN.md');
+      await fs.writeFile(target, '', 'utf8');
+
+      const origLstat = fs.lstat;
+      const lstatSpy = vi.spyOn(fs, 'lstat').mockImplementation(async (p) => {
+        const stats = await origLstat(p);
+        if (path.resolve(String(p)) !== target) return stats;
+        return new Proxy(stats, {
+          get(obj, prop, receiver) {
+            if (prop === 'isFile') return () => false;
+            if (prop === 'isSymbolicLink') return () => false;
+            return Reflect.get(obj, prop, receiver);
+          },
+        });
+      });
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      try {
+        await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+          /not a regular file/,
+        );
+      } finally {
+        lstatSpy.mockRestore();
+      }
+    });
+
+    it('throws WorkspaceInitConflictError when existing file has content and force is unset', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      // Create the file between the readFile ENOENT and the open('wx')
+      // by pre-creating it — the 'wx' flag throws EEXIST atomically.
+      await fs.writeFile(path.join(tmpDir, 'QWEN.md'), '# content', 'utf8');
+
+      // Since the file has content and force is not set, it throws
+      // WorkspaceInitConflictError (not the race). To test the EEXIST
+      // race, we'd need to inject between lstat and open — this verifies
+      // the conflict guard at least.
+      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+        /already exists/,
+      );
+    });
+
+    it('throws WorkspaceInitRaceError when fs.open hits EEXIST', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      const origOpen = fs.open;
+      vi.spyOn(fs, 'open').mockImplementation(
+        async (
+          filePath: Parameters<typeof origOpen>[0],
+          flags?: Parameters<typeof origOpen>[1],
+        ) => {
+          if (String(flags) === 'wx' && String(filePath).endsWith('QWEN.md')) {
+            const err = new Error('EEXIST') as NodeJS.ErrnoException;
+            err.code = 'EEXIST';
+            throw err;
+          }
+          return origOpen(filePath, flags as string);
+        },
+      );
+
+      try {
+        await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+          /appeared.*between/,
+        );
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it('throws WorkspaceInitSymlinkError when overwrite open hits ELOOP', async () => {
+      const target = path.join(tmpDir, 'QWEN.md');
+      await fs.writeFile(target, '# existing content', 'utf8');
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      const origOpen = fs.open;
+      vi.spyOn(fs, 'open').mockImplementation(
+        async (
+          filePath: Parameters<typeof origOpen>[0],
+          flags?: Parameters<typeof origOpen>[1],
+        ) => {
+          if (
+            typeof flags === 'number' &&
+            String(filePath).endsWith('QWEN.md')
+          ) {
+            const err = new Error('ELOOP') as NodeJS.ErrnoException;
+            err.code = 'ELOOP';
+            throw err;
+          }
+          return origOpen(filePath, flags as string);
+        },
+      );
+
+      try {
+        await expect(
+          svc.initWorkspace(makeCtx(), { force: true }),
+        ).rejects.toThrow(/O_NOFOLLOW.*ELOOP|symlink/i);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it('throws WorkspaceInitRaceError when overwrite open hits ENOENT', async () => {
+      const target = path.join(tmpDir, 'QWEN.md');
+      await fs.writeFile(target, '# existing content', 'utf8');
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+        }),
+      );
+
+      const origOpen = fs.open;
+      vi.spyOn(fs, 'open').mockImplementation(
+        async (
+          filePath: Parameters<typeof origOpen>[0],
+          flags?: Parameters<typeof origOpen>[1],
+        ) => {
+          if (
+            typeof flags === 'number' &&
+            String(filePath).endsWith('QWEN.md')
+          ) {
+            const err = new Error('ENOENT') as NodeJS.ErrnoException;
+            err.code = 'ENOENT';
+            throw err;
+          }
+          return origOpen(filePath, flags as string);
+        },
+      );
+
+      try {
+        await expect(
+          svc.initWorkspace(makeCtx(), { force: true }),
+        ).rejects.toThrow(/deleted.*between|concurrent/i);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    });
+
+    it('parent symlink outside workspace is rejected', async () => {
+      // Create a subdirectory that's actually a symlink to /tmp
+      const docsLink = path.join(tmpDir, 'docs');
+      await fs.symlink(os.tmpdir(), docsLink);
+
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'docs/QWEN.md',
+        }),
+      );
+
+      await expect(svc.initWorkspace(makeCtx(), {})).rejects.toThrow(
+        /parent.*resolves outside|parent.*workspace/i,
+      );
+    });
+  });
+});

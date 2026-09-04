@@ -18,11 +18,11 @@ import type {
   PluginChoiceRequest,
 } from '../types.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
-import type { QwenAuthState } from '../hooks/useQwenAuth.js';
+import type { AuthUiState } from '../auth/useAuth.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import type {
-  AuthType,
   IdeContext,
   ApprovalMode,
   IdeInfo,
@@ -30,55 +30,78 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type { DOMElement } from 'ink';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
+import type { PendingMcpServer } from '../hooks/useMcpApproval.js';
 import type { ExtensionUpdateState } from '../state/extensions.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 
 import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
+import { type HelpTab } from './UIActionsContext.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
-import { type CodingPlanUpdateRequest } from '../hooks/useCodingPlanUpdates.js';
+import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+import type { MicrophonePermission } from '../hooks/use-voice-input.js';
+import type { StatusLinePresetConfig } from '../statusLinePresets.js';
+import type { StartupIdeConnectionStatus } from '../../utils/events.js';
+
+export interface PendingSkillView {
+  name: string;
+  description: string;
+  /** Absolute path of the staged SKILL.md, for inline preview / open-in-editor. */
+  stagedManifestPath: string;
+}
 
 export interface UIState {
   history: HistoryItem[];
   historyManager: UseHistoryManagerReturn;
   isThemeDialogOpen: boolean;
   themeError: string | null;
-  isAuthenticating: boolean;
+  auth: AuthUiState;
   isConfigInitialized: boolean;
-  authError: string | null;
-  isAuthDialogOpen: boolean;
-  pendingAuthType: AuthType | undefined;
-  // Qwen OAuth state
-  qwenAuthState: QwenAuthState;
   editorError: string | null;
   isEditorDialogOpen: boolean;
   debugMessage: string;
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
+  isStatusLineDialogOpen: boolean;
+  statusLineSettingsVersion?: number;
+  statusLineConfigOverride?: StatusLinePresetConfig;
   isMemoryDialogOpen: boolean;
+  isSkillReviewDialogOpen: boolean;
+  /** Pending auto-skills awaiting confirmation, plus their owning task id. */
+  skillReviewPending: { taskId: string; skills: PendingSkillView[] } | null;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
+  isVoiceModelMode: boolean;
+  isVisionModelMode: boolean;
+  isCompactionModelMode: boolean;
+  isImageModelMode: boolean;
+  modelDialogPersistScope: 'workspace' | 'user' | undefined;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
+  isEffortDialogOpen: boolean;
+  isOutputStyleDialogOpen: boolean;
   isResumeDialogOpen: boolean;
   resumeMatchedSessions: SessionListItem[] | undefined;
   isDeleteDialogOpen: boolean;
+  isHelpDialogOpen: boolean;
+  activeHelpTab: HelpTab;
   slashCommands: readonly SlashCommand[];
+  recentSlashCommands: RecentSlashCommands;
   pendingSlashCommandHistoryItems: HistoryItemWithoutId[];
   commandContext: CommandContext;
   shellConfirmationRequest: ShellConfirmationRequest | null;
   confirmationRequest: ConfirmationRequest | null;
   confirmUpdateExtensionRequests: ConfirmationRequest[];
-  codingPlanUpdateRequest: CodingPlanUpdateRequest | undefined;
+  providerUpdateRequest: ProviderUpdateRequest | undefined;
   settingInputRequests: SettingInputRequest[];
   pluginChoiceRequests: PluginChoiceRequest[];
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
-  geminiMdFileCount: number;
+  memoryFileCount: number;
   streamingState: StreamingState;
   initError: string | null;
-  pendingGeminiHistoryItems: HistoryItemWithoutId[];
+  pendingLlmHistoryItems: HistoryItemWithoutId[];
   thought: ThoughtSummary | null;
   shellModeActive: boolean;
   userMessages: string[];
@@ -90,6 +113,10 @@ export interface UIState {
   shouldShowCommandMigrationNudge: boolean;
   commandMigrationTomlFiles: string[];
   isFolderTrustDialogOpen: boolean;
+  isMcpApprovalDialogOpen: boolean;
+  currentMcpApproval: PendingMcpServer | undefined;
+  pendingMcpApprovals: PendingMcpServer[];
+  mcpApprovalRemaining: number;
   isTrustedFolder: boolean | undefined;
   constrainHeight: boolean;
   ideContextState: IdeContext | undefined;
@@ -106,6 +133,9 @@ export interface UIState {
   currentModel: string;
   contextFileNames: string[];
   availableTerminalHeight: number | undefined;
+  useTerminalBuffer: boolean;
+  /** Whether the VP scrollbar is shown (auto-hides while idle). */
+  showScrollbar?: boolean;
   mainAreaWidth: number;
   staticAreaMaxItemHeight: number;
   staticExtraHeight: number;
@@ -117,11 +147,35 @@ export interface UIState {
   cancelBtw: () => void;
   nightly: boolean;
   branchName: string | undefined;
+  /**
+   * Active worktree session (from the `<sessionId>.worktree.json` sidecar).
+   * Set when `enter_worktree` has been called, cleared when `exit_worktree`
+   * removes the sidecar. Used by the Footer to display the worktree
+   * indicator and by WorktreeExitDialog to know what to operate on.
+   */
+  activeWorktree: {
+    slug: string;
+    branch: string;
+    path: string;
+    originalCwd: string;
+    originalBranch: string;
+    originalHeadCommit: string;
+  } | null;
+  /** Visibility of WorktreeExitDialog (only shown when activeWorktree != null). */
+  showWorktreeExitDialog: boolean;
+  /**
+   * P7-trigger: true while the current turn was steered toward the Workflow
+   * tool by the `workflow` keyword. Drives the Footer `workflow active`
+   * indicator; cleared when the turn returns to idle.
+   */
+  workflowKeywordActive: boolean;
   sessionStats: SessionStatsState;
   terminalWidth: number;
   terminalHeight: number;
   mainControlsRef: React.MutableRefObject<DOMElement | null>;
+  voiceMicWarnedStatusRef: React.MutableRefObject<MicrophonePermission | null>;
   currentIDE: IdeInfo | null;
+  startupIdeConnectionStatus: StartupIdeConnectionStatus;
   updateInfo: UpdateObject | null;
   showIdeRestartPrompt: boolean;
   ideTrustRestartReason: RestartReason;
@@ -139,16 +193,21 @@ export interface UIState {
   // Subagent dialogs
   isSubagentCreateDialogOpen: boolean;
   isAgentsManagerDialogOpen: boolean;
+  // Skills manager dialog (`/skills`)
+  isSkillsManagerDialogOpen: boolean;
   // Extensions manager dialog
   isExtensionsManagerDialogOpen: boolean;
   // MCP dialog
   isMcpDialogOpen: boolean;
   // Hooks dialog
   isHooksDialogOpen: boolean;
+  isStatsDialogOpen: boolean;
   // Feedback dialog
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
+  taskStartStreamingChars: number;
+  responseCandidateTokens: number;
   // Real-time token display: ref to streaming output char length (polled, not state)
   streamingResponseLengthRef: React.RefObject<number>;
   // True = receiving content (↓), false = waiting for API response (↑)
@@ -158,11 +217,17 @@ export interface UIState {
   setSessionName: (name: string | null) => void;
   // Prompt suggestion
   promptSuggestion: string | null;
-  /** Dismiss prompt suggestion (clears state, aborts speculation) */
-  dismissPromptSuggestion: () => void;
+  /**
+   * Abort in-flight suggestion generation/speculation; intentionally preserves
+   * `promptSuggestion` so the placeholder can restore it when the buffer is
+   * emptied again.
+   */
+  abortPromptSuggestion: () => void;
   // Rewind selector
   isRewindSelectorOpen: boolean;
   rewindEscPending: boolean;
+  // Diff dialog
+  isDiffDialogOpen: boolean;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

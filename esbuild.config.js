@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { wasmLoader } from 'esbuild-plugin-wasm';
+import { isStubbedSdkNodeExporterImport } from './scripts/sdk-node-exporter-stub.js';
 
 let esbuild;
 try {
@@ -55,6 +56,101 @@ const wasmBinaryPlugin = {
   },
 };
 
+// `@opentelemetry/sdk-node` eagerly require()s every exporter package to
+// support `OTEL_*_EXPORTER` env-based auto-configuration, which would drag
+// both OTLP protocol chains (~2 MiB) back into the sdk-impl static closure
+// and defeat the per-protocol dynamic imports in
+// `packages/core/src/telemetry/sdk-{impl,exporters-grpc,exporters-http}.ts`
+// (issue #7264). From sdk-node 0.221 the env auto-configuration helpers were
+// additionally extracted into `@opentelemetry/configuration` and the two
+// `otlp-*exporter-base` packages, which sdk-node requires eagerly; they get
+// the same treatment. qwen-code always passes explicit `spanProcessors` /
+// `logRecordProcessors` to NodeSDK, so those env code paths are unreachable
+// for traces and logs. Stub the packages ONLY when imported by
+// sdk-node itself — our own protocol modules keep resolving the real ones.
+// The stubbed constructors throw so an unexpectedly reached env path (e.g.
+// `OTEL_METRICS_EXPORTER=otlp`) fails loudly instead of exporting nowhere;
+// NodeSDK.start() is wrapped in try/catch in `sdk.ts`. The resolve decision
+// lives in scripts/sdk-node-exporter-stub.js so it stays unit-testable.
+const sdkNodeExporterStubPlugin = {
+  name: 'sdk-node-exporter-stub',
+  setup(build) {
+    build.onResolve(
+      {
+        filter:
+          /^@opentelemetry\/(exporter-|configuration$|otlp-(grpc-)?exporter-base$)/,
+      },
+      (args) => {
+        if (!isStubbedSdkNodeExporterImport(args.path, args.importer)) {
+          return null;
+        }
+        return { path: args.path, namespace: 'sdk-node-exporter-stub' };
+      },
+    );
+    build.onLoad(
+      { filter: /.*/, namespace: 'sdk-node-exporter-stub' },
+      (args) => ({
+        contents: `
+          const throwStubbed = (name) => {
+            throw new Error(
+              'qwen-code bundles @opentelemetry/sdk-node without ' +
+                ${JSON.stringify(args.path)} + ' (env-based exporter ' +
+                'selection is unsupported; configure telemetry via ' +
+                'qwen-code settings instead). Attempted to construct: ' + name,
+            );
+          };
+          const handler = {
+            // Module interop and thenable probes must see a plain, non-callable
+            // namespace: a bundler or await import() reads then and __esModule
+            // (Symbol.* keys are already covered by the typeof check), and
+            // constructing those as "exporters" would throw a confusing error.
+            get: (_t, prop) => {
+              if (
+                typeof prop !== 'string' ||
+                prop === 'then' ||
+                prop === '__esModule'
+              ) {
+                return undefined;
+              }
+              return function stubbedExporter() {
+                throwStubbed(prop);
+              };
+            },
+          };
+          module.exports = new Proxy({}, handler);
+        `,
+        loader: 'js',
+      }),
+    );
+  },
+};
+
+const syncFileEncodingTreeShakePlugin = {
+  name: 'sync-file-encoding-tree-shake',
+  setup(build) {
+    build.onResolve(
+      { filter: /^\.\/services\/sync-file-encoding\.js$/ },
+      (args) => {
+        if (
+          !/[\\/]packages[\\/]core[\\/](?:src|dist[\\/]src)[\\/]index\.(?:ts|js)$/.test(
+            args.importer,
+          )
+        ) {
+          return null;
+        }
+        const sourceExtension = args.importer.endsWith('.ts') ? '.ts' : '.js';
+        return {
+          path: path.resolve(
+            args.resolveDir,
+            args.path.replace(/\.js$/, sourceExtension),
+          ),
+          sideEffects: false,
+        };
+      },
+    );
+  },
+};
+
 const external = [
   '@lydell/node-pty',
   'node-pty',
@@ -63,6 +159,7 @@ const external = [
   '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-win32-arm64',
   '@lydell/node-pty-win32-x64',
+  '@qwen-code/audio-capture',
   '@teddyzhu/clipboard',
   '@teddyzhu/clipboard-darwin-arm64',
   '@teddyzhu/clipboard-darwin-x64',
@@ -70,47 +167,117 @@ const external = [
   '@teddyzhu/clipboard-linux-arm64-gnu',
   '@teddyzhu/clipboard-win32-x64-msvc',
   '@teddyzhu/clipboard-win32-arm64-msvc',
+  'sharp',
 ];
 
-esbuild
-  .build({
-    entryPoints: ['packages/cli/index.ts'],
-    bundle: true,
-    outfile: 'dist/cli.js',
-    platform: 'node',
-    format: 'esm',
-    target: 'node20',
-    external,
-    packages: 'bundle',
-    inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
-    banner: {
-      js: `// Force strict mode and setup for ESM
+// Name of the directory under `dist/` that esbuild emits shared chunks into.
+// MUST stay in sync with `BUNDLE_CHUNK_DIR` in
+// `packages/core/src/utils/bundlePaths.ts`, whose `resolveBundleDir` helper
+// strips this exact segment when modules look up sibling assets at runtime.
+// Renaming here without renaming there silently breaks bundled-binary lookup
+// in skill-manager / ripgrepUtils / i18n / extensions/new.
+const BUNDLE_CHUNK_DIR = 'chunks';
+
+const mainBuild = esbuild.build({
+  entryPoints: { cli: 'packages/cli/src/cli.ts' },
+  bundle: true,
+  outdir: 'dist',
+  entryNames: '[name]',
+  chunkNames: `${BUNDLE_CHUNK_DIR}/[name]-[hash]`,
+  splitting: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  external,
+  packages: 'bundle',
+  inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  banner: {
+    js: `// Force strict mode and setup for ESM
 "use strict";`,
-    },
-    alias: {
-      'is-in-ci': path.resolve(
-        __dirname,
-        'packages/cli/src/patches/is-in-ci.ts',
-      ),
-      '@qwen-code/web-templates': path.resolve(
-        __dirname,
-        'packages/web-templates/src/index.ts',
-      ),
-      // Resolve to userland punycode instead of deprecated node:punycode built-in
-      punycode: require.resolve('punycode/'),
-    },
-    define: {
-      'process.env.CLI_VERSION': JSON.stringify(pkg.version),
-      // Make global available for compatibility
-      global: 'globalThis',
-    },
-    loader: { '.node': 'file' },
-    plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],
-    metafile: true,
-    write: true,
-    keepNames: true,
-  })
-  .then(({ metafile }) => {
+  },
+  alias: {
+    'is-in-ci': path.resolve(__dirname, 'packages/cli/src/patches/is-in-ci.ts'),
+    'jsonc-parser': require.resolve('jsonc-parser/lib/esm/main.js'),
+    '@qwen-code/web-templates': path.resolve(
+      __dirname,
+      'packages/web-templates/src/index.ts',
+    ),
+    // Resolve to userland punycode instead of deprecated node:punycode built-in
+    punycode: require.resolve('punycode/'),
+  },
+  define: {
+    'process.env.CLI_VERSION': JSON.stringify(pkg.version),
+    // react-reconciler ≥0.33 (ink 7) gates its dev build behind NODE_ENV
+    // and calls performance.measure() on every render, leaking
+    // PerformanceMeasure objects into the global measureEntryBuffer.
+    // Setting production here tree-shakes the entire dev build (~15k lines).
+    'process.env.NODE_ENV': JSON.stringify('production'),
+    // Make global available for compatibility
+    global: 'globalThis',
+    // Redirect free __dirname/__filename references to the shim so that
+    // vendored libraries that emit their own `var __dirname` locals don't
+    // collide with our injected bindings when code-splitting is enabled.
+    //
+    // CONTRIBUTOR WARNING: this rewrite applies to *all* source files, so
+    // any bare `__dirname` / `__filename` in our own code resolves to the
+    // shim chunk's on-disk location (i.e. `dist/chunks/`), NOT the source
+    // file's own directory. To get a per-file path, declare a local shadow
+    // at the top of the module:
+    //
+    //   import { fileURLToPath } from 'node:url';
+    //   const __filename = fileURLToPath(import.meta.url);
+    //   const __dirname  = path.dirname(__filename);
+    //
+    // esbuild leaves the local binding alone (it's a declared identifier,
+    // not a free reference). For sibling-asset lookups in modules that may
+    // be hoisted into a shared chunk, prefer
+    // `resolveBundleDir(import.meta.url)` from
+    // `packages/core/src/utils/bundlePaths.ts` — it both produces a
+    // per-file path and strips the chunk segment when the module ends up
+    // under `dist/chunks/`.
+    __dirname: '__qwen_dirname',
+    __filename: '__qwen_filename',
+  },
+  loader: { '.node': 'file' },
+  plugins: [
+    sdkNodeExporterStubPlugin,
+    syncFileEncodingTreeShakePlugin,
+    wasmBinaryPlugin,
+    wasmLoader({ mode: 'embedded' }),
+  ],
+  metafile: true,
+  write: true,
+  keepNames: true,
+});
+
+// fzf index worker — runs in its own worker_threads worker that
+// `fzfWorkerHandle.ts` spawns via `new Worker(new URL('./fzfWorker.js', ...))`.
+// Must exist as a standalone file next to `dist/cli.js` so the URL resolves
+// at runtime; we bundle it self-contained (no chunk splitting) so fzf is
+// inlined and the worker doesn't need to walk back into node_modules from
+// the published tarball. `prepare-package.js` whitelists `fzfWorker.js` in
+// the dist `files` array.
+const workerBuild = esbuild.build({
+  entryPoints: ['packages/core/src/utils/filesearch/fzfWorker.ts'],
+  bundle: true,
+  outfile: 'dist/fzfWorker.js',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  external,
+  packages: 'bundle',
+  // fzf is CJS — needs the same require()-shim the main bundle uses for
+  // CJS interop in ESM output.
+  inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
+  banner: {
+    js: `"use strict";`,
+  },
+  write: true,
+  keepNames: true,
+});
+
+Promise.all([mainBuild, workerBuild])
+  .then(([{ metafile }]) => {
     if (process.env.DEV === 'true') {
       writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));
     }

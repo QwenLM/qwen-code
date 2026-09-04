@@ -12,7 +12,6 @@ import './styles/timeline.css';
 import './styles/components.css';
 
 // Shared UI Components Export
-// Export all shared components from this package
 
 // Context
 export {
@@ -25,6 +24,13 @@ export type {
   PlatformProviderProps,
   PlatformType,
 } from './context/PlatformContext';
+
+export {
+  ExpandControlContext,
+  useExpandControl,
+  useControlledExpanded,
+} from './context/ExpandControlContext';
+export type { ExpandControlContextValue } from './context/ExpandControlContext';
 
 // Layout components
 export { default as Container } from './components/layout/Container';
@@ -165,6 +171,7 @@ export {
   ReadToolCall,
   WebFetchToolCall,
   CheckboxDisplay,
+  getToolCallComponent,
 } from './components/toolcalls';
 export type {
   ToolCallContainerProps,
@@ -260,6 +267,10 @@ export type { CompletionItem, CompletionItemType } from './types/completion';
 // Utils
 export { groupSessionsByDate, getTimeAgo } from './utils/sessionGrouping';
 export type { SessionGroup } from './utils/sessionGrouping';
+export {
+  ZERO_WIDTH_SPACE,
+  stripZeroWidthSpaces,
+} from './utils/inputPlaceholder';
 
 // Adapters - for normalizing different data formats
 export {

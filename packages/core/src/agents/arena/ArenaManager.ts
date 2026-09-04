@@ -8,14 +8,20 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { GitWorktreeService } from '../../services/gitWorktreeService.js';
 import { Storage } from '../../config/storage.js';
-import type { Config } from '../../config/config.js';
-import type { ContentGenerator } from '../../core/contentGenerator.js';
-import { getCoreSystemPrompt } from '../../core/prompts.js';
+import {
+  APPROVAL_MODES,
+  type ApprovalMode,
+  type Config,
+} from '../../config/config.js';
+import {
+  assembleSystemPrompt,
+  getCoreSystemPrompt,
+} from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
+import { runSideQuery } from '../../utils/sideQuery.js';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
-import { getResponseText } from '../../utils/partUtils.js';
 import { ArenaEventEmitter, ArenaEventType } from './arena-events.js';
 import type { AgentSpawnConfig, Backend, DisplayMode } from '../index.js';
 import { detectBackend, DISPLAY_MODE } from '../index.js';
@@ -43,6 +49,7 @@ import {
   isTerminalStatus,
   isSettledStatus,
   isSuccessStatus,
+  lastVisibleAnswer,
 } from '../runtime/agent-types.js';
 import {
   logArenaSessionStarted,
@@ -1069,12 +1076,24 @@ export class ArenaManager {
       inProcess: {
         agentName: model.modelId,
         initialTask: this.arenaConfig?.task,
+        approvalMode: toApprovalMode(this.arenaConfig?.approvalMode),
         runtimeConfig: {
           promptConfig: {
-            systemPrompt: getCoreSystemPrompt(
-              this.config.getUserMemory(),
-              model.modelId,
-            ),
+            // Stable base + context only. The volatile auto-memory section is
+            // appended once by AgentCore.buildChatSystemPrompt when the
+            // in-process worker builds its system instruction; classifying it
+            // here too would duplicate the section (the per-agent Config
+            // inherits a non-empty getAutoMemoryPrompt() from this base).
+            systemPrompt: assembleSystemPrompt({
+              base: getCoreSystemPrompt(
+                undefined,
+                model.modelId,
+                undefined,
+                'headless',
+                this.config.getOutputStyle(),
+              ),
+              contextFiles: this.config.getUserMemory(),
+            }),
           },
           modelConfig: { model: model.modelId },
           runConfig: {
@@ -1656,19 +1675,9 @@ export class ArenaManager {
     transcript: ArenaTranscriptEntry[] | undefined,
   ): string | undefined {
     if (!transcript) return undefined;
-
-    for (let i = transcript.length - 1; i >= 0; i--) {
-      const message = transcript[i]!;
-      if (
-        message.role === 'assistant' &&
-        !message.thought &&
-        message.content.trim()
-      ) {
-        return message.content.trim();
-      }
-    }
-
-    return undefined;
+    // Shared with TeamManager's pre-attach recovery: the most recent
+    // non-empty, non-thought assistant message wins.
+    return lastVisibleAnswer(transcript);
   }
 
   private async addApproachSummaries(
@@ -1682,55 +1691,29 @@ export class ArenaManager {
     );
   }
 
-  private getAgentSummaryGenerator(
-    agentId: string,
-  ): ContentGenerator | undefined {
-    if (this.backend?.type !== DISPLAY_MODE.IN_PROCESS) {
-      return undefined;
-    }
-
-    return (this.backend as InProcessBackend).getAgentContentGenerator(agentId);
-  }
-
   private async generateAgentApproachSummary(
     summaryInput: ArenaSummaryInput,
   ): Promise<string> {
     const { result } = summaryInput;
-    const generator = this.getAgentSummaryGenerator(result.agentId);
-    if (!generator) {
-      return buildFallbackApproachSummary(result);
-    }
-
-    const abortController = new AbortController();
-    const timeout = setTimeout(
-      () => abortController.abort(),
-      ARENA_SUMMARY_TIMEOUT_MS,
-    );
 
     try {
-      const response = await generator.generateContent(
-        {
-          model: result.model.modelId,
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  text: this.buildAgentApproachSummaryPrompt(summaryInput),
-                },
-              ],
-            },
-          ],
-          config: {
-            abortSignal: abortController.signal,
-            thinkingConfig: { includeThoughts: false },
+      const response = await runSideQuery(this.config, {
+        purpose: 'arena-approach-summary',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: this.buildAgentApproachSummaryPrompt(summaryInput),
+              },
+            ],
           },
-        },
-        'arena_approach_summary',
-      );
+        ],
+        abortSignal: AbortSignal.timeout(ARENA_SUMMARY_TIMEOUT_MS),
+      });
 
       return (
-        parseApproachSummaryResponse(getResponseText(response) ?? '')?.trim() ||
+        parseApproachSummaryResponse(response.text)?.trim() ||
         buildFallbackApproachSummary(result)
       );
     } catch (error) {
@@ -1739,8 +1722,6 @@ export class ArenaManager {
         error,
       );
       return buildFallbackApproachSummary(result);
-    } finally {
-      clearTimeout(timeout);
     }
   }
 
@@ -1829,6 +1810,15 @@ export class ArenaManager {
       wasRepoInitialized: false,
     };
   }
+}
+
+function toApprovalMode(mode: string | undefined): ApprovalMode | undefined {
+  if (!mode) {
+    return undefined;
+  }
+  return APPROVAL_MODES.includes(mode as ApprovalMode)
+    ? (mode as ApprovalMode)
+    : undefined;
 }
 
 function truncateForPrompt(text: string, maxChars: number): string {

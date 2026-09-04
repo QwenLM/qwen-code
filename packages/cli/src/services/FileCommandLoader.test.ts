@@ -119,6 +119,8 @@ describe('FileCommandLoader', () => {
     const command = commands[0];
     expect(command).toBeDefined();
     expect(command.name).toBe('test');
+    expect(command.sourceLabel).toBe('Custom');
+    expect(command.sourceDetail).toBe('custom');
 
     const result = await command.action?.(
       createMockCommandContext({
@@ -600,6 +602,40 @@ describe('FileCommandLoader', () => {
       const extCommand = commands.find((cmd) => cmd.name === 'ext');
       expect(extCommand?.extensionName).toBe('test-ext');
       expect(extCommand?.description).toMatch(/^\[test-ext\]/);
+    });
+
+    it('ignores commands bundled in manually discovered Agent Plugins', async () => {
+      const extensionDir = path.join(
+        process.cwd(),
+        '.qwen/extensions/agent-plugin',
+      );
+      mock({
+        [extensionDir]: {
+          commands: {
+            'deploy.toml': 'prompt = "Unconsented command"',
+          },
+        },
+      });
+      const mockConfig = {
+        getProjectRoot: vi.fn(() => process.cwd()),
+        getExtensions: vi.fn(() => [
+          {
+            name: 'agent-plugin',
+            version: '1.0.0',
+            isActive: true,
+            path: extensionDir,
+            format: 'agent-plugins-v1',
+          },
+        ]),
+        getFolderTrustFeature: vi.fn(() => false),
+        getFolderTrust: vi.fn(() => false),
+      } as unknown as Config;
+
+      const commands = await new FileCommandLoader(mockConfig).loadCommands(
+        signal,
+      );
+
+      expect(commands).toEqual([]);
     });
 
     it('extension commands have extensionName metadata for conflict resolution', async () => {

@@ -1,0 +1,362 @@
+.picker {
+  width: 380px;
+  max-height: 480px;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.searchWrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+}
+
+.searchIcon {
+  flex-shrink: 0;
+  color: var(--muted-foreground, #888);
+}
+
+.searchInput {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--foreground, #e0e0e0);
+  font-size: 13px;
+  outline: none;
+  padding: 2px 0;
+}
+
+.searchInput:focus-visible {
+  border-bottom: 1px solid var(--primary, #60a5fa);
+}
+
+.searchInput::placeholder {
+  color: var(--muted-foreground, #888);
+}
+
+.list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.section {
+  margin-bottom: 2px;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted-foreground, #888);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sectionHeader:hover {
+  color: var(--foreground, #e0e0e0);
+}
+
+.sectionChevron {
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+
+.sectionChevronCollapsed {
+  transform: rotate(-90deg);
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px 5px 20px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--foreground, #e0e0e0);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+}
+
+.item:hover,
+.item:focus-visible {
+  background: var(--accent, rgba(128, 128, 128, 0.12));
+  outline: none;
+}
+
+.itemActive {
+  color: var(--primary, #60a5fa);
+}
+
+.itemIcon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted-foreground, #888);
+}
+
+.itemStar {
+  color: #f59e0b;
+}
+
+.itemName {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.itemMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted-foreground, #888);
+}
+
+.itemAheadBehind {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.itemUpstream {
+  color: var(--muted-foreground, #666);
+  font-size: 11px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.separator {
+  height: 1px;
+  background: var(--border, rgba(128, 128, 128, 0.2));
+  margin: 4px 0;
+}
+
+.actionItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--foreground, #e0e0e0);
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+}
+
+.actionItem:hover,
+.actionItem:focus-visible {
+  background: var(--accent, rgba(128, 128, 128, 0.12));
+  outline: none;
+}
+
+.actionItem:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.actionIcon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted-foreground, #888);
+}
+
+.actionLabel {
+  flex: 1;
+}
+
+.inlineInput {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 4px 20px;
+}
+
+.inlineInputField {
+  flex: 1;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 4px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  padding: 3px 6px;
+  outline: none;
+}
+
+.inlineInputField:focus {
+  border-color: var(--primary, #60a5fa);
+}
+
+.inlineInputFieldInvalid {
+  border-color: var(--destructive, #ef4444);
+}
+
+.statusBar {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--muted-foreground, #888);
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  background: var(--accent, rgba(128, 128, 128, 0.06));
+}
+
+.statusBarError {
+  color: var(--destructive, #ef4444);
+  background: color-mix(in srgb, var(--destructive, #ef4444) 10%, transparent);
+}
+
+.statusBarSuccess {
+  color: var(--success-color, #22c55e);
+  background: color-mix(
+    in srgb,
+    var(--success-color, #22c55e) 10%,
+    transparent
+  );
+}
+
+.statusBarWarning {
+  color: var(--warning-color, #f59e0b);
+  background: color-mix(
+    in srgb,
+    var(--warning-color, #f59e0b) 12%,
+    transparent
+  );
+  white-space: normal;
+}
+
+.pullBlocked {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 12px;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+  background: color-mix(in srgb, var(--destructive, #ef4444) 8%, transparent);
+}
+
+.pullBlockedMessage {
+  color: var(--destructive, #ef4444);
+}
+
+.pullBlockedHint {
+  color: var(--muted-foreground, #888);
+}
+
+.pullBlockedActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.pullBlockedButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 4px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.pullBlockedButton:hover,
+.pullBlockedButton:focus-visible {
+  background: var(--accent, rgba(128, 128, 128, 0.12));
+  outline: none;
+}
+
+.pullBlockedButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.pullBlockedButtonDanger {
+  color: var(--destructive, #ef4444);
+  border-color: color-mix(
+    in srgb,
+    var(--destructive, #ef4444) 40%,
+    transparent
+  );
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.empty {
+  padding: 16px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted-foreground, #888);
+}
+
+.remoteGroupLabel {
+  padding: 3px 12px 1px 28px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted-foreground, #666);
+  letter-spacing: 0.3px;
+}
+
+.loading {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted-foreground, #888);
+}
+
+.actionItemMuted .actionLabel {
+  color: var(--muted-foreground, #888);
+}
+
+.actionHint {
+  flex-shrink: 0;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground, #888);
+}
+
+.actionHint[data-tone='info'] {
+  color: var(--foreground, #e0e0e0);
+  opacity: 0.8;
+}
+
+.actionHint[data-tone='warning'] {
+  color: var(--warning-color, #f59e0b);
+}

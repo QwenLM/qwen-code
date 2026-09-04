@@ -6,12 +6,16 @@
 
 import type { Mock } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { handleAtCommand } from './atCommandProcessor.js';
+import {
+  extractAtPathCommands,
+  handleAtCommand,
+} from './atCommandProcessor.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   FileDiscoveryService,
   StandardFileSystemService,
   COMMON_IGNORE_PATTERNS,
+  Storage,
   // DEFAULT_FILE_EXCLUDES,
 } from '@qwen-code/qwen-code-core';
 import * as os from 'node:os';
@@ -19,6 +23,16 @@ import { ToolCallStatus } from '../types.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
+
+describe('extractAtPathCommands', () => {
+  it('extracts only non-empty @path commands', () => {
+    expect(extractAtPathCommands('')).toEqual([]);
+    expect(extractAtPathCommands('@')).toEqual([]);
+    expect(extractAtPathCommands('hello')).toEqual([]);
+    expect(extractAtPathCommands('@foo')).toEqual(['foo']);
+    expect(extractAtPathCommands('@foo @bar')).toEqual(['foo', 'bar']);
+  });
+});
 
 describe('handleAtCommand', () => {
   let testRootDir: string;
@@ -38,8 +52,10 @@ describe('handleAtCommand', () => {
   beforeEach(async () => {
     vi.resetAllMocks();
 
-    testRootDir = await fsPromises.mkdtemp(
-      path.join(os.tmpdir(), 'folder-structure-test-'),
+    testRootDir = await fsPromises.realpath(
+      await fsPromises.mkdtemp(
+        path.join(os.tmpdir(), 'folder-structure-test-'),
+      ),
     );
 
     abortController = new AbortController();
@@ -65,6 +81,9 @@ describe('handleAtCommand', () => {
       getMcpServerCommand: () => undefined,
       getPromptRegistry: () => ({
         getPromptsByServer: () => [],
+      }),
+      getResourceRegistry: () => ({
+        getResourcesByServer: () => [],
       }),
       getDebugMode: () => false,
       getFileExclusions: () => ({
@@ -150,7 +169,396 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays).toBeDefined();
     expect(result.toolDisplays).toHaveLength(1);
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+    expect(result.toolDisplays![0].description).toBe('@file.txt');
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'reads a file symlink through its canonical target type',
+    async () => {
+      const textPath = await createTestFile(
+        path.join(testRootDir, 'notes.txt'),
+        'plain text target',
+      );
+      const imageAlias = path.join(testRootDir, 'alias.png');
+      await fsPromises.symlink(textPath, imageAlias);
+
+      const result = await handleAtCommand({
+        query: `inspect @${imageAlias}`,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 625,
+        signal: abortController.signal,
+      });
+
+      const parts = Array.isArray(result.processedQuery)
+        ? result.processedQuery
+        : [result.processedQuery];
+      expect(parts).toContainEqual({ text: 'plain text target' });
+      expect(parts).toContainEqual({ text: `\nContent from ${imageAlias}:\n` });
+      expect(parts).not.toContainEqual({
+        text: `\nContent from ${textPath}:\n`,
+      });
+      expect(
+        parts.some(
+          (part) => typeof part !== 'string' && part && 'inlineData' in part,
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not read a symlink whose canonical target is ignored',
+    async () => {
+      await fsPromises.mkdir(path.join(testRootDir, '.git'));
+      await createTestFile(path.join(testRootDir, '.gitignore'), '.env');
+      const ignoredPath = await createTestFile(
+        path.join(testRootDir, '.env'),
+        'SECRET=do-not-send',
+      );
+      const aliasPath = path.join(testRootDir, 'visible.txt');
+      await fsPromises.symlink(ignoredPath, aliasPath);
+
+      const result = await handleAtCommand({
+        query: `inspect @${aliasPath}`,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 626,
+        signal: abortController.signal,
+      });
+
+      expect(JSON.stringify(result.processedQuery)).not.toContain(
+        'SECRET=do-not-send',
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'does not follow a project-temp symlink outside approved roots',
+    async () => {
+      const projectTempDir = path.join(testRootDir, 'project-temp');
+      const outsideDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-command-outside-')),
+      );
+      const outsidePath = path.join(outsideDir, 'secret.txt');
+      const aliasPath = path.join(projectTempDir, 'visible.txt');
+      await fsPromises.writeFile(outsidePath, 'outside secret');
+      await fsPromises.mkdir(projectTempDir, { recursive: true });
+      await fsPromises.symlink(outsidePath, aliasPath);
+      const tempDirSpy = vi
+        .spyOn(Storage, 'getGlobalTempDir')
+        .mockReturnValue(projectTempDir);
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: (candidate: string) => {
+            const absolute = path.isAbsolute(candidate)
+              ? candidate
+              : path.resolve(testRootDir, candidate);
+            const relative = path.relative(testRootDir, absolute);
+            return (
+              relative === '' ||
+              (!relative.startsWith('..') && !path.isAbsolute(relative))
+            );
+          },
+          getDirectories: () => [testRootDir],
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await handleAtCommand({
+          query: `inspect @${aliasPath}`,
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 627,
+          signal: abortController.signal,
+        });
+
+        expect(JSON.stringify(result.processedQuery)).not.toContain(
+          'outside secret',
+        );
+      } finally {
+        tempDirSpy.mockRestore();
+        await fsPromises.rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('should attach a truncated text file larger than 10MB', async () => {
+    const filePath = await createTestFile(
+      path.join(testRootDir, 'large.log'),
+      'x'.repeat(11 * 1024 * 1024),
+    );
+
+    const result = await handleAtCommand({
+      query: `@${filePath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 626,
+      signal: abortController.signal,
+    });
+
+    const processedText = Array.isArray(result.processedQuery)
+      ? result.processedQuery
+          .map((part) =>
+            typeof part === 'string'
+              ? part
+              : 'text' in part
+                ? part.text
+                : JSON.stringify(part),
+          )
+          .join('')
+      : '';
+
+    expect(processedText).toContain('Showing lines 1-');
+    expect(processedText).toContain('... [truncated]');
+    expect(result.shouldProceed).toBe(true);
+    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+  });
+
+  it('should only allow actual temp directory paths outside the workspace', async () => {
+    const tempParentDir = await fsPromises.mkdtemp(
+      path.join(os.tmpdir(), 'at-command-temp-'),
+    );
+    const projectTempDir = path.join(tempParentDir, 'tmp');
+    const tempSiblingDir = `${projectTempDir}-sibling`;
+    const tempFileContent = 'allowed temp content';
+    const siblingFileContent = 'sibling secret content';
+    const tempFilePath = await createTestFile(
+      path.join(projectTempDir, 'allowed.txt'),
+      tempFileContent,
+    );
+    const siblingFilePath = await createTestFile(
+      path.join(tempSiblingDir, 'secret.txt'),
+      siblingFileContent,
+    );
+    const tempDirSpy = vi
+      .spyOn(Storage, 'getGlobalTempDir')
+      .mockReturnValue(projectTempDir);
+    const isWithinWorkspace = (candidate: string) => {
+      const absoluteCandidate = path.isAbsolute(candidate)
+        ? candidate
+        : path.resolve(testRootDir, candidate);
+      const relative = path.relative(testRootDir, absoluteCandidate);
+      return (
+        relative === '' ||
+        (!relative.startsWith('..') && !path.isAbsolute(relative))
+      );
+    };
+    mockConfig = {
+      ...mockConfig,
+      getWorkspaceContext: () => ({
+        isPathWithinWorkspace: isWithinWorkspace,
+        getDirectories: () => [testRootDir],
+      }),
+    } as unknown as Config;
+
+    try {
+      const tempResult = await handleAtCommand({
+        query: `@${tempFilePath}`,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 126,
+        signal: abortController.signal,
+      });
+
+      expect(tempResult.processedQuery).toContainEqual({
+        text: tempFileContent,
+      });
+
+      mockOnDebugMessage.mockClear();
+      const siblingResult = await handleAtCommand({
+        query: `@${siblingFilePath}`,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 127,
+        signal: abortController.signal,
+      });
+
+      expect(siblingResult.processedQuery).toEqual([
+        { text: `@${siblingFilePath}` },
+      ]);
+      expect(JSON.stringify(siblingResult.processedQuery)).not.toContain(
+        siblingFileContent,
+      );
+      expect(mockOnDebugMessage).toHaveBeenCalledWith(
+        `Path ${siblingFilePath} is not in the workspace and will be skipped.`,
+      );
+    } finally {
+      tempDirSpy.mockRestore();
+      await fsPromises.rm(tempParentDir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'accepts a temp-dir file via the realpath branch when the configured path is a symlink',
+    async () => {
+      const realDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-command-real-')),
+      );
+      const linkDir = path.join(testRootDir, 'temp-link');
+      await fsPromises.symlink(realDir, linkDir);
+      const filePath = path.join(realDir, 'file.txt');
+      await fsPromises.writeFile(filePath, 'temp content');
+      const tempDirSpy = vi
+        .spyOn(Storage, 'getGlobalTempDir')
+        .mockReturnValue(linkDir);
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: (candidate: string) => {
+            const absolute = path.isAbsolute(candidate)
+              ? candidate
+              : path.resolve(testRootDir, candidate);
+            const relative = path.relative(testRootDir, absolute);
+            return (
+              relative === '' ||
+              (!relative.startsWith('..') && !path.isAbsolute(relative))
+            );
+          },
+          getDirectories: () => [testRootDir],
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await handleAtCommand({
+          query: `@${filePath}`,
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 628,
+          signal: abortController.signal,
+        });
+
+        expect(result.processedQuery).toContainEqual({
+          text: 'temp content',
+        });
+        expect(result.shouldProceed).toBe(true);
+      } finally {
+        tempDirSpy.mockRestore();
+        await fsPromises.rm(linkDir, { force: true });
+        await fsPromises.rm(realDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'multi-root workspace: continues to next dir when canonical path escapes workspace',
+    async () => {
+      const secondRootDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(
+          path.join(os.tmpdir(), 'at-command-multiroot-'),
+        ),
+      );
+      const outsideDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-command-outside-')),
+      );
+      const outsideFile = path.join(outsideDir, 'secret.txt');
+      await fsPromises.writeFile(outsideFile, 'outside secret');
+      // Symlink in first dir escapes the workspace
+      await fsPromises.mkdir(path.join(testRootDir, 'src'), {
+        recursive: true,
+      });
+      await fsPromises.symlink(
+        outsideFile,
+        path.join(testRootDir, 'src', 'index.ts'),
+      );
+      // Valid file in second dir at the same relative path
+      await fsPromises.mkdir(path.join(secondRootDir, 'src'), {
+        recursive: true,
+      });
+      await fsPromises.writeFile(
+        path.join(secondRootDir, 'src', 'index.ts'),
+        'valid content from second root',
+      );
+
+      const isWithinWorkspace = (candidate: string) => {
+        const absolute = path.isAbsolute(candidate)
+          ? candidate
+          : path.resolve(testRootDir, candidate);
+        for (const dir of [testRootDir, secondRootDir]) {
+          const rel = path.relative(dir, absolute);
+          if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+            return true;
+          }
+        }
+        return false;
+      };
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: isWithinWorkspace,
+          getDirectories: () => [testRootDir, secondRootDir],
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await handleAtCommand({
+          query: '@src/index.ts',
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 700,
+          signal: abortController.signal,
+        });
+
+        const processedText = JSON.stringify(result.processedQuery);
+        expect(processedText).toContain('valid content from second root');
+        expect(processedText).not.toContain('outside secret');
+      } finally {
+        await fsPromises.rm(secondRootDir, { recursive: true, force: true });
+        await fsPromises.rm(outsideDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'multi-root workspace: continues to next dir when canonical path is ignored',
+    async () => {
+      const secondRootDir = await fsPromises.realpath(
+        await fsPromises.mkdtemp(
+          path.join(os.tmpdir(), 'at-command-multiroot2-'),
+        ),
+      );
+      // Set up git ignore in first dir
+      await fsPromises.mkdir(path.join(testRootDir, '.git'), {
+        recursive: true,
+      });
+      await createTestFile(path.join(testRootDir, '.gitignore'), 'secret.txt');
+      const secretFile = await createTestFile(
+        path.join(testRootDir, 'secret.txt'),
+        'ignored content',
+      );
+      // Symlink in first dir points to the ignored file
+      await fsPromises.symlink(secretFile, path.join(testRootDir, 'data.txt'));
+      // Valid file in second dir at the same relative path
+      await fsPromises.writeFile(
+        path.join(secondRootDir, 'data.txt'),
+        'valid content from second root',
+      );
+
+      mockConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () => ({
+          isPathWithinWorkspace: () => true,
+          getDirectories: () => [testRootDir, secondRootDir],
+        }),
+      } as unknown as Config;
+
+      try {
+        const result = await handleAtCommand({
+          query: '@data.txt',
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 701,
+          signal: abortController.signal,
+        });
+
+        const processedText = JSON.stringify(result.processedQuery);
+        expect(processedText).toContain('valid content from second root');
+        expect(processedText).not.toContain('ignored content');
+      } finally {
+        await fsPromises.rm(secondRootDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('should process a valid directory path', async () => {
     const filePath = await createTestFile(
@@ -187,6 +595,39 @@ describe('handleAtCommand', () => {
     expect(mockOnDebugMessage).toHaveBeenCalledWith(
       `Path ${dirPath} resolved to directory.`,
     );
+    expect(result.toolDisplays).toBeDefined();
+    expect(result.toolDisplays).toHaveLength(1);
+    expect(result.toolDisplays![0].description).toBe('@to');
+  });
+
+  it('should inject MCP server context for @mcp mentions', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getMcpServers: () => ({ demo: {} }),
+      getPromptRegistry: () => ({
+        getPromptsByServer: (name: string) => (name === 'demo' ? ['p'] : []),
+      }),
+      getResourceRegistry: () => ({
+        getResourcesByServer: (name: string) =>
+          name === 'demo' ? [{ uri: 'res://1' }] : [],
+      }),
+    } as unknown as Config;
+
+    const result = await handleAtCommand({
+      query: 'Use @mcp:demo now',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 128,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.processedQuery).toEqual([
+      { text: 'Use @mcp:demo now' },
+      {
+        text: expect.stringContaining('--- MCP Server: demo ---'),
+      },
+    ]);
   });
 
   it('should handle query with text before and after @command', async () => {
@@ -219,36 +660,39 @@ describe('handleAtCommand', () => {
     });
   });
 
-  it('should correctly unescape paths with escaped spaces', async () => {
-    const fileContent = 'This is the file content.';
-    const filePath = await createTestFile(
-      path.join(testRootDir, 'path', 'to', 'my file.txt'),
-      fileContent,
-    );
-    const escapedpath = path.join(testRootDir, 'path', 'to', 'my\\ file.txt');
-    const query = `@${escapedpath}`;
+  it.skipIf(process.platform === 'win32')(
+    'should correctly unescape paths with escaped spaces',
+    async () => {
+      const fileContent = 'This is the file content.';
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'path', 'to', 'my file.txt'),
+        fileContent,
+      );
+      const escapedpath = path.join(testRootDir, 'path', 'to', 'my\\ file.txt');
+      const query = `@${escapedpath}`;
 
-    const result = await handleAtCommand({
-      query,
-      config: mockConfig,
-      onDebugMessage: mockOnDebugMessage,
-      messageId: 125,
-      signal: abortController.signal,
-    });
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 125,
+        signal: abortController.signal,
+      });
 
-    expect(result.processedQuery).toEqual([
-      { text: `@${filePath}` },
-      { text: '\n--- Content from referenced files ---' },
-      { text: `\nContent from ${filePath}:\n` },
-      { text: fileContent },
-      { text: '\n--- End of content ---' },
-    ]);
-    expect(result.shouldProceed).toBe(true);
-    // toolDisplays should be returned for caller to add to UI history
-    expect(result.toolDisplays).toBeDefined();
-    expect(result.toolDisplays).toHaveLength(1);
-    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
-  });
+      expect(result.processedQuery).toEqual([
+        { text: `@${filePath}` },
+        { text: '\n--- Content from referenced files ---' },
+        { text: `\nContent from ${filePath}:\n` },
+        { text: fileContent },
+        { text: '\n--- End of content ---' },
+      ]);
+      expect(result.shouldProceed).toBe(true);
+      // toolDisplays should be returned for caller to add to UI history
+      expect(result.toolDisplays).toBeDefined();
+      expect(result.toolDisplays).toHaveLength(1);
+      expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+    },
+  );
 
   it('should handle multiple @file references', async () => {
     const content1 = 'Content file1';
@@ -423,6 +867,32 @@ describe('handleAtCommand', () => {
       );
     });
 
+    it.skipIf(process.platform === 'win32')(
+      'should skip an ignored symlink whose target is allowed',
+      async () => {
+        await createTestFile(
+          path.join(testRootDir, '.gitignore'),
+          'ignored-link.txt',
+        );
+        const targetPath = await createTestFile(
+          path.join(testRootDir, 'allowed.txt'),
+          'allowed target content',
+        );
+        const aliasPath = path.join(testRootDir, 'ignored-link.txt');
+        await fsPromises.symlink(targetPath, aliasPath);
+
+        const result = await handleAtCommand({
+          query: `@${aliasPath}`,
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 2001,
+          signal: abortController.signal,
+        });
+
+        expect(result.processedQuery).toEqual([{ text: `@${aliasPath}` }]);
+      },
+    );
+
     it('should process non-git-ignored files normally', async () => {
       await createTestFile(
         path.join(testRootDir, '.gitignore'),
@@ -550,6 +1020,37 @@ describe('handleAtCommand', () => {
       );
       expect(mockOnDebugMessage).toHaveBeenCalledWith(
         `Ignored 1 files:\nQwen-ignored: ${qwenIgnoredFile}`,
+      );
+    });
+
+    it('should skip files ignored by .agentignore in @ commands', async () => {
+      await createTestFile(
+        path.join(testRootDir, '.agentignore'),
+        'agent/output.js',
+      );
+      const agentIgnoredFile = await createTestFile(
+        path.join(testRootDir, 'agent', 'output.js'),
+        'console.log("Hello");',
+      );
+      const query = `@${agentIgnoredFile}`;
+
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 204,
+        signal: abortController.signal,
+      });
+
+      expect(result).toMatchObject({
+        processedQuery: [{ text: query }],
+        shouldProceed: true,
+      });
+      expect(mockOnDebugMessage).toHaveBeenCalledWith(
+        `Path ${agentIgnoredFile} is qwen-ignored and will be skipped.`,
+      );
+      expect(mockOnDebugMessage).toHaveBeenCalledWith(
+        `Ignored 1 files:\nQwen-ignored: ${agentIgnoredFile}`,
       );
     });
   });
@@ -782,34 +1283,37 @@ describe('handleAtCommand', () => {
       });
     });
 
-    it('should still handle escaped spaces in paths before punctuation', async () => {
-      const fileContent = 'Spaced file content';
-      const filePath = await createTestFile(
-        path.join(testRootDir, 'spaced file.txt'),
-        fileContent,
-      );
-      const escapedPath = path.join(testRootDir, 'spaced\\ file.txt');
-      const query = `Check @${escapedPath}, it has spaces.`;
+    it.skipIf(process.platform === 'win32')(
+      'should still handle escaped spaces in paths before punctuation',
+      async () => {
+        const fileContent = 'Spaced file content';
+        const filePath = await createTestFile(
+          path.join(testRootDir, 'spaced file.txt'),
+          fileContent,
+        );
+        const escapedPath = path.join(testRootDir, 'spaced\\ file.txt');
+        const query = `Check @${escapedPath}, it has spaces.`;
 
-      const result = await handleAtCommand({
-        query,
-        config: mockConfig,
-        onDebugMessage: mockOnDebugMessage,
-        messageId: 412,
-        signal: abortController.signal,
-      });
+        const result = await handleAtCommand({
+          query,
+          config: mockConfig,
+          onDebugMessage: mockOnDebugMessage,
+          messageId: 412,
+          signal: abortController.signal,
+        });
 
-      expect(result).toMatchObject({
-        processedQuery: [
-          { text: `Check @${filePath}, it has spaces.` },
-          { text: '\n--- Content from referenced files ---' },
-          { text: `\nContent from ${filePath}:\n` },
-          { text: fileContent },
-          { text: '\n--- End of content ---' },
-        ],
-        shouldProceed: true,
-      });
-    });
+        expect(result).toMatchObject({
+          processedQuery: [
+            { text: `Check @${filePath}, it has spaces.` },
+            { text: '\n--- Content from referenced files ---' },
+            { text: `\nContent from ${filePath}:\n` },
+            { text: fileContent },
+            { text: '\n--- End of content ---' },
+          ],
+          shouldProceed: true,
+        });
+      },
+    );
 
     it('should not break file paths with periods in extensions', async () => {
       const fileContent = 'TypeScript content';
@@ -1130,7 +1634,7 @@ describe('handleAtCommand', () => {
 
       expect(result.toolDisplays).toBeDefined();
       expect(result.toolDisplays!.length).toBeGreaterThanOrEqual(1);
-      expect(result.toolDisplays![0].description).toContain('file.txt');
+      expect(result.toolDisplays![0].description).toBe('@specific-file.txt');
     });
 
     it('should mark per-file failures as Error status, not Success', async () => {
@@ -1156,6 +1660,463 @@ describe('handleAtCommand', () => {
         'Failed to read oversized.bin',
       );
       expect(result.toolDisplays![0].resultDisplay).toContain('10MB');
+    });
+  });
+
+  describe('MCP resource references (@server:uri)', () => {
+    const makeResourceConfig = (
+      readMcpResource: (
+        serverName: string,
+        uri: string,
+        options?: { signal?: AbortSignal },
+      ) => Promise<unknown>,
+    ): Config =>
+      ({
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getToolRegistry: () => ({ readMcpResource }),
+      }) as unknown as Config;
+
+    it('reads an @server:uri MCP resource and injects its text content', async () => {
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://doc', text: 'RESOURCE BODY' }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: 'summarize @myserver:res://doc please',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 600,
+        signal: abortController.signal,
+      });
+
+      expect(readMcpResource).toHaveBeenCalledWith('myserver', 'res://doc', {
+        signal: abortController.signal,
+      });
+      expect(result.shouldProceed).toBe(true);
+      const parts = result.processedQuery as Array<{ text?: string }>;
+      // The @server:uri reference is preserved verbatim in the prompt text.
+      expect(parts[0].text).toContain('@myserver:res://doc');
+      // The resource body is injected as a content part.
+      expect(JSON.stringify(result.processedQuery)).toContain('RESOURCE BODY');
+      expect(result.toolDisplays).toHaveLength(1);
+      expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+      // The success card reflects what was injected ('RESOURCE BODY' = 13).
+      expect(result.toolDisplays![0].resultDisplay).toBe('Injected 13 chars');
+      expect(result.filesRead).toContain('myserver:res://doc');
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'revalidates a file after asynchronous reference resolution',
+      async () => {
+        const filePath = await createTestFile(
+          path.join(testRootDir, 'swapped.txt'),
+          'safe content',
+        );
+        const outsideDir = await fsPromises.realpath(
+          await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-swap-outside-')),
+        );
+        const outsidePath = path.join(outsideDir, 'secret.txt');
+        await fsPromises.writeFile(outsidePath, 'outside secret');
+        const readMcpResource = vi.fn(async () => {
+          await fsPromises.unlink(filePath);
+          await fsPromises.symlink(outsidePath, filePath);
+          return {
+            contents: [{ uri: 'res://doc', text: 'resource body' }],
+          };
+        });
+
+        try {
+          const result = await handleAtCommand({
+            query: `inspect @${filePath} @myserver:res://doc`,
+            config: makeResourceConfig(readMcpResource),
+            onDebugMessage: mockOnDebugMessage,
+            messageId: 6001,
+            signal: abortController.signal,
+          });
+
+          expect(JSON.stringify(result.processedQuery)).not.toContain(
+            'outside secret',
+          );
+          expect(
+            (result.processedQuery as Array<{ text?: string }>)[0].text,
+          ).toContain(`@${filePath}`);
+          expect(result.filesRead).not.toContain(filePath);
+          expect(mockOnDebugMessage).toHaveBeenCalledWith(
+            `Path ${filePath} failed revalidation and will be skipped.`,
+          );
+        } finally {
+          await fsPromises.rm(outsideDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'prunes all labels for a skipped canonical file',
+      async () => {
+        const filePath = await createTestFile(
+          path.join(testRootDir, 'target.txt'),
+          'safe content',
+        );
+        const aliasPath = path.join(testRootDir, 'alias.txt');
+        await fsPromises.symlink(filePath, aliasPath);
+        const outsideDir = await fsPromises.realpath(
+          await fsPromises.mkdtemp(path.join(os.tmpdir(), 'at-swap-outside-')),
+        );
+        const outsidePath = path.join(outsideDir, 'secret.txt');
+        await fsPromises.writeFile(outsidePath, 'outside secret');
+        const readMcpResource = vi.fn(async () => {
+          await fsPromises.unlink(filePath);
+          await fsPromises.symlink(outsidePath, filePath);
+          return {
+            contents: [{ uri: 'res://doc', text: 'resource body' }],
+          };
+        });
+
+        try {
+          const result = await handleAtCommand({
+            query: `inspect @${aliasPath} @${filePath} @myserver:res://doc`,
+            config: makeResourceConfig(readMcpResource),
+            onDebugMessage: mockOnDebugMessage,
+            messageId: 6002,
+            signal: abortController.signal,
+          });
+
+          expect(JSON.stringify(result.processedQuery)).not.toContain(
+            'outside secret',
+          );
+          expect(result.filesRead).not.toContain(aliasPath);
+          expect(result.filesRead).not.toContain(filePath);
+          expect(result.filesRead).toContain('myserver:res://doc');
+        } finally {
+          await fsPromises.unlink(filePath).catch(() => {});
+          await fsPromises.rm(outsideDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('keeps spacing when a deleted file is pruned after async resource resolution', async () => {
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'image.png'),
+        'image bytes',
+      );
+      const readMcpResource = vi.fn(async () => {
+        await fsPromises.unlink(filePath);
+        return {
+          contents: [{ uri: 'res://doc', text: 'resource body' }],
+        };
+      });
+      const query = `inspect @${filePath} @myserver:res://doc now`;
+
+      const result = await handleAtCommand({
+        query,
+        config: makeResourceConfig(readMcpResource),
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 6003,
+        signal: abortController.signal,
+      });
+
+      expect((result.processedQuery as Array<{ text?: string }>)[0].text).toBe(
+        query,
+      );
+      expect(result.filesRead).not.toContain(filePath);
+      expect(mockOnDebugMessage).toHaveBeenCalledWith(
+        `Path ${filePath} changed before it could be read and will be skipped.`,
+      );
+    });
+
+    it('preserves @mcp:<uri> as a resource ref when a server is named mcp', async () => {
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://doc', text: 'RESOURCE BODY' }],
+      });
+      const config = {
+        ...mockConfig,
+        getMcpServers: () => ({ mcp: {}, demo: {} }),
+        getToolRegistry: () => ({ readMcpResource }),
+      } as unknown as Config;
+
+      const result = await handleAtCommand({
+        query: 'Use @mcp:res://doc now',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 606,
+        signal: abortController.signal,
+      });
+
+      expect(readMcpResource).toHaveBeenCalledWith('mcp', 'res://doc', {
+        signal: abortController.signal,
+      });
+      const parts = result.processedQuery as Array<{ text?: string }>;
+      const text = parts.map((part) => part.text ?? '').join('\n');
+      expect(text).toContain('Use @mcp:res://doc now');
+      expect(text).toContain('RESOURCE BODY');
+      expect(text).not.toContain('--- MCP Server: demo ---');
+    });
+
+    it('injects both a @file and a @server:uri resource, surfacing both tool cards', async () => {
+      const fileContent = 'FILE BODY';
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'doc.txt'),
+        fileContent,
+      );
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://r', text: 'RESOURCE BODY' }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: `@${filePath} and @myserver:res://r`,
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 604,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const serialized = JSON.stringify(result.processedQuery);
+      // Both the file body and the resource body land in the prompt.
+      expect(serialized).toContain('FILE BODY');
+      expect(serialized).toContain('RESOURCE BODY');
+      const names = (result.toolDisplays ?? []).map((d) => d.name);
+      expect(names).toContain('Read File');
+      expect(names).toContain('Read MCP Resource');
+      expect(result.filesRead).toContain('myserver:res://r');
+    });
+
+    it('marks the success card "(no readable content)" when a resource yields no parts', async () => {
+      // A valid MCP response with empty `contents` (or only resource-link /
+      // metadata entries) must not look like a silent successful injection.
+      const readMcpResource = vi.fn().mockResolvedValue({ contents: [] });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://empty',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 606,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.toolDisplays).toHaveLength(1);
+      expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+      expect(result.toolDisplays![0].resultDisplay).toBe(
+        '(no readable content)',
+      );
+    });
+
+    it('does NOT treat @prefix:uri as a resource when prefix is not a configured server', async () => {
+      const readMcpResource = vi.fn();
+      const config = makeResourceConfig(readMcpResource);
+
+      await handleAtCommand({
+        query: 'see @other:thing',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 601,
+        signal: abortController.signal,
+      });
+
+      // 'other' is not a configured server → falls through to filesystem
+      // handling; the resource read path must not fire.
+      expect(readMcpResource).not.toHaveBeenCalled();
+    });
+
+    it('surfaces an error tool-card but still proceeds when a resource read fails', async () => {
+      const readMcpResource = vi
+        .fn()
+        .mockRejectedValue(new Error('resource boom'));
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: 'check @myserver:res://x',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 602,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.toolDisplays).toHaveLength(1);
+      expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Error);
+      expect(result.toolDisplays![0].resultDisplay).toContain('resource boom');
+    });
+
+    it('injects blob resource content as inlineData', async () => {
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://img', mimeType: 'image/png', blob: 'AAAA' }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://img',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 603,
+        signal: abortController.signal,
+      });
+
+      const parts = result.processedQuery as Array<Record<string, unknown>>;
+      const inline = parts.find((p) => 'inlineData' in p) as
+        | { inlineData: { mimeType: string; data: string } }
+        | undefined;
+      expect(inline).toBeDefined();
+      expect(inline!.inlineData).toMatchObject({
+        mimeType: 'image/png',
+        data: 'AAAA',
+      });
+    });
+
+    it('frames resource content with attribution delimiters', async () => {
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://d', text: 'HELLO' }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://d',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 607,
+        signal: abortController.signal,
+      });
+
+      const serialized = JSON.stringify(result.processedQuery);
+      // The body is fenced (with a per-call nonce after the label) so the model
+      // can tell server content from the user's own prompt and a hostile server
+      // can't forge the closing marker.
+      expect(serialized).toContain(
+        '--- Content from MCP resource myserver:res://d [',
+      );
+      expect(serialized).toContain('HELLO');
+      expect(serialized).toContain(
+        '--- End of MCP resource myserver:res://d [',
+      );
+    });
+
+    it('injects an attributed diagnostic for an empty @ resource read', async () => {
+      // An empty read must not leave a dangling @server:uri with no content;
+      // the @ path injects the same diagnostic the read_mcp_resource tool does.
+      const readMcpResource = vi.fn().mockResolvedValue({ contents: [] });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://empty',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 612,
+        signal: abortController.signal,
+      });
+
+      expect(JSON.stringify(result.processedQuery)).toContain(
+        '--- MCP resource myserver:res://empty: (no readable content) ---',
+      );
+    });
+
+    it('caps oversized resource text and flags it as truncated', async () => {
+      const big = 'x'.repeat(100_001);
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://big', text: big }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://big',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 608,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      expect(result.toolDisplays![0].resultDisplay).toBe(
+        'Injected 100000 chars (truncated)',
+      );
+    });
+
+    it('skips an oversized blob and flags the card', async () => {
+      // 8M cap + 1 → skipped entirely (no inlineData injected).
+      const bigBlob = 'A'.repeat(8_000_001);
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://huge', mimeType: 'image/png', blob: bigBlob }],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://huge',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 609,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const hasInline = (
+        result.processedQuery as Array<Record<string, unknown>>
+      ).some((p) => 'inlineData' in p);
+      expect(hasInline).toBe(false);
+      expect(result.toolDisplays![0].resultDisplay).toBe(
+        '(content too large — skipped)',
+      );
+    });
+
+    it('caps CUMULATIVE blob size: two sub-limit blobs whose sum exceeds the cap', async () => {
+      // Each 5M blob is under the 8M per-blob cap, but together they exceed it.
+      // The first is injected; the second pushes the running total over and is
+      // skipped — the per-blob check alone would have let both through.
+      const blob = 'A'.repeat(5_000_000);
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [
+          { uri: 'res://m', mimeType: 'image/png', blob },
+          { uri: 'res://m', mimeType: 'image/png', blob },
+        ],
+      });
+      const config = makeResourceConfig(readMcpResource);
+
+      const result = await handleAtCommand({
+        query: '@myserver:res://m',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 610,
+        signal: abortController.signal,
+      });
+
+      expect(result.shouldProceed).toBe(true);
+      const inlineCount = (
+        result.processedQuery as Array<Record<string, unknown>>
+      ).filter((p) => 'inlineData' in p).length;
+      expect(inlineCount).toBe(1); // only the first blob fit
+      expect(result.toolDisplays![0].resultDisplay).toBe(
+        'Injected 1 attachment (truncated)',
+      );
+    });
+
+    it('resolves a server name that itself contains a colon (@my:server:uri)', async () => {
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://x', text: 'COLON BODY' }],
+      });
+      // Both "my" and "my:server" are configured: the prefix is ambiguous,
+      // and longest-prefix disambiguation must pick "my:server".
+      const config = {
+        ...mockConfig,
+        getMcpServers: () => ({ my: {}, 'my:server': {} }),
+        getToolRegistry: () => ({ readMcpResource }),
+      } as unknown as Config;
+
+      const result = await handleAtCommand({
+        query: '@my:server:res://x',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 611,
+        signal: abortController.signal,
+      });
+
+      // Longest-prefix match picks the full "my:server", not "my".
+      expect(readMcpResource).toHaveBeenCalledWith('my:server', 'res://x', {
+        signal: abortController.signal,
+      });
+      expect(JSON.stringify(result.processedQuery)).toContain('COLON BODY');
     });
   });
 });

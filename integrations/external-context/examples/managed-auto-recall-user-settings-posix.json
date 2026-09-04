@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "exec '/absolute/path/to/node' '/administrator/path/to/qwen-code/integrations/external-context/dist/auto-recall.js'",
+            "timeout": 8000,
+            "name": "external-context-auto-recall",
+            "statusMessage": "Retrieving external context"
+          }
+        ]
+      }
+    ]
+  },
+  "$version": 4
+}

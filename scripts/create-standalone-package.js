@@ -1,0 +1,1055 @@
+#!/usr/bin/env node
+
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { pipeline } from 'node:stream/promises';
+import { fileURLToPath } from 'node:url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const rootDir = path.resolve(__dirname, '..');
+const distDir = path.join(rootDir, 'dist');
+
+const TARGETS = new Map([
+  [
+    'darwin-arm64',
+    { outputExtension: 'tar.gz', nodeExecutable: ['bin', 'node'] },
+  ],
+  [
+    'darwin-x64',
+    { outputExtension: 'tar.gz', nodeExecutable: ['bin', 'node'] },
+  ],
+  [
+    'linux-arm64',
+    { outputExtension: 'tar.gz', nodeExecutable: ['bin', 'node'] },
+  ],
+  ['linux-x64', { outputExtension: 'tar.gz', nodeExecutable: ['bin', 'node'] }],
+  ['win-x64', { outputExtension: 'zip', nodeExecutable: ['node.exe'] }],
+]);
+
+// Standalone target -> prebuildify platform-arch dir name (process.platform
+// based, so Windows is 'win32'). Only this archive's matching prebuild is
+// bundled, keeping each archive lean and correct-arch.
+const TARGET_PREBUILD_DIR = new Map([
+  ['darwin-arm64', 'darwin-arm64'],
+  ['darwin-x64', 'darwin-x64'],
+  ['linux-arm64', 'linux-arm64'],
+  ['linux-x64', 'linux-x64'],
+  ['win-x64', 'win32-x64'],
+]);
+
+const TARGET_CLIPBOARD_PACKAGE = new Map([
+  ['darwin-arm64', '@teddyzhu/clipboard-darwin-arm64'],
+  ['darwin-x64', '@teddyzhu/clipboard-darwin-x64'],
+  ['linux-arm64', '@teddyzhu/clipboard-linux-arm64-gnu'],
+  ['linux-x64', '@teddyzhu/clipboard-linux-x64-gnu'],
+  ['win-x64', '@teddyzhu/clipboard-win32-x64-msvc'],
+]);
+
+// Temporary OpenTUI preview: platform packages whose native render library is
+// resolved at runtime via `import('@opentui/core-<platform>-<arch>')`. Linux
+// is glibc-only: the bundled Bun runtime is glibc-linked and cannot start on
+// musl hosts, so shipping -musl render packages would claim support the
+// archive cannot deliver.
+const TARGET_OPENTUI_PACKAGES = new Map([
+  ['darwin-arm64', ['@opentui/core-darwin-arm64']],
+  ['darwin-x64', ['@opentui/core-darwin-x64']],
+  ['linux-arm64', ['@opentui/core-linux-arm64']],
+  ['linux-x64', ['@opentui/core-linux-x64']],
+  ['win-x64', ['@opentui/core-win32-x64']],
+]);
+
+const DIST_REQUIRED_PATHS = [
+  'cli.js',
+  'cli-entry.js',
+  'chunks',
+  'vendor',
+  'bundled/qc-helper/docs',
+];
+const DIST_ALLOWED_ENTRIES = new Set([
+  'cli.js',
+  // bin wrapper emitted by prepare-package.js. Standalone shims use it for
+  // `qwen serve` so daemon startup gets the same fast path as npm installs.
+  'cli-entry.js',
+  // fzf fuzzy-search worker; esbuild emits it as a standalone entry that must
+  // sit next to cli.js so `new URL('./fzfWorker.js', ...)` resolves at runtime.
+  'fzfWorker.js',
+  'chunks',
+  'vendor',
+  'bundled',
+  'package.json',
+  'README.md',
+  'LICENSE',
+  // Digest of the review sources this bundle was built from, stamped by
+  // copy_bundle_assets.js. Harmless to ship: a standalone install lays the
+  // dist entries out under `lib/`, and the staleness check only applies to
+  // a `<root>/dist/cli.js` layout — it never reads the stamp there.
+  'review-sources.sha256',
+  'locales',
+  'examples',
+  // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
+  // web-tree-sitter wasm, native render library) relocated by
+  // copy_bundle_assets.js; the bundled renderer sets OTUI_ASSET_ROOT to this
+  // directory for code-block syntax highlighting. copyOpenTuiAddon syncs the
+  // target's native library into it.
+  'opentui-assets',
+  // Web Shell SPA served at the daemon root by `qwen serve` (index.html +
+  // assets/). Copied into dist/web-shell/ by copy_bundle_assets.js when the
+  // web-shell workspace has been built; optional, so it's allowed but not
+  // required.
+  'web-shell',
+]);
+const DIST_ALLOWED_ENTRY_PATTERNS = [
+  /^sandbox-macos-(permissive|restrictive)-(open|closed|proxied)\.sb$/,
+];
+// Emitted into dist/ by prepare-package.js for npm publishing only;
+// standalone archives must not copy them into lib/.
+const DIST_NPM_PACKAGE_ONLY_ENTRIES = new Set(['postinstall.js', 'patches']);
+const ROOT_REQUIRED_PATHS = ['README.md', 'LICENSE'];
+
+if (isMainModule()) {
+  try {
+    await main();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exitCode = 1;
+  }
+}
+
+async function main() {
+  const args = parseArgs(process.argv.slice(2));
+
+  if (args.help) {
+    printUsage();
+    return;
+  }
+
+  const target = args.target;
+  if (!target || !TARGETS.has(target)) {
+    fail(`--target must be one of: ${Array.from(TARGETS.keys()).join(', ')}`);
+  }
+
+  if (args.runtime !== 'node' && args.runtime !== 'bun') {
+    fail('--runtime must be either "node" or "bun"');
+  }
+
+  if (!args.nodeArchive) {
+    fail('--node-archive is required');
+  }
+
+  const nodeArchive = path.resolve(args.nodeArchive);
+  if (!fs.existsSync(nodeArchive)) {
+    fail(`Node.js archive not found: ${nodeArchive}`);
+  }
+
+  assertRequiredInputs();
+
+  const version = args.version || readPackageVersion();
+  const outDir = path.resolve(args.outDir || path.join(distDir, 'standalone'));
+  fs.mkdirSync(outDir, { recursive: true });
+
+  const targetConfig = TARGETS.get(target);
+  const outputName = standaloneArchiveName(target, args.runtime);
+  const outputPath = path.join(outDir, outputName);
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-standalone-'));
+
+  try {
+    const packageRoot = path.join(tempRoot, 'qwen-code');
+    const runtimeExtractDir = path.join(tempRoot, 'runtime');
+    fs.mkdirSync(packageRoot, { recursive: true });
+    fs.mkdirSync(runtimeExtractDir, { recursive: true });
+
+    copyRuntimeAssets(packageRoot, outDir, args.runtime);
+    copyNativeAddon(packageRoot, target);
+    copyClipboardAddon(packageRoot, target, args.nativeModulesDir);
+    if (args.runtime === 'bun') {
+      copyOpenTuiAddon(packageRoot, target, args.opentuiModulesDir);
+    }
+    extractNodeArchive(nodeArchive, runtimeExtractDir);
+    const nodeDir = path.join(packageRoot, 'node');
+    if (args.runtime === 'bun') {
+      installBunRuntime(runtimeExtractDir, nodeDir, target);
+      validateBunRuntime(target, packageRoot);
+    } else {
+      copyExtractedNode(runtimeExtractDir, nodeDir);
+    }
+    validateNodeRuntime(target, nodeDir);
+    writeShims(packageRoot, args.runtime);
+    writeManifest(packageRoot, {
+      version,
+      target,
+      nodeArchive: path.basename(nodeArchive),
+      runtime: args.runtime,
+    });
+
+    if (fs.existsSync(outputPath)) {
+      fs.rmSync(outputPath, { force: true });
+    }
+    createArchive(targetConfig.outputExtension, outputPath, tempRoot);
+    if (!args.skipChecksums) {
+      await writeSha256Sums(outDir);
+    }
+
+    console.log(`Created ${path.relative(rootDir, outputPath)}`);
+    if (!args.skipChecksums) {
+      console.log(
+        `Updated ${path.relative(rootDir, path.join(outDir, 'SHA256SUMS'))}`,
+      );
+    }
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+function isMainModule() {
+  return process.argv[1] && path.resolve(process.argv[1]) === __filename;
+}
+
+// Canonical standalone archive name for a target and runtime flavor. The bun
+// runtime is the temporary OpenTUI preview flavor, so its archives carry a
+// -opentui-preview suffix and sit alongside the classic Node.js archives in
+// gated releases. build-standalone-release.js and
+// verify-installation-release.js derive their expected names from this
+// function, so the suffix stays consistent across the release pipeline.
+function standaloneArchiveName(target, runtime = 'node') {
+  const targetConfig = TARGETS.get(target);
+  if (!targetConfig) {
+    fail(`Unknown target: ${target}`);
+  }
+  const flavorSuffix = runtime === 'bun' ? '-opentui-preview' : '';
+  return `qwen-code-${target}${flavorSuffix}.${targetConfig.outputExtension}`;
+}
+
+function parseArgs(argv) {
+  const args = {
+    help: false,
+    nativeModulesDir: undefined,
+    opentuiModulesDir: undefined,
+    outDir: undefined,
+    nodeArchive: undefined,
+    runtime: 'node',
+    skipChecksums: false,
+    target: undefined,
+    version: undefined,
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    switch (arg) {
+      case '--help':
+      case '-h':
+        args.help = true;
+        break;
+      case '--target':
+        args.target = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--runtime':
+        args.runtime = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--node-archive':
+        args.nodeArchive = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--native-modules-dir':
+        args.nativeModulesDir = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--opentui-modules-dir':
+        args.opentuiModulesDir = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--out-dir':
+        args.outDir = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--version':
+        args.version = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--skip-checksums':
+        args.skipChecksums = true;
+        break;
+      default:
+        fail(`Unknown option: ${arg}`);
+    }
+  }
+
+  return args;
+}
+
+function readOptionValue(argv, index, optionName) {
+  const value = argv[index + 1];
+  if (!value || value.startsWith('-')) {
+    fail(`${optionName} requires a value`);
+  }
+  return value;
+}
+
+function printUsage() {
+  console.log(`Qwen Code standalone package builder
+
+Usage:
+  npm run package:standalone -- --target TARGET --node-archive PATH [OPTIONS]
+
+Options:
+  --target TARGET         One of: ${Array.from(TARGETS.keys()).join(', ')}
+  --runtime RUNTIME       Runtime archive flavor: "node" (default) or "bun".
+                          Temporary OpenTUI preview: "bun" installs the Bun
+                          binary at the bundled runtime path so the OpenTUI
+                          renderer (needs bun:ffi) works standalone.
+  --node-archive PATH     Downloaded Node.js runtime archive.
+  --native-modules-dir DIR
+                          Staged native node_modules directory. Missing
+                          clipboard packages are fatal when this is supplied.
+  --opentui-modules-dir DIR
+                          Staged node_modules directory holding @opentui
+                          platform packages. Used with --runtime bun; missing
+                          packages are fatal when this is supplied.
+  --out-dir DIR           Output directory. Defaults to dist/standalone.
+  --version VERSION       Qwen Code version. Defaults to package.json version.
+  --skip-checksums        Do not update SHA256SUMS. Used by release packaging.
+  -h, --help              Show this help message.`);
+}
+
+function assertRequiredInputs() {
+  if (!fs.existsSync(distDir)) {
+    fail('dist/ directory not found. Run "npm run bundle" first.');
+  }
+
+  for (const relativePath of DIST_REQUIRED_PATHS) {
+    const fullPath = path.join(distDir, relativePath);
+    if (!fs.existsSync(fullPath)) {
+      fail(
+        `Required dist asset missing: ${fullPath}. ` +
+          'Run "npm run bundle" and "npm run prepare:package" first.',
+      );
+    }
+  }
+
+  for (const relativePath of ROOT_REQUIRED_PATHS) {
+    const fullPath = path.join(rootDir, relativePath);
+    if (!fs.existsSync(fullPath)) {
+      fail(`Required repository file missing: ${fullPath}`);
+    }
+  }
+}
+
+function readPackageVersion() {
+  const packageJsonPath = path.join(rootDir, 'package.json');
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+  return packageJson.version;
+}
+
+function copyRuntimeAssets(packageRoot, outDir, runtime) {
+  const libDir = path.join(packageRoot, 'lib');
+  const skippedDistEntry = topLevelDistEntryForPath(outDir);
+  fs.mkdirSync(libDir, { recursive: true });
+
+  // Classic Node packaging carries no renderer payload: the OpenTUI backend
+  // needs bun:ffi, and cross-built archives would hold another platform's
+  // native library, so the all-or-nothing asset gate could never activate.
+  // (--runtime=bun copies it here and prunes it to the target's libraries in
+  // copyOpenTuiAddon.)
+  for (const entry of fs.readdirSync(distDir)) {
+    // Standalone rebuilds a clean, target-trimmed lib/node_modules via the
+    // native addon copy steps. If a local dist/node_modules exists from older
+    // packaging output or manual testing, copying it would drag in unrelated
+    // packages or every platform's native prebuild.
+    if (
+      entry === skippedDistEntry ||
+      entry === '.DS_Store' ||
+      entry === 'node_modules' ||
+      (entry === 'opentui-assets' && runtime !== 'bun') ||
+      DIST_NPM_PACKAGE_ONLY_ENTRIES.has(entry)
+    ) {
+      continue;
+    }
+    if (!isAllowedDistEntry(entry)) {
+      fail(`Unexpected dist asset: ${path.join(distDir, entry)}`);
+    }
+    fs.cpSync(path.join(distDir, entry), path.join(libDir, entry), {
+      recursive: true,
+      dereference: true,
+      verbatimSymlinks: false,
+    });
+  }
+  assertNoSymlinks(libDir, 'Copied runtime assets still contain symlinks.');
+
+  for (const fileName of ROOT_REQUIRED_PATHS) {
+    fs.copyFileSync(
+      path.join(rootDir, fileName),
+      path.join(packageRoot, fileName),
+    );
+  }
+
+  fs.copyFileSync(
+    path.join(rootDir, 'package.json'),
+    path.join(packageRoot, 'package.json'),
+  );
+}
+
+// Bundle the @qwen-code/audio-capture native addon (compiled JS + only this
+// target's prebuild + its runtime dep node-gyp-build) into lib/node_modules so
+// streaming voice works in standalone installs. The addon is esbuild-external
+// and resolved at runtime via import('@qwen-code/audio-capture') from
+// lib/cli.js, so lib/node_modules is where Node looks. Without it, standalone
+// users fall back to SoX/arecord (batch only) — #5502 follow-up #5590.
+function copyNativeAddon(packageRoot, target) {
+  const prebuildDirName = TARGET_PREBUILD_DIR.get(target);
+  const addonSrc = path.join(rootDir, 'packages', 'audio-capture');
+  const prebuildSrc = path.join(addonSrc, 'prebuilds', prebuildDirName);
+  if (!hasNativePrebuild(prebuildSrc)) {
+    if (process.env.QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1') {
+      fail(
+        `Required audio-capture prebuild is missing for ${prebuildDirName}: ${prebuildSrc}`,
+      );
+    }
+    // No prebuild for this target (e.g. a local build without the release
+    // artifacts). Ship without the addon: voice degrades to the SoX/arecord
+    // fallback, streaming is unavailable. The release pipeline downloads
+    // prebuilds before packaging, so release archives do bundle it.
+    console.warn(
+      `[standalone] no audio-capture prebuild for ${prebuildDirName}; ` +
+        'bundling without the native addon (streaming voice unavailable; ' +
+        'batch via SoX still works).',
+    );
+    return;
+  }
+
+  const nodeRequire = createRequire(import.meta.url);
+  const nodeGypBuildSrc = path.dirname(
+    nodeRequire.resolve('node-gyp-build/package.json'),
+  );
+
+  const modulesDir = path.join(packageRoot, 'lib', 'node_modules');
+  const addonDest = path.join(modulesDir, '@qwen-code', 'audio-capture');
+  fs.mkdirSync(addonDest, { recursive: true });
+
+  // Trimmed manifest: keep type/exports so ESM resolution works; drop the
+  // install hook (no npm runs inside the archive).
+  const addonPkg = JSON.parse(
+    fs.readFileSync(path.join(addonSrc, 'package.json'), 'utf8'),
+  );
+  delete addonPkg.scripts;
+  delete addonPkg.devDependencies;
+  fs.writeFileSync(
+    path.join(addonDest, 'package.json'),
+    JSON.stringify(addonPkg, null, 2) + '\n',
+  );
+
+  const copyOpts = {
+    recursive: true,
+    dereference: true,
+    verbatimSymlinks: false,
+  };
+  fs.cpSync(path.join(addonSrc, 'dist'), path.join(addonDest, 'dist'), {
+    ...copyOpts,
+    filter: (src) => !/\.test\.(d\.)?[mc]?[jt]s(\.map)?$/.test(src),
+  });
+  fs.cpSync(
+    prebuildSrc,
+    path.join(addonDest, 'prebuilds', prebuildDirName),
+    copyOpts,
+  );
+  // node-gyp-build is the addon's only runtime dependency (zero-dep itself).
+  fs.cpSync(nodeGypBuildSrc, path.join(modulesDir, 'node-gyp-build'), copyOpts);
+
+  assertNoSymlinks(modulesDir, 'Bundled native addon still contains symlinks.');
+}
+
+function copyClipboardAddon(packageRoot, target, nativeModulesDir) {
+  const modulesSrc = path.resolve(
+    nativeModulesDir || path.join(rootDir, 'node_modules'),
+  );
+  const nativePackage = TARGET_CLIPBOARD_PACKAGE.get(target);
+  const packageNames = ['@teddyzhu/clipboard', nativePackage];
+  const packageSources = packageNames.map((packageName) =>
+    path.join(modulesSrc, packageName),
+  );
+  const nativePackageSrc = packageSources[1];
+  const hasRequiredFiles =
+    packageSources.every((packageSrc) =>
+      fs.existsSync(path.join(packageSrc, 'package.json')),
+    ) &&
+    fs.readdirSync(nativePackageSrc).some((entry) => entry.endsWith('.node'));
+
+  if (!hasRequiredFiles) {
+    const message = `clipboard packages for ${target} are missing from ${modulesSrc}`;
+    if (nativeModulesDir) {
+      fail(`Required ${message}`);
+    }
+    console.warn(
+      `[standalone] ${message}; bundling without clipboard image support.`,
+    );
+    return;
+  }
+
+  const modulesDest = path.join(packageRoot, 'lib', 'node_modules');
+  const copyOpts = {
+    recursive: true,
+    dereference: true,
+    verbatimSymlinks: false,
+  };
+  for (let index = 0; index < packageNames.length; index += 1) {
+    fs.cpSync(
+      packageSources[index],
+      path.join(modulesDest, packageNames[index]),
+      copyOpts,
+    );
+  }
+
+  assertNoSymlinks(
+    modulesDest,
+    'Bundled clipboard addon still contains symlinks.',
+  );
+}
+
+// Temporary OpenTUI preview: bundle the target's @opentui platform package(s)
+// into lib/node_modules so the backend's runtime
+// `import('@opentui/core-<platform>-<arch>')` resolves inside the archive.
+function copyOpenTuiAddon(packageRoot, target, opentuiModulesDir) {
+  const packageNames = TARGET_OPENTUI_PACKAGES.get(target) || [];
+  const modulesSrc = path.resolve(
+    opentuiModulesDir || path.join(rootDir, 'node_modules'),
+  );
+  const modulesDest = path.join(packageRoot, 'lib', 'node_modules');
+  // The relocated OpenTUI asset root written by copy_bundle_assets.js carries
+  // only the BUILD host's native library; sync this TARGET's libraries into
+  // it so the runtime's OTUI_ASSET_ROOT completeness check (which includes
+  // the native library) passes inside the archive.
+  const assetRoot = path.join(packageRoot, 'lib', 'opentui-assets');
+  const copyOpts = {
+    recursive: true,
+    dereference: true,
+    verbatimSymlinks: false,
+  };
+  let copiedAnyPackage = false;
+
+  for (const packageName of packageNames) {
+    const packageSrc = path.join(modulesSrc, packageName);
+    const nativeLibraries = fs.existsSync(path.join(packageSrc, 'package.json'))
+      ? fs
+          .readdirSync(packageSrc)
+          .filter((entry) => /\.(dylib|so|dll)$/.test(entry))
+      : [];
+
+    if (nativeLibraries.length === 0) {
+      const message = `OpenTUI platform package ${packageName} for ${target} is missing from ${modulesSrc}`;
+      if (opentuiModulesDir) {
+        fail(`Required ${message}`);
+      }
+      console.warn(`[standalone] ${message}; OpenTUI renderer unavailable.`);
+      continue;
+    }
+
+    copiedAnyPackage = true;
+    fs.cpSync(packageSrc, path.join(modulesDest, packageName), copyOpts);
+
+    for (const library of nativeLibraries) {
+      const assetDestDir = path.join(assetRoot, packageName);
+      fs.mkdirSync(assetDestDir, { recursive: true });
+      fs.copyFileSync(
+        path.join(packageSrc, library),
+        path.join(assetDestDir, library),
+      );
+    }
+  }
+
+  // The relocated tree ships the BUILD host's platform library; any other
+  // platform package directory is dead weight the runtime can never load.
+  if (packageNames.length > 0) {
+    const targetBasenames = new Set(
+      packageNames.map((packageName) => packageName.split('/')[1]),
+    );
+    const scopeDir = path.join(assetRoot, '@opentui');
+    if (fs.existsSync(scopeDir)) {
+      for (const entry of fs.readdirSync(scopeDir)) {
+        if (/^core-/.test(entry) && !targetBasenames.has(entry)) {
+          fs.rmSync(path.join(scopeDir, entry), {
+            recursive: true,
+            force: true,
+          });
+        }
+      }
+    }
+  }
+
+  // The warn-only degradation path copies nothing, so lib/node_modules may
+  // not exist here.
+  if (copiedAnyPackage) {
+    assertNoSymlinks(
+      modulesDest,
+      'Bundled OpenTUI addon still contains symlinks.',
+    );
+  }
+}
+
+function hasNativePrebuild(prebuildDir) {
+  return (
+    fs.existsSync(prebuildDir) &&
+    fs.readdirSync(prebuildDir).some((entry) => entry.endsWith('.node'))
+  );
+}
+
+function topLevelDistEntryForPath(candidatePath) {
+  const relative = path.relative(distDir, candidatePath);
+  if (
+    relative === '' ||
+    relative.startsWith('..') ||
+    path.isAbsolute(relative)
+  ) {
+    return undefined;
+  }
+
+  return relative.split(path.sep)[0];
+}
+
+function isAllowedDistEntry(entry) {
+  return (
+    DIST_ALLOWED_ENTRIES.has(entry) ||
+    DIST_ALLOWED_ENTRY_PATTERNS.some((pattern) => pattern.test(entry))
+  );
+}
+
+function extractNodeArchive(nodeArchive, extractDir) {
+  if (nodeArchive.endsWith('.zip')) {
+    extractZipArchive(nodeArchive, extractDir);
+    return;
+  }
+
+  if (
+    nodeArchive.endsWith('.tar.gz') ||
+    nodeArchive.endsWith('.tgz') ||
+    nodeArchive.endsWith('.tar.xz')
+  ) {
+    run('tar', ['-xf', nodeArchive, '-C', extractDir]);
+    return;
+  }
+
+  fail(
+    `Unsupported Node.js archive format: ${nodeArchive}. Expected .zip, .tar.gz, .tgz, or .tar.xz.`,
+  );
+}
+
+function extractZipArchive(nodeArchive, extractDir) {
+  if (process.platform === 'win32') {
+    run(
+      'powershell',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        'Expand-Archive -LiteralPath $env:QWEN_NODE_ARCHIVE -DestinationPath $env:QWEN_EXTRACT_DIR -Force',
+      ],
+      {
+        env: {
+          ...process.env,
+          QWEN_NODE_ARCHIVE: nodeArchive,
+          QWEN_EXTRACT_DIR: extractDir,
+        },
+      },
+    );
+    return;
+  }
+
+  run('unzip', ['-q', nodeArchive, '-d', extractDir]);
+}
+
+function copyExtractedNode(extractDir, nodeDir) {
+  const entries = fs
+    .readdirSync(extractDir)
+    .filter((entry) => entry !== '.DS_Store');
+  if (entries.length === 0) {
+    fail('Node.js archive did not contain any files.');
+  }
+
+  const sourceRoot =
+    entries.length === 1 &&
+    fs.statSync(path.join(extractDir, entries[0])).isDirectory()
+      ? path.join(extractDir, entries[0])
+      : extractDir;
+
+  // Official Unix Node.js archives include internal npm/npx symlinks.
+  // The installer rejects symlinks in final archives, so keep safe internal
+  // targets by copying their referents during a single checked traversal.
+  copyNodeRuntimeEntry(sourceRoot, nodeDir, {
+    realRoot: fs.realpathSync(sourceRoot),
+    sourceRoot,
+    activeDirectories: new Set(),
+  });
+}
+
+function copyNodeRuntimeEntry(source, destination, state) {
+  const lstat = fs.lstatSync(source);
+
+  if (lstat.isSymbolicLink()) {
+    copyNodeRuntimeEntry(
+      resolveRuntimeSymlink(source, state),
+      destination,
+      state,
+    );
+    return;
+  }
+
+  if (lstat.isDirectory()) {
+    const realSource = fs.realpathSync(source);
+    if (state.activeDirectories.has(realSource)) {
+      fail(
+        `Node.js runtime contains a symlink cycle at ${displayRuntimePath(
+          state,
+          source,
+        )}`,
+      );
+    }
+
+    state.activeDirectories.add(realSource);
+    fs.mkdirSync(destination, { recursive: true });
+    fs.chmodSync(destination, lstat.mode);
+    for (const entry of fs.readdirSync(source)) {
+      copyNodeRuntimeEntry(
+        path.join(source, entry),
+        path.join(destination, entry),
+        state,
+      );
+    }
+    state.activeDirectories.delete(realSource);
+    return;
+  }
+
+  if (lstat.isFile()) {
+    fs.copyFileSync(source, destination);
+    fs.chmodSync(destination, lstat.mode);
+    return;
+  }
+
+  fail(`Unsupported Node.js runtime entry type: ${source}`);
+}
+
+function resolveRuntimeSymlink(source, state) {
+  const target = fs.readlinkSync(source);
+  const resolvedTarget = path.resolve(path.dirname(source), target);
+  let realTarget;
+  try {
+    realTarget = fs.realpathSync(resolvedTarget);
+  } catch (error) {
+    const errorCode =
+      error && typeof error === 'object' && 'code' in error
+        ? error.code
+        : undefined;
+    const reason =
+      errorCode === 'ELOOP' ? 'a symlink cycle' : 'a missing target';
+    fail(
+      `Node.js runtime symlink points to ${reason}: ${displayRuntimePath(
+        state,
+        source,
+      )} -> ${target}`,
+    );
+  }
+
+  if (!isPathInside(state.realRoot, realTarget)) {
+    fail(
+      `Node.js runtime symlink escapes the archive: ${displayRuntimePath(
+        state,
+        source,
+      )} -> ${target}`,
+    );
+  }
+
+  return resolvedTarget;
+}
+
+function displayRuntimePath(state, source) {
+  return path.relative(state.sourceRoot, source) || '.';
+}
+
+function assertNoSymlinks(root, message) {
+  for (const entry of walkDirectory(root)) {
+    if (fs.lstatSync(entry).isSymbolicLink()) {
+      fail(`${message} First symlink: ${path.relative(root, entry)}`);
+    }
+  }
+}
+
+function* walkDirectory(root) {
+  for (const entry of fs.readdirSync(root)) {
+    const fullPath = path.join(root, entry);
+    yield fullPath;
+    if (fs.lstatSync(fullPath).isDirectory()) {
+      yield* walkDirectory(fullPath);
+    }
+  }
+}
+
+function isPathInside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === '' ||
+    (!relative.startsWith('..') && !path.isAbsolute(relative))
+  );
+}
+
+function validateNodeRuntime(target, nodeDir) {
+  const targetConfig = TARGETS.get(target);
+  const executablePath = path.join(nodeDir, ...targetConfig.nodeExecutable);
+  const displayPath = targetConfig.nodeExecutable.join('/');
+
+  if (!fs.existsSync(executablePath)) {
+    fail(`Node.js runtime for ${target} must contain ${displayPath}.`);
+  }
+
+  if (target !== 'win-x64') {
+    const mode = fs.statSync(executablePath).mode;
+    if ((mode & 0o111) === 0) {
+      fail(
+        `Node.js runtime for ${target} must provide executable ${displayPath}.`,
+      );
+    }
+  }
+}
+
+function validateBunRuntime(target, packageRoot) {
+  const relativePath =
+    target === 'win-x64'
+      ? path.join('bun', 'bun.exe')
+      : path.join('bun', 'bin', 'bun');
+  const executablePath = path.join(packageRoot, relativePath);
+
+  if (!fs.existsSync(executablePath)) {
+    fail(`Bun runtime for ${target} must contain ${relativePath}.`);
+  }
+
+  if (target !== 'win-x64') {
+    const mode = fs.statSync(executablePath).mode;
+    if ((mode & 0o111) === 0) {
+      fail(
+        `Bun runtime for ${target} must provide executable ${relativePath}.`,
+      );
+    }
+  }
+}
+
+// Temporary OpenTUI preview support: Bun release archives contain a single
+// executable (`bun` / `bun.exe`). It is installed under `bun/` and launched
+// by that name — Bun invoked as `node` enters its node-compat CLI mode,
+// which breaks the interactive TUI. A placeholder is also placed at the
+// classic `node/bin/node` path so installer scripts that validate that
+// layout keep working unchanged. It must be a REGULAR file: the installers
+// refuse archives containing symlinks or hardlinks, and a hardlink mirror
+// tripped exactly that check. Unix gets a tiny exec shim (zero size cost);
+// Windows gets a plain copy because a `.sh` shim cannot impersonate an exe.
+function installBunRuntime(extractDir, nodeDir, target) {
+  const executableName = target === 'win-x64' ? 'bun.exe' : 'bun';
+  const sourcePath = findFileRecursive(extractDir, executableName);
+  if (!sourcePath) {
+    fail(`Bun runtime archive did not contain ${executableName}.`);
+  }
+
+  const targetConfig = TARGETS.get(target);
+  const packageRoot = path.dirname(nodeDir);
+  const bunRelativePath =
+    target === 'win-x64'
+      ? path.join('bun', 'bun.exe')
+      : path.join('bun', 'bin', 'bun');
+  const bunPath = path.join(packageRoot, bunRelativePath);
+  fs.mkdirSync(path.dirname(bunPath), { recursive: true });
+  fs.copyFileSync(sourcePath, bunPath);
+  fs.chmodSync(bunPath, 0o755);
+
+  // Installer-script compatibility mirror at the Node.js layout path.
+  const compatPath = path.join(nodeDir, ...targetConfig.nodeExecutable);
+  fs.mkdirSync(path.dirname(compatPath), { recursive: true });
+  if (target === 'win-x64') {
+    fs.copyFileSync(bunPath, compatPath);
+  } else {
+    fs.writeFileSync(
+      compatPath,
+      '#!/usr/bin/env sh\n' +
+        '# OpenTUI preview: the bundled runtime is Bun; this placeholder keeps\n' +
+        '# installers that validate the classic Node.js layout working.\n' +
+        'exec "$(dirname "$0")/../../bun/bin/bun" "$@"\n',
+    );
+  }
+  fs.chmodSync(compatPath, 0o755);
+}
+
+function findFileRecursive(dir, fileName) {
+  for (const entry of fs.readdirSync(dir)) {
+    const fullPath = path.join(dir, entry);
+    if (fs.statSync(fullPath).isDirectory()) {
+      const nested = findFileRecursive(fullPath, fileName);
+      if (nested) {
+        return nested;
+      }
+    } else if (entry === fileName) {
+      return fullPath;
+    }
+  }
+  return undefined;
+}
+
+function writeShims(packageRoot, runtime) {
+  const binDir = path.join(packageRoot, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+
+  const unixRuntime =
+    runtime === 'bun' ? '$ROOT/bun/bin/bun' : '$ROOT/node/bin/node';
+  // The bun flavor is the OpenTUI preview: default the renderer to opentui so
+  // the archive launches what it was built to preview. An explicit user
+  // QWEN_TUI_RENDERER still wins. No STRICT default: probe failures keep
+  // falling back to ink.
+  const unixRendererDefault =
+    runtime === 'bun'
+      ? 'export QWEN_TUI_RENDERER="${QWEN_TUI_RENDERER:-opentui}"\n'
+      : '';
+  const unixShim = `#!/usr/bin/env sh
+set -e
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+${unixRendererDefault}QWEN_CODE_LAUNCHER_PATH="$ROOT/bin/qwen" exec "${unixRuntime}" "$ROOT/lib/cli-entry.js" "$@"
+`;
+  const unixShimPath = path.join(binDir, 'qwen');
+  fs.writeFileSync(unixShimPath, unixShim);
+  fs.chmodSync(unixShimPath, 0o755);
+
+  const windowsRuntime =
+    runtime === 'bun' ? '%ROOT%\\bun\\bun.exe' : '%ROOT%\\node\\node.exe';
+  const windowsRendererDefault =
+    runtime === 'bun'
+      ? 'if not defined QWEN_TUI_RENDERER set "QWEN_TUI_RENDERER=opentui"\n'
+      : '';
+  const windowsShim = `@echo off
+setlocal
+set "ROOT=%~dp0.."
+${windowsRendererDefault}set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"
+"${windowsRuntime}" "%ROOT%\\lib\\cli-entry.js" %*
+exit /b %ERRORLEVEL%
+`;
+  fs.writeFileSync(path.join(binDir, 'qwen.cmd'), windowsShim);
+}
+
+function writeManifest(packageRoot, manifest) {
+  const manifestPath = path.join(packageRoot, 'manifest.json');
+  fs.writeFileSync(
+    manifestPath,
+    JSON.stringify(
+      {
+        name: '@qwen-code/qwen-code',
+        version: manifest.version,
+        target: manifest.target,
+        runtime: manifest.runtime || 'node',
+        nodeArchive: manifest.nodeArchive,
+        createdAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ) + '\n',
+  );
+}
+
+function createArchive(outputExtension, outputPath, cwd) {
+  if (outputExtension === 'zip') {
+    createZipArchive(outputPath, cwd);
+    return;
+  }
+
+  run('tar', ['-czf', outputPath, '-C', cwd, 'qwen-code']);
+}
+
+function createZipArchive(outputPath, cwd) {
+  if (process.platform === 'win32') {
+    run(
+      'powershell',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        'Compress-Archive -LiteralPath $env:QWEN_PACKAGE_ROOT -DestinationPath $env:QWEN_OUTPUT_PATH -Force',
+      ],
+      {
+        env: {
+          ...process.env,
+          QWEN_PACKAGE_ROOT: path.join(cwd, 'qwen-code'),
+          QWEN_OUTPUT_PATH: outputPath,
+        },
+      },
+    );
+    return;
+  }
+
+  run('zip', ['-qr', outputPath, 'qwen-code'], { cwd });
+}
+
+async function writeSha256Sums(outDir) {
+  const entries = fs
+    .readdirSync(outDir)
+    .filter(
+      (entry) =>
+        entry.startsWith('qwen-code-') &&
+        (entry.endsWith('.tar.gz') || entry.endsWith('.zip')),
+    )
+    .sort();
+
+  if (entries.length === 0) {
+    fail(
+      `No qwen-code archives found in ${outDir}; refusing to write empty SHA256SUMS.`,
+    );
+  }
+
+  const lines = [];
+  for (const entry of entries) {
+    const filePath = path.join(outDir, entry);
+    const hash = await sha256File(filePath);
+    lines.push(`${hash}  ${entry}`);
+  }
+
+  fs.writeFileSync(path.join(outDir, 'SHA256SUMS'), `${lines.join('\n')}\n`);
+}
+
+async function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  await pipeline(fs.createReadStream(filePath), hash);
+  return hash.digest('hex');
+}
+
+function run(command, args, options = {}) {
+  try {
+    execFileSync(command, args, {
+      stdio: 'inherit',
+      ...options,
+    });
+  } catch (error) {
+    const detail =
+      error && typeof error === 'object' && 'message' in error
+        ? `: ${error.message}`
+        : '';
+    fail(`Command failed: ${command} ${args.join(' ')}${detail}`);
+  }
+}
+
+function fail(message) {
+  throw new Error(`Error: ${message}`);
+}
+
+export {
+  TARGET_CLIPBOARD_PACKAGE,
+  TARGETS,
+  standaloneArchiveName,
+  writeSha256Sums,
+  // Exported so a test can hold the allowlist and the build's stamp together:
+  // the packager aborts on any dist entry it does not know, and nothing else
+  // would notice a one-sided rename until a release was cut.
+  isAllowedDistEntry,
+};

@@ -9,9 +9,73 @@ import type {
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
-import { escapeAnsiCtrlCodes, sanitizeSensitiveText } from './textUtils.js';
+import {
+  TEXT_CACHE_MAX_ENTRIES,
+  __getTextUtilsCacheSizes,
+  clearStringWidthCache,
+  escapeAnsiCtrlCodes,
+  getCachedStringWidth,
+  sanitizeFilenameForDisplay,
+  sanitizeMultilineForDisplay,
+  sanitizeSensitiveText,
+  sliceTextByVisualHeight,
+  toCodePoints,
+  truncateToWidth,
+} from './textUtils.js';
 
 describe('textUtils', () => {
+  describe('sliceTextByVisualHeight', () => {
+    it('returns the original text when maxHeight is undefined', () => {
+      const sliced = sliceTextByVisualHeight('a\nb\nc', undefined, 10);
+      expect(sliced).toEqual({ text: 'a\nb\nc', hiddenLinesCount: 0 });
+    });
+
+    it('keeps the tail when overflowing from the top (default)', () => {
+      const sliced = sliceTextByVisualHeight('abcdefghijklmnop', 3, 4, {
+        minHeight: 2,
+        reservedRows: 1,
+        overflowDirection: 'top',
+      });
+
+      expect(sliced).toEqual({
+        text: 'ijkl\nmnop',
+        hiddenLinesCount: 2,
+      });
+    });
+
+    it('keeps the head when overflowing from the bottom', () => {
+      const sliced = sliceTextByVisualHeight('a\nb\nc\nd', 3, 80, {
+        overflowDirection: 'bottom',
+      });
+
+      expect(sliced).toEqual({
+        text: 'a\nb\nc',
+        hiddenLinesCount: 1,
+      });
+    });
+
+    it('counts soft wraps in narrow widths as visual rows', () => {
+      const sliced = sliceTextByVisualHeight('aaaa\nbbbbbbbb\ncc', 3, 4, {
+        overflowDirection: 'bottom',
+      });
+
+      expect(sliced.hiddenLinesCount).toBeGreaterThan(0);
+      expect(sliced.text.split('\n').length).toBeLessThanOrEqual(3);
+    });
+
+    it('subtracts reservedRows before deciding whether to truncate', () => {
+      // With reservedRows=1 and maxHeight=3 the visible content budget is 2.
+      // A 3-line input must therefore truncate to 2 rows (not return
+      // unchanged just because it fits inside the unreserved 3-row budget).
+      const sliced = sliceTextByVisualHeight('a\nb\nc', 3, 80, {
+        reservedRows: 1,
+        overflowDirection: 'bottom',
+      });
+
+      expect(sliced).toEqual({ text: 'a\nb', hiddenLinesCount: 1 });
+    });
+  });
+
   describe('escapeAnsiCtrlCodes', () => {
     describe('escapeAnsiCtrlCodes string case study', () => {
       it('should replace ANSI escape codes with a visible representation', () => {
@@ -31,6 +95,17 @@ describe('textUtils', () => {
 
       it('should handle an empty string', () => {
         expect(escapeAnsiCtrlCodes('')).toBe('');
+      });
+
+      it('preserves inline image data while sanitizing surrounding text', () => {
+        const imageData = 'payload\u001bwith-control-code';
+        const sanitized = escapeAnsiCtrlCodes({
+          text: '\u001b[31mcaption\u001b[0m',
+          images: [{ data: imageData, mimeType: 'image/png' }],
+        });
+
+        expect(sanitized.text).toBe('\\u001b[31mcaption\\u001b[0m');
+        expect(sanitized.images[0].data).toBe(imageData);
       });
 
       describe('toolConfirmationDetails case study', () => {
@@ -168,6 +243,85 @@ describe('textUtils', () => {
     });
   });
 
+  describe('sanitizeFilenameForDisplay', () => {
+    it('passes clean filenames through unchanged', () => {
+      expect(sanitizeFilenameForDisplay('src/foo.ts')).toBe('src/foo.ts');
+      expect(sanitizeFilenameForDisplay('packages/cli/src/index.ts')).toBe(
+        'packages/cli/src/index.ts',
+      );
+      expect(sanitizeFilenameForDisplay('文件.txt')).toBe('文件.txt');
+      expect(sanitizeFilenameForDisplay('')).toBe('');
+    });
+
+    it('escapes C0 control bytes that bypass escapeAnsiCtrlCodes', () => {
+      // Bare \n / \r / NUL / BEL / BS slip past the ANSI regex but would
+      // still inject layout breaks or terminal effects in `<Text>`.
+      expect(sanitizeFilenameForDisplay('a\nb')).toBe('a\\nb');
+      expect(sanitizeFilenameForDisplay('a\rb')).toBe('a\\rb');
+      expect(sanitizeFilenameForDisplay('a\tb')).toBe('a\\tb');
+      expect(sanitizeFilenameForDisplay('a\bb')).toBe('a\\bb');
+      expect(sanitizeFilenameForDisplay('a\fb')).toBe('a\\fb');
+      expect(sanitizeFilenameForDisplay('a\x00b')).toBe('a\\u0000b');
+      expect(sanitizeFilenameForDisplay('a\x07b')).toBe('a\\u0007b');
+    });
+
+    it('escapes DEL (0x7F) and C1 control bytes (0x80–0x9F)', () => {
+      expect(sanitizeFilenameForDisplay('a\x7fb')).toBe('a\\u007fb');
+      expect(sanitizeFilenameForDisplay('a\x80b')).toBe('a\\u0080b');
+      expect(sanitizeFilenameForDisplay('a\x9fb')).toBe('a\\u009fb');
+    });
+
+    it('escapes Unicode bidi embedding/isolate controls', () => {
+      // RLO/LRE (U+202A–202E) and LRI/PDI (U+2066–2069) can visually reorder
+      // a filename to spoof its extension (e.g. "report‮fdp.exe" reads as
+      // "reportexe.pdf").
+      expect(sanitizeFilenameForDisplay('a\u202eb')).toBe('a\\u202eb');
+      expect(sanitizeFilenameForDisplay('a\u202ab')).toBe('a\\u202ab');
+      expect(sanitizeFilenameForDisplay('a\u2066b')).toBe('a\\u2066b');
+      expect(sanitizeFilenameForDisplay('a\u2069b')).toBe('a\\u2069b');
+    });
+
+    it('strips multi-byte ANSI CSI sequences', () => {
+      // SGR color/reset and cursor movement should not survive to the
+      // terminal — `escapeAnsiCtrlCodes` neutralizes the ESC byte, then
+      // the control-char pass cleans up any leftover bare C0/C1 bytes.
+      const ansi = '\x1b[31mred\x1b[0m';
+      const out = sanitizeFilenameForDisplay(ansi);
+      expect(out.includes('\x1b')).toBe(false);
+      expect(out).toContain('red');
+    });
+
+    it('handles a path crafted with mixed C0 controls + ANSI', () => {
+      const crafted = `evil\x1b[2K\npath\x00.txt`;
+      const out = sanitizeFilenameForDisplay(crafted);
+      // No raw C0 / DEL bytes remain in the output.
+      for (let i = 0; i < out.length; i++) {
+        const code = out.charCodeAt(i);
+        expect(code < 0x20 || code === 0x7f).toBe(false);
+      }
+      expect(out).toContain('evil');
+      expect(out).toContain('path');
+      expect(out).toContain('.txt');
+    });
+  });
+
+  describe('sanitizeMultilineForDisplay', () => {
+    it('preserves line structure while escaping other control bytes', () => {
+      expect(sanitizeMultilineForDisplay('line one\n\tline two')).toBe(
+        'line one\n\tline two',
+      );
+      expect(sanitizeMultilineForDisplay('a\rb\x07c\x9bd')).toBe(
+        'a\\rb\\u0007c\\u009bd',
+      );
+    });
+
+    it('neutralizes ANSI sequences like the filename variant', () => {
+      const out = sanitizeMultilineForDisplay('x\x1b[2Jy\nz');
+      expect(out.includes('\x1b')).toBe(false);
+      expect(out).toContain('\n');
+    });
+  });
+
   describe('sanitizeSensitiveText', () => {
     it('should return text unchanged if no sensitive patterns', () => {
       const text = 'Hello, this is a normal prompt';
@@ -232,6 +386,86 @@ describe('textUtils', () => {
       expect(result).not.toContain('secretkey12345678901234');
       expect(result).not.toContain('mypass123');
       expect(result).not.toContain('sk-test123456789012345678901');
+    });
+  });
+
+  describe('truncateToWidth', () => {
+    it('returns the full text when it fits the budget', () => {
+      expect(truncateToWidth('Color', 12)).toBe('Color');
+    });
+
+    it('clips with an ellipsis when over budget', () => {
+      expect(truncateToWidth('Target config', 6)).toBe('Targe…');
+    });
+
+    it('returns a lone ellipsis at a one-cell budget', () => {
+      expect(truncateToWidth('Target config', 1)).toBe('…');
+    });
+
+    it('returns empty (no stray ellipsis) at a zero or negative budget', () => {
+      expect(truncateToWidth('Target config', 0)).toBe('');
+      expect(truncateToWidth('Target config', -3)).toBe('');
+    });
+
+    it('bounds CJK text by display width, not character count', () => {
+      // 5 CJK characters (10 cells) plus the ellipsis fit an 11-cell budget.
+      expect(truncateToWidth('目标配置参数设置', 11)).toBe('目标配置参…');
+    });
+  });
+
+  describe('text cache bounds', () => {
+    it('does not grow the caches for ASCII fast-path input', () => {
+      const before = __getTextUtilsCacheSizes();
+      getCachedStringWidth('plain-ascii-input');
+      toCodePoints('plain-ascii-input');
+      expect(__getTextUtilsCacheSizes()).toEqual(before);
+    });
+
+    it('bounds the code points cache and keeps results correct', () => {
+      const probe = (i: number) => `cache-bound-probe-${i}-é`;
+      for (let i = 0; i < TEXT_CACHE_MAX_ENTRIES + 50; i++) {
+        toCodePoints(probe(i));
+      }
+
+      expect(TEXT_CACHE_MAX_ENTRIES).toBe(500);
+      expect(__getTextUtilsCacheSizes().codePoints).toBe(
+        TEXT_CACHE_MAX_ENTRIES,
+      );
+
+      const fresh = 'fresh-é-probe';
+      expect(toCodePoints(fresh)).toEqual(Array.from(fresh));
+      // An evicted key must recompute to the same result.
+      expect(toCodePoints(probe(0))).toEqual(Array.from(probe(0)));
+    });
+
+    it('bounds the string width cache and keeps widths correct', () => {
+      const probe = (i: number) => `width-bound-probe-${i}-é`;
+      for (let i = 0; i < TEXT_CACHE_MAX_ENTRIES + 50; i++) {
+        getCachedStringWidth(probe(i));
+      }
+
+      expect(__getTextUtilsCacheSizes().stringWidth).toBe(
+        TEXT_CACHE_MAX_ENTRIES,
+      );
+
+      expect(getCachedStringWidth('héllo')).toBe(5);
+      expect(getCachedStringWidth('目标')).toBe(4);
+    });
+
+    it('does not cache long string width keys', () => {
+      clearStringWidthCache();
+      const longCjk = '目'.repeat(1001);
+
+      expect(getCachedStringWidth(longCjk)).toBe(2002);
+      expect(__getTextUtilsCacheSizes().stringWidth).toBe(0);
+    });
+
+    it('caches string width keys at the length limit', () => {
+      clearStringWidthCache();
+      const limitCjk = '目'.repeat(1000);
+
+      expect(getCachedStringWidth(limitCjk)).toBe(2000);
+      expect(__getTextUtilsCacheSizes().stringWidth).toBe(1);
     });
   });
 });

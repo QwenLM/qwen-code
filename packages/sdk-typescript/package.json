@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/sdk",
-  "version": "0.1.6",
+  "version": "0.1.8",
   "description": "TypeScript SDK for programmatic access to qwen-code CLI",
   "main": "./dist/index.cjs",
   "module": "./dist/index.mjs",
@@ -12,7 +12,25 @@
       "import": "./dist/index.mjs",
       "require": "./dist/index.cjs"
     },
+    "./daemon": {
+      "types": "./dist/daemon/index.d.ts",
+      "import": "./dist/daemon/index.js",
+      "require": "./dist/daemon/index.cjs"
+    },
+    "./daemon/transports": {
+      "types": "./dist/daemon/transports.d.ts",
+      "import": "./dist/daemon/transports.js",
+      "require": "./dist/daemon/transports.cjs"
+    },
+    "./daemon/transcript": {
+      "types": "./dist/daemon/transcript.d.ts",
+      "import": "./dist/daemon/transcript.js",
+      "require": "./dist/daemon/transcript.cjs"
+    },
     "./package.json": "./package.json"
+  },
+  "bin": {
+    "qwen-serve-mcp": "./dist/daemon-mcp/serve-bridge/bin.js"
   },
   "files": [
     "dist",
@@ -22,12 +40,13 @@
     "build": "node scripts/build.js",
     "bundle:cli": "node scripts/bundle-cli.js",
     "test": "vitest run",
-    "test:ci": "vitest run",
+    "test:ci": "npm run typecheck:public-surface && vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint src test",
     "lint:fix": "eslint src test --fix",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test-fence.json",
+    "typecheck:public-surface": "tsc --noEmit -p tsconfig.public-surface.json",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run clean && npm run build && npm run bundle:cli",
     "prepack": "npm run build && npm run bundle:cli"
@@ -43,14 +62,16 @@
   "author": "Qwen Team",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^3.25.0"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
+    "@qwen-code/acp-bridge": "file:../acp-bridge",
+    "@qwen-code/qwen-code-core": "file:../core",
+    "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^7.13.0",
     "@typescript-eslint/parser": "^7.13.0",
     "@vitest/coverage-v8": "^1.6.0",

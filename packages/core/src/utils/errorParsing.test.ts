@@ -100,6 +100,34 @@ describe('parseAndFormatApiError', () => {
     expect(parseAndFormatApiError(error)).toBe(expected);
   });
 
+  it('should include the underlying cause of an Error', () => {
+    const cause = Object.assign(new Error('fetch failed'), {
+      code: 'ECONNREFUSED',
+    });
+    const error = new Error('Connection error.', { cause });
+
+    expect(parseAndFormatApiError(error)).toBe(
+      '[API Error: Connection error. (cause: ECONNREFUSED: fetch failed)]',
+    );
+  });
+
+  it('should preserve a plain Error message when there is no cause', () => {
+    expect(parseAndFormatApiError(new Error('Connection error.'))).toBe(
+      '[API Error: Connection error.]',
+    );
+  });
+
+  it('should include details from an AggregateError cause', () => {
+    const cause = Object.assign(new Error('connect failed'), {
+      code: 'ECONNREFUSED',
+    });
+    const error = new Error('Connection error.', {
+      cause: new AggregateError([cause]),
+    });
+
+    expect(parseAndFormatApiError(error)).toContain('ECONNREFUSED');
+  });
+
   it('should format a 429 StructuredError with the vertex message', () => {
     const error: StructuredError = {
       message: 'Rate limit exceeded',
@@ -114,5 +142,88 @@ describe('parseAndFormatApiError', () => {
     const error = 12345;
     const expected = '[API Error: An unknown error occurred.]';
     expect(parseAndFormatApiError(error)).toBe(expected);
+  });
+
+  it.each([
+    'Qwen OAuth quota exceeded: retry after 12:00 UTC',
+    'Qwen OAuth free tier has been discontinued for this model',
+  ])('should return Qwen quota messages unchanged: %s', (message) => {
+    const error: StructuredError = { message, status: 429 };
+
+    expect(parseAndFormatApiError(error)).toBe(message);
+  });
+
+  it('should surface a friendly quota-exhaustion message verbatim (string)', () => {
+    const message =
+      'Quota exhausted: Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.\n\nPlease retry after the reset time, or switch to another API key / auth method.';
+    // Must NOT be re-wrapped in "[API Error: …]" and must NOT pick up the
+    // misleading "please wait and try again later" transient-throttle suffix.
+    expect(parseAndFormatApiError(message)).toBe(message);
+  });
+
+  it('should surface a friendly quota-exhaustion StructuredError.message verbatim', () => {
+    const message =
+      'Quota exhausted: Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.\n\nPlease retry after the reset time, or switch to another API key / auth method.';
+    const error: StructuredError = { message, status: 429 };
+    expect(parseAndFormatApiError(error, AuthType.USE_OPENAI)).toBe(message);
+  });
+
+  // Idempotency — added after a customer report where a 4xx in non-interactive
+  // mode produced "[API Error: [API Error: ...]]". The non-interactive runner
+  // formats once, prints, then throws an Error whose .message is the formatted
+  // string; the top-level handleError used to call this function again on
+  // that string and double-wrap it. Returning already-formatted input
+  // unchanged is the safety net that keeps the symptom from coming back even
+  // if a future code path forgets to mark its throws.
+  describe('idempotency', () => {
+    it('returns an already-formatted plain string unchanged', () => {
+      const formatted =
+        '[API Error: 402 Model X is not available for billing.]';
+      expect(parseAndFormatApiError(formatted)).toBe(formatted);
+    });
+
+    it('returns an already-formatted 429 plain string with quota guidance unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded (Status: RESOURCE_EXHAUSTED)]\nPossible quota limitations in place or slow response times detected. Please wait and try again later.';
+      expect(parseAndFormatApiError(formatted)).toBe(formatted);
+    });
+
+    it('returns an already-formatted StructuredError.message unchanged', () => {
+      const formatted =
+        '[API Error: 402 Model X is not available for billing.]';
+      const error: StructuredError = { message: formatted, status: 402 };
+      expect(parseAndFormatApiError(error)).toBe(formatted);
+    });
+
+    it('returns an already-formatted 429 StructuredError.message with quota guidance unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded]\nPossible quota limitations in place or slow response times detected. Please wait and try again later.';
+      const error: StructuredError = { message: formatted, status: 429 };
+      expect(parseAndFormatApiError(error)).toBe(formatted);
+    });
+
+    it('returns an already-formatted 429 USE_GEMINI message unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded]\nPlease wait and try again later. To increase your limits, request a quota increase through AI Studio, or switch to another /auth method';
+      expect(parseAndFormatApiError(formatted, AuthType.USE_GEMINI)).toBe(
+        formatted,
+      );
+    });
+
+    it('returns an already-formatted 429 VERTEX message unchanged', () => {
+      const formatted =
+        '[API Error: Rate limit exceeded]\nPlease wait and try again later. To increase your limits, request a quota increase through Vertex, or switch to another /auth method';
+      expect(parseAndFormatApiError(formatted, AuthType.USE_VERTEX_AI)).toBe(
+        formatted,
+      );
+    });
+
+    it('still wraps a raw message that merely contains the prefix mid-string', () => {
+      // Defensive: the prefix check anchors at the start, so a message that
+      // simply mentions the literal "[API Error: " inside a longer sentence
+      // must still be wrapped (otherwise we'd silently drop the wrap).
+      const raw = 'see [API Error: 502] in the upstream log for details';
+      expect(parseAndFormatApiError(raw)).toBe(`[API Error: ${raw}]`);
+    });
   });
 });

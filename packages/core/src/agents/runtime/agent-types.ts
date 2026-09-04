@@ -69,15 +69,29 @@ export interface RunConfig {
   max_turns?: number;
 }
 
+export type AgentExternalInput =
+  | string
+  | {
+      kind: 'notification';
+      text: string;
+    };
+
 /**
  * Configures the tools available to an agent during its execution.
  */
 export interface ToolConfig {
   /**
    * A list of tool names (from the tool registry) or full function declarations
-   * that the agent is permitted to use.
+   * exposed to the model.
    */
   tools: Array<string | FunctionDeclaration>;
+
+  /**
+   * Optional execution-layer allowlist. Tool declarations remain unchanged,
+   * but calls outside this list are rejected before scheduling or approval.
+   * Supports exact tool names and MCP server-level patterns.
+   */
+  executionAllowedTools?: string[];
 
   /**
    * Optional list of tool names to exclude from the agent's tool pool.
@@ -100,6 +114,8 @@ export enum AgentTerminateMode {
   GOAL = 'GOAL',
   /** The agent's execution terminated because it exceeded the maximum number of turns. */
   MAX_TURNS = 'MAX_TURNS',
+  /** The agent's execution terminated after detecting a tool-call loop. */
+  LOOP_DETECTED = 'LOOP_DETECTED',
   /** The agent's execution was cancelled via an abort signal. */
   CANCELLED = 'CANCELLED',
   /** The agent was gracefully shut down (e.g., arena/team session ended). */
@@ -158,6 +174,18 @@ export interface AgentInteractiveConfig {
   initialTask?: string;
   /** Max model round-trips per enqueued message (default: unlimited). */
   maxTurnsPerMessage?: number;
+  /**
+   * When true, the agent transitions to COMPLETED (terminal) instead of
+   * IDLE when its message queue empties — for truly one-shot agents that
+   * should not linger after finishing.
+   *
+   * Note: team teammates deliberately use `false` (the default). They
+   * settle to IDLE rather than COMPLETED so they stay alive to receive
+   * follow-up messages and auto-claim further tasks; the leader's wait
+   * loop relies on that (see `hasActiveTeammates` /
+   * `allTeammatesTerminated` in TeamManager).
+   */
+  completeOnIdle?: boolean;
   /** Max wall-clock minutes per enqueued message (default: unlimited). */
   maxTimeMinutesPerMessage?: number;
   /**
@@ -165,6 +193,11 @@ export interface AgentInteractiveConfig {
    * agent's chat with prior context.
    */
   chatHistory?: Content[];
+  /**
+   * Optional async context wrapper for every agent processing loop.
+   * Used by team agents to preserve teammate identity across follow-up messages.
+   */
+  runInContext?: <T>(fn: () => T) => T;
 }
 
 /**
@@ -195,6 +228,25 @@ export interface AgentMessage {
    * For role='assistant' with error: error=true
    */
   metadata?: Record<string, unknown>;
+}
+
+/**
+ * The last model-visible answer in a message history, or undefined
+ * when there is none. Scans most-recent-first; the first non-empty,
+ * non-thought assistant message wins. Shared by the team pre-attach
+ * recovery (TeamManager) and the arena final-text fallback
+ * (ArenaManager) so both apply the same selection rule.
+ */
+export function lastVisibleAnswer(
+  messages: readonly AgentMessage[],
+): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]!;
+    if (message.role !== 'assistant' || message.thought) continue;
+    const text = message.content.trim();
+    if (text) return text;
+  }
+  return undefined;
 }
 
 /**

@@ -1,0 +1,7 @@
+# Configuration for GitHub's automatic release notes generation
+# Manual and automatically classified internal PRs are excluded.
+changelog:
+  exclude:
+    labels:
+      - 'skip-changelog'
+      - 'skip-changelog-auto'

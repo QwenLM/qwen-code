@@ -4,46 +4,79 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { SSEClientTransportOptions } from '@modelcontextprotocol/sdk/client/sse.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import type { StreamableHTTPClientTransportOptions } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type {
-  GetPromptResult,
-  JSONRPCMessage,
-  Prompt,
-  ReadResourceResult,
-} from '@modelcontextprotocol/sdk/types.js';
+import {
+  Client,
+  SSEClientTransport,
+  StreamableHTTPClientTransport,
+  type GetPromptResult,
+  type JSONRPCMessage,
+  type Prompt,
+  type ReadResourceResult,
+  type Resource,
+  type SSEClientTransportOptions,
+  type StreamableHTTPClientTransportOptions,
+  type Transport,
+} from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import type { Client as GenAiMcpClient } from '@modelcontextprotocol/sdk/client/index.js';
 import {
   GetPromptResultSchema,
   ListPromptsResultSchema,
-  ListRootsRequestSchema,
+  ListResourcesResultSchema,
+  ListToolsResultSchema,
   ReadResourceResultSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+} from '@modelcontextprotocol/core';
 import { parse } from 'shell-quote';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { AuthProviderType, isSdkMcpServerConfig } from '../config/config.js';
+import { validateAgentPluginStdioRuntimePaths } from '../extension/agent-plugins-v1/mcp.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-provider.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
+import {
+  MCPServerStatus,
+  recordMCPServerLastError,
+  updateMCPServerStatus,
+} from './mcp-status.js';
+export {
+  addMCPStatusChangeListener,
+  getAllMCPServerStatuses,
+  getMCPServerLastError,
+  getMCPServerStatus,
+  MCPServerStatus,
+  recordMCPServerLastError,
+  removeMCPServerStatus,
+  removeMCPStatusChangeListener,
+  updateMCPServerStatus,
+} from './mcp-status.js';
 
 import type { FunctionDeclaration } from '@google/genai';
-import { mcpToTool } from '@google/genai';
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
 import { MCPOAuthTokenStorage } from '../mcp/oauth-token-storage.js';
 import { OAuthUtils } from '../mcp/oauth-utils.js';
+import type { OAuthCredentials } from '../mcp/token-storage/types.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
-import { getErrorMessage } from '../utils/errors.js';
+import type { ResourceRegistry } from '../resources/resource-registry.js';
+import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
+import {
+  getOrCreateMcpDispatcher,
+  loadUndici,
+  preloadRuntimeFetchModule,
+  resetDispatcherCache,
+} from '../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  discoveryTimeoutFor,
+  runWithTimeout,
+} from './mcp-discovery-timeout.js';
+import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import type {
   Unsubscribe,
   WorkspaceContext,
@@ -59,8 +92,305 @@ export type SendSdkMcpMessage = (
 ) => Promise<JSONRPCMessage>;
 
 export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
+// Auto-negotiation `server/discover` otherwise inherits connect()'s
+// timeout (10 minutes here, 60s SDK default). Silent legacy stdio
+// servers never answer that probe; cap it so fallback fits inside
+// the discovery window. Remote HTTP/SSE/WS skip the probe
+// entirely (`mode: 'legacy'`): SDK v2 rejects HTTP probe timeouts
+// with no `initialize` fallback. Modern-only remotes are deferred
+// until that SDK gap closes.
+export const MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS = 5_000;
+/** Reserve a full handshake window after a silent stdio discovery probe. */
+export const MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS =
+  MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS;
+export const MCP_APPS_EXTENSION_ID = 'io.modelcontextprotocol/ui';
+export const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 
 const debugLogger = createDebugLogger('MCP');
+const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
+/**
+ * Upper bound for the session-termination DELETE in `disconnect()`. The SDK
+ * call has no timeout of its own; a live-but-unresponsive server must not
+ * hang teardown (see `disconnect()`).
+ */
+const TERMINATE_SESSION_TIMEOUT_MS = 2_000;
+
+const invocationContextTransports = new WeakSet<Transport>();
+const invocationContextClients = new WeakSet<Client>();
+
+function bindInvocationContextPolicy(
+  client: Client,
+  transport: Transport,
+): void {
+  invocationContextClients.delete(client);
+  if (invocationContextTransports.has(transport)) {
+    invocationContextClients.add(client);
+  }
+}
+
+const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400, 404]);
+const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
+// The MCP undici dispatcher runs with headersTimeout: 0, bodyTimeout: 0
+// (see getOrCreateMcpDispatcher in runtimeFetchOptions.ts), and every caller
+// of the optional GET/SSE probe is fire-and-forget, so nothing above this
+// wrapper will ever time out a body that sends headers but never completes.
+// This excerpt is best-effort diagnostics only — bound it so a stalled body
+// can't leak a reader/connection for the life of the process.
+const STREAMABLE_HTTP_GET_SSE_EXCERPT_TIMEOUT_MS = 2_000;
+
+export function getMcpOAuthDialogInstruction(
+  action: 'authenticate' | 're-authenticate',
+  mcpServerName: string,
+): string {
+  return [
+    `In interactive Qwen Code sessions, open the /mcp dialog to ${action}`,
+    `with MCP server '${mcpServerName}'.`,
+    `For headless or SDK usage, configure MCP OAuth with qwen mcp add --oauth-*`,
+    `or settings.json, then ${action} once in an interactive session before connecting.`,
+  ].join(' ');
+}
+
+type SseOAuth401TokenState = 'accepted-token-rejected' | 'unusable' | 'missing';
+
+function getSseOAuth401Message(
+  mcpServerName: string,
+  tokenState: SseOAuth401TokenState,
+): string {
+  if (tokenState === 'accepted-token-rejected') {
+    return (
+      `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
+      getMcpOAuthDialogInstruction('re-authenticate', mcpServerName)
+    );
+  }
+
+  if (tokenState === 'unusable') {
+    return (
+      `Stored OAuth tokens for SSE server '${mcpServerName}' are expired or could not be refreshed. ` +
+      getMcpOAuthDialogInstruction('re-authenticate', mcpServerName)
+    );
+  }
+
+  return (
+    `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
+    getMcpOAuthDialogInstruction('authenticate', mcpServerName)
+  );
+}
+
+async function readResponseBodyExcerpt(
+  response: Response,
+): Promise<string | undefined> {
+  const reader = response.clone().body?.getReader();
+  if (!reader) {
+    return undefined;
+  }
+
+  const readLoop = async (): Promise<string | undefined> => {
+    const decoder = new TextDecoder();
+    let body = '';
+    let bytesRead = 0;
+    let truncated = false;
+    while (bytesRead < STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT) {
+      const { done, value } = await reader.read();
+      if (done) {
+        body += decoder.decode();
+        break;
+      }
+
+      const remaining = STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT - bytesRead;
+      if (value.byteLength > remaining) {
+        body += decoder.decode(value.subarray(0, remaining), {
+          stream: true,
+        });
+        bytesRead += remaining;
+        truncated = true;
+        reader.cancel().catch(() => {
+          // Best-effort cleanup after collecting the bounded excerpt.
+        });
+        break;
+      }
+
+      body += decoder.decode(value, { stream: true });
+      bytesRead += value.byteLength;
+    }
+
+    if (bytesRead >= STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT && !truncated) {
+      const { done } = await reader.read();
+      if (!done) {
+        truncated = true;
+        reader.cancel().catch(() => {
+          // Best-effort cleanup after collecting the bounded excerpt.
+        });
+      }
+    }
+
+    body += decoder.decode();
+    const excerpt = body.trim();
+    if (!excerpt) {
+      return undefined;
+    }
+    return truncated ||
+      excerpt.length > STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT
+      ? `${excerpt.slice(0, STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT)}...`
+      : excerpt;
+  };
+
+  try {
+    return await runWithTimeout(
+      readLoop(),
+      STREAMABLE_HTTP_GET_SSE_EXCERPT_TIMEOUT_MS,
+      'Streamable HTTP GET SSE fallback body excerpt',
+    );
+  } catch {
+    // Timed out (or the read failed): drop the diagnostics and cancel this
+    // clone's tee branch so the abandoned read settles instead of dangling.
+    // Cancelling one branch alone does not run the underlying source's
+    // cancel algorithm — it's the caller's response.body?.cancel() below
+    // that cancels the sibling branch and actually releases the connection.
+    reader.cancel().catch(() => {
+      // Best-effort cleanup; the caller still returns the 405 sentinel.
+    });
+    return undefined;
+  }
+}
+
+function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
+  const method = (init?.method ?? 'GET').toUpperCase();
+  if (method !== 'GET') {
+    return false;
+  }
+
+  const headers = new Headers(init?.headers);
+  if (headers.has('last-event-id')) {
+    return false;
+  }
+
+  const accept = headers.get('accept') ?? '';
+  return accept
+    .split(',')
+    .map((value) => value.split(';')[0].trim().toLowerCase())
+    .some((type) => type === 'text/event-stream');
+}
+
+/**
+ * Wraps fetch to preserve OAuth challenges before the SDK discards response
+ * metadata and to normalize conventional "GET not supported" rejections of
+ * the optional Streamable HTTP GET SSE request to the SDK's unsupported
+ * sentinel: Spring AI rejects it with 400 (#4521), and servers with no GET
+ * route at all — e.g. the official SDK's stateless
+ * `StreamableHTTPServerTransport` behind Express, whose default fallthrough
+ * answers 404 — reject it with 404 (#8784). A raw 405 needs no rewriting
+ * (the SDK tolerates it natively) and 401 must stay untouched (the OAuth
+ * challenge detection above depends on observing it).
+ *
+ * SDK coupling: `StreamableHTTPClientTransport._startOrAuthSse()` treats a
+ * 405 response as "GET SSE unsupported" and continues in POST-only mode.
+ * If the SDK changes that non-OK handling, update this wrapper in lockstep.
+ */
+export function createStreamableHttpCompatibilityFetch(
+  mcpServerName: string,
+  fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
+  mcpServerConfig?: MCPServerConfig,
+): typeof fetch {
+  return async (input, init) => {
+    const requestHeaders = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    const stopAgentPluginRedirect =
+      mcpServerConfig?.agentPluginV1 === true &&
+      ((mcpServerConfig.headers !== undefined &&
+        Object.keys(mcpServerConfig.headers).length > 0) ||
+        requestHeaders.has('authorization'));
+    const effectiveInit = stopAgentPluginRedirect
+      ? { ...init, redirect: 'manual' as const }
+      : init;
+    const response = await fetchFn(input, effectiveInit);
+    if (
+      response.status === 401 &&
+      mcpServerConfig &&
+      supportsMcpOAuth(mcpServerConfig)
+    ) {
+      setMcpOAuthRequirement(
+        mcpServerName,
+        mcpServerConfig,
+        response.headers.get('www-authenticate') ?? '',
+      );
+    }
+    if (
+      !isStreamableHttpGetSseRequest(effectiveInit) ||
+      !STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES.has(response.status)
+    ) {
+      return response;
+    }
+
+    const responseBody = await readResponseBodyExcerpt(response);
+    await response.body?.cancel().catch(() => {
+      // Best-effort body cleanup before returning a synthetic 405.
+    });
+    debugLogger.warn(
+      `MCP server '${mcpServerName}' rejected the optional Streamable HTTP ` +
+        `GET SSE stream with HTTP ${response.status}; continuing without ` +
+        `the standalone GET stream. POST request streams remain enabled.` +
+        (responseBody ? ` Response body: ${JSON.stringify(responseBody)}` : ''),
+    );
+
+    return new Response(null, {
+      status: 405,
+      statusText: 'Method Not Allowed',
+    });
+  };
+}
+
+// Streamable HTTP servers hold a long-lived GET SSE stream open for the
+// lifetime of the connection (the SDK transport opens it after
+// `notifications/initialized`, per the MCP spec). Against some servers,
+// Node's built-in fetch stalls subsequent same-origin POSTs
+// (tools/resources/prompts discovery) behind that stream until the SDK's
+// request timeout fires (#7147 — reproduced by the reporter against
+// Fastmail's MCP endpoint on Node 26.4). The transport therefore pins
+// undici's own fetch with a dedicated dispatcher — both loaded lazily via
+// loadUndici() so undici stays out of the eager startup closure (#7264),
+// and the dispatcher shared through runtimeFetchOptions so MCP traffic
+// honors an explicit --proxy or HTTP(S)_PROXY/NO_PROXY environment and
+// uses the same disabled header/body timeouts as the LLM path (#7195).
+const mcpUndiciFetch: typeof fetch = (async (
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+) => {
+  // preload populates the sync cache the shared dispatcher builders read.
+  await preloadRuntimeFetchModule();
+  const { fetch: undiciFetch } = await loadUndici();
+  return undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+    ...(init as Parameters<typeof undiciFetch>[1]),
+    dispatcher: getOrCreateMcpDispatcher(),
+  });
+}) as unknown as typeof fetch;
+
+// Test-only override: unit tests stub `globalThis.fetch`, which the
+// dedicated undici fetch above deliberately bypasses. Follows the
+// `_reset*ForTest` convention (see utils/cleanup.ts).
+let mcpFetchOverrideForTest: typeof fetch | undefined;
+export function _setMcpFetchForTest(fn?: typeof fetch): void {
+  mcpFetchOverrideForTest = fn;
+}
+
+// Test-only: clears the shared dispatcher cache so a test can re-evaluate
+// `isTlsVerificationDisabled()` / proxy configuration under a different
+// environment. Kept under its historical name; delegates to the shared
+// runtimeFetchOptions cache the MCP dispatcher now lives in.
+export function _resetMcpFetchDispatcherForTest(): void {
+  resetDispatcherCache();
+}
+
+function createMcpStreamableHttpFetch(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+): typeof fetch {
+  return createStreamableHttpCompatibilityFetch(
+    mcpServerName,
+    mcpFetchOverrideForTest ?? mcpUndiciFetch,
+    mcpServerConfig,
+  );
+}
 
 export type DiscoveredMCPPrompt = Prompt & {
   serverName: string;
@@ -68,15 +398,98 @@ export type DiscoveredMCPPrompt = Prompt & {
 };
 
 /**
- * Enum representing the connection status of an MCP server
+ * A resource advertised by an MCP server (`resources/list`), tagged with
+ * the originating server so the read path (`readMcpResource`) and the
+ * `/mcp` view can address it by `(serverName, uri)`. Unlike prompts,
+ * resources carry no bound `invoke` closure — they are read on demand by
+ * URI via `ToolRegistry.readMcpResource`.
  */
-export enum MCPServerStatus {
-  /** Server is disconnected or experiencing errors */
-  DISCONNECTED = 'disconnected',
-  /** Server is in the process of connecting */
-  CONNECTING = 'connecting',
-  /** Server is connected and ready to use */
-  CONNECTED = 'connected',
+export type DiscoveredMCPResource = Resource & {
+  serverName: string;
+};
+
+export type McpVersionNegotiation =
+  | { mode: 'legacy' }
+  | { mode: 'auto'; probe: { timeoutMs: number } };
+
+/**
+ * External stdio clients negotiate automatically only when explicitly opted
+ * in. Internal, remote, and default stdio transports stay on legacy.
+ */
+export function mcpVersionNegotiationFor(
+  cfg: MCPServerConfig,
+): McpVersionNegotiation {
+  if (
+    cfg.versionNegotiation !== 'auto' ||
+    isSdkMcpServerConfig(cfg) ||
+    !cfg.command ||
+    cfg.httpUrl ||
+    cfg.url ||
+    cfg.tcp
+  ) {
+    return { mode: 'legacy' };
+  }
+  const discoveryTimeoutMs = discoveryTimeoutFor(cfg);
+  const probeTimeoutMs = Math.min(
+    MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS,
+    discoveryTimeoutMs - MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS,
+  );
+  if (probeTimeoutMs <= 0) {
+    return { mode: 'legacy' };
+  }
+  return {
+    mode: 'auto',
+    probe: { timeoutMs: probeTimeoutMs },
+  };
+}
+
+export function createMcpClient(name: string, cfg: MCPServerConfig): Client {
+  return new Client(
+    { name, version: '0.0.1' },
+    {
+      versionNegotiation: mcpVersionNegotiationFor(cfg),
+      // Keep listing until the server ends pagination. The SDK still stops on
+      // repeated cursors, while its default 64-page cap turns larger valid
+      // catalogs into a discovery failure that this module reports as empty.
+      listMaxPages: 0,
+      capabilities: {
+        extensions: {
+          [MCP_APPS_EXTENSION_ID]: {
+            mimeTypes: [MCP_APP_RESOURCE_MIME_TYPE],
+          },
+        },
+      },
+    },
+  );
+}
+
+export function getMcpAppResourceUri(tool: {
+  _meta?: Record<string, unknown>;
+}): string | undefined {
+  const ui = tool._meta?.['ui'];
+  const nested =
+    typeof ui === 'object' && ui !== null && !Array.isArray(ui)
+      ? (ui as Record<string, unknown>)['resourceUri']
+      : undefined;
+  const value = nested ?? tool._meta?.['ui/resourceUri'];
+  return typeof value === 'string' && value.startsWith('ui://')
+    ? value
+    : undefined;
+}
+
+/** SEP-1865: omit tools whose visibility does not include `"model"`. */
+export function isMcpToolVisibleToModel(tool: {
+  _meta?: Record<string, unknown>;
+}): boolean {
+  const ui = tool._meta?.['ui'];
+  if (typeof ui !== 'object' || ui === null || Array.isArray(ui)) {
+    return true;
+  }
+  const visibility = (ui as Record<string, unknown>)['visibility'];
+  if (visibility === undefined || visibility === null) {
+    return true;
+  }
+  return Array.isArray(visibility) && visibility.includes('model');
 }
 
 /**
@@ -102,6 +515,22 @@ export class McpClient {
   private transport: Transport | undefined;
   private status: MCPServerStatus = MCPServerStatus.DISCONNECTED;
   private isDisconnecting = false;
+  /**
+   * captures the most recent error
+   * delivered to the SDK Client's `onerror` callback. The pool entry's
+   *  silent-drop block (the DISCONNECTED-on-active branch inside
+   * `PoolEntry.statusChangeListener`) reads this via
+   * `getLastTransportError()` to thread the upstream cause (EPIPE,
+   * OAuth 401, server crash) into the `'failed'` event's `lastError`
+   * string instead of emitting only the synthetic
+   * `'transport disconnected (silent transport drop)'` marker. Reset
+   * at the top of `connect()` so a successful reconnect clears stale
+   * state. No reset on `disconnect()` — McpClient instances are GC'd
+   * at pool entry teardown; field staleness has no observable
+   * consumer post-disconnect.
+   */
+  private lastTransportError?: Error;
+  private instructions: string | undefined;
 
   constructor(
     private readonly serverName: string,
@@ -112,10 +541,10 @@ export class McpClient {
     private readonly debugMode: boolean,
     private readonly sendSdkMcpMessage?: SendSdkMcpMessage,
   ) {
-    this.client = new Client({
-      name: `qwen-cli-mcp-client-${this.serverName}`,
-      version: '0.0.1',
-    });
+    this.client = createMcpClient(
+      `qwen-cli-mcp-client-${this.serverName}`,
+      this.serverConfig,
+    );
   }
 
   /**
@@ -123,6 +552,14 @@ export class McpClient {
    */
   async connect(): Promise<void> {
     this.isDisconnecting = false;
+    invocationContextClients.delete(this.client);
+    clearMcpOAuthRequirement(this.serverName, this.serverConfig);
+    // clear stale upstream error from
+    // any prior connect/disconnect cycle. The silent-drop reader
+    // is otherwise satisfied by `undefined` and falls back to the
+    // synthetic marker — but a stale error from a previous incarnation
+    // would mis-attribute a fresh transport drop to an old cause.
+    this.lastTransportError = undefined;
     this.updateStatus(MCPServerStatus.CONNECTING);
     try {
       this.transport = await this.createTransport();
@@ -131,7 +568,21 @@ export class McpClient {
         if (this.isDisconnecting) {
           return;
         }
-        debugLogger.error(`MCP ERROR (${this.serverName}):`, error.toString());
+        // capture the upstream error
+        // BEFORE the synchronous `updateStatus(DISCONNECTED)` cascades
+        // to PoolEntry's statusChangeListener. The listener's
+        // silent-drop block reads `lastTransportError` inline; setting
+        // it ahead of `updateStatus` guarantees the field is populated
+        // by the time the listener fires.
+        this.lastTransportError = error;
+        // Use getErrorMessage (not `error.toString()`) so the underlying
+        // syscall behind opaque wrappers like undici's `TypeError: fetch
+        // failed` (e.g. `ECONNREFUSED`, a proxy `502`) is surfaced instead of
+        // a bare "fetch failed". Critical for diagnosing local-server /
+        // proxy connectivity issues.
+        debugLogger.error(
+          `MCP ERROR (${this.serverName}): ${getErrorMessage(error)}`,
+        );
         this.updateStatus(MCPServerStatus.DISCONNECTED);
       };
 
@@ -139,7 +590,7 @@ export class McpClient {
         roots: {},
       });
 
-      this.client.setRequestHandler(ListRootsRequestSchema, async () => {
+      this.client.setRequestHandler('roots/list', async () => {
         const roots = [];
         for (const dir of this.workspaceContext.getDirectories()) {
           roots.push({
@@ -155,44 +606,245 @@ export class McpClient {
       await this.client.connect(this.transport, {
         timeout: this.serverConfig.timeout,
       });
+      this.instructions = this.client.getInstructions();
+      bindInvocationContextPolicy(this.client, this.transport);
 
       this.updateStatus(MCPServerStatus.CONNECTED);
     } catch (error) {
+      this.instructions = undefined;
+      if (
+        hasNetworkTransport(this.serverConfig) &&
+        supportsMcpOAuth(this.serverConfig)
+      ) {
+        const key = oauthRecoveryKey(this.serverName, this.serverConfig);
+        const oauthChallenge = getMcpOAuthChallengeFromError(error);
+        if (oauthChallenge.confirmed401) {
+          setMcpOAuthRequirement(
+            this.serverName,
+            this.serverConfig,
+            oauthChallenge.wwwAuthenticate,
+          );
+        } else {
+          mcpServerOAuthProbeCandidates.add(key);
+        }
+      }
       this.updateStatus(MCPServerStatus.DISCONNECTED);
+      // Preserve the cause: the manager's discovery catch swallows this
+      // error (best-effort discovery), leaving the status registry's enum as
+      // the only other witness. Recording it lets status consumers (e.g.
+      // `qwen mcp reconnect`) tell the user WHY the connection failed
+      // instead of a bare "status: disconnected" (issue #9944).
+      // Same guard as `updateStatus()`: a late rejection from a doomed
+      // in-flight connect (server disabled/removed mid-connect) must not
+      // resurrect a cause entry that `removeMCPServerStatus` already dropped.
+      if (!this.isDisconnecting) {
+        recordMCPServerLastError(this.serverName, getErrorMessage(error));
+      }
       throw error;
     }
   }
 
   /**
    * Discovers tools and prompts from the MCP server.
+   *
+   * On error, the client's status is flipped to DISCONNECTED before the
+   * error is re-thrown. Without this, a server that connects successfully
+   * but then crashes (or returns no tools, or whose `tools/list` call
+   * rejects) would remain `CONNECTED` in the global status registry, and
+   * `Config.getFailedMcpServerNames()` — which filters by
+   * `status !== CONNECTED` — would silently omit it from the
+   * non-interactive failure banner. The caller (manager) still catches
+   * and logs; we just need the status registry to reflect reality.
    */
   async discover(cliConfig: Config): Promise<void> {
+    // legacy
+    // `discover()` path (used by non-pool sessions and any direct
+    // McpClient consumers) MUST apply config filters at discovery
+    // time — pre-PR `this.discoverTools(cliConfig)` defaulted
+    // `applyConfigFilters` to `true`, so `trust: true` server config
+    // → tool's trust set; `includeTools`/`excludeTools` filtered out
+    // disallowed tools. The refactor routed `discover()` through
+    // `discoverAndReturn` which used to hardcode
+    // `{ applyConfigFilters: false }` (matching pool semantics where
+    // `SessionMcpView.applyTools` is the authoritative filter), but
+    // that broke the legacy path: trust silently became `undefined`
+    // (operators saw unexpected permission prompts) and include/
+    // exclude filters were ignored. Now `discoverAndReturn` defaults
+    // to applying filters; pool callers explicitly opt out.
+    const { tools, prompts, resources } =
+      await this.discoverAndReturn(cliConfig);
+    for (const tool of tools) {
+      this.toolRegistry.registerTool(tool);
+    }
+    for (const prompt of prompts) {
+      this.promptRegistry.registerPrompt(prompt);
+    }
+    // Resources are registered via the Config-owned `ResourceRegistry`
+    // rather than a constructor-injected field. `this.promptRegistry` is
+    // already `cliConfig.getPromptRegistry()` on this non-pool path, so
+    // this is the same single global registry — fetching it here avoids
+    // threading a 4th registry through all ~20 `new McpClient(...)` sites.
+    //
+    // Clear-then-register makes re-discovery (health-monitor reconnect,
+    // incremental settings-change discovery) idempotent: a resource the
+    // server dropped between discoveries must not linger in the registry.
+    // Mirrors `SessionMcpView.applyResources`' remove-then-register on the
+    // pool path.
+    //
+    // Guard on `resources.length > 0`: `listMcpResources` swallows ALL errors
+    // (including transient network failures / timeouts) and returns [], so an
+    // unconditional clear would silently purge a server's resources whenever a
+    // `resources/list` call transiently fails while tools/prompts succeed. We
+    // only replace the set when we actually got one back. (Trade-off: a server
+    // that legitimately drops to zero resources keeps the stale set until a
+    // non-empty discovery — far less harmful than wiping good resources.)
+    const resourceRegistry = cliConfig.getResourceRegistry();
+    if (resources.length > 0) {
+      resourceRegistry.removeResourcesByServer(this.serverName);
+      for (const resource of resources) {
+        resourceRegistry.registerResource(resource);
+      }
+    }
+  }
+
+  /**
+   * Pure discovery — returns tools and prompts WITHOUT registering them.
+   *
+   * pool path: a single shared `McpClient` produces this
+   * snapshot once; per-session `SessionMcpView` instances each
+   * register a filtered/decorated copy into their own registries.
+   *
+   * Behavior mirrors `discover()` for error handling: status flips to
+   * DISCONNECTED on any failure (so the global status registry +
+   * `getFailedMcpServerNames()` reflect reality), then re-throws.
+   *
+   * Returns the same combined "no prompts or tools" error that `discover()`
+   * raised previously, so callers that distinguish "server up but empty" from
+   * "server down" still get the right signal.
+   *
+   * @param opts.applyConfigFilters Whether to apply `includeTools` /
+   *   `excludeTools` filtering and set the `trust` field on returned
+   *   tools at discovery time. Defaults to `true` (legacy `discover()`
+   *   semantics). Pool callers pass `false` because per-session
+   *   `SessionMcpView.applyTools` is the authoritative filter
+   *   (otherwise pool-mode trust + filtering would apply twice
+   *   inconsistently across sessions).
+   */
+  async discoverAndReturn(
+    cliConfig: Config,
+    opts?: { applyConfigFilters?: boolean },
+  ): Promise<{
+    tools: DiscoveredMCPTool[];
+    prompts: DiscoveredMCPPrompt[];
+    resources: DiscoveredMCPResource[];
+  }> {
     if (this.status !== MCPServerStatus.CONNECTED) {
       throw new Error('Client is not connected.');
     }
 
-    const prompts = await this.discoverPrompts();
-    const tools = await this.discoverTools(cliConfig);
+    try {
+      // Prompts, resources, and tools are independent reads with no data
+      // dependency; run them concurrently (the SDK client multiplexes
+      // requests by JSON-RPC id) to save round-trips per server at startup.
+      // Each helper retries transient errors internally, then swallows
+      // permanent errors and returns [], so Promise.all never rejects here.
+      const [prompts, resources, toolDiscovery] = await Promise.all([
+        listMcpPrompts(this.serverName, this.client),
+        listMcpResources(this.serverName, this.client),
+        discoverToolsWithMetadata(
+          this.serverName,
+          this.serverConfig,
+          this.client,
+          cliConfig,
+          { applyConfigFilters: opts?.applyConfigFilters ?? true },
+        ),
+      ]);
+      const tools = applyListingAppResourceUi(toolDiscovery.tools, resources);
 
-    if (prompts.length === 0 && tools.length === 0) {
-      throw new Error('No prompts or tools found on the server.');
-    }
+      if (
+        prompts.length === 0 &&
+        tools.length === 0 &&
+        resources.length === 0 &&
+        !toolDiscovery.hadVisibilityFilteredTools
+      ) {
+        throw new Error('No prompts, tools, or resources found on the server.');
+      }
 
-    for (const tool of tools) {
-      this.toolRegistry.registerTool(tool);
+      return { tools, prompts, resources };
+    } catch (error) {
+      this.updateStatus(MCPServerStatus.DISCONNECTED);
+      // Same carrier as `connect()`'s catch: the manager swallows this error
+      // for best-effort discovery; keep the cause retrievable for status
+      // consumers (issue #9944). Gated like the status write so a server
+      // removed mid-discovery doesn't get an orphan cause entry resurrected.
+      if (!this.isDisconnecting) {
+        recordMCPServerLastError(this.serverName, getErrorMessage(error));
+      }
+      throw error;
     }
   }
 
   /**
    * Disconnects from the MCP server.
+   *
+   * The intentional DISCONNECTED status update must reach the global
+   * registry — `getFailedMcpServerNames()` filters on `status !== CONNECTED`
+   * and the Footer's MCP health pill subscribes to the registry. Going
+   * through `updateStatus()` would have it swallowed by the
+   * `isDisconnecting` guard whose only purpose is to suppress LATE writes
+   * from a stale `connect()` catch. We therefore write the local field and
+   * the global registry directly, then flip `isDisconnecting = true` to
+   * shut down propagation from any in-flight `connect()` / `discover()`
+   * whose catch will fire after the transport has been torn down.
    */
   async disconnect(): Promise<void> {
+    // Set the local status BEFORE flipping `isDisconnecting`. A concurrent
+    // `discover()` reading `this.status` would otherwise see the stale
+    // CONNECTED value and try to register tools that we're about to drop.
+    this.status = MCPServerStatus.DISCONNECTED;
+    updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
     if (this.transport) {
+      // Streamable HTTP only: the SDK's `transport.close()` aborts local
+      // state but leaves the server-side session alive. Per spec, a client
+      // that no longer needs a session SHOULD terminate it explicitly
+      // (`terminateSession()` sends the DELETE). Without this, a session we
+      // abandon keeps occupying the server: single-session HTTP servers
+      // then reject every later `initialize` with "Server already
+      // initialized" (issue #9944 — e.g. the internal reconnect path or a
+      // later `qwen mcp reconnect` can never recover them), and
+      // multi-session servers accumulate orphaned sessions. Best-effort —
+      // a dead/unreachable server must not block teardown. Must run BEFORE
+      // `close()` aborts the transport's request machinery.
+      const streamableTransport = this.transport as {
+        terminateSession?: () => Promise<void>;
+      };
+      if (typeof streamableTransport.terminateSession === 'function') {
+        try {
+          // Bound the DELETE: the SDK's `terminateSession()` has no timeout
+          // of its own (the MCP undici dispatcher runs with
+          // `headersTimeout: 0, bodyTimeout: 0`), and the transport's abort
+          // controller is only aborted by `close()` below — after this
+          // await. A live-but-unresponsive server would otherwise hang
+          // `disconnect()` (and every teardown caller) indefinitely. On
+          // timeout `runWithTimeout` rejects into the catch below (logged,
+          // then falls through to `close()`, which aborts the still-in-flight
+          // request) — same contract as the pool spawn/restart bounds.
+          await runWithTimeout(
+            streamableTransport.terminateSession(),
+            TERMINATE_SESSION_TIMEOUT_MS,
+            `terminateSession for server '${this.serverName}'`,
+          );
+        } catch (error) {
+          debugLogger.debug(
+            `Could not terminate MCP session for server '${this.serverName}' during disconnect (continuing): ${getErrorMessage(error)}`,
+          );
+        }
+      }
       await this.transport.close();
     }
     this.client.close();
-    this.updateStatus(MCPServerStatus.DISCONNECTED);
+    this.instructions = undefined;
   }
 
   /**
@@ -200,6 +852,45 @@ export class McpClient {
    */
   getStatus(): MCPServerStatus {
     return this.status;
+  }
+
+  /**
+   * The OS pid of the spawned MCP child process, if this is a stdio
+   * transport and the child is currently alive. Returns `undefined`
+   * for remote transports (sse / http / websocket) and for stdio
+   * transports that have not yet connected or have already exited.
+   *
+   * `PoolEntry.forceShutdown` reads this to enumerate
+   * descendant pids (via `listDescendantPids`) before calling
+   * `client.disconnect()`, so wrapper processes like
+   * `npx @modelcontextprotocol/server-X` and `uvx ...` don't leak.
+   */
+  getTransportPid(): number | undefined {
+    const t = this.transport as { pid?: number | null } | undefined;
+    if (!t || typeof t.pid !== 'number' || t.pid <= 0) return undefined;
+    return t.pid;
+  }
+
+  /**
+   * expose the most recent SDK Client
+   * `onerror` payload so PoolEntry's silent-drop block can thread
+   * the upstream cause (EPIPE, OAuth 401, server-side crash) into the
+   * `'failed'` event's `lastError` string. Returns `undefined` if no
+   * error has been observed since the last `connect()`. Caller falls
+   * back to the synthetic marker on `undefined`. Population site: the
+   * `client.onerror` arrow inside `connect()` (this file). Consumer:
+   * the silent-drop block inside `PoolEntry.statusChangeListener`.
+   */
+  getLastTransportError(): Error | undefined {
+    return this.lastTransportError;
+  }
+
+  getInstructions(): string | undefined {
+    return this.instructions;
+  }
+
+  clearOAuthState(): void {
+    clearMcpOAuthRequirement(this.serverName, this.serverConfig);
   }
 
   async readResource(
@@ -210,11 +901,17 @@ export class McpClient {
       throw new Error('Client is not connected.');
     }
 
-    // Only request resources if the server supports them.
-    if (this.client.getServerCapabilities()?.resources == null) {
-      throw new Error('MCP server does not support resources.');
+    // No `getServerCapabilities()?.resources` precheck, to match the lenient
+    // `listMcpResources` discovery path: a server that answers `resources/list`
+    // but under-declares the `resources` capability would otherwise have its
+    // resources discovered, listed in `/mcp`, and offered in `@server:`
+    // completion, yet fail on read with a misleading "does not support
+    // resources" error. The v2 typed helper skips the wire request when the
+    // capability is omitted, so modern sessions use it only when `resources`
+    // is declared; otherwise we issue the same raw request as the legacy path.
+    if (canUseModernTypedHelper(this.client, 'resources')) {
+      return this.client.readResource({ uri }, options);
     }
-
     return this.client.request(
       { method: 'resources/read', params: { uri } },
       ReadResourceResultSchema,
@@ -224,6 +921,14 @@ export class McpClient {
 
   private updateStatus(status: MCPServerStatus): void {
     this.status = status;
+    // Once disconnect has begun, don't propagate further status changes to
+    // the global registry. An in-flight `connect()` whose catch block fires
+    // after `disableMcpServer` has already removed the entry would otherwise
+    // silently resurrect the server and the Footer's MCP health pill would
+    // continue to count it as offline.
+    if (this.isDisconnecting) {
+      return;
+    }
     updateMCPServerStatus(this.serverName, status);
   }
 
@@ -235,25 +940,7 @@ export class McpClient {
       this.sendSdkMcpMessage,
     );
   }
-
-  private async discoverTools(cliConfig: Config): Promise<DiscoveredMCPTool[]> {
-    return discoverTools(
-      this.serverName,
-      this.serverConfig,
-      this.client,
-      cliConfig,
-    );
-  }
-
-  private async discoverPrompts(): Promise<Prompt[]> {
-    return discoverPrompts(this.serverName, this.client, this.promptRegistry);
-  }
 }
-
-/**
- * Map to track the status of each MCP server within the core package
- */
-const serverStatuses: Map<string, MCPServerStatus> = new Map();
 
 /**
  * Track the overall MCP discovery state
@@ -265,69 +952,35 @@ let mcpDiscoveryState: MCPDiscoveryState = MCPDiscoveryState.NOT_STARTED;
  */
 export const mcpServerRequiresOAuth: Map<string, boolean> = new Map();
 
-/**
- * Event listeners for MCP server status changes
- */
-type StatusChangeListener = (
-  serverName: string,
-  status: MCPServerStatus,
-) => void;
-const statusChangeListeners: StatusChangeListener[] = [];
-
-/**
- * Add a listener for MCP server status changes
- */
-export function addMCPStatusChangeListener(
-  listener: StatusChangeListener,
-): void {
-  statusChangeListeners.push(listener);
-}
-
-/**
- * Remove a listener for MCP server status changes
- */
-export function removeMCPStatusChangeListener(
-  listener: StatusChangeListener,
-): void {
-  const index = statusChangeListeners.indexOf(listener);
-  if (index !== -1) {
-    statusChangeListeners.splice(index, 1);
-  }
-}
-
-/**
- * Update the status of an MCP server
- */
-export function updateMCPServerStatus(
-  serverName: string,
-  status: MCPServerStatus,
-): void {
-  serverStatuses.set(serverName, status);
-  // Notify all listeners
-  for (const listener of statusChangeListeners) {
-    listener(serverName, status);
-  }
-}
-
-/**
- * Get the current status of an MCP server
- */
-export function getMCPServerStatus(serverName: string): MCPServerStatus {
-  return serverStatuses.get(serverName) || MCPServerStatus.DISCONNECTED;
-}
-
-/**
- * Get all MCP server statuses
- */
-export function getAllMCPServerStatuses(): Map<string, MCPServerStatus> {
-  return new Map(serverStatuses);
-}
+const mcpServerOAuthChallenges = new Map<string, string>();
+const mcpServerOAuthRequirements = new Set<string>();
+const mcpServerOAuthProbeCandidates = new Set<string>();
+const mcpServerOAuthProbeInFlight = new Map<string, Promise<boolean>>();
+const mcpServerOAuthProbeVersions = new Map<string, number>();
+const automaticOAuthInFlight = new Map<string, Promise<boolean>>();
+let automaticOAuthQueue: Promise<void> = Promise.resolve();
 
 /**
  * Get the current MCP discovery state
  */
 export function getMCPDiscoveryState(): MCPDiscoveryState {
   return mcpDiscoveryState;
+}
+
+/**
+ * expose a setter so
+ * `McpClientManager.discoverAllMcpToolsViaPool` can update the
+ * module-global `mcpDiscoveryState`. Pre-fix the pool path only
+ * updated the manager-local state, leaving the global at
+ * `NOT_STARTED` while pool discovery was running or already
+ * complete — `GET /workspace/mcp` and the MCP preflight cell read
+ * the global and reported `not_started` for a workspace whose
+ * discovery had finished. Per-session managers don't have the
+ * concept of "ALL workspace discovery complete" anymore in pool
+ * mode, so the pool path becomes the canonical writer when active.
+ */
+export function setMCPDiscoveryState(state: MCPDiscoveryState): void {
+  mcpDiscoveryState = state;
 }
 
 /**
@@ -356,6 +1009,151 @@ function extractWWWAuthenticateHeader(errorString: string): string | null {
   return null;
 }
 
+function oauthRecoveryKey(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+): string {
+  return `${mcpServerName}\0${mcpServerConfig.httpUrl ?? mcpServerConfig.url ?? ''}`;
+}
+
+function supportsMcpOAuth(mcpServerConfig: MCPServerConfig): boolean {
+  return (
+    !mcpServerConfig.authProviderType ||
+    mcpServerConfig.authProviderType === AuthProviderType.DYNAMIC_DISCOVERY
+  );
+}
+
+function getMcpOAuthChallengeFromError(error: unknown): {
+  confirmed401: boolean;
+  wwwAuthenticate: string;
+} {
+  const errorString = getErrorMessage(error);
+  return {
+    confirmed401:
+      getErrorStatus(error) === 401 || /(^|\D)401(\D|$)/.test(errorString),
+    wwwAuthenticate: extractWWWAuthenticateHeader(errorString) ?? '',
+  };
+}
+
+function setMcpOAuthRequirement(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+  wwwAuthenticate: string,
+): void {
+  const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
+  mcpServerOAuthProbeCandidates.delete(key);
+  mcpServerOAuthRequirements.add(key);
+  mcpServerOAuthChallenges.set(
+    key,
+    wwwAuthenticate || mcpServerOAuthChallenges.get(key) || '',
+  );
+  mcpServerRequiresOAuth.set(mcpServerName, true);
+}
+
+function clearMcpOAuthRequirement(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+): void {
+  const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
+  mcpServerOAuthProbeVersions.set(
+    key,
+    (mcpServerOAuthProbeVersions.get(key) ?? 0) + 1,
+  );
+  mcpServerOAuthProbeCandidates.delete(key);
+  mcpServerOAuthRequirements.delete(key);
+  mcpServerOAuthChallenges.delete(key);
+  const serverPrefix = `${mcpServerName}\0`;
+  if (
+    ![...mcpServerOAuthRequirements].some((candidate) =>
+      candidate.startsWith(serverPrefix),
+    )
+  ) {
+    mcpServerRequiresOAuth.delete(mcpServerName);
+  }
+}
+
+export async function probeMcpServerForOAuth(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+  error?: unknown,
+): Promise<boolean> {
+  if (
+    !hasNetworkTransport(mcpServerConfig) ||
+    !supportsMcpOAuth(mcpServerConfig)
+  ) {
+    return false;
+  }
+
+  const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
+  if (error !== undefined) {
+    const challenge = getMcpOAuthChallengeFromError(error);
+    if (challenge.confirmed401) {
+      setMcpOAuthRequirement(
+        mcpServerName,
+        mcpServerConfig,
+        challenge.wwwAuthenticate,
+      );
+      return true;
+    }
+  } else if (
+    !mcpServerOAuthProbeCandidates.has(key) &&
+    !mcpServerOAuthRequirements.has(key)
+  ) {
+    return false;
+  }
+
+  if (mcpServerOAuthRequirements.has(key)) {
+    return true;
+  }
+
+  const existingProbe = mcpServerOAuthProbeInFlight.get(key);
+  if (existingProbe) {
+    return existingProbe;
+  }
+  const probeVersion = mcpServerOAuthProbeVersions.get(key) ?? 0;
+
+  const probe = (async () => {
+    try {
+      const response = await fetch(
+        mcpServerConfig.httpUrl || mcpServerConfig.url!,
+        {
+          method: 'HEAD',
+          headers: {
+            ...mcpServerConfig.headers,
+            Accept: mcpServerConfig.httpUrl
+              ? 'application/json'
+              : 'text/event-stream',
+          },
+          redirect: 'manual',
+          signal: AbortSignal.timeout(5000),
+        },
+      );
+      if (response.status === 401) {
+        if ((mcpServerOAuthProbeVersions.get(key) ?? 0) !== probeVersion) {
+          return false;
+        }
+        setMcpOAuthRequirement(
+          mcpServerName,
+          mcpServerConfig,
+          response.headers.get('www-authenticate') ?? '',
+        );
+        return true;
+      }
+    } catch (fetchError) {
+      debugLogger.debug(
+        `Failed to probe MCP server for OAuth challenge: ${getErrorMessage(fetchError)}`,
+      );
+    }
+
+    mcpServerOAuthProbeCandidates.delete(key);
+    return false;
+  })().finally(() => {
+    mcpServerOAuthProbeInFlight.delete(key);
+  });
+  mcpServerOAuthProbeInFlight.set(key, probe);
+  return probe;
+}
+
 /**
  * Handle automatic OAuth discovery and authentication for a server.
  *
@@ -377,19 +1175,28 @@ async function handleAutomaticOAuth(
     const resourceMetadataUri =
       OAuthUtils.parseWWWAuthenticateHeader(wwwAuthenticate);
     if (resourceMetadataUri) {
-      oauthConfig = await OAuthUtils.discoverOAuthConfig(resourceMetadataUri);
+      oauthConfig = await retryWithBackoff(
+        () => OAuthUtils.discoverOAuthConfig(resourceMetadataUri),
+        `${mcpServerName}/oauth-discovery`,
+        { maxRetries: 1 },
+      );
     } else if (hasNetworkTransport(mcpServerConfig)) {
       // Fallback: try to discover OAuth config from the base URL
       const serverUrl = new URL(
         mcpServerConfig.httpUrl || mcpServerConfig.url!,
       );
       const baseUrl = `${serverUrl.protocol}//${serverUrl.host}`;
-      oauthConfig = await OAuthUtils.discoverOAuthConfig(baseUrl);
+      oauthConfig = await retryWithBackoff(
+        () => OAuthUtils.discoverOAuthConfig(baseUrl),
+        `${mcpServerName}/oauth-discovery`,
+        { maxRetries: 1 },
+      );
     }
 
     if (!oauthConfig) {
       debugLogger.error(
-        `Could not configure OAuth for '${mcpServerName}' - please authenticate manually with /mcp auth ${mcpServerName}`,
+        `Could not configure OAuth for server '${mcpServerName}'. ` +
+          getMcpOAuthDialogInstruction('authenticate', mcpServerName),
       );
       return false;
     }
@@ -425,6 +1232,74 @@ async function handleAutomaticOAuth(
   }
 }
 
+async function withAutomaticOAuthTimeout(
+  recovery: Promise<boolean>,
+  mcpServerName: string,
+): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<boolean>((resolve) => {
+    timeout = setTimeout(() => {
+      debugLogger.error(
+        `Timed out handling automatic OAuth for server '${mcpServerName}'. ` +
+          getMcpOAuthDialogInstruction('authenticate', mcpServerName),
+      );
+      resolve(false);
+    }, AUTOMATIC_MCP_OAUTH_TIMEOUT_MS);
+  });
+
+  try {
+    return await Promise.race([recovery, timedOut]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+export async function attemptAutomaticMcpOAuth(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+  allowBrowserLaunch: boolean,
+): Promise<boolean> {
+  if (
+    !allowBrowserLaunch ||
+    !supportsMcpOAuth(mcpServerConfig) ||
+    (!mcpServerConfig.httpUrl && !mcpServerConfig.oauth?.enabled)
+  ) {
+    return false;
+  }
+
+  const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
+  if (!mcpServerOAuthRequirements.has(key)) {
+    return false;
+  }
+  const existing = automaticOAuthInFlight.get(key);
+  if (existing) {
+    return existing;
+  }
+
+  const recovery = automaticOAuthQueue
+    .then(() =>
+      withAutomaticOAuthTimeout(
+        handleAutomaticOAuth(
+          mcpServerName,
+          mcpServerConfig,
+          mcpServerOAuthChallenges.get(key) ?? '',
+        ),
+        mcpServerName,
+      ),
+    )
+    .finally(() => {
+      automaticOAuthInFlight.delete(key);
+    });
+  automaticOAuthInFlight.set(key, recovery);
+  automaticOAuthQueue = recovery.then(
+    () => undefined,
+    () => undefined,
+  );
+  return recovery;
+}
+
 /**
  * Create a transport with OAuth token for the given server configuration.
  *
@@ -442,6 +1317,7 @@ async function createTransportWithOAuth(
     if (mcpServerConfig.httpUrl) {
       // Create HTTP transport with OAuth token
       const oauthTransportOptions: StreamableHTTPClientTransportOptions = {
+        fetch: createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig),
         requestInit: {
           headers: {
             ...mcpServerConfig.headers,
@@ -497,7 +1373,11 @@ export async function discoverMcpTools(
 ): Promise<void> {
   mcpDiscoveryState = MCPDiscoveryState.IN_PROGRESS;
   try {
-    mcpServers = populateMcpServerCommand(mcpServers, mcpServerCommand);
+    mcpServers = populateMcpServerCommand(
+      mcpServers,
+      mcpServerCommand,
+      cliConfig.getTargetDir(),
+    );
 
     const discoveryPromises = Object.entries(mcpServers).map(
       ([mcpServerName, mcpServerConfig]) =>
@@ -521,20 +1401,42 @@ export async function discoverMcpTools(
 export function populateMcpServerCommand(
   mcpServers: Record<string, MCPServerConfig>,
   mcpServerCommand: string | undefined,
+  cwd?: string,
 ): Record<string, MCPServerConfig> {
+  let result = mcpServers;
   if (mcpServerCommand) {
     const cmd = mcpServerCommand;
     const args = parse(cmd, process.env) as string[];
     if (args.some((arg) => typeof arg !== 'string')) {
       throw new Error('failed to parse mcpServerCommand: ' + cmd);
     }
-    // use generic server name 'mcp'
-    mcpServers['mcp'] = {
-      command: args[0],
-      args: args.slice(1),
+    result = {
+      ...result,
+      mcp: {
+        command: args[0],
+        args: args.slice(1),
+        cwd,
+      },
     };
   }
-  return mcpServers;
+  if (cwd === undefined) return result;
+  // Stamp the session cwd onto implicit stdio servers so a worktree
+  // relocation rebinds them (cwd is part of the pool fingerprint). The
+  // predicate mirrors mcpTransportOf's order — tcp before command — so a
+  // config carrying both stays a websocket server and is not stamped.
+  return Object.fromEntries(
+    Object.entries(result).map(([name, server]) => [
+      name,
+      server.command !== undefined &&
+      server.httpUrl === undefined &&
+      server.url === undefined &&
+      server.tcp === undefined &&
+      server.type !== 'sdk' &&
+      server.cwd === undefined
+        ? { ...server, cwd }
+        : server,
+    ]),
+  );
 }
 
 /**
@@ -575,26 +1477,40 @@ export async function connectAndDiscover(
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
     };
 
-    // Attempt to discover both prompts and tools
+    // Attempt to discover prompts, resources, and tools
     const prompts = await discoverPrompts(
       mcpServerName,
       mcpClient,
       promptRegistry,
     );
-    const tools = await discoverTools(
+    const resources = await discoverResources(
+      mcpServerName,
+      mcpClient,
+      cliConfig.getResourceRegistry(),
+    );
+    const toolDiscovery = await discoverToolsWithMetadata(
       mcpServerName,
       mcpServerConfig,
       mcpClient,
       cliConfig,
     );
+    const tools = applyListingAppResourceUi(toolDiscovery.tools, resources);
 
-    // If we have neither prompts nor tools, it's a failed discovery
-    if (prompts.length === 0 && tools.length === 0) {
-      throw new Error('No prompts or tools found on the server.');
+    // If we found no prompts, resources, or tools, it's a failed discovery
+    if (
+      prompts.length === 0 &&
+      resources.length === 0 &&
+      tools.length === 0 &&
+      !toolDiscovery.hadVisibilityFilteredTools
+    ) {
+      throw new Error('No prompts, tools, or resources found on the server.');
     }
 
     // If we found anything, the server is connected
     updateMCPServerStatus(mcpServerName, MCPServerStatus.CONNECTED);
+    // A successful connect proves authentication works now — clear the sticky
+    // 401 marker so later unrelated outages aren't mislabeled as auth failures.
+    clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
 
     // Register any discovered tools
     for (const tool of tools) {
@@ -624,32 +1540,110 @@ export async function connectAndDiscover(
  * @returns A promise that resolves to an array of discovered and enabled tools.
  * @throws An error if no enabled tools are found or if the server provides invalid function declarations.
  */
+function applyListingAppResourceUi(
+  tools: DiscoveredMCPTool[],
+  resources: readonly DiscoveredMCPResource[],
+): DiscoveredMCPTool[] {
+  if (tools.length === 0 || resources.length === 0) return tools;
+  const uiByUri = new Map<string, Record<string, unknown>>();
+  for (const resource of resources) {
+    const meta = resource._meta;
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) continue;
+    const ui = meta['ui'];
+    if (!ui || typeof ui !== 'object' || Array.isArray(ui)) continue;
+    uiByUri.set(resource.uri, ui as Record<string, unknown>);
+  }
+  if (uiByUri.size === 0) return tools;
+  return tools.map((tool) => {
+    const listingUi = tool.appResourceUri
+      ? uiByUri.get(tool.appResourceUri)
+      : undefined;
+    return listingUi ? tool.withAppResourceUi(listingUi) : tool;
+  });
+}
+
 export async function discoverTools(
   mcpServerName: string,
   mcpServerConfig: MCPServerConfig,
   mcpClient: Client,
   cliConfig: Config,
+  opts?: { applyConfigFilters?: boolean },
 ): Promise<DiscoveredMCPTool[]> {
+  return (
+    await discoverToolsWithMetadata(
+      mcpServerName,
+      mcpServerConfig,
+      mcpClient,
+      cliConfig,
+      opts,
+    )
+  ).tools;
+}
+
+type ToolDiscoveryResult = {
+  tools: DiscoveredMCPTool[];
+  hadVisibilityFilteredTools: boolean;
+};
+
+async function discoverToolsWithMetadata(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+  mcpClient: Client,
+  cliConfig: Config,
+  opts?: { applyConfigFilters?: boolean },
+): Promise<ToolDiscoveryResult> {
   try {
-    const mcpCallableTool = mcpToTool(mcpClient, {
+    const { mcpToTool } = await import('@google/genai');
+    const listedTools: Array<
+      Awaited<ReturnType<Client['listTools']>>['tools'][number]
+    > = [];
+    let didListTools = false;
+    const listTools = async (params?: { cursor?: string }) => {
+      // Clients without getProtocolEra (tests and the genai adapter) keep
+      // the typed helper. Modern sessions use it only when `tools` is
+      // declared; otherwise the v2 helper returns [] without a wire request.
+      const result =
+        typeof mcpClient.getProtocolEra !== 'function' ||
+        canUseModernTypedHelper(mcpClient, 'tools')
+          ? await mcpClient.listTools(params)
+          : await mcpClient.request(
+              { method: 'tools/list', params: params ?? {} },
+              ListToolsResultSchema,
+            );
+      didListTools = true;
+      listedTools.push(...result.tools);
+      return result;
+    };
+    // @google/genai still types this structural adapter against SDK v1. Its
+    // discovery path only calls listTools(); execution stays on the v2 client.
+    // Legacy listTools must remain lenient because some servers implement
+    // tools/list without declaring the tools capability during initialization.
+    const discoveryClient = { listTools } as unknown as GenAiMcpClient;
+    const mcpCallableTool = mcpToTool(discoveryClient, {
       timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
     });
-    const tool = await mcpCallableTool.tool();
+    const tool = await retryWithBackoff(
+      () => mcpCallableTool.tool(),
+      `${mcpServerName}/tools/list`,
+    );
 
     if (!Array.isArray(tool.functionDeclarations)) {
       // This is a valid case for a prompt-only server
-      return [];
+      return { tools: [], hadVisibilityFilteredTools: false };
     }
 
     // Fetch raw tool list from MCP client to get annotations (readOnlyHint, etc.)
     // that are not preserved by mcpToTool's functionDeclarations conversion.
     const annotationsMap = new Map<string, McpToolAnnotations>();
+    const appResourceUriMap = new Map<string, string>();
     try {
-      const listToolsResult = await mcpClient.listTools();
-      for (const mcpTool of listToolsResult.tools) {
+      if (!didListTools) await listTools();
+      for (const mcpTool of listedTools) {
         if (mcpTool.annotations) {
           annotationsMap.set(mcpTool.name, mcpTool.annotations);
         }
+        const resourceUri = getMcpAppResourceUri(mcpTool);
+        if (resourceUri) appResourceUriMap.set(mcpTool.name, resourceUri);
       }
     } catch {
       // If listTools fails, proceed without annotations — non-critical
@@ -659,10 +1653,39 @@ export async function discoverTools(
     }
 
     const mcpTimeout = mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC;
+    const applyConfigFilters = opts?.applyConfigFilters ?? true;
     const discoveredTools: DiscoveredMCPTool[] = [];
+    let hadVisibilityFilteredTools = false;
     for (const funcDecl of tool.functionDeclarations) {
       try {
-        if (!isEnabled(funcDecl, mcpServerName, mcpServerConfig)) {
+        if (!funcDecl.name) {
+          // emit the
+          // malformed-funcDecl warning inline rather than calling
+          // `isEnabled` solely for its side effect. Pre-fix
+          // `isEnabled(funcDecl, ...)` was invoked just to trigger
+          // the warn log inside it (return value ignored), which
+          // misuses isEnabled as a logging helper. The warning text
+          // is the same as the one in isEnabled (line 1618-1620);
+          // keeping it here keeps the call site readable and lets
+          // isEnabled stay a pure predicate.
+          debugLogger.warn(
+            `Discovered a function declaration without a name from MCP server '${mcpServerName}'. Skipping.`,
+          );
+          continue;
+        }
+
+        if (
+          applyConfigFilters &&
+          !isEnabled(funcDecl, mcpServerName, mcpServerConfig)
+        ) {
+          continue;
+        }
+
+        const listed = listedTools.find(
+          (mcpTool) => mcpTool.name === funcDecl.name,
+        );
+        if (listed && !isMcpToolVisibleToModel(listed)) {
+          hadVisibilityFilteredTools = true;
           continue;
         }
 
@@ -673,12 +1696,16 @@ export async function discoverTools(
             funcDecl.name!,
             funcDecl.description ?? '',
             funcDecl.parametersJsonSchema ?? { type: 'object', properties: {} },
-            mcpServerConfig.trust,
+            applyConfigFilters ? mcpServerConfig.trust : undefined,
             undefined,
             cliConfig,
             mcpClient, // raw MCP Client for direct callTool with progress
             mcpTimeout,
+            cliConfig?.getMcpToolIdleTimeoutMs?.(),
             annotationsMap.get(funcDecl.name!),
+            mcpServerConfig.alwaysLoadTools === true,
+            invocationContextClients.has(mcpClient),
+            appResourceUriMap.get(funcDecl.name!),
           ),
         );
       } catch (error) {
@@ -689,14 +1716,97 @@ export async function discoverTools(
         );
       }
     }
-    return discoveredTools;
+    return { tools: discoveredTools, hadVisibilityFilteredTools };
   } catch (error) {
-    if (
-      error instanceof Error &&
-      !error.message?.includes('Method not found')
-    ) {
+    if (!isMethodNotFound(error)) {
       debugLogger.error(
         `Error discovering tools from ${mcpServerName}: ${getErrorMessage(
+          error,
+        )}`,
+      );
+    }
+    return { tools: [], hadVisibilityFilteredTools: false };
+  }
+}
+
+/**
+ * True when an MCP request failed because the method is not implemented.
+ * JSON-RPC guarantees the numeric code (`-32601`), so that is the primary,
+ * precise check. The message fallback (for transports that drop the code)
+ * keeps the original case-sensitive exact substring `'Method not found'` —
+ * deliberately NOT a broad `/method not found/i`, which would also swallow
+ * unrelated errors like "Error in method not found handler: ...".
+ */
+function isMethodNotFound(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === -32601) return true;
+  return error instanceof Error && error.message.includes('Method not found');
+}
+
+/**
+ * v2 typed list/read helpers return empty (or skip the call) when the
+ * server omitted that capability. Use them only when the capability is
+ * declared; otherwise fall back to a raw request so under-declared
+ * servers stay visible.
+ */
+function canUseModernTypedHelper(
+  mcpClient: Client,
+  capability: 'prompts' | 'resources' | 'tools',
+): boolean {
+  return (
+    mcpClient.getProtocolEra?.() === 'modern' &&
+    Boolean(mcpClient.getServerCapabilities?.()?.[capability])
+  );
+}
+
+/**
+ * Pure prompt listing. Asks the MCP server for its prompts and returns
+ * enriched `DiscoveredMCPPrompt[]` (with `serverName` + bound `invoke`)
+ * WITHOUT registering them anywhere. pool uses this so a single
+ * shared transport can produce the snapshot once and let each session's
+ * `SessionMcpView` register into its own registry.
+ *
+ * Returns `[]` on protocol errors or when the server has no prompts —
+ * matches `discoverPrompts` swallow-and-continue behavior.
+ *
+ * We deliberately do NOT skip the wire request when
+ * `getServerCapabilities()?.prompts` is absent. A non-trivial number of
+ * real MCP servers implement `prompts/list` but under-declare (or omit)
+ * the `prompts` capability in their `initialize` response; the v2 typed
+ * helper returns `[]` without a request in that case. Modern sessions
+ * therefore use the helper only when the capability is declared;
+ * otherwise we issue the same raw `prompts/list` request as the legacy
+ * path. A server that truly lacks prompts answers `-32601 Method not
+ * found`, which the catch below swallows silently.
+ */
+export async function listMcpPrompts(
+  mcpServerName: string,
+  mcpClient: Client,
+): Promise<DiscoveredMCPPrompt[]> {
+  try {
+    const response = await retryWithBackoff(
+      () =>
+        canUseModernTypedHelper(mcpClient, 'prompts')
+          ? mcpClient.listPrompts()
+          : mcpClient.request(
+              { method: 'prompts/list', params: {} },
+              ListPromptsResultSchema,
+            ),
+      `${mcpServerName}/prompts/list`,
+    );
+
+    return response.prompts.map((prompt) => ({
+      ...prompt,
+      serverName: mcpServerName,
+      invoke: (params: Record<string, unknown>) =>
+        invokeMcpPrompt(mcpServerName, mcpClient, prompt.name, params),
+    }));
+  } catch (error) {
+    // It's okay if this fails, not all servers will have prompts.
+    // Don't log an error if the method is not found, which is a common case.
+    if (!isMethodNotFound(error)) {
+      debugLogger.error(
+        `Error discovering prompts from ${mcpServerName}: ${getErrorMessage(
           error,
         )}`,
       );
@@ -706,50 +1816,28 @@ export async function discoverTools(
 }
 
 /**
- * Discovers and logs prompts from a connected MCP client.
- * It retrieves prompt declarations from the client and logs their names.
+ * Discovers prompts AND registers them into the supplied PromptRegistry.
+ * Thin wrapper over `listMcpPrompts` that preserves the historical
+ * `Promise<Prompt[]>` signature (used by `connectAndDiscover`, standalone
+ * qwen, and existing tests). New code should prefer `listMcpPrompts`
+ * for testability.
  *
  * @param mcpServerName The name of the MCP server.
  * @param mcpClient The active MCP client instance.
+ * @param promptRegistry The registry to register discovered prompts into.
  */
 export async function discoverPrompts(
   mcpServerName: string,
   mcpClient: Client,
   promptRegistry: PromptRegistry,
 ): Promise<Prompt[]> {
-  try {
-    // Only request prompts if the server supports them.
-    if (mcpClient.getServerCapabilities()?.prompts == null) return [];
-
-    const response = await mcpClient.request(
-      { method: 'prompts/list', params: {} },
-      ListPromptsResultSchema,
-    );
-
-    for (const prompt of response.prompts) {
-      promptRegistry.registerPrompt({
-        ...prompt,
-        serverName: mcpServerName,
-        invoke: (params: Record<string, unknown>) =>
-          invokeMcpPrompt(mcpServerName, mcpClient, prompt.name, params),
-      });
-    }
-    return response.prompts;
-  } catch (error) {
-    // It's okay if this fails, not all servers will have prompts.
-    // Don't log an error if the method is not found, which is a common case.
-    if (
-      error instanceof Error &&
-      !error.message?.includes('Method not found')
-    ) {
-      debugLogger.error(
-        `Error discovering prompts from ${mcpServerName}: ${getErrorMessage(
-          error,
-        )}`,
-      );
-    }
-    return [];
+  const enriched = await listMcpPrompts(mcpServerName, mcpClient);
+  for (const prompt of enriched) {
+    promptRegistry.registerPrompt(prompt);
   }
+  // Preserve historical return type: raw Prompt (without serverName/invoke).
+  // Callers only ever inspected `length`, but the type contract is preserved.
+  return enriched.map(({ serverName: _s, invoke: _i, ...rest }) => rest);
 }
 
 /**
@@ -768,23 +1856,21 @@ export async function invokeMcpPrompt(
   promptParams: Record<string, unknown>,
 ): Promise<GetPromptResult> {
   try {
-    const response = await mcpClient.request(
-      {
-        method: 'prompts/get',
-        params: {
-          name: promptName,
-          arguments: promptParams,
-        },
-      },
-      GetPromptResultSchema,
-    );
+    const params = {
+      name: promptName,
+      arguments: promptParams as Record<string, string>,
+    };
+    const response =
+      mcpClient.getProtocolEra?.() === 'modern'
+        ? await mcpClient.getPrompt(params)
+        : await mcpClient.request(
+            { method: 'prompts/get', params },
+            GetPromptResultSchema,
+          );
 
     return response;
   } catch (error) {
-    if (
-      error instanceof Error &&
-      !error.message?.includes('Method not found')
-    ) {
+    if (!isMethodNotFound(error)) {
       debugLogger.error(
         `Error invoking prompt '${promptName}' from ${mcpServerName} ${promptParams}: ${getErrorMessage(
           error,
@@ -793,6 +1879,79 @@ export async function invokeMcpPrompt(
     }
     throw error;
   }
+}
+
+/**
+ * Lists resources advertised by an MCP server (`resources/list`) WITHOUT
+ * registering them anywhere — the pool uses this so a single shared
+ * transport can produce the snapshot once and let each session register
+ * into its own registry. Mirrors `listMcpPrompts`.
+ *
+ * As with prompts, we do NOT skip the wire request when
+ * `getServerCapabilities()?.resources` is absent: some servers expose
+ * resources but under-declare the capability. The v2 typed helper returns
+ * `[]` without a request in that case, so modern sessions use it only
+ * when `resources` is declared; otherwise we issue the same raw request
+ * as the legacy path. A server with no resources answers `-32601 Method
+ * not found`, swallowed below.
+ *
+ * When the capability is declared, the v2 helper also aggregates cursor
+ * pagination. Legacy sessions preserve the existing first-page behavior.
+ */
+export async function listMcpResources(
+  mcpServerName: string,
+  mcpClient: Client,
+): Promise<DiscoveredMCPResource[]> {
+  try {
+    const response = await retryWithBackoff(
+      () =>
+        canUseModernTypedHelper(mcpClient, 'resources')
+          ? mcpClient.listResources()
+          : mcpClient.request(
+              { method: 'resources/list', params: {} },
+              ListResourcesResultSchema,
+            ),
+      `${mcpServerName}/resources/list`,
+    );
+
+    return response.resources.map((resource) => ({
+      ...resource,
+      serverName: mcpServerName,
+    }));
+  } catch (error) {
+    // It's okay if this fails; not all servers expose resources. Don't log
+    // when the method is simply absent (the common case for tool-only
+    // servers).
+    if (!isMethodNotFound(error)) {
+      debugLogger.error(
+        `Error discovering resources from ${mcpServerName}: ${getErrorMessage(
+          error,
+        )}`,
+      );
+    }
+    return [];
+  }
+}
+
+/**
+ * Discovers resources AND registers them into the supplied
+ * `ResourceRegistry`. Thin wrapper over `listMcpResources`, mirroring
+ * `discoverPrompts`.
+ *
+ * @param mcpServerName The name of the MCP server.
+ * @param mcpClient The active MCP client instance.
+ * @param resourceRegistry The registry to register discovered resources into.
+ */
+export async function discoverResources(
+  mcpServerName: string,
+  mcpClient: Client,
+  resourceRegistry: ResourceRegistry,
+): Promise<DiscoveredMCPResource[]> {
+  const resources = await listMcpResources(mcpServerName, mcpClient);
+  for (const resource of resources) {
+    resourceRegistry.registerResource(resource);
+  }
+  return resources;
 }
 
 /**
@@ -823,10 +1982,8 @@ export async function connectToMcpServer(
   workspaceContext: WorkspaceContext,
   sendSdkMcpMessage?: SendSdkMcpMessage,
 ): Promise<Client> {
-  const mcpClient = new Client({
-    name: 'qwen-code-mcp-client',
-    version: '0.0.1',
-  });
+  clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
+  const mcpClient = createMcpClient('qwen-code-mcp-client', mcpServerConfig);
 
   mcpClient.registerCapabilities({
     roots: {
@@ -834,7 +1991,7 @@ export async function connectToMcpServer(
     },
   });
 
-  mcpClient.setRequestHandler(ListRootsRequestSchema, async () => {
+  mcpClient.setRequestHandler('roots/list', async () => {
     const roots = [];
     for (const dir of workspaceContext.getDirectories()) {
       roots.push({
@@ -873,6 +2030,29 @@ export async function connectToMcpServer(
     unlistenDirectories = undefined;
   };
 
+  // Snapshot credentials before createTransport. Its internal getValidToken
+  // call may refresh or purge stored tokens, so the later 401 handler needs
+  // this pre-check to distinguish "had credentials, now unusable" from
+  // "never had OAuth configuration."
+  let hadStoredSseOAuthCredentials = false;
+
+  if (
+    mcpServerConfig.url &&
+    !mcpServerConfig.httpUrl &&
+    !mcpServerConfig.oauth?.enabled
+  ) {
+    const tokenStorage = new MCPOAuthTokenStorage();
+    try {
+      hadStoredSseOAuthCredentials = Boolean(
+        await tokenStorage.getCredentials(mcpServerName),
+      );
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to pre-read stored OAuth credentials for SSE server '${mcpServerName}': ${getErrorMessage(error)}`,
+      );
+    }
+  }
+
   try {
     const transport = await createTransport(
       mcpServerName,
@@ -884,6 +2064,8 @@ export async function connectToMcpServer(
       await mcpClient.connect(transport, {
         timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
       });
+      bindInvocationContextPolicy(mcpClient, transport);
+      clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
       return mcpClient;
     } catch (error) {
       unlistenDirectories?.();
@@ -894,82 +2076,56 @@ export async function connectToMcpServer(
   } catch (error) {
     unlistenDirectories?.();
     unlistenDirectories = undefined;
-    // Check if this is a 401 error that might indicate OAuth is required
-    const errorString = String(error);
-    if (errorString.includes('401') && hasNetworkTransport(mcpServerConfig)) {
-      mcpServerRequiresOAuth.set(mcpServerName, true);
+    const requiresOAuth = await probeMcpServerForOAuth(
+      mcpServerName,
+      mcpServerConfig,
+      error,
+    );
+    if (requiresOAuth) {
       // Only trigger automatic OAuth discovery for HTTP servers or when OAuth is explicitly configured
       // For SSE servers, we should not trigger new OAuth flows automatically
       const shouldTriggerOAuth =
         mcpServerConfig.httpUrl || mcpServerConfig.oauth?.enabled;
 
       if (!shouldTriggerOAuth) {
-        // For SSE servers without explicit OAuth config, if a token was found but rejected, report it accurately.
+        // For SSE servers without explicit OAuth config, report whether
+        // the 401 came after trying stored credentials or without any OAuth setup.
         const tokenStorage = new MCPOAuthTokenStorage();
-        const credentials = await tokenStorage.getCredentials(mcpServerName);
+        let credentials: OAuthCredentials | null = null;
+        try {
+          credentials = await tokenStorage.getCredentials(mcpServerName);
+        } catch (credentialError) {
+          debugLogger.error(
+            `Failed to re-read stored OAuth credentials for SSE server '${mcpServerName}' after 401: ${getErrorMessage(credentialError)}`,
+          );
+        }
+        let tokenState: SseOAuth401TokenState =
+          credentials || hadStoredSseOAuthCredentials ? 'unusable' : 'missing';
         if (credentials) {
           const authProvider = new MCPOAuthProvider(tokenStorage);
-          const hasStoredTokens = await authProvider.getValidToken(
-            mcpServerName,
-            {
+          try {
+            tokenState = (await authProvider.getValidToken(mcpServerName, {
               // Pass client ID if available
               clientId: credentials.clientId,
-            },
-          );
-          if (hasStoredTokens) {
-            debugLogger.warn(
-              `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
-                `Please re-authenticate using: /mcp auth ${mcpServerName}`,
+            }))
+              ? 'accepted-token-rejected'
+              : 'unusable';
+          } catch (tokenError) {
+            debugLogger.error(
+              `Failed to validate stored OAuth token for SSE server '${mcpServerName}': ${getErrorMessage(tokenError)}`,
             );
-          } else {
-            debugLogger.warn(
-              `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-                `Please authenticate using: /mcp auth ${mcpServerName}`,
-            );
+            tokenState = 'unusable';
           }
         }
-        throw new Error(
-          `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-            `Please authenticate using: /mcp auth ${mcpServerName}`,
-        );
+        const oauthMessage = getSseOAuth401Message(mcpServerName, tokenState);
+        debugLogger.warn(oauthMessage);
+        throw new Error(oauthMessage);
       }
 
-      // Try to extract www-authenticate header from the error
-      let wwwAuthenticate = extractWWWAuthenticateHeader(errorString);
-
-      // If we didn't get the header from the error string, try to get it from the server
-      if (!wwwAuthenticate && hasNetworkTransport(mcpServerConfig)) {
-        debugLogger.debug(
-          `No www-authenticate header in error, trying to fetch it from server...`,
-        );
-        try {
-          const urlToFetch = mcpServerConfig.httpUrl || mcpServerConfig.url!;
-          const response = await fetch(urlToFetch, {
-            method: 'HEAD',
-            headers: {
-              Accept: mcpServerConfig.httpUrl
-                ? 'application/json'
-                : 'text/event-stream',
-            },
-            signal: AbortSignal.timeout(5000),
-          });
-
-          if (response.status === 401) {
-            wwwAuthenticate = response.headers.get('www-authenticate');
-            if (wwwAuthenticate) {
-              debugLogger.debug(
-                `Found www-authenticate header from server: ${wwwAuthenticate}`,
-              );
-            }
-          }
-        } catch (fetchError) {
-          debugLogger.debug(
-            `Failed to fetch www-authenticate header: ${getErrorMessage(
-              fetchError,
-            )}`,
-          );
-        }
-      }
+      const wwwAuthenticate =
+        mcpServerOAuthChallenges.get(
+          oauthRecoveryKey(mcpServerName, mcpServerConfig),
+        ) ?? '';
 
       if (wwwAuthenticate) {
         debugLogger.debug(
@@ -1016,6 +2172,7 @@ export async function connectToMcpServer(
                       mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
                   });
                   // Connection successful with OAuth
+                  clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
                   return mcpClient;
                 } catch (retryError) {
                   debugLogger.error(
@@ -1050,51 +2207,17 @@ export async function connectToMcpServer(
             );
           }
         } else {
-          debugLogger.error(
-            `Failed to handle automatic OAuth for server '${mcpServerName}'`,
-          );
-          throw new Error(
-            `Failed to handle automatic OAuth for server '${mcpServerName}'`,
-          );
+          const oauthMessage =
+            `Failed to handle automatic OAuth for server '${mcpServerName}'. ` +
+            getMcpOAuthDialogInstruction('authenticate', mcpServerName);
+          debugLogger.error(oauthMessage);
+          throw new Error(oauthMessage);
         }
       } else {
         // No www-authenticate header found, but we got a 401
-        // Only try OAuth discovery for HTTP servers or when OAuth is explicitly configured
-        // For SSE servers, we should not trigger new OAuth flows automatically
-        const shouldTryDiscovery =
-          mcpServerConfig.httpUrl || mcpServerConfig.oauth?.enabled;
-
-        if (!shouldTryDiscovery) {
-          const tokenStorage = new MCPOAuthTokenStorage();
-          const credentials = await tokenStorage.getCredentials(mcpServerName);
-          if (credentials) {
-            const authProvider = new MCPOAuthProvider(tokenStorage);
-            const hasStoredTokens = await authProvider.getValidToken(
-              mcpServerName,
-              {
-                // Pass client ID if available
-                clientId: credentials.clientId,
-              },
-            );
-            if (hasStoredTokens) {
-              debugLogger.warn(
-                `Stored OAuth token for SSE server '${mcpServerName}' was rejected. ` +
-                  `Please re-authenticate using: /mcp auth ${mcpServerName}`,
-              );
-            } else {
-              debugLogger.warn(
-                `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-                  `Please authenticate using: /mcp auth ${mcpServerName}`,
-              );
-            }
-          }
-          throw new Error(
-            `401 error received for SSE server '${mcpServerName}' without OAuth configuration. ` +
-              `Please authenticate using: /mcp auth ${mcpServerName}`,
-          );
-        }
-
-        // For SSE/HTTP servers, try to discover OAuth configuration from the base URL
+        // For HTTP servers and explicitly configured OAuth, try to discover
+        // OAuth configuration from the base URL. SSE servers without explicit
+        // OAuth are handled above before this branch.
         debugLogger.info(
           `Attempting OAuth discovery for '${mcpServerName}'...`,
         );
@@ -1105,118 +2228,129 @@ export async function connectToMcpServer(
           );
           const baseUrl = `${serverUrl.protocol}//${serverUrl.host}`;
 
+          let oauthConfig: Awaited<
+            ReturnType<typeof OAuthUtils.discoverOAuthConfig>
+          >;
           try {
             // Try to discover OAuth configuration from the base URL
-            const oauthConfig = await OAuthUtils.discoverOAuthConfig(baseUrl);
-            if (oauthConfig) {
-              debugLogger.info(
-                `Discovered OAuth configuration from base URL for server '${mcpServerName}'`,
-              );
+            oauthConfig = await retryWithBackoff(
+              () => OAuthUtils.discoverOAuthConfig(baseUrl),
+              `${mcpServerName}/oauth-discovery`,
+              { maxRetries: 1 },
+            );
+          } catch (discoveryError) {
+            const oauthMessage =
+              `OAuth discovery failed for server '${mcpServerName}'. ` +
+              getMcpOAuthDialogInstruction('authenticate', mcpServerName) +
+              ` Original error: ${getErrorMessage(discoveryError)}`;
+            debugLogger.error(oauthMessage);
+            throw new Error(oauthMessage, { cause: discoveryError });
+          }
 
-              // Create OAuth configuration for authentication
-              const oauthAuthConfig = {
-                enabled: true,
-                authorizationUrl: oauthConfig.authorizationUrl,
-                tokenUrl: oauthConfig.tokenUrl,
-                scopes: oauthConfig.scopes || [],
-              };
+          if (oauthConfig) {
+            debugLogger.info(
+              `Discovered OAuth configuration from base URL for server '${mcpServerName}'`,
+            );
 
-              // Perform OAuth authentication
-              // Pass the server URL for proper discovery
-              const authServerUrl =
-                mcpServerConfig.httpUrl || mcpServerConfig.url;
-              debugLogger.info(
-                `Starting OAuth authentication for server '${mcpServerName}'...`,
-              );
-              const authProvider = new MCPOAuthProvider(
-                new MCPOAuthTokenStorage(),
-              );
-              await authProvider.authenticate(
+            // Create OAuth configuration for authentication
+            const oauthAuthConfig = {
+              enabled: true,
+              authorizationUrl: oauthConfig.authorizationUrl,
+              tokenUrl: oauthConfig.tokenUrl,
+              scopes: oauthConfig.scopes || [],
+            };
+
+            // Perform OAuth authentication
+            // Pass the server URL for proper discovery
+            const authServerUrl =
+              mcpServerConfig.httpUrl || mcpServerConfig.url;
+            debugLogger.info(
+              `Starting OAuth authentication for server '${mcpServerName}'...`,
+            );
+            const authProvider = new MCPOAuthProvider(
+              new MCPOAuthTokenStorage(),
+            );
+            await authProvider.authenticate(
+              mcpServerName,
+              oauthAuthConfig,
+              authServerUrl,
+            );
+
+            // Retry connection with OAuth token
+            const tokenStorage = new MCPOAuthTokenStorage();
+            const credentials =
+              await tokenStorage.getCredentials(mcpServerName);
+            if (credentials) {
+              const authProvider = new MCPOAuthProvider(tokenStorage);
+              const accessToken = await authProvider.getValidToken(
                 mcpServerName,
-                oauthAuthConfig,
-                authServerUrl,
+                {
+                  // Pass client ID if available
+                  clientId: credentials.clientId,
+                },
               );
-
-              // Retry connection with OAuth token
-              const tokenStorage = new MCPOAuthTokenStorage();
-              const credentials =
-                await tokenStorage.getCredentials(mcpServerName);
-              if (credentials) {
-                const authProvider = new MCPOAuthProvider(tokenStorage);
-                const accessToken = await authProvider.getValidToken(
+              if (accessToken) {
+                // Create transport with OAuth token
+                const oauthTransport = await createTransportWithOAuth(
                   mcpServerName,
-                  {
-                    // Pass client ID if available
-                    clientId: credentials.clientId,
-                  },
+                  mcpServerConfig,
+                  accessToken,
                 );
-                if (accessToken) {
-                  // Create transport with OAuth token
-                  const oauthTransport = await createTransportWithOAuth(
-                    mcpServerName,
-                    mcpServerConfig,
-                    accessToken,
-                  );
-                  if (oauthTransport) {
-                    try {
-                      await mcpClient.connect(oauthTransport, {
-                        timeout:
-                          mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
-                      });
-                      // Connection successful with OAuth
-                      return mcpClient;
-                    } catch (retryError) {
-                      debugLogger.error(
-                        `Failed to connect with OAuth token: ${getErrorMessage(
-                          retryError,
-                        )}`,
-                      );
-                      throw retryError;
-                    }
-                  } else {
+                if (oauthTransport) {
+                  try {
+                    await mcpClient.connect(oauthTransport, {
+                      timeout:
+                        mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
+                    });
+                    // Connection successful with OAuth
+                    clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
+                    return mcpClient;
+                  } catch (retryError) {
                     debugLogger.error(
-                      `Failed to create OAuth transport for server '${mcpServerName}'`,
+                      `Failed to connect with OAuth token: ${getErrorMessage(
+                        retryError,
+                      )}`,
                     );
-                    throw new Error(
-                      `Failed to create OAuth transport for server '${mcpServerName}'`,
-                    );
+                    throw retryError;
                   }
                 } else {
-                  debugLogger.error(
-                    `Failed to get OAuth token for server '${mcpServerName}'`,
-                  );
-                  throw new Error(
-                    `Failed to get OAuth token for server '${mcpServerName}'`,
-                  );
+                  const oauthMessage =
+                    `Failed to create OAuth transport for server '${mcpServerName}'. ` +
+                    getMcpOAuthDialogInstruction('authenticate', mcpServerName);
+                  debugLogger.error(oauthMessage);
+                  throw new Error(oauthMessage);
                 }
               } else {
-                debugLogger.error(
-                  `Failed to get stored credentials for server '${mcpServerName}'`,
-                );
-                throw new Error(
-                  `Failed to get stored credentials for server '${mcpServerName}'`,
-                );
+                const oauthMessage =
+                  `Failed to get OAuth token for server '${mcpServerName}'. ` +
+                  getMcpOAuthDialogInstruction('authenticate', mcpServerName);
+                debugLogger.error(oauthMessage);
+                throw new Error(oauthMessage);
               }
             } else {
-              debugLogger.error(
-                `Could not configure OAuth for '${mcpServerName}' - please authenticate manually with /mcp auth ${mcpServerName}`,
-              );
-              throw new Error(
-                `OAuth configuration failed for '${mcpServerName}'. Please authenticate manually with /mcp auth ${mcpServerName}`,
-              );
+              const oauthMessage =
+                `Failed to get stored credentials for server '${mcpServerName}'. ` +
+                getMcpOAuthDialogInstruction('authenticate', mcpServerName);
+              debugLogger.error(oauthMessage);
+              throw new Error(oauthMessage);
             }
-          } catch (discoveryError) {
+          } else {
             debugLogger.error(
-              `OAuth discovery failed for '${mcpServerName}' - please authenticate manually with /mcp auth ${mcpServerName}`,
+              `Could not configure OAuth for server '${mcpServerName}'. ` +
+                getMcpOAuthDialogInstruction('authenticate', mcpServerName),
             );
-            throw discoveryError;
+            throw new Error(
+              `OAuth configuration failed for server '${mcpServerName}'. ` +
+                getMcpOAuthDialogInstruction('authenticate', mcpServerName),
+            );
           }
         } else {
           debugLogger.error(
             `'${mcpServerName}' requires authentication but no OAuth configuration found`,
           );
           throw new Error(
-            `MCP server '${mcpServerName}' requires authentication. Please configure OAuth or check server settings.`,
+            `MCP server '${mcpServerName}' requires authentication. ` +
+              getMcpOAuthDialogInstruction('authenticate', mcpServerName),
           );
         }
       }
@@ -1276,6 +2410,8 @@ export async function createTransport(
     };
 
     if (mcpServerConfig.httpUrl) {
+      (transportOptions as StreamableHTTPClientTransportOptions).fetch =
+        createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig);
       return new StreamableHTTPClientTransport(
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
@@ -1302,6 +2438,8 @@ export async function createTransport(
       authProvider: provider,
     };
     if (mcpServerConfig.httpUrl) {
+      (transportOptions as StreamableHTTPClientTransportOptions).fetch =
+        createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig);
       return new StreamableHTTPClientTransport(
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
@@ -1329,12 +2467,12 @@ export async function createTransport(
 
     if (!accessToken) {
       debugLogger.error(
-        `MCP server '${mcpServerName}' requires OAuth authentication. ` +
-          `Please authenticate using the /mcp auth command.`,
+        `The MCP server '${mcpServerName}' requires OAuth authentication. ` +
+          getMcpOAuthDialogInstruction('authenticate', mcpServerName),
       );
       throw new Error(
-        `MCP server '${mcpServerName}' requires OAuth authentication. ` +
-          `Please authenticate using the /mcp auth command.`,
+        `The MCP server '${mcpServerName}' requires OAuth authentication. ` +
+          getMcpOAuthDialogInstruction('authenticate', mcpServerName),
       );
     }
   } else {
@@ -1353,12 +2491,19 @@ export async function createTransport(
         debugLogger.debug(
           `Found stored OAuth token for server '${mcpServerName}'`,
         );
+      } else {
+        debugLogger.warn(
+          `Stored OAuth credentials exist for server '${mcpServerName}' but no valid token could be obtained. Transport will be created without authentication; expect a 401. ` +
+            getMcpOAuthDialogInstruction('re-authenticate', mcpServerName),
+        );
       }
     }
   }
 
   if (mcpServerConfig.httpUrl) {
-    const transportOptions: StreamableHTTPClientTransportOptions = {};
+    const transportOptions: StreamableHTTPClientTransportOptions = {
+      fetch: createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig),
+    };
 
     // Set up headers with OAuth token if available
     if (hasOAuthConfig && accessToken) {
@@ -1404,6 +2549,7 @@ export async function createTransport(
   }
 
   if (mcpServerConfig.command) {
+    validateAgentPluginStdioRuntimePaths(mcpServerConfig);
     if (mcpServerConfig.cwd && !existsSync(mcpServerConfig.cwd)) {
       throw new Error(
         `MCP server '${mcpServerName}': configured cwd does not exist: ${mcpServerConfig.cwd}`,
@@ -1415,7 +2561,7 @@ export async function createTransport(
     // config providing its own PATH fully replaces the parent value instead of
     // being merged with a stale case-variant.
     const env = {
-      ...normalizePathEnvForWindows({ ...process.env }),
+      ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
       ...(mcpServerConfig.env || {}),
     };
 
@@ -1426,6 +2572,7 @@ export async function createTransport(
       cwd: mcpServerConfig.cwd,
       stderr: 'pipe',
     });
+    invocationContextTransports.add(transport);
     if (debugMode) {
       transport.stderr!.on('data', (data) => {
         const stderrStr = data.toString().trim();

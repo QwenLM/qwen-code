@@ -13,7 +13,11 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
-import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  ApprovalMode as ApprovalModeEnum,
+} from '@qwen-code/qwen-code-core';
+import { formatApprovalModeName } from '../utils/approvalModeDisplay.js';
 
 /**
  * Parses the argument string and returns the corresponding ApprovalMode if valid.
@@ -33,6 +37,7 @@ export const approvalModeCommand: SlashCommand = {
   get description() {
     return t('View or change the approval mode for tool usage');
   },
+  argumentHint: '<mode>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
   action: async (
@@ -63,7 +68,27 @@ export const approvalModeCommand: SlashCommand = {
     }
 
     // Set the mode for current session only (not persisted)
-    const { config } = context.services;
+    const { config, settings } = context.services;
+    let priorMode: ApprovalMode | undefined;
+    if (config) {
+      try {
+        priorMode = config.getApprovalMode();
+      } catch (e) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: (e as Error).message,
+        };
+      }
+    }
+
+    const autoModeNotices =
+      mode === ApprovalModeEnum.AUTO &&
+      priorMode !== ApprovalModeEnum.AUTO &&
+      config
+        ? await import('../hooks/useAutoAcceptIndicator.js')
+        : undefined;
+
     if (config) {
       try {
         config.setApprovalMode(mode);
@@ -76,10 +101,23 @@ export const approvalModeCommand: SlashCommand = {
       }
     }
 
+    // When the user switches INTO AUTO via this command (not just via
+    // Shift+Tab), emit the same first-time-acknowledgement + stripped-rules
+    // notices as the keyboard handler.
+    if (autoModeNotices && config) {
+      autoModeNotices.emitAutoModeEntryNotices({
+        config,
+        settings,
+        addItem: context.ui.addItem,
+      });
+    }
+
     return {
       type: 'message',
       messageType: 'info',
-      content: t('Approval mode set to "{{mode}}"', { mode }),
+      content: t('Approval mode set to "{{mode}}"', {
+        mode: formatApprovalModeName(mode),
+      }),
     };
   },
 };

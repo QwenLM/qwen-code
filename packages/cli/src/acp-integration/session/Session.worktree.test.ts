@@ -1,0 +1,479 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Phase C — Session.pendingWorktreeNotice consumption tests.
+ *
+ * Coverage:
+ *   VP3: first Session.prompt() prepends pendingWorktreeNotice as a
+ *        <system-reminder> block at the front of the user message parts.
+ *   VP3b: pendingWorktreeNotice is cleared (null) after the first prompt.
+ *   VP4: second Session.prompt() does NOT inject the notice again.
+ *   VP4b: no notice set — first prompt is sent without any worktree reminder.
+ *
+ * This file does NOT mock @qwen-code/qwen-code-core at the module level so
+ * the real Session class and its dependencies resolve correctly.
+ */
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { Session } from './Session.js';
+import type { Config, LlmChat } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  AuthType,
+  GoalPersistenceUnavailableError,
+  Storage,
+} from '@qwen-code/qwen-code-core';
+import * as core from '@qwen-code/qwen-code-core';
+import type {
+  AgentSideConnection,
+  PromptRequest,
+} from '@agentclientprotocol/sdk';
+import type { LoadedSettings } from '../../config/settings.js';
+import { handleSlashCommand } from '../../nonInteractiveCliCommands.js';
+
+// Stub the non-interactive CLI commands that Session.ts imports transitively.
+vi.mock('../../nonInteractiveCliCommands.js', () => ({
+  ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE: [],
+  getAvailableCommands: vi.fn().mockResolvedValue([]),
+  handleSlashCommand: vi.fn(),
+}));
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Returns an async generator that immediately completes (end_turn). */
+function createEmptyStream() {
+  return (async function* () {})();
+}
+
+/** Minimal PromptRequest */
+function makePromptRequest(text = 'hello'): PromptRequest {
+  return {
+    sessionId: 'wt-test-session',
+    prompt: [{ type: 'text', text }],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Shared fixtures
+// ---------------------------------------------------------------------------
+
+describe('Session.pendingWorktreeNotice', () => {
+  const SESSION_ID = 'wt-test-session';
+
+  /** Parts arrays captured on each sendMessageStream call. */
+  let capturedMessages: unknown[][];
+  let mockChat: LlmChat;
+  let mockConfig: Config;
+  let mockClient: AgentSideConnection;
+  let mockSettings: LoadedSettings;
+
+  beforeEach(() => {
+    capturedMessages = [];
+    vi.mocked(handleSlashCommand).mockReset();
+
+    mockChat = {
+      sendMessageStream: vi
+        .fn()
+        .mockImplementation(
+          async (
+            _model: string,
+            args: { message: unknown[]; config: unknown },
+            _promptId: string,
+          ) => {
+            capturedMessages.push(args.message);
+            return createEmptyStream();
+          },
+        ),
+      addHistory: vi.fn(),
+      getHistory: vi.fn().mockReturnValue([]),
+      setHistory: vi.fn(),
+      truncateHistory: vi.fn(),
+      stripThoughtsFromHistory: vi.fn(),
+    } as unknown as LlmChat;
+
+    const mockLlmClient = {
+      getChat: vi.fn().mockReturnValue(mockChat),
+      tryCompressChat: vi.fn().mockResolvedValue({
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: core.CompressionStatus.NOOP,
+      }),
+      beginManagedAutoMemoryRecall: vi.fn(),
+      consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      finishManagedAutoMemoryRecall: vi.fn(),
+      recordCompletedToolCall: vi.fn(),
+    };
+
+    mockConfig = {
+      storage: {
+        getRuntimeBaseDir: vi.fn(() => Storage.getRuntimeBaseDir()),
+      },
+      setApprovalMode: vi.fn(),
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      switchModel: vi.fn(),
+      getModel: vi.fn().mockReturnValue('qwen3'),
+      getSessionId: vi.fn().mockReturnValue(SESSION_ID),
+      takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
+      getActiveTodoWorkChainOwner: vi.fn((promptId: string) => promptId),
+      setActiveTodoReminder: vi.fn(),
+      startActiveTodoWorkChain: vi.fn(),
+      startAutomaticActiveTodoWorkChain: vi.fn(),
+      endAutomaticActiveTodoWorkChain: vi.fn(),
+      assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+      getWorkingDir: vi.fn().mockReturnValue('/tmp'),
+      getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
+      getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
+      getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        getBranchCheckpointCursor: vi.fn().mockReturnValue({
+          recordId: null,
+          activeRecordCount: 0,
+          pendingToolCalls: [],
+        }),
+        recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
+        recordUserMessage: vi.fn(),
+        recordUiTelemetryEvent: vi.fn(),
+        recordToolResult: vi.fn(),
+        recordSlashCommand: vi.fn(),
+        rewindRecording: vi.fn(),
+        setTitleRecordedCallback: vi.fn(),
+      }),
+      getSessionService: vi.fn().mockReturnValue({
+        setSessionPrBoundCallback: vi.fn(),
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(),
+        ensureTool: vi.fn().mockResolvedValue(true),
+      }),
+      getFileService: vi.fn().mockReturnValue({
+        shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
+      }),
+      getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
+      getFileFilteringOptions: vi.fn().mockReturnValue({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      }),
+      getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      // The prompt turn's finally sweeps review-worktree leases against the
+      // project root (see Session.review-lease.test.ts).
+      getProjectRoot: vi.fn().mockReturnValue('/tmp'),
+      getDebugMode: vi.fn().mockReturnValue(false),
+      getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      isCronEnabled: vi.fn().mockReturnValue(false),
+      getSessionTokenLimit: vi.fn().mockReturnValue(0),
+      getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(false),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      // Added on main after the test was written; Session.prompt's stop-hook
+      // loop reads this so the mock has to provide it.
+      getStopHookBlockingCap: vi.fn().mockReturnValue(0),
+      // Session constructor registers background-notification callbacks on
+      // these registries; provide no-op stubs so construction succeeds.
+      getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+        setNotificationCallback: vi.fn(),
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        listUnfinalizedBackgroundAgentIds: vi.fn().mockReturnValue([]),
+      }),
+      getMonitorRegistry: vi.fn().mockReturnValue({
+        setNotificationCallback: vi.fn(),
+      }),
+      getBackgroundShellRegistry: vi.fn().mockReturnValue({
+        setNotificationCallback: vi.fn(),
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+      }),
+      getWorkflowRunRegistry: vi.fn().mockReturnValue({
+        setStatusChangeCallback: vi.fn(),
+        clearStatusChangeCallback: vi.fn(),
+        setCompletionCallback: vi.fn(),
+        setSnapshotPersistedCallback: vi.fn(),
+        setApprovalRequestCallback: vi.fn(),
+      }),
+      setSubSessionSpawner: vi.fn(),
+      getSubSessionSpawner: vi.fn(),
+      // The Session constructor and Session.prompt both reach for the
+      // canonical Goal runtime. A real Config throws this exact error when
+      // Goal persistence is off, and both call sites are written to fall
+      // through on it — which is the shape these worktree-notice tests want.
+      getGoalRuntime: vi.fn(() => {
+        throw new GoalPersistenceUnavailableError();
+      }),
+      getGoalRuntimeReady: vi
+        .fn()
+        .mockRejectedValue(new GoalPersistenceUnavailableError()),
+    } as unknown as Config;
+
+    mockClient = {
+      sessionUpdate: vi.fn().mockResolvedValue(undefined),
+      requestPermission: vi.fn().mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      }),
+      extNotification: vi.fn().mockResolvedValue(undefined),
+    } as unknown as AgentSideConnection;
+
+    mockSettings = {
+      merged: {},
+      isTrusted: false,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+  });
+
+  afterEach(() => {
+    Storage.setRuntimeBaseDir(null);
+    vi.restoreAllMocks();
+    vi.clearAllTimers();
+  });
+
+  // VP3: notice is prepended as <system-reminder> on first prompt
+  it('VP3: first prompt prepends pendingWorktreeNotice as a <system-reminder> block', async () => {
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+
+    const notice =
+      '[Resumed] Active worktree: "feat" at /repo/.qwen/worktrees/feat ' +
+      '(branch: worktree-feat). Continue using this path for all file operations.';
+    session.pendingWorktreeNotice = notice;
+
+    await session.prompt(makePromptRequest('first prompt'));
+
+    expect(capturedMessages.length).toBeGreaterThanOrEqual(1);
+
+    const firstParts = capturedMessages[0] as Array<{ text?: string }>;
+    const reminderPart = firstParts.find(
+      (p) =>
+        typeof p.text === 'string' &&
+        p.text.includes('<system-reminder>') &&
+        p.text.includes(notice),
+    );
+    expect(reminderPart).toBeDefined();
+  });
+
+  // VP3b: notice cleared after first prompt
+  it('VP3b: pendingWorktreeNotice is null after the first prompt', async () => {
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+
+    session.pendingWorktreeNotice = 'notice text';
+    await session.prompt(makePromptRequest('first'));
+
+    expect(session.pendingWorktreeNotice).toBeNull();
+  });
+
+  // VP4: second prompt does NOT re-inject the notice
+  it('VP4: second prompt does not re-inject pendingWorktreeNotice', async () => {
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+
+    const notice = 'some-worktree-context-notice';
+    session.pendingWorktreeNotice = notice;
+
+    await session.prompt(makePromptRequest('first prompt'));
+    await session.prompt(makePromptRequest('second prompt'));
+
+    // Two model sends should have been captured.
+    expect(capturedMessages.length).toBeGreaterThanOrEqual(2);
+
+    // Second send must NOT include the system-reminder block with the notice.
+    const secondParts = capturedMessages[1] as Array<{ text?: string }>;
+    const reminderPart = secondParts.find(
+      (p) =>
+        typeof p.text === 'string' &&
+        p.text.includes('<system-reminder>') &&
+        p.text.includes(notice),
+    );
+    expect(reminderPart).toBeUndefined();
+
+    // Stays null after the second call as well.
+    expect(session.pendingWorktreeNotice).toBeNull();
+  });
+
+  it('injects a recovered-agents notice into the next prompt once', async () => {
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const notice =
+      '2 background agents were restored. Use list_agents to inspect them.';
+    session.pendingRecoveredAgentsNotice = notice;
+
+    await session.prompt(makePromptRequest('first prompt'));
+    await session.prompt(makePromptRequest('second prompt'));
+
+    const firstParts = capturedMessages[0] as Array<{ text?: string }>;
+    expect(firstParts.some((part) => part.text?.includes(notice))).toBe(true);
+    const secondParts = capturedMessages[1] as Array<{ text?: string }>;
+    expect(secondParts.some((part) => part.text?.includes(notice))).toBe(false);
+    expect(session.pendingRecoveredAgentsNotice).toBeNull();
+  });
+
+  it('does not consume a recovered-agents notice for a slash command', async () => {
+    vi.mocked(handleSlashCommand).mockResolvedValueOnce({
+      type: 'submit_prompt',
+      content: [{ text: 'Prompt from command' }],
+    });
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const notice = 'Recovered agents are available.';
+    session.pendingRecoveredAgentsNotice = notice;
+
+    await session.prompt(makePromptRequest('/testcommand'));
+    await session.prompt(makePromptRequest('ordinary prompt'));
+
+    expect(capturedMessages[0]).toEqual([{ text: 'Prompt from command' }]);
+    expect(capturedMessages[1]).toEqual(
+      expect.arrayContaining([
+        { text: expect.stringContaining(notice) as string },
+        { text: 'ordinary prompt' },
+      ]),
+    );
+    expect(session.pendingRecoveredAgentsNotice).toBeNull();
+  });
+
+  it('does not consume a recovered-agents notice on an interrupted-turn continuation', async () => {
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const notice = 'Recovered agents are available.';
+    session.pendingRecoveredAgentsNotice = notice;
+
+    // A daemon continuation (`qwen.daemon.continueLastTurn`) closing a dangling
+    // tool call re-sends synthesized functionResponse parts. The one-shot
+    // recovered-agents notice must survive it (the `!isContinue` guard) so it
+    // is delivered on the user's next ordinary prompt instead.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+        ],
+      },
+    ] as never);
+    await session.prompt({
+      ...makePromptRequest(''),
+      _meta: { 'qwen.daemon.continueLastTurn': true },
+    } as PromptRequest);
+
+    // The continuation send leads with the synthesized functionResponse and
+    // carries no recovered-agents notice; the notice is still pending.
+    const continuationParts = capturedMessages[0] as Array<{ text?: string }>;
+    expect(continuationParts.some((part) => part.text?.includes(notice))).toBe(
+      false,
+    );
+    expect(session.pendingRecoveredAgentsNotice).toBe(notice);
+
+    // The next ordinary prompt consumes it exactly once.
+    vi.mocked(mockChat.getHistory).mockReturnValue([]);
+    await session.prompt(makePromptRequest('ordinary prompt'));
+    const ordinaryParts = capturedMessages[1] as Array<{ text?: string }>;
+    expect(ordinaryParts.some((part) => part.text?.includes(notice))).toBe(
+      true,
+    );
+    expect(session.pendingRecoveredAgentsNotice).toBeNull();
+  });
+
+  // VP4b: sanity — no notice set, prompt works normally, no worktree reminder injected
+  it('VP4b: no notice set — prompt proceeds normally without worktree system-reminder', async () => {
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+
+    expect(session.pendingWorktreeNotice).toBeNull();
+
+    await session.prompt(makePromptRequest('plain prompt'));
+
+    expect(session.pendingWorktreeNotice).toBeNull();
+    // Message was still sent to the model.
+    expect(capturedMessages.length).toBeGreaterThanOrEqual(1);
+  });
+
+  // VP5: ordering contract when the worktree notice, system reminders, and a
+  // continuation that leads with functionResponse parts all combine. Locks the
+  // `[...functionResponses, worktreeNotice, ...systemReminders, ...]` order so
+  // the two insert-after-functionResponses phases can't silently reorder.
+  it('VP5: continuation keeps functionResponses first, then worktree notice, then reminders', async () => {
+    // Plan mode makes #buildInitialSystemReminders emit a reminder part.
+    (mockConfig.getApprovalMode as ReturnType<typeof vi.fn>).mockReturnValue(
+      ApprovalMode.PLAN,
+    );
+    // History ends on a model turn with a dangling tool call → an
+    // `interrupted_turn` continuation whose parts lead with functionResponses.
+    (mockChat.getHistory as ReturnType<typeof vi.fn>).mockReturnValue([
+      { role: 'user', parts: [{ text: 'run a command' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+      },
+    ]);
+
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+
+    const notice = 'worktree restore notice';
+    session.pendingWorktreeNotice = notice;
+
+    await session.prompt({
+      sessionId: SESSION_ID,
+      prompt: [],
+      _meta: { 'qwen.daemon.continueLastTurn': true },
+    } as unknown as PromptRequest);
+
+    expect(capturedMessages.length).toBeGreaterThanOrEqual(1);
+    const parts = capturedMessages[0] as Array<{
+      text?: string;
+      functionResponse?: unknown;
+    }>;
+
+    // tool_result blocks must stay first (Anthropic-compatible ordering).
+    expect(parts[0].functionResponse).toBeDefined();
+    const noticeIdx = parts.findIndex(
+      (p) => typeof p.text === 'string' && p.text.includes(notice),
+    );
+    const reminderIdx = parts.findIndex(
+      (p) =>
+        typeof p.text === 'string' &&
+        p.text.includes('<system-reminder>') &&
+        !p.text.includes(notice),
+    );
+    expect(noticeIdx).toBeGreaterThan(0);
+    expect(reminderIdx).toBeGreaterThan(noticeIdx);
+  });
+});

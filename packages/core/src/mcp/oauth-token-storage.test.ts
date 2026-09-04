@@ -4,13 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type MockInstance,
+} from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { MCPOAuthTokenStorage } from './oauth-token-storage.js';
-import { FORCE_ENCRYPTED_FILE_ENV_VAR } from './token-storage/index.js';
+import type { MCPOAuthTokenStorage as MCPOAuthTokenStorageType } from './oauth-token-storage.js';
 import type { OAuthCredentials, OAuthToken } from './token-storage/types.js';
 import { QWEN_DIR } from '../utils/paths.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 
 // Mock debugLogger
 const mockDebugLogger = vi.hoisted(() => ({
@@ -31,6 +39,10 @@ vi.mock('node:fs', () => ({
     mkdir: vi.fn(),
     unlink: vi.fn(),
   },
+}));
+
+vi.mock('../utils/atomicFileWrite.js', () => ({
+  atomicWriteFile: vi.fn(),
 }));
 
 vi.mock('node:path', () => ({
@@ -59,7 +71,18 @@ vi.mock('./token-storage/hybrid-token-storage.js', () => ({
 const ONE_HR_MS = 3600000;
 
 describe('MCPOAuthTokenStorage', () => {
-  let tokenStorage: MCPOAuthTokenStorage;
+  let MCPOAuthTokenStorage: typeof import('./oauth-token-storage.js').MCPOAuthTokenStorage;
+  let FORCE_ENCRYPTED_FILE_ENV_VAR: string;
+  let stderrWriteSpy: MockInstance<typeof process.stderr.write>;
+  let tokenStorage: MCPOAuthTokenStorageType;
+
+  async function loadStorageModule(): Promise<void> {
+    vi.resetModules();
+    ({ FORCE_ENCRYPTED_FILE_ENV_VAR } = await import(
+      './token-storage/index.js'
+    ));
+    ({ MCPOAuthTokenStorage } = await import('./oauth-token-storage.js'));
+  }
 
   const mockToken: OAuthToken = {
     accessToken: 'access_token_123',
@@ -78,7 +101,11 @@ describe('MCPOAuthTokenStorage', () => {
   };
 
   describe('with encrypted flag false', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
+      await loadStorageModule();
+      stderrWriteSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((() => true) as typeof process.stderr.write);
       vi.stubEnv(FORCE_ENCRYPTED_FILE_ENV_VAR, 'false');
       tokenStorage = new MCPOAuthTokenStorage();
 
@@ -139,10 +166,28 @@ describe('MCPOAuthTokenStorage', () => {
     });
 
     describe('saveToken', () => {
+      it('should warn once when writing plaintext tokens', async () => {
+        vi.mocked(fs.readFile).mockRejectedValue({ code: 'ENOENT' });
+        vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
+
+        await tokenStorage.saveToken('server1', mockToken);
+        await tokenStorage.saveToken('server2', mockToken);
+
+        expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(FORCE_ENCRYPTED_FILE_ENV_VAR),
+        );
+        expect(stderrWriteSpy).toHaveBeenCalledTimes(1);
+        expect(stderrWriteSpy).toHaveBeenCalledWith(
+          expect.stringContaining(FORCE_ENCRYPTED_FILE_ENV_VAR),
+        );
+      });
+
       it('should save token with restricted permissions', async () => {
         vi.mocked(fs.readFile).mockRejectedValue({ code: 'ENOENT' });
         vi.mocked(fs.mkdir).mockResolvedValue(undefined);
-        vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
         await tokenStorage.saveToken(
           'test-server',
@@ -155,10 +200,10 @@ describe('MCPOAuthTokenStorage', () => {
           path.join('/mock/home', QWEN_DIR),
           { recursive: true },
         );
-        expect(fs.writeFile).toHaveBeenCalledWith(
+        expect(atomicWriteFile).toHaveBeenCalledWith(
           path.join('/mock/home', QWEN_DIR, 'mcp-oauth-tokens.json'),
           expect.stringContaining('test-server'),
-          { mode: 0o600 },
+          { mode: 0o600, forceMode: true, noFollow: true },
         );
       });
 
@@ -170,7 +215,7 @@ describe('MCPOAuthTokenStorage', () => {
         vi.mocked(fs.readFile).mockResolvedValue(
           JSON.stringify([existingCredentials]),
         );
-        vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
         const newToken: OAuthToken = {
           ...mockToken,
@@ -178,7 +223,7 @@ describe('MCPOAuthTokenStorage', () => {
         };
         await tokenStorage.saveToken('existing-server', newToken);
 
-        const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
+        const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
         const savedData = JSON.parse(
           writeCall[1] as string,
         ) as OAuthCredentials[];
@@ -192,7 +237,7 @@ describe('MCPOAuthTokenStorage', () => {
         vi.mocked(fs.readFile).mockRejectedValue({ code: 'ENOENT' });
         vi.mocked(fs.mkdir).mockResolvedValue(undefined);
         const writeError = new Error('Disk full');
-        vi.mocked(fs.writeFile).mockRejectedValue(writeError);
+        vi.mocked(atomicWriteFile).mockRejectedValue(writeError);
 
         await expect(
           tokenStorage.saveToken('test-server', mockToken),
@@ -201,6 +246,42 @@ describe('MCPOAuthTokenStorage', () => {
         expect(mockDebugLogger.error).toHaveBeenCalledWith(
           expect.stringContaining('Failed to save MCP OAuth token'),
         );
+      });
+
+      it('should warn on a successful retry after a plaintext write fails', async () => {
+        vi.mocked(fs.readFile).mockRejectedValue({ code: 'ENOENT' });
+        vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile)
+          .mockRejectedValueOnce(new Error('Disk full'))
+          .mockResolvedValueOnce(undefined);
+
+        await expect(
+          tokenStorage.saveToken('test-server', mockToken),
+        ).rejects.toThrow('Disk full');
+
+        expect(mockDebugLogger.warn).not.toHaveBeenCalled();
+        expect(stderrWriteSpy).not.toHaveBeenCalled();
+
+        await tokenStorage.saveToken('test-server', mockToken);
+
+        expect(mockDebugLogger.warn).toHaveBeenCalledTimes(1);
+        expect(stderrWriteSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('should not fail token writes when stderr warning output fails', async () => {
+        vi.mocked(fs.readFile).mockRejectedValue({ code: 'ENOENT' });
+        vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
+        stderrWriteSpy.mockImplementationOnce(() => {
+          throw new Error('EPIPE');
+        });
+
+        await expect(
+          tokenStorage.saveToken('test-server', mockToken),
+        ).resolves.toBeUndefined();
+
+        expect(stderrWriteSpy).toHaveBeenCalledTimes(1);
+        expect(mockDebugLogger.error).not.toHaveBeenCalled();
       });
     });
 
@@ -247,15 +328,21 @@ describe('MCPOAuthTokenStorage', () => {
         vi.mocked(fs.readFile).mockResolvedValue(
           JSON.stringify([credentials1, credentials2]),
         );
-        vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+        vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
         await tokenStorage.deleteCredentials('server1');
 
-        const writeCall = vi.mocked(fs.writeFile).mock.calls[0];
+        const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
         const savedData = JSON.parse(writeCall[1] as string);
 
         expect(savedData).toHaveLength(1);
         expect(savedData[0].serverName).toBe('server2');
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          expect.stringContaining(FORCE_ENCRYPTED_FILE_ENV_VAR),
+        );
+        expect(stderrWriteSpy).toHaveBeenCalledWith(
+          expect.stringContaining(FORCE_ENCRYPTED_FILE_ENV_VAR),
+        );
       });
 
       it('should remove token file when no tokens remain', async () => {
@@ -269,7 +356,7 @@ describe('MCPOAuthTokenStorage', () => {
         expect(fs.unlink).toHaveBeenCalledWith(
           path.join('/mock/home', QWEN_DIR, 'mcp-oauth-tokens.json'),
         );
-        expect(fs.writeFile).not.toHaveBeenCalled();
+        expect(atomicWriteFile).not.toHaveBeenCalled();
       });
 
       it('should handle removal of non-existent token gracefully', async () => {
@@ -279,7 +366,7 @@ describe('MCPOAuthTokenStorage', () => {
 
         await tokenStorage.deleteCredentials('non-existent');
 
-        expect(fs.writeFile).not.toHaveBeenCalled();
+        expect(atomicWriteFile).not.toHaveBeenCalled();
         expect(fs.unlink).not.toHaveBeenCalled();
       });
 
@@ -373,7 +460,11 @@ describe('MCPOAuthTokenStorage', () => {
   });
 
   describe('with encrypted flag true', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
+      await loadStorageModule();
+      stderrWriteSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation((() => true) as typeof process.stderr.write);
       vi.stubEnv(FORCE_ENCRYPTED_FILE_ENV_VAR, 'true');
       tokenStorage = new MCPOAuthTokenStorage();
 

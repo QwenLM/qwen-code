@@ -5,7 +5,10 @@
  */
 
 import { useCallback, useMemo, useEffect } from 'react';
-import type { Suggestion } from '../components/SuggestionsDisplay.js';
+import type {
+  Suggestion,
+  SuggestionCategory,
+} from '../components/SuggestionsDisplay.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import { logicalPosToOffset } from '../components/shared/text-buffer.js';
@@ -13,17 +16,46 @@ import {
   isSlashCommand,
   findMidInputSlashCommand,
   getBestSlashCommandMatch,
+  isMidInputCompletableCommand,
 } from '../utils/commandUtils.js';
 import { toCodePoints } from '../utils/textUtils.js';
 import { useAtCompletion } from './useAtCompletion.js';
-import { useSlashCompletion } from './useSlashCompletion.js';
+import {
+  type RecentSlashCommands,
+  useSlashCompletion,
+} from './useSlashCompletion.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { useCompletion } from './useCompletion.js';
+import {
+  isStackedSkillCompletableCommand,
+  isValidStackedSkillPrefix,
+  parseSlashCommand,
+} from '../commands/commands.js';
 
 export enum CompletionMode {
   IDLE = 'IDLE',
   AT = 'AT',
   SLASH = 'SLASH',
+}
+
+enum SlashCompletionContext {
+  LINE_START = 'line-start',
+  MID_INPUT = 'mid-input',
+  STACKED_SKILL = 'stacked-skill',
+}
+
+function isExactMidInputModelInvocableCommand(
+  partialCommand: string,
+  slashCommands: readonly SlashCommand[],
+): boolean {
+  const query = partialCommand.toLowerCase();
+  // Match canonical names only. The ghost-text fallback (getBestSlashCommandMatch)
+  // matches names too, so an exact altName routes through the dropdown instead —
+  // fzf surfaces altNames there, avoiding a no-feedback dead zone.
+  return slashCommands.some(
+    (cmd) =>
+      isMidInputCompletableCommand(cmd) && cmd.name.toLowerCase() === query,
+  );
 }
 
 export interface UseCommandCompletionReturn {
@@ -36,11 +68,26 @@ export interface UseCommandCompletionReturn {
   setActiveSuggestionIndex: React.Dispatch<React.SetStateAction<number>>;
   setShowSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
   resetCompletionState: () => void;
+  dismissCompletion: () => void;
   navigateUp: () => void;
   navigateDown: () => void;
   handleAutocomplete: (indexToUse: number) => void;
+  completionMode: CompletionMode;
   /** Inline ghost text for mid-input slash commands (not at line start). */
-  midInputGhostText: { text: string; insertPosition: number } | null;
+  midInputGhostText: {
+    text: string;
+    insertPosition: number;
+    acceptText?: string;
+    showCursorBeforeText?: boolean;
+  } | null;
+  /** Active category tab for the `@` completion UI ('all' shows everything). */
+  activeCategory: SuggestionCategory | 'all';
+  /** Tabs available for the current suggestion set (always includes 'all'). */
+  availableCategories: Array<SuggestionCategory | 'all'>;
+  /** Select an exact category tab; a category change resets active/scroll index. */
+  selectCategory: (category: SuggestionCategory | 'all') => void;
+  /** Cycle the active category tab; resets active/scroll index. */
+  switchCategory: (direction: 1 | -1) => void;
 }
 
 export function useCommandCompletion(
@@ -52,14 +99,141 @@ export function useCommandCompletion(
   config?: Config,
   // When false, suppresses showing suggestions (e.g., after history navigation)
   active: boolean = true,
+  recentCommands?: RecentSlashCommands,
 ): UseCommandCompletionReturn {
+  const cursorRow = buffer.cursor[0];
+  const cursorCol = buffer.cursor[1];
+
+  const {
+    completionMode,
+    query,
+    completionStart,
+    completionEnd,
+    slashCompletionContext,
+  } = useMemo(() => {
+    const currentLine = buffer.lines[cursorRow] || '';
+
+    // Check for @ completion first, so that typing @ after a slash command
+    // still triggers file search (see #2518).
+    const codePoints = toCodePoints(currentLine);
+    for (let i = cursorCol - 1; i >= 0; i--) {
+      const char = codePoints[i];
+
+      if (char === ' ') {
+        let backslashCount = 0;
+        for (let j = i - 1; j >= 0 && codePoints[j] === '\\'; j--) {
+          backslashCount++;
+        }
+        if (backslashCount % 2 === 0) {
+          break;
+        }
+      } else if (char === '@' && (i === 0 || /\s/.test(codePoints[i - 1]))) {
+        let end = codePoints.length;
+        for (let i = cursorCol; i < codePoints.length; i++) {
+          if (codePoints[i] === ' ') {
+            let backslashCount = 0;
+            for (let j = i - 1; j >= 0 && codePoints[j] === '\\'; j--) {
+              backslashCount++;
+            }
+
+            if (backslashCount % 2 === 0) {
+              end = i;
+              break;
+            }
+          }
+        }
+        const pathStart = i + 1;
+        const partialPath = currentLine.substring(pathStart, end);
+        return {
+          completionMode: CompletionMode.AT,
+          query: partialPath,
+          completionStart: pathStart,
+          completionEnd: end,
+          slashCompletionContext: null,
+        };
+      }
+    }
+
+    const cursorOffset = logicalPosToOffset(buffer.lines, cursorRow, cursorCol);
+    const midCmd = findMidInputSlashCommand(buffer.text, cursorOffset);
+    if (midCmd) {
+      const lineStartOffset = logicalPosToOffset(buffer.lines, cursorRow, 0);
+      const startOnLine = midCmd.startPos - lineStartOffset;
+      const isInitialCommandOnFirstLine =
+        cursorRow === 0 &&
+        isSlashCommand(currentLine.trim()) &&
+        startOnLine >= 0 &&
+        codePoints.slice(0, startOnLine).join('').trim().length === 0;
+      const inputCodePoints = toCodePoints(buffer.text);
+      const prefix = inputCodePoints.slice(0, midCmd.startPos).join('');
+      const isStackedSkill =
+        !isInitialCommandOnFirstLine &&
+        isValidStackedSkillPrefix(prefix, slashCommands);
+      const isSlashLedInput = isSlashCommand(prefix.trimStart());
+      const isRegularMidInput =
+        !isInitialCommandOnFirstLine && !isSlashLedInput;
+      if (
+        startOnLine >= 0 &&
+        (isStackedSkill ||
+          (isRegularMidInput &&
+            !isExactMidInputModelInvocableCommand(
+              midCmd.partialCommand,
+              slashCommands,
+            )))
+      ) {
+        return {
+          completionMode: CompletionMode.SLASH,
+          query: midCmd.token,
+          completionStart: startOnLine,
+          completionEnd: startOnLine + midCmd.token.length,
+          slashCompletionContext: isStackedSkill
+            ? SlashCompletionContext.STACKED_SKILL
+            : SlashCompletionContext.MID_INPUT,
+        };
+      }
+    }
+
+    if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
+      return {
+        completionMode: CompletionMode.SLASH,
+        query: currentLine,
+        completionStart: 0,
+        completionEnd: currentLine.length,
+        slashCompletionContext: SlashCompletionContext.LINE_START,
+      };
+    }
+
+    return {
+      completionMode: CompletionMode.IDLE,
+      query: null,
+      completionStart: -1,
+      completionEnd: -1,
+      slashCompletionContext: null,
+    };
+  }, [cursorRow, cursorCol, buffer.lines, buffer.text, slashCommands]);
+
+  const isMidInputSlashCompletion =
+    slashCompletionContext === SlashCompletionContext.MID_INPUT ||
+    slashCompletionContext === SlashCompletionContext.STACKED_SKILL;
+
+  const slashCommandsForCompletion = useMemo(() => {
+    if (slashCompletionContext === SlashCompletionContext.STACKED_SKILL) {
+      return slashCommands.filter(isStackedSkillCompletableCommand);
+    }
+    if (slashCompletionContext === SlashCompletionContext.MID_INPUT) {
+      return slashCommands.filter(isMidInputCompletableCommand);
+    }
+    return slashCommands;
+  }, [slashCompletionContext, slashCommands]);
+
   const {
     suggestions,
     activeSuggestionIndex,
     visibleStartIndex,
     showSuggestions,
     isLoadingSuggestions,
-    isPerfectMatch,
+    isPerfectMatch: publishedIsPerfectMatch,
+    dismissed,
 
     setSuggestions,
     setShowSuggestions,
@@ -69,73 +243,14 @@ export function useCommandCompletion(
     setVisibleStartIndex,
 
     resetCompletionState,
+    dismissCompletion,
     navigateUp,
     navigateDown,
-  } = useCompletion();
-
-  const cursorRow = buffer.cursor[0];
-  const cursorCol = buffer.cursor[1];
-
-  const { completionMode, query, completionStart, completionEnd } =
-    useMemo(() => {
-      const currentLine = buffer.lines[cursorRow] || '';
-
-      // Check for @ completion first, so that typing @ after a slash command
-      // still triggers file search (see #2518).
-      const codePoints = toCodePoints(currentLine);
-      for (let i = cursorCol - 1; i >= 0; i--) {
-        const char = codePoints[i];
-
-        if (char === ' ') {
-          let backslashCount = 0;
-          for (let j = i - 1; j >= 0 && codePoints[j] === '\\'; j--) {
-            backslashCount++;
-          }
-          if (backslashCount % 2 === 0) {
-            break;
-          }
-        } else if (char === '@') {
-          let end = codePoints.length;
-          for (let i = cursorCol; i < codePoints.length; i++) {
-            if (codePoints[i] === ' ') {
-              let backslashCount = 0;
-              for (let j = i - 1; j >= 0 && codePoints[j] === '\\'; j--) {
-                backslashCount++;
-              }
-
-              if (backslashCount % 2 === 0) {
-                end = i;
-                break;
-              }
-            }
-          }
-          const pathStart = i + 1;
-          const partialPath = currentLine.substring(pathStart, end);
-          return {
-            completionMode: CompletionMode.AT,
-            query: partialPath,
-            completionStart: pathStart,
-            completionEnd: end,
-          };
-        }
-      }
-
-      if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
-        return {
-          completionMode: CompletionMode.SLASH,
-          query: currentLine,
-          completionStart: 0,
-          completionEnd: currentLine.length,
-        };
-      }
-
-      return {
-        completionMode: CompletionMode.IDLE,
-        query: null,
-        completionStart: -1,
-        completionEnd: -1,
-      };
-    }, [cursorRow, cursorCol, buffer.lines]);
+    activeCategory,
+    availableCategories,
+    selectCategory,
+    switchCategory,
+  } = useCompletion({ query });
 
   useAtCompletion({
     enabled: completionMode === CompletionMode.AT,
@@ -149,12 +264,17 @@ export function useCommandCompletion(
   const slashCompletionRange = useSlashCompletion({
     enabled: completionMode === CompletionMode.SLASH,
     query,
-    slashCommands,
+    slashCommands: slashCommandsForCompletion,
     commandContext,
+    recentCommands,
     setSuggestions,
     setIsLoadingSuggestions,
     setIsPerfectMatch,
   });
+  const isPerfectMatch =
+    completionMode === CompletionMode.SLASH
+      ? slashCompletionRange.isPerfectMatch
+      : publishedIsPerfectMatch;
 
   useEffect(() => {
     setActiveSuggestionIndex(suggestions.length > 0 ? 0 : -1);
@@ -170,6 +290,11 @@ export function useCommandCompletion(
       resetCompletionState();
       return;
     }
+    // If the user explicitly dismissed the dropdown (e.g., via Enter accept),
+    // do not re-open it until the query changes again.
+    if (dismissed) {
+      return;
+    }
     // Show suggestions if we are loading OR if there are results to display.
     setShowSuggestions(isLoadingSuggestions || suggestions.length > 0);
   }, [
@@ -178,6 +303,7 @@ export function useCommandCompletion(
     isLoadingSuggestions,
     reverseSearchActive,
     active,
+    dismissed,
     resetCompletionState,
     setShowSuggestions,
   ]);
@@ -209,7 +335,8 @@ export function useCommandCompletion(
         if (
           start === end &&
           start > 1 &&
-          (buffer.lines[cursorRow] || '')[start - 1] !== ' '
+          (buffer.lines[cursorRow] || '')[start - 1] !== ' ' &&
+          (buffer.lines[cursorRow] || '')[start - 1] !== '/'
         ) {
           suggestionText = ' ' + suggestionText;
         }
@@ -217,7 +344,11 @@ export function useCommandCompletion(
 
       const lineCodePoints = toCodePoints(buffer.lines[cursorRow] || '');
       const charAfterCompletion = lineCodePoints[end];
-      if (charAfterCompletion !== ' ') {
+      const isDirectory = suggestions[indexToUse].isDirectory;
+      if (
+        charAfterCompletion !== ' ' &&
+        !(isDirectory && !charAfterCompletion)
+      ) {
         suggestionText += ' ';
       }
 
@@ -243,17 +374,54 @@ export function useCommandCompletion(
   const midInputGhostText = useMemo((): {
     text: string;
     insertPosition: number;
+    acceptText?: string;
+    showCursorBeforeText?: boolean;
   } | null => {
     if (!active || reverseSearchActive) return null;
     const cursorOffset = logicalPosToOffset(buffer.lines, cursorRow, cursorCol);
     const midCmd = findMidInputSlashCommand(buffer.text, cursorOffset);
-    if (!midCmd) return null;
-    const match = getBestSlashCommandMatch(
-      midCmd.partialCommand,
+    if (midCmd) {
+      if (isMidInputSlashCompletion) return null;
+      const prefix = toCodePoints(buffer.text)
+        .slice(0, midCmd.startPos)
+        .join('');
+      if (isSlashCommand(prefix.trimStart())) return null;
+      const match = getBestSlashCommandMatch(
+        midCmd.partialCommand,
+        slashCommands,
+        recentCommands,
+      );
+      if (!match) return null;
+      const isCompleteCommand = match.suffix.length === 0;
+      return {
+        text: isCompleteCommand ? (match.argumentHint ?? '') : match.suffix,
+        insertPosition: cursorOffset,
+        acceptText: isCompleteCommand ? undefined : match.suffix,
+        showCursorBeforeText: isCompleteCommand,
+      };
+    }
+
+    if (cursorRow !== 0) return null;
+    const currentLine = buffer.lines[cursorRow] || '';
+    const lineCodePoints = toCodePoints(currentLine);
+    if (cursorCol !== lineCodePoints.length) return null;
+
+    const lineToCursor = lineCodePoints.slice(0, cursorCol).join('');
+    if (!isSlashCommand(lineToCursor.trim())) return null;
+
+    const { commandToExecute, args } = parseSlashCommand(
+      lineToCursor,
       slashCommands,
     );
-    if (!match) return null;
-    return { text: match.suffix, insertPosition: cursorOffset };
+    if (!commandToExecute?.argumentHint || args.trim().length > 0) {
+      return null;
+    }
+
+    return {
+      text: commandToExecute.argumentHint,
+      insertPosition: cursorOffset,
+      showCursorBeforeText: true,
+    };
   }, [
     buffer.text,
     buffer.lines,
@@ -262,6 +430,8 @@ export function useCommandCompletion(
     slashCommands,
     active,
     reverseSearchActive,
+    recentCommands,
+    isMidInputSlashCompletion,
   ]);
 
   return {
@@ -274,9 +444,15 @@ export function useCommandCompletion(
     setActiveSuggestionIndex,
     setShowSuggestions,
     resetCompletionState,
+    dismissCompletion,
     navigateUp,
     navigateDown,
     handleAutocomplete,
+    completionMode,
     midInputGhostText,
+    activeCategory,
+    availableCategories,
+    selectCategory,
+    switchCategory,
   };
 }

@@ -20,7 +20,7 @@ With MCP servers connected, you can ask Qwen Code to:
 Qwen Code loads MCP servers from `mcpServers` in your `settings.json`. You can configure servers either:
 
 - By editing `settings.json` directly
-- By using `qwen mcp` commands (see [CLI reference](#qwen-mcp-cli))
+- By using `qwen mcp` commands (see [CLI reference](#manage-mcp-servers-with-qwen-mcp))
 
 ### Add your first server
 
@@ -30,20 +30,28 @@ Qwen Code loads MCP servers from `mcpServers` in your `settings.json`. You can c
 qwen mcp add --transport http my-server http://localhost:3000/mcp
 ```
 
-2. Open MCP management dialog to view and manage servers:
+2. Start Qwen Code and open the MCP management dialog to view and manage
+   servers:
 
 ```bash
-qwen mcp
+qwen
 ```
 
-3. Restart Qwen Code in the same project (or start it if it wasn’t running yet), then ask the model to use tools from that server.
+Then enter:
+
+```text
+/mcp
+```
+
+3. If Qwen Code was already running before you added the server, restart it in
+   the same project. Then ask the model to use tools from that server.
 
 ## Where configuration is stored (scopes)
 
 Most users only need these two scopes:
 
-- **Project scope (default)**: `.qwen/settings.json` in your project root
-- **User scope**: `~/.qwen/settings.json` across all projects on your machine
+- **User scope (default)**: `~/.qwen/settings.json` across all projects on your machine
+- **Project scope**: `.qwen/settings.json` in your project root
 
 Write to user scope:
 
@@ -94,7 +102,7 @@ JSON (`.qwen/settings.json`):
 }
 ```
 
-CLI (writes to project scope by default):
+CLI (writes to user scope by default):
 
 ```bash
 qwen mcp add pythonTools -e DATABASE_URL=$DB_CONNECTION_STRING -e API_KEY=$EXTERNAL_API_KEY \
@@ -147,11 +155,153 @@ CLI:
 qwen mcp add --transport sse sseServer http://localhost:8080/sse --timeout 30000
 ```
 
+## Using MCP prompts and resources
+
+Besides tools, Qwen Code discovers and surfaces two other MCP primitives.
+
+### Prompts (slash commands)
+
+Any prompt a server advertises via `prompts/list` becomes an executable
+**slash command**. After discovery, type `/` and you'll see the prompt
+listed (labeled `MCP: <server>`); run it like any other command:
+
+```text
+/my_prompt --arg1="value" --arg2="value"
+# positional form also works:
+/my_prompt "value" "value"
+# show the prompt's arguments:
+/my_prompt help
+```
+
+The prompt's messages are sent to the model, which then acts on them.
+
+> Discovery is lenient about the declared `prompts` capability: some
+> servers implement `prompts/list` but omit `prompts` from their
+> `initialize` capabilities. Qwen Code attempts `prompts/list` anyway, so
+> those prompts still appear. A server that genuinely has no prompts simply
+> answers `Method not found`, which is ignored.
+
+### Resources
+
+Resources a server advertises via `resources/list` are discovered per
+server. Open the management dialog with `/mcp` and select a server to see
+its **Resources** count alongside its tools and prompts. Choose **View
+resources** to browse the server's resource URIs; selecting one shows its
+description and MIME type along with the exact `@server:uri` reference to
+paste into a message. As with prompts, the `resources` capability is not
+required to be declared.
+
+Inject a resource's contents into your message with the `@server:uri`
+syntax — type `@`, then the server name, a colon, and the resource URI:
+
+```text
+summarize @myserver:file:///docs/spec.md and list the open questions
+```
+
+Typing `@myserver:` shows an autocomplete list of that server's resources;
+keep typing to filter, matching (case-insensitively) either the resource URI
+or its friendly name/title. You don't have to know a URI by heart — before
+you reach the colon, typing part of a server name also suggests matching
+servers that expose resources, so you can pick one and drill straight into
+its resource list. On submit, the referenced resource is read and its contents are
+appended to your message (text inline, binary blobs as attachments); the
+`@server:uri` reference is preserved in the prompt so the model knows what
+it is looking at. The `server` prefix must match a configured MCP server —
+otherwise the token is treated as a normal file path, so existing
+`@path/to/file` references are unaffected. Resource reads are disabled in
+untrusted folders.
+
+## Progressive availability and discovery timeouts
+
+Qwen Code discovers MCP servers in the background after the UI is already
+interactive. You see the cli's first prompt within a few hundred
+milliseconds even when one of your MCP servers takes several seconds
+(or never responds), and the model's tool list updates within roughly
+one frame (~16 ms) of each server completing its discover handshake.
+
+- **Interactive mode**: the UI appears immediately; an MCP status pill in
+  the bottom-right shows `N/M MCP servers ready` while discovery is in
+  flight. Sending a prompt before MCP finishes simply means the model
+  sees the tools that are ready _at that moment_; subsequent prompts see
+  more tools as servers come online.
+- **Non-interactive mode** (`--prompt`, stream-json, ACP): the cli still
+  waits for MCP discovery to settle before sending the first prompt, so
+  scripted / piped invocations see the same complete tool set the
+  legacy synchronous behavior produced.
+
+### Per-server `discoveryTimeoutMs`
+
+Each MCP server gets a discovery-only timeout that caps how long the
+initial handshake (`connect` + `tools/list` + `prompts/list` +
+`resources/list`) is allowed to take. Defaults:
+
+- **stdio servers**: 30 s
+- **remote HTTP / SSE servers**: 5 s (network risk is higher)
+
+Override per server when needed:
+
+```jsonc
+{
+  "mcpServers": {
+    "slow-stdio": {
+      "command": "node",
+      "args": ["./slow-server.js"],
+      "discoveryTimeoutMs": 60000,
+    },
+    "flaky-remote": {
+      "httpUrl": "https://example.com/mcp",
+      "discoveryTimeoutMs": 10000,
+    },
+  },
+}
+```
+
+The existing `timeout` field is **tool-call** timeout (used for each
+`tools/call` request, default 10 minutes) and is unaffected by
+`discoveryTimeoutMs` — a long-running tool invocation is not a startup
+pathology.
+
+### Automatic stdio negotiation
+
+Stdio servers use the single-process legacy initialize flow by default. To
+connect to a modern-only stdio server, opt into automatic protocol negotiation:
+
+```jsonc
+{
+  "mcpServers": {
+    "modern-server": {
+      "command": "node",
+      "args": ["./server.js"],
+      "versionNegotiation": "auto",
+    },
+  },
+}
+```
+
+Automatic negotiation runs a short-lived copy of the configured server before
+starting the session process and can use up to five seconds of the discovery
+budget. Keep the default legacy policy for servers with non-idempotent startup
+side effects, single-owner locks or PID files, or slow initialize handshakes.
+
+### Rolling back progressive MCP
+
+If you need the old synchronous behavior (cli waits for every MCP server
+before showing any UI), set `QWEN_CODE_LEGACY_MCP_BLOCKING=1` in your
+environment. This is kept as an escape hatch for at least one release.
+
 ## Safety and control
 
 ### Trust (skip confirmations)
 
-- **Server trust** (`trust: true`): bypasses confirmation prompts for that server (use sparingly).
+- **Server trust** (`trust: true`): bypasses confirmation prompts for that server only in a trusted workspace (use sparingly).
+
+### Connection-loss replay
+
+Qwen Code only reconnects and replays the current MCP tool call when the server has `trust: true`, the workspace is trusted, and the tool explicitly declares either `idempotentHint: true` or a consistent read-only annotation. Read-only annotations conflict with `destructiveHint: true` or `idempotentHint: false` and are not replayed.
+
+Calls with missing annotations, conflicting annotations, an untrusted server, or an untrusted workspace are not replayed after a connection failure. Qwen Code reports that the result may be unknown because the server could have completed the operation before the response was lost. Verify the outcome before trying again. This conservative behavior can differ from earlier releases that transparently retried unannotated tools.
+
+Annotations are server-provided behavior hints, not permissions or an authorization boundary. Only configure `trust: true` for servers you control and whose annotations you have verified.
 
 ### OAuth authentication
 
@@ -175,13 +325,21 @@ The OAuth flow requires a redirect URI where the authorization provider sends th
 
 - **Local development**: By default, Qwen Code uses `http://localhost:7777/oauth/callback`. This works when running Qwen Code on your local machine with a local browser.
 
-- **Remote/cloud deployments**: When running Qwen Code on remote servers, cloud IDEs, or web terminals, the default `localhost` redirect will NOT work. You MUST configure `--oauth-redirect-uri` to point to a publicly accessible URL that can receive the OAuth callback.
+- **Remote/cloud deployments**: When running Qwen Code on remote servers, cloud IDEs, or web terminals, the default `localhost` redirect will NOT work. Configure `--oauth-redirect-uri` with a public URL ending in `/oauth/callback`, then reverse-proxy that path to `http://127.0.0.1:7777/oauth/callback` on the machine running Qwen Code. Qwen Code does not terminate TLS; the proxy must do so.
 
 Example for remote servers:
 
 ```bash
 qwen mcp add --transport sse remote-server https://api.example.com/sse/ \
   --oauth-redirect-uri https://your-remote-server.example.com/oauth/callback
+```
+
+For example, a reverse proxy can forward only this callback path to the local listener:
+
+```nginx
+location = /oauth/callback {
+  proxy_pass http://127.0.0.1:7777;
+}
 ```
 
 #### Manual configuration via settings.json
@@ -225,11 +383,15 @@ OAuth configuration properties:
 
 OAuth tokens are automatically:
 
-- **Stored securely** in `~/.qwen/mcp-oauth-tokens.json`
+- **Stored** in `~/.qwen/mcp-oauth-tokens.json` (plaintext, mode 0600) by default. If `QWEN_CODE_FORCE_ENCRYPTED_FILE_STORAGE=true` is set, Qwen Code uses keychain-backed storage where available, or `~/.qwen/mcp-oauth-tokens-v2.json` with AES-256-GCM encryption.
 - **Refreshed** when expired (if refresh tokens are available)
 - **Validated** before each connection attempt
 
-Use the `/mcp auth` command within Qwen Code to manage OAuth authentication interactively.
+> [!WARNING]
+> By default, OAuth tokens are stored unencrypted on disk. On shared or multi-user machines, set `QWEN_CODE_FORCE_ENCRYPTED_FILE_STORAGE=true` to protect credentials.
+
+Use the `/mcp` dialog within Qwen Code to inspect MCP servers and manage
+authentication interactively.
 
 ### Tool filtering (allow/deny tools per server)
 
@@ -257,12 +419,14 @@ The `mcp` object in your `settings.json` defines global rules for all MCP server
 - `mcp.allowed`: allow-list of MCP server names (keys in `mcpServers`)
 - `mcp.excluded`: deny-list of MCP server names
 
+Both lists support glob patterns: `*` matches any sequence of characters and `?` matches a single character (for example, `"*puppeteer*"` matches every server whose name contains `puppeteer`). Entries without glob characters are matched exactly. When a server matches both lists, `mcp.excluded` takes precedence.
+
 Example:
 
 ```json
 {
   "mcp": {
-    "allowed": ["my-trusted-server"],
+    "allowed": ["my-trusted-server", "*-internal"],
     "excluded": ["experimental-server"]
   }
 }
@@ -312,18 +476,19 @@ Required (one of the following):
 
 Optional:
 
-| Property               | Type/Default                 | Description                                                                                                                                                                                                                                                       |
-| ---------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `args`                 | array                        | Command-line arguments for Stdio transport                                                                                                                                                                                                                        |
-| `headers`              | object                       | Custom HTTP headers when using `url` or `httpUrl`                                                                                                                                                                                                                 |
-| `env`                  | object                       | Environment variables for the server process. Values can reference environment variables using `$VAR_NAME` or `${VAR_NAME}` syntax                                                                                                                                |
-| `cwd`                  | string                       | Working directory for Stdio transport                                                                                                                                                                                                                             |
-| `timeout`              | number<br>(default: 600,000) | Request timeout in milliseconds (default: 600,000ms = 10 minutes)                                                                                                                                                                                                 |
-| `trust`                | boolean<br>(default: false)  | When `true`, bypasses all tool call confirmations for this server (default: `false`)                                                                                                                                                                              |
-| `includeTools`         | array                        | List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.                                       |
-| `excludeTools`         | array                        | List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server.<br>Note: `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded. |
-| `targetAudience`       | string                       | The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                         |
-| `targetServiceAccount` | string                       | The email address of the Google Cloud Service Account to impersonate. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                                              |
+| Property               | Type/Default                                  | Description                                                                                                                                                                                                                                                       |
+| ---------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `args`                 | array                                         | Command-line arguments for Stdio transport                                                                                                                                                                                                                        |
+| `headers`              | object                                        | Custom HTTP headers when using `url` or `httpUrl`                                                                                                                                                                                                                 |
+| `env`                  | object                                        | Environment variables for the server process. Values can reference environment variables using `$VAR_NAME` or `${VAR_NAME}` syntax                                                                                                                                |
+| `cwd`                  | string                                        | Working directory for Stdio transport                                                                                                                                                                                                                             |
+| `timeout`              | number<br>(default: 600,000)                  | Request timeout in milliseconds (default: 600,000ms = 10 minutes)                                                                                                                                                                                                 |
+| `versionNegotiation`   | `"auto" \| "legacy"`<br>(default: `"legacy"`) | For Stdio servers, `"auto"` opts into protocol negotiation on a disposable sibling process. The default `"legacy"` starts only the session process.                                                                                                               |
+| `trust`                | boolean<br>(default: false)                   | When `true`, bypasses tool call confirmations for this server in a trusted workspace (default: `false`)                                                                                                                                                           |
+| `includeTools`         | array                                         | List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.                                       |
+| `excludeTools`         | array                                         | List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server.<br>Note: `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded. |
+| `targetAudience`       | string                                        | The OAuth Client ID allowlisted on the IAP-protected application you are trying to access. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                         |
+| `targetServiceAccount` | string                                        | The email address of the Google Cloud Service Account to impersonate. Used with `authProviderType: 'service_account_impersonation'`.                                                                                                                              |
 
 <a id="qwen-mcp-cli"></a>
 
@@ -342,12 +507,12 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 | `<name>`                    | A unique name for the server.                                       | —                                      | `example-server`                                                   |
 | `<commandOrUrl>`            | The command to execute (for `stdio`) or the URL (for `http`/`sse`). | —                                      | `/usr/bin/python` or `http://localhost:8`                          |
 | `[args...]`                 | Optional arguments for a `stdio` command.                           | —                                      | `--port 5000`                                                      |
-| `-s`, `--scope`             | Configuration scope (user or project).                              | `project`                              | `-s user`                                                          |
+| `-s`, `--scope`             | Configuration scope (user or project).                              | `user`                                 | `-s user`                                                          |
 | `-t`, `--transport`         | Transport type (`stdio`, `sse`, `http`).                            | `stdio`                                | `-t sse`                                                           |
 | `-e`, `--env`               | Set environment variables.                                          | —                                      | `-e KEY=value`                                                     |
 | `-H`, `--header`            | Set HTTP headers for SSE and HTTP transports.                       | —                                      | `-H "X-Api-Key: abc123"`                                           |
 | `--timeout`                 | Set connection timeout in milliseconds.                             | —                                      | `--timeout 30000`                                                  |
-| `--trust`                   | Trust the server (bypass all tool call confirmation prompts).       | — (`false`)                            | `--trust`                                                          |
+| `--trust`                   | Trust the server; skip confirmations in trusted workspaces.         | — (`false`)                            | `--trust`                                                          |
 | `--description`             | Set the description for the server.                                 | —                                      | `--description "Local tools"`                                      |
 | `--include-tools`           | A comma-separated list of tools to include.                         | all tools included                     | `--include-tools mytool,othertool`                                 |
 | `--exclude-tools`           | A comma-separated list of tools to exclude.                         | none                                   | `--exclude-tools mytool`                                           |

@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../utils/logger.js';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import * as crypto from 'crypto';
-import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
+import { getProjectHash } from '@qwen-code/qwen-code-core';
+import { getRuntimeBaseDir } from '../utils/paths.js';
 import type { QwenSession } from './qwenSessionReader.js';
 
 /**
@@ -21,18 +22,17 @@ import type { QwenSession } from './qwenSessionReader.js';
  * when ACP methods are unavailable or fail.
  */
 export class QwenSessionManager {
-  private qwenDir: string;
-
-  constructor() {
-    this.qwenDir = path.join(os.homedir(), '.qwen');
-  }
-
   /**
    * Get the session directory for a project with backward compatibility
    */
   private getSessionDir(workingDir: string): string {
     const projectHash = getProjectHash(workingDir);
-    const sessionDir = path.join(this.qwenDir, 'tmp', projectHash, 'chats');
+    const sessionDir = path.join(
+      getRuntimeBaseDir(),
+      'tmp',
+      projectHash,
+      'chats',
+    );
     return sessionDir;
   }
 
@@ -44,9 +44,9 @@ export class QwenSessionManager {
   }
 
   /**
-   * Load a saved session by name
+   * Load a saved session by ID
    *
-   * @param sessionName - Name/tag of the session to load
+   * @param sessionId - ID of the session to load
    * @param workingDir - Current working directory
    * @returns Loaded session or null if not found
    */
@@ -60,17 +60,17 @@ export class QwenSessionManager {
       const filePath = path.join(sessionDir, filename);
 
       if (!fs.existsSync(filePath)) {
-        console.log(`[QwenSessionManager] Session file not found: ${filePath}`);
+        logger.log(`[QwenSessionManager] Session file not found: ${filePath}`);
         return null;
       }
 
       const content = fs.readFileSync(filePath, 'utf-8');
       const session = JSON.parse(content) as QwenSession;
 
-      console.log(`[QwenSessionManager] Session loaded: ${filePath}`);
+      logger.log(`[QwenSessionManager] Session loaded: ${filePath}`);
       return session;
     } catch (error) {
-      console.error('[QwenSessionManager] Failed to load session:', error);
+      logger.error('[QwenSessionManager] Failed to load session:', error);
       return null;
     }
   }
@@ -103,7 +103,7 @@ export class QwenSessionManager {
           const session = JSON.parse(content) as QwenSession;
           sessions.push(session);
         } catch (error) {
-          console.error(
+          logger.error(
             `[QwenSessionManager] Failed to read session file ${file}:`,
             error,
           );
@@ -118,7 +118,7 @@ export class QwenSessionManager {
 
       return sessions;
     } catch (error) {
-      console.error('[QwenSessionManager] Failed to list sessions:', error);
+      logger.error('[QwenSessionManager] Failed to list sessions:', error);
       return [];
     }
   }
@@ -138,13 +138,13 @@ export class QwenSessionManager {
 
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
-        console.log(`[QwenSessionManager] Session deleted: ${filePath}`);
+        logger.log(`[QwenSessionManager] Session deleted: ${filePath}`);
         return true;
       }
 
       return false;
     } catch (error) {
-      console.error('[QwenSessionManager] Failed to delete session:', error);
+      logger.error('[QwenSessionManager] Failed to delete session:', error);
       return false;
     }
   }

@@ -1,10 +1,12 @@
-# Multi File Read Tool (`read_many_files`)
+# Multi-File Read (`read_many_files`)
 
-This document describes the `read_many_files` tool for Qwen Code.
+> [!note]
+>
+> `read_many_files` was previously exposed as a standalone tool but has been refactored into an internal utility function. The model no longer invokes it directly — instead, the `read_file`, `glob`, and `grep_search` tools cover individual and multi-file reading. The information below is retained for reference.
 
 ## Description
 
-Use `read_many_files` to read content from multiple files specified by paths or glob patterns. The behavior of this tool depends on the provided files:
+`read_many_files` reads content from multiple files specified by paths or glob patterns. The behavior depends on the file types:
 
 - For text files, this tool concatenates their content into a single string.
 - For image (e.g., PNG, JPEG), PDF, audio (MP3, WAV), and video (MP4, MOV) files, it reads and returns them as base64-encoded data, provided they are explicitly requested by name or extension.

@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Buffer } from 'node:buffer';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
-  GeminiEventType,
+  LlmEventType,
   type Config,
-  type ServerGeminiStreamEvent,
+  type ServerLlmStreamEvent,
   type ToolCallRequestInfo,
   type AgentResultDisplay,
 } from '@qwen-code/qwen-code-core';
@@ -28,6 +29,10 @@ import {
   extractTextFromBlocks,
   createExtendedUsage,
 } from './BaseJsonOutputAdapter.js';
+import {
+  HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET,
+  HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
+} from './headless-tool-result-text-projection.js';
 
 /**
  * Test implementation of BaseJsonOutputAdapter for unit testing.
@@ -288,7 +293,7 @@ describe('BaseJsonOutputAdapter', () => {
     it('should build message with text blocks', () => {
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Hello world',
       });
 
@@ -311,7 +316,7 @@ describe('BaseJsonOutputAdapter', () => {
     it('should set stop_reason to tool_use when message contains only tool_use blocks', () => {
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.ToolCallRequest,
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-1',
           name: 'test_tool',
@@ -438,7 +443,7 @@ describe('BaseJsonOutputAdapter', () => {
       adapter.startAssistantMessage();
       const state = adapter['mainAgentMessageState'];
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'text',
       });
 
@@ -478,7 +483,7 @@ describe('BaseJsonOutputAdapter', () => {
       adapter.startAssistantMessage();
       const state = adapter['mainAgentMessageState'];
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'test',
       });
 
@@ -499,7 +504,7 @@ describe('BaseJsonOutputAdapter', () => {
       adapter.startAssistantMessage();
       const state = adapter['mainAgentMessageState'];
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'test',
       });
 
@@ -517,7 +522,7 @@ describe('BaseJsonOutputAdapter', () => {
       adapter.startAssistantMessage();
       const state = adapter['mainAgentMessageState'];
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'test',
       });
       state.openBlocks.add(0);
@@ -763,7 +768,7 @@ describe('BaseJsonOutputAdapter', () => {
     it('should reset main agent message state', () => {
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'test',
       });
 
@@ -782,7 +787,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should process Content events', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Hello',
       });
 
@@ -796,7 +801,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should process Citation events', () => {
       adapter.processEvent({
-        type: GeminiEventType.Citation,
+        type: LlmEventType.Citation,
         value: 'Citation text',
       });
 
@@ -808,9 +813,9 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should ignore non-string Citation values', () => {
       adapter.processEvent({
-        type: GeminiEventType.Citation,
+        type: LlmEventType.Citation,
         value: 123,
-      } as unknown as ServerGeminiStreamEvent);
+      } as unknown as ServerLlmStreamEvent);
 
       const state = adapter['mainAgentMessageState'];
       expect(state.blocks).toHaveLength(0);
@@ -818,7 +823,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should process Thought events', () => {
       adapter.processEvent({
-        type: GeminiEventType.Thought,
+        type: LlmEventType.Thought,
         value: {
           subject: 'Planning',
           description: 'Thinking',
@@ -836,7 +841,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should process ToolCallRequest events', () => {
       adapter.processEvent({
-        type: GeminiEventType.ToolCallRequest,
+        type: LlmEventType.ToolCallRequest,
         value: {
           callId: 'tool-1',
           name: 'test_tool',
@@ -858,7 +863,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should process Finished events with usage metadata', () => {
       adapter.processEvent({
-        type: GeminiEventType.Finished,
+        type: LlmEventType.Finished,
         value: {
           reason: undefined,
           usageMetadata: {
@@ -877,13 +882,13 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should ignore events after finalization', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'First',
       });
       adapter.finalizeAssistantMessage();
 
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Second',
       });
 
@@ -902,7 +907,7 @@ describe('BaseJsonOutputAdapter', () => {
 
     it('should build and return assistant message', () => {
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Test response',
       });
 
@@ -1061,6 +1066,164 @@ describe('BaseJsonOutputAdapter', () => {
         expect(message.parent_tool_use_id).toBe('parent-tool-1');
       }
     });
+
+    const persistedOutputCases: Array<[string, string[] | undefined]> = [
+      ['unhandled', undefined],
+      ['handled without artifact', []],
+      ['reusable artifact', ['/tmp/private-output.txt']],
+    ];
+    it.each(persistedOutputCases)(
+      'bounds %s tool display without mutating or serializing persistence metadata',
+      (_name, persistedOutputFiles) => {
+        const display = 'HEAD-' + 'x'.repeat(100_000) + '-TAIL';
+        const request = {
+          callId: 'tool-large',
+          name: 'test_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        };
+        const response = {
+          callId: 'tool-large',
+          responseParts: [],
+          resultDisplay: display,
+          error: undefined,
+          errorType: undefined,
+          persistedOutputFiles,
+        };
+
+        adapter.emitToolResult(request, response, 'parent-tool-1');
+
+        const message = adapter.emittedMessages[0];
+        expect(message).toMatchObject({
+          type: 'user',
+          parent_tool_use_id: 'parent-tool-1',
+        });
+        if (message.type !== 'user') throw new Error('Expected user message');
+        const block = message.message.content[0];
+        if (
+          typeof block !== 'object' ||
+          block === null ||
+          block.type !== 'tool_result' ||
+          typeof block.content !== 'string'
+        ) {
+          throw new Error('Expected textual tool result');
+        }
+
+        expect(
+          Buffer.byteLength(JSON.stringify(block.content), 'utf8'),
+        ).toBeLessThanOrEqual(HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET);
+        expect(block.content).toContain(
+          HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
+        );
+        expect(block.content.startsWith('HEAD-')).toBe(true);
+        expect(block.content.endsWith('-TAIL')).toBe(true);
+        expect(JSON.stringify(block)).not.toContain('/tmp/private-output.txt');
+        expect(response.resultDisplay).toBe(display);
+        expect(response.persistedOutputFiles).toBe(persistedOutputFiles);
+      },
+    );
+
+    it('keeps content omitted when semantic selection yields no text', () => {
+      const request = {
+        callId: 'tool-empty',
+        name: 'test_tool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-1',
+      };
+
+      adapter.emitToolResult(request, {
+        callId: 'tool-empty',
+        responseParts: [],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      });
+
+      const message = adapter.emittedMessages[0];
+      if (message.type !== 'user') throw new Error('Expected user message');
+      const block = message.message.content[0];
+      if (
+        typeof block !== 'object' ||
+        block === null ||
+        block.type !== 'tool_result'
+      ) {
+        throw new Error('Expected tool result');
+      }
+      expect(Object.hasOwn(block, 'content')).toBe(false);
+    });
+
+    it.each([
+      {
+        name: 'responseParts fallback',
+        response: {
+          responseParts: [
+            {
+              functionResponse: {
+                response: {
+                  output: 'HEAD-' + 'p'.repeat(100_000) + '-TAIL',
+                },
+              },
+            },
+          ],
+          resultDisplay: undefined,
+          error: undefined,
+        },
+      },
+      {
+        name: 'top-level error',
+        response: {
+          responseParts: [],
+          resultDisplay: 'ignored display',
+          error: new Error('HEAD-' + 'e'.repeat(100_000) + '-TAIL'),
+        },
+      },
+      {
+        name: 'vision bridge notice',
+        response: {
+          responseParts: [],
+          resultDisplay: 'HEAD-' + 'v'.repeat(100_000) + '-TAIL',
+          visionBridgeNotice: 'Vision disclosure',
+          error: undefined,
+        },
+      },
+    ])('projects oversized $name after semantic selection', ({ response }) => {
+      adapter.emitToolResult(
+        {
+          callId: 'tool-semantic',
+          name: 'test_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+        {
+          callId: 'tool-semantic',
+          errorType: undefined,
+          ...response,
+        },
+      );
+
+      const message = adapter.emittedMessages[0];
+      if (message.type !== 'user') throw new Error('Expected user message');
+      const block = message.message.content[0];
+      if (
+        typeof block !== 'object' ||
+        block === null ||
+        block.type !== 'tool_result' ||
+        typeof block.content !== 'string'
+      ) {
+        throw new Error('Expected textual tool result');
+      }
+
+      expect(
+        Buffer.byteLength(JSON.stringify(block.content), 'utf8'),
+      ).toBeLessThanOrEqual(HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET);
+      expect(block.content).toContain(
+        HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
+      );
+      expect(block.content.endsWith('-TAIL')).toBe(true);
+    });
   });
 
   describe('emitSystemMessage', () => {
@@ -1110,7 +1273,7 @@ describe('BaseJsonOutputAdapter', () => {
     beforeEach(() => {
       adapter.startAssistantMessage();
       adapter.processEvent({
-        type: GeminiEventType.Content,
+        type: LlmEventType.Content,
         value: 'Response text',
       });
       const message = adapter.finalizeAssistantMessage();
@@ -1243,6 +1406,70 @@ describe('BaseJsonOutputAdapter', () => {
       if (!result.is_error) {
         expect(result.result).toBe('');
       }
+    });
+
+    it('includes structured_result and JSON-stringifies result when structuredResult is provided', () => {
+      const payload = { summary: 'hi', score: 42 };
+      const options: ResultOptions = {
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+        structuredResult: payload,
+      };
+
+      const result = adapter.exposeBuildResultMessage(options);
+
+      if (!result.is_error) {
+        expect(result.result).toBe(JSON.stringify(payload));
+        expect(
+          (result as unknown as { structured_result?: unknown })
+            .structured_result,
+        ).toEqual(payload);
+      }
+    });
+
+    it('omits structured_result when structuredResult is undefined (back-compat)', () => {
+      const options: ResultOptions = {
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      };
+
+      const result = adapter.exposeBuildResultMessage(options);
+
+      expect(
+        (result as unknown as { structured_result?: unknown })
+          .structured_result,
+      ).toBeUndefined();
+    });
+
+    it('emits structured_result=null when the field is explicitly present but undefined', () => {
+      // runNonInteractive sets `structuredResult: undefined` when the
+      // model called structured_output with no args under an empty
+      // schema (`{}`). The previous `!== undefined` guard collapsed
+      // "absent" with "submitted-as-undefined", silently dropping the
+      // field and falling back to the free-text result. Track presence
+      // by key existence and normalize undefined to null so both
+      // `result` and `structured_result` render as JSON-safe values.
+      const options: ResultOptions = {
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+        structuredResult: undefined,
+      };
+
+      const result = adapter.exposeBuildResultMessage(options);
+
+      if (!result.is_error) {
+        expect(result.result).toBe('null');
+      }
+      expect(
+        (result as unknown as { structured_result?: unknown })
+          .structured_result,
+      ).toBeNull();
     });
   });
 
@@ -1540,6 +1767,141 @@ describe('BaseJsonOutputAdapter', () => {
         expect(result).toBe('Tool result');
       });
 
+      it('maps mcp_app displays to fallbackText', () => {
+        const response = {
+          callId: 'app-1',
+          resultDisplay: {
+            type: 'mcp_app' as const,
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: '<main>Revenue</main>',
+            toolResult: {
+              content: [{ type: 'text', text: 'Dashboard ready' }],
+            },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+          responseParts: [
+            {
+              functionResponse: {
+                response: {},
+              },
+            },
+          ],
+          error: undefined,
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe('Dashboard ready');
+      });
+
+      it('includes the vision bridge disclosure with tool content', () => {
+        const response = {
+          callId: 'pdf-success',
+          resultDisplay: {
+            type: 'vision_bridge_notice' as const,
+            summary: 'Transcribed PDF pages 20-23; remaining pages 24-25',
+            notice:
+              'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).',
+          },
+          responseParts: [
+            {
+              functionResponse: {
+                response: { output: 'Page 20: transcribed content' },
+              },
+            },
+          ],
+          error: undefined,
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Transcribed PDF pages 20-23; remaining pages 24-25\n' +
+            'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).\n' +
+            'Page 20: transcribed content',
+        );
+      });
+
+      it('includes a tool-result vision notice without replacing content', () => {
+        const response = {
+          callId: 'image-tool',
+          resultDisplay: 'captured screen',
+          visionBridgeNotice:
+            'Converted 1 image via qwen3-vl-plus (dashscope.aliyuncs.com).',
+          responseParts: [
+            {
+              functionResponse: {
+                response: { output: 'Screen says READY' },
+              },
+            },
+          ],
+          error: undefined,
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Converted 1 image via qwen3-vl-plus (dashscope.aliyuncs.com).\n' +
+            'captured screen',
+        );
+      });
+
+      it('prefers a top-level tool error over content with a vision bridge disclosure', () => {
+        const response = {
+          callId: 'pdf-failure',
+          resultDisplay: {
+            type: 'vision_bridge_notice' as const,
+            summary: 'Failed to read PDF after rendering pages 20-23',
+            notice: 'Vision bridge (qwen3-vl-plus) failed.',
+          },
+          responseParts: [
+            {
+              functionResponse: {
+                response: { output: 'Partial transcription' },
+              },
+            },
+          ],
+          error: new Error('No extractable text layer.'),
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Failed to read PDF after rendering pages 20-23\n' +
+            'Vision bridge (qwen3-vl-plus) failed.\n' +
+            'No extractable text layer.',
+        );
+      });
+
+      it('prefers an embedded tool error over content with a vision bridge disclosure', () => {
+        const response = {
+          callId: 'pdf-failure',
+          resultDisplay: {
+            type: 'vision_bridge_notice' as const,
+            summary: 'Failed to read PDF after rendering pages 20-23',
+            notice: 'Vision bridge (qwen3-vl-plus) failed.',
+          },
+          responseParts: [
+            {
+              functionResponse: {
+                response: { output: 'Partial transcription' },
+              },
+            },
+            {
+              functionResponse: {
+                response: { error: 'No extractable text layer.' },
+              },
+            },
+          ],
+          error: undefined,
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Failed to read PDF after rendering pages 20-23\n' +
+            'Vision bridge (qwen3-vl-plus) failed.\n' +
+            'No extractable text layer.',
+        );
+      });
+
       it('should extract content from responseParts', () => {
         const response = {
           callId: 'tool-1',
@@ -1566,6 +1928,30 @@ describe('BaseJsonOutputAdapter', () => {
         const result = toolResultContent(response);
 
         expect(result).toBe('Tool failed');
+      });
+
+      it('prefers detailed response error over the operational summary', () => {
+        const response = {
+          callId: 'tool-1',
+          resultDisplay: 'partial output',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'tool-1',
+                name: 'shell',
+                response: {
+                  error: 'Command timed out.\npartial output',
+                },
+              },
+            },
+          ],
+          error: new Error('Command timed out.'),
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Command timed out.\npartial output',
+        );
       });
 
       it('should return undefined if no content', () => {

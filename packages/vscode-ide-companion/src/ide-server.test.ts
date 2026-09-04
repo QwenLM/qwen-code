@@ -13,9 +13,13 @@ import * as http from 'node:http';
 import { IDEServer } from './ide-server.js';
 import type { DiffManager } from './diff-manager.js';
 
-vi.mock('node:crypto', () => ({
-  randomUUID: vi.fn(() => 'test-auth-token'),
-}));
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  return {
+    ...actual,
+    randomUUID: vi.fn(() => 'test-auth-token'),
+  };
+});
 
 const mocks = vi.hoisted(() => ({
   diffManager: {
@@ -38,9 +42,17 @@ vi.mock('node:os', async (importOriginal) => {
   };
 });
 
-vi.mock('@qwen-code/qwen-code-core/src/ide/detect-ide.js', () => ({
-  detectIdeFromEnv: vi.fn(() => ({ name: 'vscode', displayName: 'VS Code' })),
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    detectIdeFromEnv: vi.fn(() => ({
+      name: 'vscode',
+      displayName: 'VS Code',
+    })),
+  };
+});
 
 const vscodeMock = vi.hoisted(() => ({
   workspace: {
@@ -61,13 +73,6 @@ const vscodeMock = vi.hoisted(() => ({
 }));
 
 vi.mock('vscode', () => vscodeMock);
-
-vi.mock('@qwen-code/qwen-code-core/src/ide/detect-ide.js', () => ({
-  detectIdeFromEnv: vi.fn(() => ({
-    name: 'vscode',
-    displayName: 'VS Code',
-  })),
-}));
 
 vi.mock('./open-files-manager', () => {
   const OpenFilesManager = vi.fn();

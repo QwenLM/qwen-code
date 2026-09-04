@@ -404,7 +404,6 @@ const SNIPPET_MAX_LINES = 1000;
  *
  * @param oldContent The original file content before the edit (null for new files)
  * @param newContent The new file content after the edit
- * @param contextLines Number of context lines to show before and after the change
  * @returns Snippet information, or null if no meaningful snippet can be extracted
  */
 export function extractEditSnippet(

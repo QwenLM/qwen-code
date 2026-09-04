@@ -10,6 +10,10 @@ import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { HookConfigDisplayInfo, HookEventDisplayInfo } from './types.js';
 import { HooksConfigSource } from '@qwen-code/qwen-code-core';
 import { t } from '../../../i18n/index.js';
+import {
+  getTranslatedSourceDisplayMap,
+  supportsMatchers,
+} from './constants.js';
 
 interface HookConfigDetailStepProps {
   hookEvent: HookEventDisplayInfo;
@@ -22,26 +26,10 @@ export function HookConfigDetailStep({
 }: HookConfigDetailStepProps): React.JSX.Element {
   const { columns: terminalWidth } = useTerminalSize();
 
-  // Get source display
-  const getSourceDisplay = (): string => {
-    switch (hookConfig.source) {
-      case HooksConfigSource.Project:
-        return t('Local Settings');
-      case HooksConfigSource.User:
-        return t('User Settings');
-      case HooksConfigSource.System:
-        return t('System Settings');
-      case HooksConfigSource.Extensions:
-        return t('Extensions');
-      default:
-        return hookConfig.source;
-    }
-  };
+  const sourceDisplay = getTranslatedSourceDisplayMap()[hookConfig.source];
 
-  // Check if this is from an extension
   const isFromExtension = hookConfig.source === HooksConfigSource.Extensions;
 
-  // Get hook type display
   const getHookTypeDisplay = (): string => {
     switch (hookConfig.config.type) {
       case 'command':
@@ -51,7 +39,6 @@ export function HookConfigDetailStep({
     }
   };
 
-  // Get command to display
   const getCommand = (): string => {
     if (hookConfig.config.type === 'command') {
       return hookConfig.config.command;
@@ -59,22 +46,33 @@ export function HookConfigDetailStep({
     return '';
   };
 
-  // Calculate box width for command display
+  const getPrompt = (): string => {
+    if (hookConfig.config.type === 'prompt') {
+      return hookConfig.config.prompt;
+    }
+    return '';
+  };
+
+  const getUrl = (): string => {
+    if (hookConfig.config.type === 'http') {
+      return hookConfig.config.url;
+    }
+    return '';
+  };
+
   const commandBoxWidth = Math.min(terminalWidth - 6, 80);
 
-  // Label width for alignment (Extension: is the longest label)
   const labelWidth = 12;
+  const showMatcher = supportsMatchers(hookEvent.event);
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      {/* Title */}
       <Box marginBottom={1}>
         <Text bold color={theme.text.primary}>
           {t('Hook details')}
         </Text>
       </Box>
 
-      {/* Event */}
       <Box>
         <Box width={labelWidth}>
           <Text color={theme.text.secondary}>{t('Event:')}</Text>
@@ -82,7 +80,15 @@ export function HookConfigDetailStep({
         <Text color={theme.text.primary}>{hookEvent.event}</Text>
       </Box>
 
-      {/* Type */}
+      {showMatcher && (
+        <Box>
+          <Box width={labelWidth}>
+            <Text color={theme.text.secondary}>{t('Matcher:')}</Text>
+          </Box>
+          <Text color={theme.text.primary}>{hookConfig.matcher || '*'}</Text>
+        </Box>
+      )}
+
       <Box>
         <Box width={labelWidth}>
           <Text color={theme.text.secondary}>{t('Type:')}</Text>
@@ -90,18 +96,16 @@ export function HookConfigDetailStep({
         <Text color={theme.text.primary}>{getHookTypeDisplay()}</Text>
       </Box>
 
-      {/* Source */}
       <Box>
         <Box width={labelWidth}>
           <Text color={theme.text.secondary}>{t('Source:')}</Text>
         </Box>
-        <Text color={theme.text.primary}>{getSourceDisplay()}</Text>
+        <Text color={theme.text.primary}>{sourceDisplay}</Text>
         {hookConfig.sourcePath && (
           <Text color={theme.text.secondary}> ({hookConfig.sourcePath})</Text>
         )}
       </Box>
 
-      {/* Extension name (only for extensions) */}
       {isFromExtension && hookConfig.sourceDisplay && (
         <Box>
           <Box width={labelWidth}>
@@ -111,7 +115,6 @@ export function HookConfigDetailStep({
         </Box>
       )}
 
-      {/* Name (if exists) */}
       {hookConfig.config.name && (
         <Box>
           <Box width={labelWidth}>
@@ -121,7 +124,6 @@ export function HookConfigDetailStep({
         </Box>
       )}
 
-      {/* Description (if exists) */}
       {hookConfig.config.description && (
         <Box>
           <Box width={labelWidth}>
@@ -133,23 +135,57 @@ export function HookConfigDetailStep({
         </Box>
       )}
 
-      {/* Command */}
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>{t('Command:')}</Text>
-      </Box>
+      {hookConfig.config.type === 'command' && (
+        <>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>{t('Command:')}</Text>
+          </Box>
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={theme.border.default}
+            paddingX={1}
+            width={commandBoxWidth}
+          >
+            <Text color={theme.text.primary}>{getCommand()}</Text>
+          </Box>
+        </>
+      )}
 
-      {/* Command box */}
-      <Box
-        flexDirection="column"
-        borderStyle="round"
-        borderColor={theme.border.default}
-        paddingX={1}
-        width={commandBoxWidth}
-      >
-        <Text color={theme.text.primary}>{getCommand()}</Text>
-      </Box>
+      {hookConfig.config.type === 'prompt' && (
+        <>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>{t('Prompt:')}</Text>
+          </Box>
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={theme.border.default}
+            paddingX={1}
+            width={commandBoxWidth}
+          >
+            <Text color={theme.text.primary}>{getPrompt()}</Text>
+          </Box>
+        </>
+      )}
 
-      {/* Help text */}
+      {hookConfig.config.type === 'http' && (
+        <>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>{t('URL:')}</Text>
+          </Box>
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={theme.border.default}
+            paddingX={1}
+            width={commandBoxWidth}
+          >
+            <Text color={theme.text.primary}>{getUrl()}</Text>
+          </Box>
+        </>
+      )}
+
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>
           {t(
@@ -158,7 +194,6 @@ export function HookConfigDetailStep({
         </Text>
       </Box>
 
-      {/* Footer hint */}
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>{t('Esc to go back')}</Text>
       </Box>

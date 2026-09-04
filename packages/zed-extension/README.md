@@ -41,7 +41,7 @@ zed --install-extension qwen-code
 
 - Zed Editor (latest version recommended)
 - Internet connection for AI model access
-- Node.js >= 20 (for running Qwen Code agent server)
+- Node.js >= 22 (for running Qwen Code agent server)
 
 ## Configuration
 
@@ -60,7 +60,7 @@ For additional environment variables, configure them in your Zed settings:
   "agent_servers": {
     "qwen-code": {
       "env": {
-        "QWEN_LOG_LEVEL": "info",
+        "QWEN_DEBUG_LOG_FILE": "1",
         "YOUR_CUSTOM_VAR": "value"
       }
     }

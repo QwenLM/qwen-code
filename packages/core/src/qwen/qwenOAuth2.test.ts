@@ -6,7 +6,6 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'events';
-import { type ChildProcess } from 'child_process';
 import type { Config } from '../config/config.js';
 import {
   generateCodeChallenge,
@@ -19,11 +18,13 @@ import {
   qwenOAuth2Events,
   QwenOAuth2Event,
   QwenOAuth2Client,
+  showFallbackMessage,
   type DeviceAuthorizationResponse,
   type DeviceTokenResponse,
   type ErrorData,
   type QwenCredentials,
 } from './qwenOAuth2.js';
+import { HYPERLINK_ENV_KEYS } from '../utils/osc8.js';
 import {
   SharedTokenManager,
   TokenManagerError,
@@ -35,6 +36,8 @@ interface MockSharedTokenManager {
   getCurrentCredentials(): QwenCredentials | null;
   clearCache(): void;
 }
+
+const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 
 // Mock SharedTokenManager
 vi.mock('./sharedTokenManager.js', () => ({
@@ -91,9 +94,8 @@ vi.mock('./sharedTokenManager.js', () => ({
   },
 }));
 
-// Mock open
-vi.mock('open', () => ({
-  default: vi.fn(),
+vi.mock('../utils/secure-browser-launcher.js', () => ({
+  openBrowserSecurely: mockOpenBrowserSecurely,
 }));
 
 // Mock process.stdout.write
@@ -110,8 +112,18 @@ vi.mock('node:fs', () => ({
     writeFile: vi.fn(),
     unlink: vi.fn(),
     mkdir: vi.fn().mockResolvedValue(undefined),
+    // PR #4255 round-11 #2 (gpt-5.5 review): atomic write uses
+    // temp-file → chmod → rename. Tests need chmod + rename in the
+    // mocked fs surface; both default to no-op success.
+    chmod: vi.fn().mockResolvedValue(undefined),
+    rename: vi.fn().mockResolvedValue(undefined),
   },
 }));
+
+beforeEach(() => {
+  mockOpenBrowserSecurely.mockReset();
+  mockOpenBrowserSecurely.mockResolvedValue(undefined);
+});
 
 describe('PKCE Code Generation', () => {
   describe('generateCodeVerifier', () => {
@@ -740,6 +752,104 @@ describe('QwenOAuth2Client', () => {
 
       await expect(client.refreshAccessToken()).rejects.toThrow(
         'Token refresh failed: 500 Internal Server Error',
+      );
+    });
+
+    it('should time out hung refresh token requests', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(global.fetch).mockImplementation(
+          (_url, init) =>
+            new Promise<Response>((_, reject) => {
+              const signal = (init as RequestInit).signal;
+              if (!signal) {
+                reject(new Error('missing abort signal'));
+                return;
+              }
+              signal.addEventListener(
+                'abort',
+                () => {
+                  reject(
+                    Object.assign(
+                      new DOMException(
+                        'The operation was aborted',
+                        'AbortError',
+                      ),
+                      { cause: signal.reason },
+                    ),
+                  );
+                },
+                { once: true },
+              );
+            }),
+        );
+
+        const refreshError = client
+          .refreshAccessToken()
+          .catch((error: unknown) => error);
+
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        const error = await refreshError;
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(
+          'Token refresh timeout: The operation was aborted (cause: Operation timed out)',
+        );
+        expect((error as Error).cause).toBeInstanceOf(DOMException);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should keep the refresh timeout active while reading the response body', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(global.fetch).mockImplementation(async (_url, init) => {
+          const signal = (init as RequestInit).signal;
+          if (!signal) {
+            throw new Error('missing abort signal');
+          }
+          return {
+            ok: true,
+            text: () =>
+              new Promise<string>((_, reject) => {
+                signal.addEventListener('abort', () => reject(signal.reason), {
+                  once: true,
+                });
+              }),
+          } as Response;
+        });
+
+        const refreshError = client
+          .refreshAccessToken()
+          .catch((error: unknown) => error);
+
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        const error = await refreshError;
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain('Token refresh timeout:');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should preserve non-timeout network errors and show the token endpoint', async () => {
+      const cause = Object.assign(new Error('connect ECONNREFUSED'), {
+        code: 'ECONNREFUSED',
+      });
+      const networkError = new TypeError('fetch failed', { cause });
+      vi.mocked(global.fetch).mockRejectedValue(networkError);
+
+      const error = await client
+        .refreshAccessToken()
+        .catch((refreshError: unknown) => refreshError);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).cause).toBe(networkError);
+      expect((error as Error).message).toContain('Token refresh failed:');
+      expect((error as Error).message).toContain(
+        'https://chat.qwen.ai/api/v1/oauth2/token',
       );
     });
 
@@ -1459,6 +1569,7 @@ describe('authWithQwenDeviceFlow - Comprehensive Testing', () => {
 
     expect(client).toBeInstanceOf(Object);
     expect(mockConfig.isBrowserLaunchSuppressed).toHaveBeenCalled();
+    expect(mockOpenBrowserSecurely).not.toHaveBeenCalled();
 
     SharedTokenManager.getInstance = originalGetInstance;
   });
@@ -1489,9 +1600,15 @@ describe('Browser Launch and Error Handling', () => {
       new Error('No cached credentials'),
     );
 
-    // Mock open to throw error
-    const open = await import('open');
-    vi.mocked(open.default).mockRejectedValue(
+    const mockTokenManager = {
+      getValidCredentials: vi
+        .fn()
+        .mockRejectedValue(new Error('No credentials')),
+    };
+    const originalGetInstance = SharedTokenManager.getInstance;
+    SharedTokenManager.getInstance = vi.fn().mockReturnValue(mockTokenManager);
+
+    mockOpenBrowserSecurely.mockRejectedValue(
       new Error('Browser launch failed'),
     );
 
@@ -1526,27 +1643,26 @@ describe('Browser Launch and Error Handling', () => {
     );
 
     expect(client).toBeInstanceOf(Object);
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+      'https://chat.qwen.ai/device?code=TEST123',
+    );
+
+    SharedTokenManager.getInstance = originalGetInstance;
   });
 
-  it('should handle browser child process error gracefully', async () => {
+  it('should launch the device flow URL through the shared browser helper', async () => {
     const { promises: fs } = await import('node:fs');
     vi.mocked(fs.readFile).mockRejectedValue(
       new Error('No cached credentials'),
     );
 
-    // Mock open to return a child process that will emit error
-    const open = await import('open');
-    const mockChildProcess = {
-      on: vi.fn((event: string, callback: (error: Error) => void) => {
-        if (event === 'error') {
-          // Call the error handler immediately for testing
-          setTimeout(() => callback(new Error('Process spawn failed')), 0);
-        }
-      }),
+    const mockTokenManager = {
+      getValidCredentials: vi
+        .fn()
+        .mockRejectedValue(new Error('No credentials')),
     };
-    vi.mocked(open.default).mockResolvedValue(
-      mockChildProcess as unknown as ChildProcess,
-    );
+    const originalGetInstance = SharedTokenManager.getInstance;
+    SharedTokenManager.getInstance = vi.fn().mockReturnValue(mockTokenManager);
 
     const mockAuthResponse = {
       ok: true,
@@ -1579,6 +1695,11 @@ describe('Browser Launch and Error Handling', () => {
     );
 
     expect(client).toBeInstanceOf(Object);
+    expect(mockOpenBrowserSecurely).toHaveBeenCalledWith(
+      'https://chat.qwen.ai/device?code=TEST123',
+    );
+
+    SharedTokenManager.getInstance = originalGetInstance;
   });
 });
 
@@ -2266,5 +2387,72 @@ describe('Constants and Configuration', () => {
     expect(options?.body).toContain(
       'scope=openid%20profile%20email%20model.completion',
     );
+  });
+});
+
+describe('showFallbackMessage', () => {
+  const savedEnv: Record<string, string | undefined> = {};
+  const url = 'https://chat.qwen.ai/authorize?user_code=WDJB-MJHT';
+
+  beforeEach(() => {
+    for (const key of HYPERLINK_ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of HYPERLINK_ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+  });
+
+  const capture = (isTTY: boolean) => {
+    const chunks: string[] = [];
+    const out = {
+      isTTY,
+      write: (chunk: string) => {
+        chunks.push(String(chunk));
+        return true;
+      },
+    } as unknown as NodeJS.WriteStream;
+    return { out, text: () => chunks.join('') };
+  };
+
+  it('emits the URL as a single OSC 8 hyperlink when the terminal supports it', () => {
+    process.env['FORCE_HYPERLINK'] = '1';
+    const { out, text } = capture(true);
+
+    showFallbackMessage(url, out);
+
+    const output = text();
+    // OSC 8 envelope: ESC ] 8 ; ; <url> BEL <label> ESC ] 8 ; ; BEL
+    expect(output).toContain(`\x1b]8;;${url}\x07${url}\x1b]8;;\x07`);
+    // The ASCII box is not drawn on the hyperlink path.
+    expect(output).not.toContain('+--');
+  });
+
+  it('falls back to the ASCII box when hyperlinks are disabled', () => {
+    process.env['QWEN_DISABLE_HYPERLINKS'] = '1';
+    const { out, text } = capture(true);
+
+    showFallbackMessage(url, out);
+
+    const output = text();
+    expect(output).not.toContain('\x1b]8;;');
+    expect(output).toContain('Qwen OAuth Device Authorization');
+    expect(output).toContain('+'); // box border
+  });
+
+  it('falls back to the ASCII box for a non-TTY stream even with FORCE_HYPERLINK', () => {
+    process.env['FORCE_HYPERLINK'] = '1';
+    const { out, text } = capture(false);
+
+    showFallbackMessage(url, out);
+
+    const output = text();
+    expect(output).not.toContain('\x1b]8;;');
+    expect(output).toContain('+');
   });
 });

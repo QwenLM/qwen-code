@@ -5,7 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { initializeApp } from './initializer.js';
+import { connectIdeForStartup, initializeApp } from './initializer.js';
 
 const mockPerformInitialAuth = vi.fn();
 const mockValidateTheme = vi.fn();
@@ -21,6 +21,8 @@ vi.mock('./theme.js', () => ({
 
 vi.mock('../i18n/index.js', () => ({
   initializeI18n: (...args: unknown[]) => mockInitializeI18n(...args),
+  resolveLanguageSetting: (settingsLang?: string) =>
+    process.env['QWEN_CODE_LANG'] || settingsLang || 'auto',
 }));
 
 const mockConnect = vi.fn();
@@ -42,7 +44,7 @@ describe('initializeApp', () => {
   let mockConfig: {
     getModelsConfig: ReturnType<typeof vi.fn>;
     getIdeMode: ReturnType<typeof vi.fn>;
-    getGeminiMdFileCount: ReturnType<typeof vi.fn>;
+    getMemoryFileCount: ReturnType<typeof vi.fn>;
   };
   let mockSettings: {
     merged: Record<string, unknown>;
@@ -58,7 +60,7 @@ describe('initializeApp', () => {
         wasAuthTypeExplicitlyProvided: vi.fn().mockReturnValue(false),
       }),
       getIdeMode: vi.fn().mockReturnValue(false),
-      getGeminiMdFileCount: vi.fn().mockReturnValue(0),
+      getMemoryFileCount: vi.fn().mockReturnValue(0),
     };
 
     mockSettings = {
@@ -94,7 +96,7 @@ describe('initializeApp', () => {
 
     expect(result.authError).toBeNull();
     expect(result.themeError).toBeNull();
-    expect(result.geminiMdFileCount).toBe(0);
+    expect(result.memoryFileCount).toBe(0);
   });
 
   it('should return authError when auth fails', async () => {
@@ -162,7 +164,7 @@ describe('initializeApp', () => {
     expect(result.shouldOpenAuthDialog).toBe(false);
   });
 
-  it('should connect to IDE when in IDE mode', async () => {
+  it('should connect to IDE by default when in IDE mode', async () => {
     mockConfig.getIdeMode.mockReturnValue(true);
 
     await initializeApp(mockConfig as never, mockSettings as never);
@@ -170,6 +172,38 @@ describe('initializeApp', () => {
     expect(mockGetInstance).toHaveBeenCalled();
     expect(mockConnect).toHaveBeenCalled();
     expect(mockLogIdeConnection).toHaveBeenCalled();
+  });
+
+  it('should not connect to IDE when deferred', async () => {
+    mockConfig.getIdeMode.mockReturnValue(true);
+
+    await initializeApp(mockConfig as never, mockSettings as never, {
+      deferIdeConnection: true,
+    });
+
+    expect(mockGetInstance).not.toHaveBeenCalled();
+    expect(mockConnect).not.toHaveBeenCalled();
+    expect(mockLogIdeConnection).not.toHaveBeenCalled();
+  });
+
+  it('should connect to IDE through startup helper', async () => {
+    mockConfig.getIdeMode.mockReturnValue(true);
+
+    await connectIdeForStartup(mockConfig as never);
+
+    expect(mockGetInstance).toHaveBeenCalled();
+    expect(mockConnect).toHaveBeenCalled();
+    expect(mockLogIdeConnection).toHaveBeenCalled();
+  });
+
+  it('should not connect to IDE through startup helper when not in IDE mode', async () => {
+    mockConfig.getIdeMode.mockReturnValue(false);
+
+    await connectIdeForStartup(mockConfig as never);
+
+    expect(mockGetInstance).not.toHaveBeenCalled();
+    expect(mockConnect).not.toHaveBeenCalled();
+    expect(mockLogIdeConnection).not.toHaveBeenCalled();
   });
 
   it('should not connect to IDE when not in IDE mode', async () => {

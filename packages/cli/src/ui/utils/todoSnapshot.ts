@@ -12,12 +12,42 @@ import type {
 } from '../types.js';
 
 type HistoryLikeItem = HistoryItem | HistoryItemWithoutId;
-type SnapshotSearchResult = TodoItem[] | null | undefined;
+interface TodoSnapshotSearchResult {
+  itemIndex: number;
+  todos: TodoItem[] | null;
+}
+
+type SnapshotSearchResult = TodoSnapshotSearchResult | undefined;
+
+// This threshold is item-count based, not line-count based. A single long
+// response can fill the viewport while still counting as one item, so the
+// sticky panel may stay hidden longer than strictly necessary. That is
+// preferable to duplicating a recently committed inline TodoWrite result.
+// On tall terminals, TodoWrite -> short text -> small tool call can still
+// leave the inline result visible when the sticky panel appears.
+const MIN_HISTORY_ITEMS_AFTER_TODO_BEFORE_STICKY = 2;
+export const STICKY_TODO_MAX_VISIBLE_ITEMS = 5;
+const STICKY_TODO_ROWS_PER_VISIBLE_ITEM = 5;
+const STICKY_TODO_VP_ROWS_PER_VISIBLE_ITEM = 12;
+const STICKY_TODO_VP_MIN_VISIBLE_ITEMS = 2;
+const STICKY_TODO_VP_MAX_VISIBLE_ITEMS = 4;
+
 const STICKY_TODO_STATUS_PRIORITY: Record<TodoItem['status'], number> = {
   in_progress: 0,
   pending: 1,
   completed: 2,
 };
+
+function clampStickyTodoVisibleItems(value: number): number {
+  if (!Number.isFinite(value)) {
+    return STICKY_TODO_MAX_VISIBLE_ITEMS;
+  }
+
+  return Math.max(
+    1,
+    Math.min(STICKY_TODO_MAX_VISIBLE_ITEMS, Math.floor(value)),
+  );
+}
 
 function extractTodosFromResultDisplay(
   resultDisplay: unknown,
@@ -32,6 +62,9 @@ function extractTodosFromResultDisplay(
       candidate['type'] === 'todo_list' &&
       Array.isArray(candidate['todos'])
     ) {
+      if (candidate['unchanged'] === true) {
+        return null;
+      }
       return candidate['todos'] as TodoItem[];
     }
   }
@@ -67,7 +100,10 @@ function findLatestTodoSnapshot(
       const tool = item.tools[toolIndex] as IndividualToolCallDisplay;
       const todos = extractTodosFromResultDisplay(tool.resultDisplay);
       if (todos) {
-        return todos.length > 0 ? todos : null;
+        return {
+          itemIndex,
+          todos: todos.length > 0 ? todos : null,
+        };
       }
     }
   }
@@ -79,21 +115,65 @@ function areAllTodosCompleted(todos: readonly TodoItem[]): boolean {
   return todos.length > 0 && todos.every((todo) => todo.status === 'completed');
 }
 
+function isRecentHistoryTodoSnapshot(
+  snapshotItemIndex: number,
+  historyLength: number,
+): boolean {
+  const historyItemsAfterSnapshot = historyLength - snapshotItemIndex - 1;
+  return historyItemsAfterSnapshot < MIN_HISTORY_ITEMS_AFTER_TODO_BEFORE_STICKY;
+}
+
+/**
+ * Returns true when a user message exists after the given index, meaning the
+ * todo snapshot belongs to a previous turn.  The sticky panel should not
+ * resurface stale todos from an earlier turn when the user starts a new one.
+ */
+function hasUserMessageAfter(
+  items: readonly HistoryLikeItem[],
+  afterIndex: number,
+): boolean {
+  for (let i = afterIndex + 1; i < items.length; i++) {
+    if (items[i].type === 'user') {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function getStickyTodos(
   history: readonly HistoryItem[],
   pendingHistoryItems: readonly HistoryItemWithoutId[],
 ): TodoItem[] | null {
   const pendingSnapshot = findLatestTodoSnapshot(pendingHistoryItems);
   if (pendingSnapshot !== undefined) {
-    return pendingSnapshot;
-  }
-
-  const historySnapshot = findLatestTodoSnapshot(history);
-  if (historySnapshot && areAllTodosCompleted(historySnapshot)) {
+    // The pending TodoWrite result is already rendered inline above the
+    // composer, so defer the sticky panel until the turn commits to history.
     return null;
   }
 
-  return historySnapshot ?? null;
+  const historySnapshot = findLatestTodoSnapshot(history);
+  if (historySnapshot === undefined || historySnapshot.todos === null) {
+    return null;
+  }
+
+  // Ink Static writes committed history to scrollback, and does not expose a
+  // reliable per-item viewport API. Treat very recent TodoWrite snapshots as
+  // still visible so the footer does not duplicate the inline result.
+  if (isRecentHistoryTodoSnapshot(historySnapshot.itemIndex, history.length)) {
+    return null;
+  }
+
+  // If a new user message appeared after the todo snapshot, the snapshot
+  // belongs to a previous turn.  Do not resurface stale todos.
+  if (hasUserMessageAfter(history, historySnapshot.itemIndex)) {
+    return null;
+  }
+
+  if (areAllTodosCompleted(historySnapshot.todos)) {
+    return null;
+  }
+
+  return historySnapshot.todos;
 }
 
 export function getOrderedStickyTodos(todos: readonly TodoItem[]): TodoItem[] {
@@ -106,4 +186,80 @@ export function getOrderedStickyTodos(todos: readonly TodoItem[]): TodoItem[] {
         left.index - right.index,
     )
     .map(({ todo }) => todo);
+}
+
+export function getStickyTodosRenderKey(
+  todos: readonly TodoItem[] | null,
+): string {
+  if (!todos) {
+    return 'null';
+  }
+
+  return JSON.stringify(
+    todos.map((todo) => [todo.id, todo.content, todo.status]),
+  );
+}
+
+export function getStickyTodosLayoutKey(
+  todos: readonly TodoItem[] | null,
+  width: number,
+  maxVisibleItems: number,
+): string {
+  if (!todos) {
+    return 'null';
+  }
+
+  const visibleTodoCount = clampStickyTodoVisibleItems(maxVisibleItems);
+  const orderedOpenTodos = getOrderedStickyTodos(todos).filter(
+    (todo) => todo.status !== 'completed',
+  );
+  const visibleTodos = orderedOpenTodos.slice(0, visibleTodoCount);
+  const hasHiddenTodos = orderedOpenTodos.length > visibleTodos.length;
+
+  return JSON.stringify({
+    width,
+    maxVisibleItems: visibleTodoCount,
+    hasHiddenTodos,
+    todos: visibleTodos.map((todo) => [todo.id, todo.content, todo.status]),
+  });
+}
+
+export function getStickyTodoMaxVisibleItems(terminalHeight: number): number {
+  if (!Number.isFinite(terminalHeight) || terminalHeight <= 0) {
+    return STICKY_TODO_MAX_VISIBLE_ITEMS;
+  }
+
+  return clampStickyTodoVisibleItems(
+    terminalHeight / STICKY_TODO_ROWS_PER_VISIBLE_ITEM,
+  );
+}
+
+// VP mode uses a tighter per-item row budget (12 rows/item vs 5) so the
+// panel leaves more room for the conversation. Clamped to [2, 4] so very
+// short terminals still show a useful panel and very tall ones don't
+// over-allocate.
+function getStickyTodoVpCap(terminalHeight: number): number {
+  if (!Number.isFinite(terminalHeight) || terminalHeight <= 0) {
+    return STICKY_TODO_VP_MIN_VISIBLE_ITEMS;
+  }
+  return Math.max(
+    STICKY_TODO_VP_MIN_VISIBLE_ITEMS,
+    Math.min(
+      STICKY_TODO_VP_MAX_VISIBLE_ITEMS,
+      Math.floor(terminalHeight / STICKY_TODO_VP_ROWS_PER_VISIBLE_ITEM),
+    ),
+  );
+}
+
+// Single source of truth for the sticky-todo cap across render + layout-key
+// sites. VP mode uses a height-aware tighter cap; other modes use the
+// height-derived default.
+export function getStickyTodoMaxVisibleItemsForMode(
+  terminalHeight: number,
+  useTerminalBuffer: boolean,
+): number {
+  const base = getStickyTodoMaxVisibleItems(terminalHeight);
+  return useTerminalBuffer
+    ? Math.min(getStickyTodoVpCap(terminalHeight), base)
+    : base;
 }

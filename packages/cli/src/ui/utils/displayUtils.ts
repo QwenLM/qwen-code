@@ -5,6 +5,7 @@
  */
 
 import { theme } from '../semantic-colors.js';
+import { ICON } from '../constants.js';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
 
 // --- Status Labels ---
@@ -26,11 +27,23 @@ export function getArenaStatusLabel(status: AgentStatus): StatusLabel {
     case AgentStatus.FAILED:
       return { icon: '✗', text: 'Failed', color: theme.status.error };
     case AgentStatus.RUNNING:
-      return { icon: '○', text: 'Running', color: theme.text.secondary };
+      return {
+        icon: ICON.CIRCLE_EMPTY,
+        text: 'Running',
+        color: theme.text.secondary,
+      };
     case AgentStatus.INITIALIZING:
-      return { icon: '○', text: 'Initializing', color: theme.text.secondary };
+      return {
+        icon: ICON.CIRCLE_EMPTY,
+        text: 'Initializing',
+        color: theme.text.secondary,
+      };
     default:
-      return { icon: '○', text: status, color: theme.text.secondary };
+      return {
+        icon: ICON.CIRCLE_EMPTY,
+        text: status,
+        color: theme.text.secondary,
+      };
   }
 }
 
@@ -61,3 +74,13 @@ export const getStatusColor = (
   }
   return options.defaultColor ?? theme.status.error;
 };
+
+export function formatDuration(ms: number): string {
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+}

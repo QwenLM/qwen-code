@@ -8,16 +8,50 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import {
   createDebugLogger,
   appendToLastTextPart,
+  buildSkillLlmContent,
+  applySkillAllowedTools,
+  canApplySkillSideEffects,
+  recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
+import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
+import {
+  writeSkillArgs,
+  clearSkillArgs,
+  staleArgsWarning,
+  skillArgsNote,
+  skillArgsPath,
+} from './skill-args-file.js';
 import type {
   SlashCommand,
   SlashCommandActionReturn,
   CommandSource,
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
+import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('SKILL_COMMAND_LOADER');
+
+export async function recordAutoSkillCommandUsage(
+  config: Config | null,
+  command: SlashCommand,
+): Promise<void> {
+  const detail = command.skillDetail;
+  if (!config || detail?.level !== 'project' || !detail.filePath) {
+    return;
+  }
+  try {
+    await recordAutoSkillUsage(config.getProjectRoot(), {
+      name: detail.name,
+      level: 'project',
+      filePath: detail.filePath,
+    });
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to record auto-skill command usage: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
 
 /**
  * Loads user-level, project-level, and extension-level skills as slash
@@ -53,11 +87,20 @@ export class SkillCommandLoader implements ICommandLoader {
 
       const allSkills = [...userSkills, ...projectSkills, ...extensionSkills];
 
+      // Filter by source here; a global denylist would also hide unrelated
+      // commands or skills with the same name.
+      const visibleSkills = allSkills.filter(
+        (skill) => this.config?.isSkillEnabled(skill) ?? true,
+      );
+      const nonUserInvocableCount = visibleSkills.filter(
+        (skill) => skill.userInvocable === false,
+      ).length;
+
       debugLogger.debug(
-        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands`,
+        `Loaded ${userSkills.length} user + ${projectSkills.length} project + ${extensionSkills.length} extension skill(s) as slash commands; ${allSkills.length - visibleSkills.length} disabled; ${nonUserInvocableCount} marked non-user-invocable`,
       );
 
-      return allSkills.map((skill) => {
+      return visibleSkills.map((skill) => {
         const isExtension = skill.level === 'extension';
 
         // Extension skills need explicit description or whenToUse to be
@@ -70,27 +113,86 @@ export class SkillCommandLoader implements ICommandLoader {
             : true;
 
         const sourceLabel = isExtension
-          ? `Extension: ${skill.extensionName ?? 'unknown'}`
+          ? `${t('Extension:')} ${skill.extensionDisplayName ?? skill.extensionName ?? 'unknown'}`
           : skill.level === 'project'
-            ? 'Project'
-            : 'User';
+            ? t('Project')
+            : t('User');
 
         return {
           name: skill.name,
           description: skill.description,
+          modelDescription: skill.description,
           kind: CommandKind.SKILL,
           source: (isExtension
             ? 'plugin-command'
             : 'skill-dir-command') as CommandSource,
           sourceLabel,
+          sourceDetail: isExtension
+            ? 'extension'
+            : skill.level === 'project'
+              ? 'project'
+              : 'user',
+          userInvocable: skill.userInvocable ?? true,
           modelInvocable,
+          argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,
+          skillDetail: {
+            name: skill.name,
+            description: skill.description,
+            body: skill.body,
+            filePath: skill.filePath,
+            level: skill.level,
+            ...(isExtension && skill.extensionName
+              ? { extensionName: skill.extensionName }
+              : {}),
+          },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
-            const body = skill.body;
+            if (this.config && !this.config.isSkillEnabled(skill)) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content: `Skill "${skill.name}" is disabled.`,
+              };
+            }
+            // Auto-approve the skill's declared allowedTools before its body is submitted.
+            if (this.config && canApplySkillSideEffects(skill, this.config)) {
+              applySkillAllowedTools(
+                this.config.getPermissionManager(),
+                skill.allowedTools,
+                { trustGated: skill.level === 'project' },
+              );
+            } else if (skill.allowedTools?.length) {
+              debugLogger.warn(
+                `Skill "${skill.name}" is a project skill in an untrusted folder; ignoring its allowedTools.`,
+              );
+            }
 
-            const content = context.invocation?.args
-              ? appendToLastTextPart([{ text: body }], context.invocation.raw)
-              : [{ text: body }];
+            const body = buildSkillLlmContent(
+              dirname(skill.filePath),
+              skill.body,
+            );
+
+            // See BundledSkillLoader: the arguments are written down for the
+            // skill to read, rather than transcribed by the model, and a bare
+            // invocation erases any prior record so its authority is not reused.
+            const rawArgs = context.invocation?.args ?? '';
+            let content;
+            if (rawArgs) {
+              content = appendToLastTextPart(
+                [{ text: body }],
+                context.invocation!.raw +
+                  (writeSkillArgs(skill.name, rawArgs)
+                    ? skillArgsNote(skillArgsPath(skill.name), rawArgs)
+                    : ''),
+              );
+            } else {
+              // See BundledSkillLoader: a failed revocation leaves the earlier
+              // run's posting authority on disk, and the skill must be told.
+              content = [{ text: body }];
+              if (!clearSkillArgs(skill.name)) {
+                content = appendToLastTextPart(content, staleArgsWarning());
+              }
+            }
 
             return {
               type: 'submit_prompt',

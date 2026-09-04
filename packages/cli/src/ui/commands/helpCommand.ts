@@ -6,7 +6,6 @@
 
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
-import { MessageType, type HistoryItemHelp } from '../types.js';
 import { t } from '../../i18n/index.js';
 
 export const helpCommand: SlashCommand = {
@@ -14,15 +13,12 @@ export const helpCommand: SlashCommand = {
   altNames: ['?'],
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
+  canRunDuringStreaming: true,
   get description() {
     return t('for help on Qwen Code');
   },
-  action: async (context) => {
-    const helpItem: Omit<HistoryItemHelp, 'id'> = {
-      type: MessageType.HELP,
-      timestamp: new Date(),
-    };
-
-    context.ui.addItem(helpItem, Date.now());
-  },
+  action: async () => ({
+    type: 'dialog',
+    dialog: 'help',
+  }),
 };

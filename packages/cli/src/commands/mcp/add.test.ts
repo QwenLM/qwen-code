@@ -29,10 +29,13 @@ vi.mock('fs/promises', async (importOriginal) => {
   };
 });
 
-vi.mock('os', () => {
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>();
   const homedir = vi.fn(() => '/home/user');
   return {
+    ...actual,
     default: {
+      ...actual,
       homedir,
     },
     homedir,
@@ -81,6 +84,17 @@ describe('mcp add command', () => {
     });
   });
 
+  it('should preserve equals signs in env values', async () => {
+    await parser.parseAsync('add my-server /path/to/server -e TOKEN=a=b=c');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': expect.objectContaining({
+        command: '/path/to/server',
+        env: { TOKEN: 'a=b=c' },
+      }),
+    });
+  });
+
   it('should auto-detect http transport when commandOrUrl is an https URL', async () => {
     await parser.parseAsync('add http-server https://example.com/mcp');
 
@@ -97,6 +111,16 @@ describe('mcp add command', () => {
     expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'http-server': {
         httpUrl: 'http://localhost:8080/mcp',
+      },
+    });
+  });
+
+  it('should auto-detect http transport when commandOrUrl uses an uppercase URL scheme', async () => {
+    await parser.parseAsync('add http-server HTTPS://example.com/mcp');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'http-server': {
+        httpUrl: 'HTTPS://example.com/mcp',
       },
     });
   });
@@ -161,6 +185,35 @@ describe('mcp add command', () => {
       'test-server': {
         command: 'npx',
         args: ['-y', 'http://example.com/some-package'],
+      },
+    });
+  });
+
+  it('should keep dash-prefixed server args in the add tail', async () => {
+    // `unknown-options-as-args` means the server command's own flags belong in
+    // `args` rather than being claimed by this command's options.
+    await parser.parseAsync('add my-server node server.js --inspect');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': {
+        command: 'node',
+        args: ['server.js', '--inspect'],
+      },
+    });
+  });
+
+  it('should keep a -v token in the add tail when this parser is reached', async () => {
+    // Parser-level only: a real `qwen mcp add my-server node server.js -v`
+    // never gets here. resolveBootstrapRoute intercepts every exact version
+    // token before `--` and prints the version instead (base parity — see the
+    // version intercept in cli.ts and its cli.test.ts coverage). Pinned so the
+    // tail's behavior is already known if that intercept is ever narrowed.
+    await parser.parseAsync('add my-server node server.js -v');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': {
+        command: 'node',
+        args: ['server.js', '-v'],
       },
     });
   });
@@ -247,7 +300,7 @@ describe('mcp add command', () => {
           .spyOn(process, 'exit')
           .mockImplementation((() => {
             throw new Error('process.exit called');
-          }) as (code?: number) => never);
+          }) as typeof process.exit);
 
         await expect(
           parser.parseAsync(`add --scope project ${serverName} ${command}`),

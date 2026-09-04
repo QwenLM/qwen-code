@@ -10,7 +10,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { atomicWriteFileSync, Storage } from '@qwen-code/qwen-code-core';
 
 interface TipHistoryEntry {
   totalShown: number;
@@ -114,8 +114,10 @@ export class TipHistory {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
-      fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), {
+      atomicWriteFileSync(this.filePath, JSON.stringify(this.data, null, 2), {
         mode: 0o600,
+        forceMode: true,
+        noFollow: true,
       });
     } catch {
       // Silently ignore write errors — tips are non-critical

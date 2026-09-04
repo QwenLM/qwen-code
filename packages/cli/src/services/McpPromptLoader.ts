@@ -18,6 +18,11 @@ import { CommandKind } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
 import type { PromptArgument } from '@modelcontextprotocol/sdk/types.js';
 
+// Shared by completion() and parseArgs() so the named-arg grammar stays in
+// sync between tab-completion and execution. Declared without `/g`; callers
+// create a stateful `/g` instance per use.
+const NAMED_ARG_REGEX = /--([^=]+)=(?:"((?:\\.|[^"\\])*)"|([^ ]+))/;
+
 /**
  * Discovers and loads executable slash commands from prompts exposed by
  * Model-Context-Protocol (MCP) servers.
@@ -42,9 +47,12 @@ export class McpPromptLoader implements ICommandLoader {
       const prompts = getMCPServerPrompts(this.config, serverName) || [];
       for (const prompt of prompts) {
         const commandName = `${prompt.name}`;
+        const description =
+          prompt.description || `Invoke prompt ${prompt.name}`;
         const newPromptCommand: SlashCommand = {
           name: commandName,
-          description: prompt.description || `Invoke prompt ${prompt.name}`,
+          description,
+          modelDescription: description,
           kind: CommandKind.MCP_PROMPT,
           source: 'mcp-prompt' as const,
           sourceLabel: `MCP: ${serverName}`,
@@ -52,13 +60,15 @@ export class McpPromptLoader implements ICommandLoader {
             {
               name: 'help',
               description: 'Show help for this prompt',
+              modelDescription: 'Show help for this prompt',
               kind: CommandKind.MCP_PROMPT,
+              source: 'mcp-prompt' as const,
               action: async (): Promise<SlashCommandActionReturn> => {
                 if (!prompt.arguments || prompt.arguments.length === 0) {
                   return {
                     type: 'message',
                     messageType: 'info',
-                    content: `Prompt "${prompt.name}" has no arguments.`,
+                    content: `Prompt "${prompt.name}" has no declared arguments. Any text you provide will be forwarded as-is (e.g., /${prompt.name} some text sends { input: "some text" }).`,
                   };
                 }
 
@@ -158,37 +168,67 @@ export class McpPromptLoader implements ICommandLoader {
               return [];
             }
             const indexOfFirstSpace = invocation.raw.indexOf(' ') + 1;
-            let promptInputs =
+            // Parse named args directly for completion purposes. We can't
+            // use parseArgs() here because it returns an Error when required
+            // args are missing — which is the normal state during tab
+            // completion (the user hasn't filled everything yet). We only
+            // need to know which args have been provided so far (#7991).
+            const argsString =
               indexOfFirstSpace === 0
-                ? {}
-                : this.parseArgs(
-                    invocation.raw.substring(indexOfFirstSpace),
-                    prompt.arguments,
-                  );
-            if (promptInputs instanceof Error) {
-              promptInputs = {};
+                ? ''
+                : invocation.raw.substring(indexOfFirstSpace);
+            const namedArgRegex = new RegExp(NAMED_ARG_REGEX.source, 'g');
+            const providedArgNames = new Set<string>();
+            let m: RegExpExecArray | null;
+            while ((m = namedArgRegex.exec(argsString)) !== null) {
+              providedArgNames.add(m[1]);
             }
-
-            const providedArgNames = Object.keys(promptInputs);
+            // Arguments can also be given by position. Count the tokens that
+            // are neither named assignments nor `--`-prefixed partial flags,
+            // then map them onto the still-unfilled args required-first,
+            // mirroring parseArgs.
+            const positionalTokens =
+              argsString
+                .replace(namedArgRegex, ' ')
+                .match(/(?:"(?:\\.|[^"\\])*"|[^ ]+)/g) || [];
+            const positionalCount = positionalTokens.filter(
+              (token) => !token.startsWith('--'),
+            ).length;
+            if (positionalCount > 0) {
+              const unfilled = prompt.arguments
+                .filter((arg) => !providedArgNames.has(arg.name))
+                .sort((a, b) =>
+                  a.required === b.required ? 0 : a.required ? -1 : 1,
+                );
+              for (let i = 0; i < positionalCount && i < unfilled.length; i++) {
+                providedArgNames.add(unfilled[i].name);
+              }
+            }
+            // Separate required and optional unused arguments so optional
+            // params don't block Enter-to-execute (#7991).
+            const unusedRequired: string[] = [];
+            const unusedOptional: string[] = [];
+            for (const arg of prompt.arguments) {
+              if (providedArgNames.has(arg.name)) continue;
+              const flag = `--${arg.name}="`;
+              if (arg.required) {
+                unusedRequired.push(flag);
+              } else {
+                unusedOptional.push(flag);
+              }
+            }
+            // With an empty partial, suggest only required args (or nothing
+            // when all required are filled) so Enter executes (#7991). With a
+            // non-empty partial, include optional args too so the user can
+            // discover them mid-keystroke.
             const unusedArguments =
-              prompt.arguments
-                .filter((arg) => {
-                  // If this arguments is not in the prompt inputs
-                  // add it to unusedArguments
-                  if (!providedArgNames.includes(arg.name)) {
-                    return true;
-                  }
-
-                  // The parseArgs method assigns the value
-                  // at the end of the prompt as a final value
-                  // The argument should still be suggested
-                  // Example /add --numberOne="34" --num
-                  // numberTwo would be assigned a value of --num
-                  // numberTwo should still be considered unused
-                  const argValue = promptInputs[arg.name];
-                  return argValue === partialArg;
-                })
-                .map((argument) => `--${argument.name}="`) || [];
+              unusedRequired.length > 0
+                ? partialArg.length > 0
+                  ? [...unusedRequired, ...unusedOptional]
+                  : unusedRequired
+                : partialArg.length > 0
+                  ? unusedOptional
+                  : [];
 
             const exactlyMatchingArgumentAtTheEnd = prompt.arguments
               .map((argument) => `--${argument.name}="`)
@@ -237,7 +277,7 @@ export class McpPromptLoader implements ICommandLoader {
     const promptInputs: Record<string, unknown> = {};
 
     // arg parsing: --key="value" or --key=value
-    const namedArgRegex = /--([^=]+)=(?:"((?:\\.|[^"\\])*)"|([^ ]+))/g;
+    const namedArgRegex = new RegExp(NAMED_ARG_REGEX.source, 'g');
     let match;
     let lastIndex = 0;
     const positionalParts: string[] = [];
@@ -268,38 +308,54 @@ export class McpPromptLoader implements ICommandLoader {
       positionalArgs.push((match[1] ?? match[2]).replace(/\\(.)/g, '$1'));
     }
 
-    if (!promptArgs) {
+    if (!promptArgs || promptArgs.length === 0) {
+      Object.assign(promptInputs, argValues);
+      // Forward positional text as a default "input" argument when the prompt
+      // declares no arguments, matching Claude Code's behavior. This key is a
+      // client-side convention, not part of the MCP spec. A user-provided
+      // --input named arg takes precedence over positional text.
+      const positionalInput = positionalArgs.join(' ');
+      if (positionalInput && !Object.hasOwn(argValues, 'input')) {
+        promptInputs['input'] = positionalInput;
+      }
       return promptInputs;
     }
     for (const arg of promptArgs) {
-      if (argValues[arg.name]) {
+      if (Object.hasOwn(argValues, arg.name)) {
         promptInputs[arg.name] = argValues[arg.name];
       }
     }
 
-    const unfilledArgs = promptArgs.filter(
-      (arg) => arg.required && !promptInputs[arg.name],
-    );
+    // Include all args not filled by named args — both required and optional —
+    // so positional input maps to optional params too (#7314).
+    // Sort required-first so positional args fill required params before
+    // optional ones regardless of declaration order.
+    const unfilledArgs = promptArgs
+      .filter((arg) => !Object.hasOwn(promptInputs, arg.name))
+      .sort((a, b) => (a.required === b.required ? 0 : a.required ? -1 : 1));
 
-    if (unfilledArgs.length === 1) {
+    if (unfilledArgs.length === 1 && positionalArgs.length > 0) {
       // If we have only one unfilled arg, we don't require quotes we just
-      // join all the given arguments together as if they were quoted.
+      // join all the given positional arguments together as if they were quoted.
       promptInputs[unfilledArgs[0].name] = positionalArgs.join(' ');
-    } else {
-      const missingArgs: string[] = [];
-      for (let i = 0; i < unfilledArgs.length; i++) {
-        if (positionalArgs.length > i) {
-          promptInputs[unfilledArgs[i].name] = positionalArgs[i];
-        } else {
-          missingArgs.push(unfilledArgs[i].name);
-        }
+    } else if (positionalArgs.length > 0) {
+      for (
+        let i = 0;
+        i < unfilledArgs.length && i < positionalArgs.length;
+        i++
+      ) {
+        promptInputs[unfilledArgs[i].name] = positionalArgs[i];
       }
-      if (missingArgs.length > 0) {
-        const missingArgNames = missingArgs
-          .map((name) => `--${name}`)
-          .join(', ');
-        return new Error(`Missing required argument(s): ${missingArgNames}`);
-      }
+    }
+
+    const missingRequired = promptArgs.filter(
+      (arg) => arg.required && !Object.hasOwn(promptInputs, arg.name),
+    );
+    if (missingRequired.length > 0) {
+      const missingArgNames = missingRequired
+        .map((arg) => `--${arg.name}`)
+        .join(', ');
+      return new Error(`Missing required argument(s): ${missingArgNames}`);
     }
 
     return promptInputs;

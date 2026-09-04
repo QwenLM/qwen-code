@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../../utils/logger.js';
 import type * as vscode from 'vscode';
 import type { IMessageHandler } from './BaseMessageHandler.js';
 import type { QwenAgentManager } from '../../services/qwenAgentManager.js';
@@ -48,6 +49,7 @@ export class MessageRouter {
       conversationStore,
       currentConversationId,
       sendToWebView,
+      (id) => this.setCurrentConversationId(id),
     );
 
     this.fileHandler = new FileMessageHandler(
@@ -88,7 +90,7 @@ export class MessageRouter {
    * Route message to appropriate handler
    */
   async route(message: { type: string; data?: unknown }): Promise<void> {
-    console.log('[MessageRouter] Routing message:', message.type);
+    logger.log('[MessageRouter] Routing message:', message.type);
 
     // Handle permission response specially
     if (message.type === 'permissionResponse') {
@@ -113,11 +115,11 @@ export class MessageRouter {
       try {
         await handler.handle(message);
       } catch (error) {
-        console.error('[MessageRouter] Handler error:', error);
+        logger.error('[MessageRouter] Handler error:', error);
         throw error;
       }
     } else {
-      console.warn(
+      logger.warn(
         '[MessageRouter] No handler found for message type:',
         message.type,
       );
@@ -171,12 +173,8 @@ export class MessageRouter {
    */
   setAuthInteractiveHandler(
     handler: (
-      provider: string,
-      region?: string,
-      apiKey?: string,
-      baseUrl?: string,
-      model?: string,
-      modelIds?: string,
+      config: import('@qwen-code/qwen-code-core').ProviderConfig,
+      inputs: import('@qwen-code/qwen-code-core').ProviderSetupInputs,
     ) => Promise<void>,
   ): void {
     this.authHandler.setAuthInteractiveHandler(handler);

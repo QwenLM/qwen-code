@@ -87,7 +87,6 @@ export async function loadExtensionSettings(
     const content = await fs.promises.readFile(envPath, 'utf-8');
     return parseEnvFile(content);
   } catch (error) {
-    // If .env file doesn't exist, return empty object
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return {};
     }
@@ -123,8 +122,7 @@ export function validateSettings(
   for (const config of settingsConfig) {
     const value = settings[config.envVar];
 
-    // Basic validation - check if value exists and is not empty
-    // Note: All settings are optional in Gemini Extension format
+    // All settings are optional in Gemini Extension format
     if (value !== undefined && typeof value !== 'string') {
       errors.push(
         `Setting "${config.name}" (${config.envVar}) must be a string`,
@@ -141,7 +139,6 @@ export function validateSettings(
  */
 export function applySettingsToEnv(settings: Record<string, string>): void {
   for (const [key, value] of Object.entries(settings)) {
-    // Only set if not already defined in process.env
     if (process.env[key] === undefined) {
       process.env[key] = value;
     }

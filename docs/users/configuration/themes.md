@@ -1,6 +1,6 @@
 # Themes
 
-Qwen Code supports a variety of themes to customize its color scheme and appearance. You can change the theme to suit your preferences via the `/theme` command or `"theme":` configuration setting.
+Qwen Code supports a variety of themes to customize its color scheme and appearance. You can change the theme to suit your preferences via the `/theme` command or the `"ui.theme"` configuration setting.
 
 ## Available Themes
 
@@ -13,12 +13,15 @@ Qwen Code comes with a selection of pre-defined themes, which you can list using
   - `Default`
   - `Dracula`
   - `GitHub`
+  - `Qwen Dark`
+  - `Shades Of Purple`
 - **Light Themes:**
   - `ANSI Light`
   - `Ayu Light`
   - `Default Light`
   - `GitHub Light`
   - `Google Code`
+  - `Qwen Light`
   - `Xcode`
 
 ### Changing Themes
@@ -28,11 +31,50 @@ Qwen Code comes with a selection of pre-defined themes, which you can list using
 3.  Using the arrow keys, select a theme. Some interfaces might offer a live preview or highlight as you select.
 4.  Confirm your selection to apply the theme.
 
-**Note:** If a theme is defined in your `settings.json` file (either by name or by a file path), you must remove the `"theme"` setting from the file before you can change the theme using the `/theme` command.
+**Note:** If a theme is defined in your `settings.json` file (either by name or by a file path), you must remove the `"ui.theme"` setting from the file before you can change the theme using the `/theme` command.
 
 ### Theme Persistence
 
 Selected themes are saved in Qwen Code's [configuration](../configuration/settings) so your preference is remembered across sessions.
+
+---
+
+## Auto Theme Detection
+
+When the theme is set to `"auto"` (or left unset), Qwen Code automatically detects whether your terminal uses a dark or light background and selects the matching Qwen theme (`Qwen Dark` or `Qwen Light`).
+
+### How to enable
+
+Set the theme to `"auto"` in `settings.json`:
+
+```json
+{
+  "ui": {
+    "theme": "auto"
+  }
+}
+```
+
+Or select **Auto** in the `/theme` dialog. This is the default behavior when no theme is explicitly configured.
+
+### Detection methods
+
+Qwen Code uses multiple detection methods in a fallback chain. At startup (async path), the order is:
+
+| Priority | Method                  | Platform   | How it works                                                                                         |
+| -------- | ----------------------- | ---------- | ---------------------------------------------------------------------------------------------------- |
+| 1        | `COLORFGBG`             | All        | Reads the `COLORFGBG` environment variable (set by terminals like iTerm2, rxvt, Konsole)             |
+| 2        | OSC 11                  | All (TTY)  | Sends an `ESC]11;?` query to the terminal and parses the background color from the response (~200ms) |
+| 3        | macOS system appearance | macOS only | Runs `defaults read -g AppleInterfaceStyle` to check if macOS Dark Mode is active                    |
+| 4        | Default                 | All        | Falls back to dark theme if no method succeeds                                                       |
+
+The first method that returns a result wins. The detected value is cached for the session so subsequent theme resolutions (e.g. reselecting Auto in the `/theme` dialog) stay consistent.
+
+### When to use Auto
+
+- **Most users** — Auto works well if your terminal background matches your OS appearance or if your terminal sets `COLORFGBG` / supports OSC 11.
+- **tmux / screen users** — OSC 11 may not pass through multiplexers. Detection falls back to `COLORFGBG` or macOS system appearance. If neither is available, the default dark theme is used. Set a specific theme if auto-detection gives the wrong result.
+- **SSH sessions** — detection depends on the remote environment. If `COLORFGBG` is not forwarded and the remote terminal doesn't respond to OSC 11, the default dark theme is used.
 
 ---
 
@@ -100,7 +142,7 @@ You can define multiple custom themes by adding more entries to the `customTheme
 
 In addition to defining custom themes in `settings.json`, you can also load a theme directly from a JSON file by specifying the file path in your `settings.json`. This is useful for sharing themes or keeping them separate from your main configuration.
 
-To load a theme from a file, set the `theme` property in your `settings.json` to the path of your theme file:
+To load a theme from a file, set the `ui.theme` property in your `settings.json` to the path of your theme file:
 
 ```json
 {
@@ -136,7 +178,7 @@ The theme file must be a valid JSON file that follows the same structure as a cu
 }
 ```
 
-**Security Note:** For your safety, Gemini CLI will only load theme files that are located within your home directory. If you attempt to load a theme from outside your home directory, a warning will be displayed and the theme will not be loaded. This is to prevent loading potentially malicious theme files from untrusted sources.
+**Security Note:** For your safety, Qwen Code will only load theme files that are located within your home directory. If you attempt to load a theme from outside your home directory, a warning will be displayed and the theme will not be loaded. This is to prevent loading potentially malicious theme files from untrusted sources.
 
 ### Example Custom Theme
 

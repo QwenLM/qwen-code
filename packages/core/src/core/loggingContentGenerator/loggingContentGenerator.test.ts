@@ -10,18 +10,209 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GenerateContentResponse } from '@google/genai';
+import { SpanStatusCode } from '@opentelemetry/api';
 import type { Config } from '../../config/config.js';
 import type { ContentGenerator } from '../contentGenerator.js';
 import { AuthType } from '../contentGenerator.js';
 import { LoggingContentGenerator } from './index.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
+import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import {
   logApiRequest,
   logApiResponse,
   logApiError,
 } from '../../telemetry/loggers.js';
+import { isTelemetrySdkInitialized } from '../../telemetry/index.js';
+import { startLLMRequestSpanWithContext } from '../../telemetry/session-tracing.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type OpenAI from 'openai';
+import { APIUserAbortError } from 'openai';
+import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+
+const activeOtelContext = vi.hoisted(() => ({ current: 'root' }));
+const loggingSpanRecords = vi.hoisted(
+  (): Array<{
+    name: string;
+    attributes: Record<string, string | number | boolean>;
+    statuses: Array<{ code: number; message?: string }>;
+    ended: boolean;
+    /**
+     * Metadata passed to endLLMRequestSpan — captured so tests can assert
+     * that token counts, durationMs, success, error are forwarded correctly.
+     */
+    endMetadata?: {
+      success?: boolean;
+      cancelled?: boolean;
+      inputTokens?: number;
+      outputTokens?: number;
+      cachedInputTokens?: number;
+      cachedInputTokensReported?: boolean;
+      cacheCreationInputTokens?: number;
+      responseModel?: string;
+      finishReasons?: string[];
+      ttftMs?: number;
+      requestSetupMs?: number;
+      attempt?: number;
+      retryTotalDelayMs?: number;
+      durationMs?: number;
+      error?: string;
+    };
+  }> => [],
+);
+const loggingSpanNamesWithSetStatusFailure = vi.hoisted(
+  () => new Set<string>(),
+);
+const loggingSpanAttributeFailures = vi.hoisted(() => new Set<string>());
+const loggingSpanAttributeSetAttempts = vi.hoisted((): string[] => []);
+const startLLMRequestSpanWithContextMock = vi.hoisted(() => vi.fn());
+const genAiExchangeState = vi.hoisted(
+  (): {
+    controllers: Array<{ finalize: ReturnType<typeof vi.fn> }>;
+    finalizeResult: string[] | undefined;
+  } => ({
+    controllers: [],
+    finalizeResult: undefined,
+  }),
+);
+
+vi.mock('@opentelemetry/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@opentelemetry/api')>();
+
+  function runWithActive<T>(label: string, fn: () => T): T {
+    const previous = activeOtelContext.current;
+    activeOtelContext.current = label;
+    try {
+      const result = fn();
+      if (result instanceof Promise) {
+        return result.finally(() => {
+          activeOtelContext.current = previous;
+        }) as T;
+      }
+      activeOtelContext.current = previous;
+      return result;
+    } catch (error) {
+      activeOtelContext.current = previous;
+      throw error;
+    }
+  }
+
+  return {
+    ...actual,
+    context: {
+      ...actual.context,
+      active: () => ({ label: activeOtelContext.current }),
+      with<T>(ctx: unknown, fn: () => T): T {
+        const label =
+          typeof ctx === 'object' &&
+          ctx !== null &&
+          'label' in ctx &&
+          typeof ctx.label === 'string'
+            ? ctx.label
+            : activeOtelContext.current;
+        return runWithActive(label, fn);
+      },
+    },
+    trace: {
+      ...actual.trace,
+      setSpan: (_ctx: unknown, span: unknown) => ({
+        label:
+          typeof span === 'object' &&
+          span !== null &&
+          '__spanName' in span &&
+          typeof span.__spanName === 'string'
+            ? span.__spanName
+            : 'span',
+        span,
+      }),
+      getSpan: (ctx: unknown) =>
+        typeof ctx === 'object' && ctx !== null && 'span' in ctx
+          ? ctx.span
+          : undefined,
+    },
+  };
+});
+
+vi.mock('../../telemetry/tracer.js', () => ({
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
+  API_CALL_ABORTED_SPAN_STATUS_MESSAGE: 'API call aborted',
+}));
+
+vi.mock('../../telemetry/gen-ai-request.js', () => ({
+  createGenAiExchange: vi.fn((parent: unknown) => {
+    const controller = {
+      finalize: vi.fn(() => genAiExchangeState.finalizeResult),
+    };
+    genAiExchangeState.controllers.push(controller);
+    return { context: parent, controller };
+  }),
+}));
+
+vi.mock('../../telemetry/session-tracing.js', () => ({
+  startLLMRequestSpanWithContext: startLLMRequestSpanWithContextMock,
+}));
+
+vi.mock('../../telemetry/index.js', () => {
+  const isTelemetrySdkInitialized = vi.fn(() => true);
+
+  return {
+    endLLMRequestSpan: vi.fn(
+      (
+        span: {
+          __spanName: string;
+          setStatus: (status: { code: number; message?: string }) => void;
+          end: () => void;
+        },
+        metadata?: {
+          success: boolean;
+          cancelled?: boolean;
+          inputTokens?: number;
+          outputTokens?: number;
+          cachedInputTokens?: number;
+          cachedInputTokensReported?: boolean;
+          cacheCreationInputTokens?: number;
+          responseModel?: string;
+          finishReasons?: string[];
+          ttftMs?: number;
+          requestSetupMs?: number;
+          attempt?: number;
+          retryTotalDelayMs?: number;
+          durationMs?: number;
+          error?: string;
+        },
+      ) => {
+        // Capture metadata on the matching span record so tests can assert
+        // token counts, durationMs, success, error are forwarded correctly.
+        const record = loggingSpanRecords.find(
+          (r) => r.name === span.__spanName && r.endMetadata === undefined,
+        );
+        if (record) {
+          record.endMetadata = metadata;
+        }
+        try {
+          if (metadata && !metadata.success && !metadata.cancelled) {
+            span.setStatus({
+              code: 2,
+              message: metadata.error ?? 'unknown error',
+            }); // ERROR
+          }
+          span.end();
+        } catch {
+          // Match production best-effort behavior.
+          span.end();
+        }
+      },
+    ),
+    addSystemPromptAttributes: vi.fn(),
+    addToolSchemaAttributes: vi.fn(),
+    addModelOutputAttributes: vi.fn(),
+    isTelemetrySdkInitialized,
+    areSensitiveSpanAttributesEnabled: vi.fn(
+      (config: Pick<Config, 'getTelemetryIncludeSensitiveSpanAttributes'>) =>
+        isTelemetrySdkInitialized() &&
+        config.getTelemetryIncludeSensitiveSpanAttributes(),
+    ),
+  };
+});
 
 vi.mock('../../telemetry/loggers.js', async (importOriginal) => {
   const actual =
@@ -40,16 +231,78 @@ vi.mock('../../utils/openaiLogger.js', () => ({
   })),
 }));
 
-const realConvertGeminiRequestToOpenAI =
-  OpenAIContentConverter.convertGeminiRequestToOpenAI;
-const convertGeminiRequestToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter, 'convertGeminiRequestToOpenAI')
+function createOwnedLlmSpan(
+  model: string,
+  promptId: string,
+  options?: {
+    operationName?: string;
+    providerName?: string;
+    outputType?: string;
+    sessionId?: string;
+    userId?: string;
+  },
+) {
+  const name = 'qwen-code.llm_request';
+  const record = {
+    name,
+    attributes: {
+      model,
+      prompt_id: promptId,
+      ...(options?.operationName
+        ? { 'gen_ai.operation.name': options.operationName }
+        : {}),
+      ...(options?.providerName
+        ? { 'gen_ai.provider.name': options.providerName }
+        : {}),
+      ...(options?.outputType
+        ? { 'gen_ai.output.type': options.outputType }
+        : {}),
+      ...(options?.sessionId ? { 'session.id': options.sessionId } : {}),
+      ...(options?.userId ? { 'gen_ai.user.id': options.userId } : {}),
+    } as Record<string, string | number | boolean>,
+    statuses: [] as Array<{ code: number; message?: string }>,
+    ended: false,
+  };
+  loggingSpanRecords.push(record);
+  return {
+    __spanName: name,
+    setStatus(status: { code: number; message?: string }) {
+      if (loggingSpanNamesWithSetStatusFailure.has(name)) {
+        throw new Error('set-status-fail');
+      }
+      record.statuses.push(status);
+    },
+    setAttribute(key: string, value: string | number | boolean) {
+      loggingSpanAttributeSetAttempts.push(key);
+      if (loggingSpanAttributeFailures.has(key)) {
+        throw new Error('set-attribute-fail');
+      }
+      record.attributes[key] = value;
+    },
+    setAttributes(attrs: Record<string, string | number | boolean>) {
+      Object.assign(record.attributes, attrs);
+    },
+    end() {
+      record.ended = true;
+    },
+    spanContext: () => ({
+      traceId: 'a'.repeat(32),
+      spanId: 'b'.repeat(16),
+      traceFlags: 1,
+    }),
+  };
+}
+
+const realConvertLlmRequestToOpenAI =
+  OpenAIContentConverter.convertLlmRequestToOpenAI;
+const convertLlmRequestToOpenAISpy = vi
+  .spyOn(OpenAIContentConverter, 'convertLlmRequestToOpenAI')
   .mockReturnValue([{ role: 'user', content: 'converted' }]);
-const convertGeminiToolsToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter, 'convertGeminiToolsToOpenAI')
+const convertLlmToolsToOpenAISpy = vi
+  .spyOn(OpenAIContentConverter, 'convertLlmToolsToOpenAI')
   .mockResolvedValue([{ type: 'function', function: { name: 'tool' } }]);
-const convertGeminiResponseToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter, 'convertGeminiResponseToOpenAI')
+const convertLlmResponseToOpenAISpy = vi
+  .spyOn(OpenAIContentConverter, 'convertLlmResponseToOpenAI')
   .mockReturnValue({
     id: 'openai-response',
     object: 'chat.completion',
@@ -59,15 +312,31 @@ const convertGeminiResponseToOpenAISpy = vi
   } as OpenAI.Chat.ChatCompletion);
 
 const createConfig = (overrides: Record<string, unknown> = {}): Config => {
-  const configContent = {
+  const configContent: Record<string, unknown> = {
     authType: 'openai',
     enableOpenAILogging: false,
     ...overrides,
   };
   return {
     getContentGeneratorConfig: () => configContent,
-    getAuthType: () => configContent.authType as AuthType | undefined,
+    getAuthType: () => configContent['authType'] as AuthType | undefined,
     getWorkingDir: () => process.cwd(),
+    getTelemetryIncludeSensitiveSpanAttributes: () =>
+      Boolean(configContent['includeSensitiveSpanAttributes']),
+    getTelemetrySensitiveSpanAttributeMaxLength: () =>
+      (configContent['sensitiveSpanAttributeMaxLength'] as number) ??
+      1024 * 1024,
+    getSessionId: () =>
+      (configContent['sessionId'] as string | undefined) ?? 'test-session',
+    getTelemetryUserId: () => configContent['userId'] as string | undefined,
+    getUserMemory: () => (configContent['userMemory'] as string) ?? '',
+    getAutoMemoryPrompt: () =>
+      (configContent['autoMemoryPrompt'] as string) ?? '',
+    getAutoCompactThreshold: () =>
+      configContent['autoCompactThreshold'] as number | undefined,
+    getToolRegistry: () =>
+      configContent['toolRegistry'] ?? { getTool: () => undefined },
+    getSkillManager: () => configContent['skillManager'] ?? null,
   } as Config;
 };
 
@@ -78,9 +347,7 @@ const createWrappedGenerator = (
   ({
     generateContent,
     generateContentStream,
-    countTokens: vi.fn(),
     embedContent: vi.fn(),
-    useSummarizedThinking: vi.fn().mockReturnValue(false),
   }) as ContentGenerator;
 
 const createResponse = (
@@ -108,15 +375,347 @@ const createResponse = (
   return response;
 };
 
+const getStreamSpanRecord = () => {
+  const spanRecord = loggingSpanRecords.find(
+    (record) => record.name === 'qwen-code.llm_request',
+  );
+  if (!spanRecord) {
+    throw new Error('qwen-code.llm_request span was not created');
+  }
+  return spanRecord;
+};
+
+const getGenerateContentSpanRecord = () => {
+  const spanRecord = loggingSpanRecords.find(
+    (record) => record.name === 'qwen-code.llm_request',
+  );
+  if (!spanRecord) {
+    throw new Error('qwen-code.llm_request span was not created');
+  }
+  return spanRecord;
+};
+
+const MAX_RESPONSE_TEXT_LENGTH = 4096;
+const RESPONSE_TEXT_TRUNCATION_SUFFIX = '...[truncated]';
+
 describe('LoggingContentGenerator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(true);
+    vi.mocked(startLLMRequestSpanWithContext).mockImplementation(
+      (model, promptId, options) => {
+        const span = createOwnedLlmSpan(model, promptId, options);
+        return {
+          span: span as never,
+          context: {
+            label: span.__spanName,
+            span,
+            getValue: () => options?.sessionId,
+          } as never,
+        };
+      },
+    );
+    activeOtelContext.current = 'root';
+    loggingSpanRecords.length = 0;
+    loggingSpanNamesWithSetStatusFailure.clear();
+    loggingSpanAttributeFailures.clear();
+    loggingSpanAttributeSetAttempts.length = 0;
+    genAiExchangeState.controllers.length = 0;
+    genAiExchangeState.finalizeResult = undefined;
   });
 
   afterEach(() => {
-    convertGeminiRequestToOpenAISpy.mockClear();
-    convertGeminiToolsToOpenAISpy.mockClear();
-    convertGeminiResponseToOpenAISpy.mockClear();
+    vi.useRealTimers();
+    convertLlmRequestToOpenAISpy.mockClear();
+    convertLlmToolsToOpenAISpy.mockClear();
+    convertLlmResponseToOpenAISpy.mockClear();
+  });
+
+  it('passes the owning config identity to a standalone LLM span', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-owner', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ sessionId: 'owner-session', userId: 'owner-user' }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      },
+    );
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'owner-prompt',
+    );
+
+    expect(startLLMRequestSpanWithContext).toHaveBeenCalledWith(
+      'test-model',
+      'owner-prompt',
+      expect.objectContaining({
+        sessionId: 'owner-session',
+        userId: 'owner-user',
+      }),
+    );
+  });
+
+  it('snapshots context usage before a non-stream request starts', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-context', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      contextWindowSize: 100_000,
+    });
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+        config: { systemInstruction: 'system' },
+      },
+      'context-prompt',
+    );
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+        ?.contextUsage,
+    ).toMatchObject({
+      version: 1,
+      window_size_tokens: 100_000,
+      breakdown: {
+        system_prompt_tokens: 2,
+        messages_tokens: 2,
+      },
+      estimated: true,
+    });
+  });
+
+  it('reads the live context window after a hot model switch', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-context', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generatorConfig = {
+      model: 'test-model',
+      authType: AuthType.QWEN_OAUTH,
+      contextWindowSize: 1_000_000,
+    };
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig(),
+      generatorConfig,
+    );
+    const request: GenerateContentParameters = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    };
+
+    await generator.generateContent(request, 'before-model-switch');
+    generatorConfig.contextWindowSize = 262_144;
+    await generator.generateContent(request, 'after-model-switch');
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]?.contextUsage
+        ?.window_size_tokens,
+    ).toBe(1_000_000);
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[1]?.[2]?.contextUsage
+        ?.window_size_tokens,
+    ).toBe(262_144);
+  });
+
+  it('snapshots context usage before a stream is iterated', async () => {
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield createResponse('resp-context', 'test-model', [{ text: 'ok' }]);
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      contextWindowSize: 100_000,
+    });
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'context-stream-prompt',
+    );
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]?.contextUsage
+        ?.window_size_tokens,
+    ).toBe(100_000);
+    for await (const _chunk of stream) {
+      // Drain the stream so span finalization runs.
+    }
+  });
+
+  it('skips context snapshot work when telemetry is disabled', async () => {
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-context', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+    });
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'context-disabled-prompt',
+    );
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+        ?.contextUsage,
+    ).toBeUndefined();
+  });
+
+  it('uses the final logical-parent session for API logs', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-parent', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    vi.mocked(startLLMRequestSpanWithContext).mockImplementationOnce(
+      (model, promptId, options) => {
+        const span = createOwnedLlmSpan(model, promptId, {
+          ...options,
+          sessionId: 'parent-session',
+        });
+        return {
+          span: span as never,
+          context: {
+            label: span.__spanName,
+            span,
+            getValue: () => 'parent-session',
+          } as never,
+        };
+      },
+    );
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig({ sessionId: 'different-owner' }),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+      },
+    );
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'parent-prompt',
+    );
+
+    expect(logApiRequest).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      'parent-session',
+    );
+    expect(logApiResponse).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      'parent-session',
+      undefined,
+    );
+  });
+
+  it('snapshots the owning identity before stream iteration', async () => {
+    const iterationContexts: string[] = [];
+    const responseLogContexts: string[] = [];
+    vi.mocked(logApiResponse).mockImplementationOnce(() => {
+      responseLogContexts.push(activeOtelContext.current);
+    });
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockImplementation(async () =>
+        (async function* () {
+          iterationContexts.push(activeOtelContext.current);
+          yield createResponse('resp-stream', 'test-model', [{ text: 'ok' }]);
+        })(),
+      ),
+    );
+    let activeSessionId = 'stream-session-B';
+    const config = createConfig({ userId: 'stream-user' });
+    vi.spyOn(config, 'getSessionId').mockImplementation(() => activeSessionId);
+    const generator = new LoggingContentGenerator(wrapped, config, {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+    });
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+      'stream-owner-prompt',
+    );
+    activeSessionId = 'stream-session-C';
+    for await (const _chunk of stream) {
+      // Drain the stream so all logging and span finalization paths execute.
+    }
+
+    expect(startLLMRequestSpanWithContext).toHaveBeenCalledWith(
+      'test-model',
+      'stream-owner-prompt',
+      expect.objectContaining({
+        sessionId: 'stream-session-B',
+        userId: 'stream-user',
+      }),
+    );
+    expect(iterationContexts).toEqual(['qwen-code.llm_request']);
+    expect(responseLogContexts).toEqual(['qwen-code.llm_request']);
+    expect(logApiRequest).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      'stream-session-B',
+    );
+    expect(logApiResponse).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      'stream-session-B',
+      undefined,
+    );
+    expect(activeOtelContext.current).toBe('root');
   });
 
   it('logs request/response, normalizes thought parts, and logs OpenAI interaction', async () => {
@@ -125,7 +724,7 @@ describe('LoggingContentGenerator', () => {
         createResponse(
           'resp-1',
           'model-v2',
-          [{ text: 'ok' }],
+          [{ text: 'ok' }, { text: 'hidden thought', thought: true }],
           {
             promptTokenCount: 3,
             candidatesTokenCount: 5,
@@ -145,7 +744,7 @@ describe('LoggingContentGenerator', () => {
     };
     const generator = new LoggingContentGenerator(
       wrapped,
-      createConfig(),
+      createConfig({ authType: AuthType.USE_ANTHROPIC }),
       generatorConfig,
     );
 
@@ -197,12 +796,22 @@ describe('LoggingContentGenerator', () => {
     const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
     expect(responseEvent.response_id).toBe('resp-1');
     expect(responseEvent.model).toBe('model-v2');
+    expect(getGenerateContentSpanRecord().attributes).toMatchObject({
+      'gen_ai.operation.name': 'chat',
+      'gen_ai.provider.name': 'openai',
+    });
+    expect(getGenerateContentSpanRecord().endMetadata).toMatchObject({
+      responseModel: 'model-v2',
+      finishReasons: ['STOP'],
+    });
     expect(responseEvent.prompt_id).toBe('prompt-1');
+    expect(responseEvent.auth_type).toBe(AuthType.USE_OPENAI);
     expect(responseEvent.input_token_count).toBe(3);
+    expect(responseEvent.response_text).toBe('ok');
 
-    expect(convertGeminiRequestToOpenAISpy).toHaveBeenCalledTimes(1);
-    expect(convertGeminiToolsToOpenAISpy).toHaveBeenCalledTimes(1);
-    expect(convertGeminiResponseToOpenAISpy).toHaveBeenCalledTimes(1);
+    expect(convertLlmRequestToOpenAISpy).toHaveBeenCalledTimes(1);
+    expect(convertLlmToolsToOpenAISpy).toHaveBeenCalledTimes(1);
+    expect(convertLlmResponseToOpenAISpy).toHaveBeenCalledTimes(1);
 
     const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
       ?.value as { logInteraction: ReturnType<typeof vi.fn> };
@@ -229,6 +838,1048 @@ describe('LoggingContentGenerator', () => {
       choices: [],
     });
     expect(openaiError).toBeUndefined();
+  });
+
+  it('creates and closes the non-stream API span on success', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-span', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-span');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.attributes).toMatchObject({
+      model: 'test-model',
+      prompt_id: 'prompt-span',
+    });
+    expect(spanRecord.statuses).toEqual([]);
+    expect(spanRecord.ended).toBe(true);
+    expect(
+      genAiExchangeState.controllers.at(-1)?.finalize,
+    ).toHaveBeenCalledWith(true);
+  });
+
+  it('records cancellation when a non-stream provider resolves after swallowing an abort', async () => {
+    const abortController = new AbortController();
+    const response = createResponse('resp-cancelled', 'test-model', [
+      { text: 'partial' },
+    ]);
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return response;
+      }),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+        config: { abortSignal: abortController.signal },
+      } as unknown as GenerateContentParameters,
+      'prompt-swallowed-abort',
+    );
+
+    expect(getGenerateContentSpanRecord().endMetadata).toMatchObject({
+      success: false,
+      cancelled: true,
+      error: 'API call aborted',
+    });
+    expect(logApiResponse).not.toHaveBeenCalled();
+    expect(
+      genAiExchangeState.controllers.at(-1)?.finalize,
+    ).toHaveBeenCalledWith(false);
+  });
+
+  it('does not let a non-stream abort after provider completion rewrite success', async () => {
+    const abortController = new AbortController();
+    vi.mocked(logApiResponse).mockImplementationOnce(() =>
+      abortController.abort(),
+    );
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-complete', 'test-model', [{ text: 'done' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    await generator.generateContent(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+        config: { abortSignal: abortController.signal },
+      } as unknown as GenerateContentParameters,
+      'prompt-complete-before-abort',
+    );
+
+    expect(getGenerateContentSpanRecord().endMetadata).toMatchObject({
+      success: true,
+      cancelled: false,
+    });
+    expect(
+      genAiExchangeState.controllers.at(-1)?.finalize,
+    ).toHaveBeenCalledWith(true);
+  });
+
+  it('emits output type only for Gemini and Vertex wire configurations', async () => {
+    const makeGenerator = (authType: AuthType) =>
+      new LoggingContentGenerator(
+        createWrappedGenerator(
+          vi
+            .fn()
+            .mockResolvedValue(
+              createResponse('response', 'actual-model', [{ text: 'ok' }]),
+            ),
+          vi.fn(),
+        ),
+        createConfig(),
+        { model: 'request-model', authType },
+      );
+    const request = {
+      model: 'request-model',
+      contents: 'Hello',
+      config: { responseMimeType: 'application/json' },
+    } as unknown as GenerateContentParameters;
+
+    await makeGenerator(AuthType.USE_GEMINI).generateContent(request, 'g');
+    await makeGenerator(AuthType.USE_VERTEX_AI).generateContent(request, 'v');
+    await makeGenerator(AuthType.USE_OPENAI).generateContent(request, 'o');
+
+    expect(loggingSpanRecords[0]!.attributes).toMatchObject({
+      'gen_ai.operation.name': 'generate_content',
+      'gen_ai.provider.name': 'gcp.gemini',
+      'gen_ai.output.type': 'json',
+    });
+    expect(loggingSpanRecords[1]!.attributes).toMatchObject({
+      'gen_ai.operation.name': 'generate_content',
+      'gen_ai.provider.name': 'gcp.vertex_ai',
+      'gen_ai.output.type': 'json',
+    });
+    expect(
+      loggingSpanRecords[2]!.attributes['gen_ai.output.type'],
+    ).toBeUndefined();
+  });
+
+  it('orders non-stream finish reasons by candidate index', async () => {
+    const response = createResponse(
+      'response',
+      'actual-model',
+      [{ text: 'first' }],
+      undefined,
+      'MAX_TOKENS',
+    );
+    response.candidates = [
+      { ...response.candidates![0]!, index: 1 },
+      {
+        ...response.candidates![0]!,
+        index: 0,
+        finishReason: 'STOP' as never,
+      },
+    ];
+    const generator = new LoggingContentGenerator(
+      createWrappedGenerator(vi.fn().mockResolvedValue(response), vi.fn()),
+      createConfig(),
+      { model: 'request-model', authType: AuthType.USE_OPENAI },
+    );
+
+    await generator.generateContent(
+      { model: 'request-model', contents: 'Hello' } as never,
+      'prompt',
+    );
+
+    expect(getGenerateContentSpanRecord().endMetadata).toMatchObject({
+      responseModel: 'actual-model',
+      finishReasons: ['STOP', 'MAX_TOKENS'],
+    });
+  });
+
+  it('omits standard stream attributes from non-stream LLM spans', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-stream-attr');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.attributes['gen_ai.request.stream']).toBeUndefined();
+    expect(spanRecord.attributes['llm_request.stream']).toBeUndefined();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeUndefined();
+  });
+
+  it('marks streaming LLM spans with the standard stream attributes', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-1', 'test-model', [{ text: 'ok' }]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-attr',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.attributes['gen_ai.request.stream']).toBe(true);
+    expect(spanRecord.attributes['llm_request.stream']).toBeUndefined();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeGreaterThanOrEqual(0);
+  });
+
+  it('forwards token counts and duration to endLLMRequestSpan on non-stream success', async () => {
+    const usage = {
+      promptTokenCount: 42,
+      candidatesTokenCount: 17,
+      cachedContentTokenCount: 0,
+      totalTokenCount: 59,
+    };
+    setGenAiUsageProvenance(usage, {
+      cachedInputTokensReported: false,
+    });
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp', 'test-model', [{ text: 'ok' }], usage),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-meta');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: true,
+      inputTokens: 42,
+      outputTokens: 17,
+      cachedInputTokensReported: false,
+    });
+    expect(spanRecord.endMetadata!.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('forwards error metadata to endLLMRequestSpan on non-stream failure', async () => {
+    genAiExchangeState.finalizeResult = ['raw-error'];
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockRejectedValue(new Error('upstream-down')),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-err'),
+    ).rejects.toThrow('upstream-down');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: false,
+      error: 'API call failed',
+      finishReasons: ['raw-error'],
+    });
+    expect(
+      genAiExchangeState.controllers.at(-1)?.finalize,
+    ).toHaveBeenCalledWith(false);
+  });
+
+  it('does not emit an api_error event when the user cancelled the request', async () => {
+    // A user cancel surfaces as the SDK's APIUserAbortError with the caller's
+    // signal aborted. It must not be reported as a qwen-code.api_error — the
+    // span already records the cancellation. Regression for #8356 at the layer
+    // the bug is about: the util-level isAbortError fix alone does not gate this
+    // separate telemetry path.
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const controller = new AbortController();
+    controller.abort();
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-cancel'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).not.toHaveBeenCalled();
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: false,
+      cancelled: true,
+      error: 'API call aborted',
+    });
+    expect(spanRecord.statuses).toHaveLength(0);
+  });
+
+  it('still emits an api_error event for a real failure that is not a cancel', async () => {
+    // The gate is scoped to genuine user cancels: a non-abort failure, even
+    // with an unrelated aborted flag absent, must still be reported.
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockRejectedValue(new Error('upstream-down')),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-real-error'),
+    ).rejects.toThrow('upstream-down');
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('still emits an api_error event for an abort-shaped error the user did not cause', async () => {
+    // Half of the gate's truth table: an abort-shaped error can also come from
+    // the network rather than the user. With the caller's signal never fired
+    // that is a genuine failure and must still be reported, so the gate cannot
+    // key on the error shape alone.
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const controller = new AbortController();
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-network-abort'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('still emits an api_error event for a real failure that races a cancel', async () => {
+    // The other half: a genuine upstream failure landing just as the user
+    // cancels is still a real error, so the gate cannot key on the aborted
+    // signal alone.
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockRejectedValue(new Error('rate limited')),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const controller = new AbortController();
+    controller.abort();
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-race'),
+    ).rejects.toThrow('rate limited');
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('still emits an api_error event for an abort-shaped error when the request has no signal', async () => {
+    // The remaining truth-table cell: no `config.abortSignal` at all. Nobody
+    // could have cancelled, so an abort-shaped rejection here is a real
+    // failure. Pins against relaxing the signal check to `?? true`.
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-no-signal-abort'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not emit an api_error event when the user cancels during stream setup', async () => {
+    // Cancelling before any chunk exists — Esc while the SDK request is still
+    // being established — rejects stream *setup* rather than the iterator, a
+    // separate call site from both the non-stream and mid-stream cases. Unlike
+    // a mid-stream abort the openai SDK does not swallow this one (the swallow
+    // lives in the stream iterator, not in the create call), so
+    // APIUserAbortError is the shape that genuinely arrives here. Dropping the
+    // signal argument at this site would re-emit the #8356 noise.
+    const controller = new AbortController();
+    controller.abort();
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi
+        .fn()
+        .mockRejectedValue(
+          new APIUserAbortError({ message: 'Request was aborted.' }),
+        ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContentStream(request, 'prompt-stream-setup-cancel'),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).not.toHaveBeenCalled();
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: false,
+      cancelled: true,
+      error: 'API call aborted',
+    });
+    expect(spanRecord.statuses).toHaveLength(0);
+  });
+
+  it('does not emit an api_error event when the user cancels mid-stream', async () => {
+    // The stream wrapper's catch is a third call site, distinct from the two
+    // above, so the gate needs its own coverage here. On the shape: the pinned
+    // openai SDK swallows a mid-stream abort (`core/streaming.mjs`:
+    // `if (isAbortError(e)) return;`), so an openai stream cancel ends the
+    // iterator normally and never reaches this catch at all. This case keeps
+    // the wrapper's contract honest for a provider that does propagate the SDK
+    // error; the shape that genuinely lands here is pinned in the test below.
+    const controller = new AbortController();
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-1', 'test-model', [{ text: 'partial' }]);
+        controller.abort();
+        throw new APIUserAbortError({ message: 'Request was aborted.' });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-cancel',
+    );
+
+    await expect(
+      (async () => {
+        for await (const _ of stream) {
+          // consume until the cancel surfaces
+        }
+      })(),
+    ).rejects.toBeInstanceOf(APIUserAbortError);
+
+    expect(logApiError).not.toHaveBeenCalled();
+  });
+
+  it('does not emit an api_error event for a DOMException-shaped mid-stream cancel', async () => {
+    // The shape a mid-stream cancel really takes on the @google/genai path: its
+    // SSE reader (`processStreamResponse`) has no abort special-case, so an
+    // abort during a read rejects with the fetch DOMException named
+    // 'AbortError' and propagates. This pins that the gate's `isAbortError`
+    // check covers the AbortError-name branch at the stream call site, not
+    // only the openai `APIUserAbortError`.
+    const controller = new AbortController();
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-1', 'test-model', [{ text: 'partial' }]);
+        controller.abort();
+        throw new DOMException('The operation was aborted.', 'AbortError');
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+      config: { abortSignal: controller.signal },
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-cancel-dom',
+    );
+
+    await expect(
+      (async () => {
+        for await (const _ of stream) {
+          // consume until the cancel surfaces
+        }
+      })(),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(logApiError).not.toHaveBeenCalled();
+    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+      success: false,
+      cancelled: true,
+      error: 'API call aborted',
+    });
+    expect(logApiResponse).not.toHaveBeenCalled();
+  });
+
+  it('forwards usage attached to the final response after it was yielded', async () => {
+    const response = createResponse('r1', 'test-model', [{ text: 'a' }]);
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield response;
+        response.usageMetadata = {
+          promptTokenCount: 100,
+          candidatesTokenCount: 50,
+          totalTokenCount: 150,
+        };
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(request, 'prompt-tok');
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: true,
+      inputTokens: 100,
+      outputTokens: 50,
+    });
+    expect(
+      genAiExchangeState.controllers.at(-1)?.finalize,
+    ).toHaveBeenCalledWith(true);
+  });
+
+  it('retains late-attached usage when the stream subsequently fails', async () => {
+    const response = createResponse('r1', 'test-model', [{ text: 'a' }]);
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield response;
+        response.usageMetadata = {
+          promptTokenCount: 10,
+          candidatesTokenCount: 5,
+          totalTokenCount: 15,
+        };
+        throw new Error('late failure');
+      })(),
+    );
+    const generator = new LoggingContentGenerator(
+      createWrappedGenerator(vi.fn(), streamFn),
+      createConfig(),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters,
+      'prompt-late-usage-error',
+    );
+
+    await expect(async () => {
+      for await (const _ of stream) {
+        // consume
+      }
+    }).rejects.toThrow('late failure');
+
+    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+      success: false,
+      inputTokens: 10,
+      outputTokens: 5,
+    });
+  });
+
+  it('separates standard first-chunk timing from user-visible TTFT', async () => {
+    let wallClockMs = 0;
+    let monotonicClockMs = 0;
+    const dateNowSpy = vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() => wallClockMs);
+    const performanceNowSpy = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => monotonicClockMs);
+    const streamFn = vi.fn().mockImplementation(async () => {
+      wallClockMs = 40;
+      monotonicClockMs = 40;
+      return (async function* () {
+        // The wall clock is deliberately driven apart from the monotonic
+        // clock: time_to_first_chunk must come from performance.now()
+        // (100ms -> 0.1s), so a mutant reading Date.now() (900ms -> 0.9s)
+        // fails the toBeCloseTo(0.1) assertion below instead of passing.
+        wallClockMs = 900;
+        monotonicClockMs = 100;
+        yield createResponse('r1', 'test-model', [], {
+          promptTokenCount: 10,
+          candidatesTokenCount: 0,
+          totalTokenCount: 10,
+        });
+        wallClockMs = 300;
+        monotonicClockMs = 300;
+        yield createResponse('r2', 'test-model', [{ text: 'hi' }], {
+          promptTokenCount: 10,
+          candidatesTokenCount: 2,
+          totalTokenCount: 12,
+        });
+      })();
+    });
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    try {
+      const stream = await generator.generateContentStream(
+        request,
+        'prompt-ttft',
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      const spanRecord = getStreamSpanRecord();
+      expect(
+        spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+      ).toBeCloseTo(0.1);
+      const meta = spanRecord.endMetadata as { ttftMs?: number } | undefined;
+      expect(meta?.ttftMs).toBe(300);
+      const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+      expect(responseEvent.ttft_ms).toBe(300);
+    } finally {
+      dateNowSpy.mockRestore();
+      performanceNowSpy.mockRestore();
+    }
+  });
+
+  it('forwards cachedInputTokens from usageMetadata to endLLMRequestSpan (Phase 4a)', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r1', 'test-model', [{ text: 'ok' }], {
+          promptTokenCount: 100,
+          candidatesTokenCount: 20,
+          cachedContentTokenCount: 40,
+          totalTokenCount: 160,
+        });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-cache',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: true,
+      inputTokens: 100,
+      cachedInputTokens: 40,
+    });
+  });
+
+  it('leaves ttftMs undefined when stream yields no user-visible chunks (Phase 4a)', async () => {
+    // Stream emits only usage-metadata chunks (no text/functionCall/etc).
+    // ttftMs must stay undefined — TTFT is only meaningful when content arrives.
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r1', 'test-model', [], {
+          promptTokenCount: 5,
+          candidatesTokenCount: 0,
+          totalTokenCount: 5,
+        });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-no-content',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    const meta = spanRecord.endMetadata as { ttftMs?: number } | undefined;
+    expect(meta!.ttftMs).toBeUndefined();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeGreaterThanOrEqual(0);
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.ttft_ms).toBeUndefined();
+  });
+
+  it('omits first-chunk timing when a stream yields no chunks', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield* [] as GenerateContentResponse[];
+      })(),
+    );
+    const generator = new LoggingContentGenerator(
+      createWrappedGenerator(vi.fn(), streamFn),
+      createConfig(),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters,
+      'prompt-empty-stream',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    expect(
+      getStreamSpanRecord().attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeUndefined();
+  });
+
+  it('does not retry first-chunk telemetry after setAttribute fails', async () => {
+    loggingSpanAttributeFailures.add('gen_ai.response.time_to_first_chunk');
+    const responses = [
+      createResponse('r1', 'test-model', [], {
+        promptTokenCount: 5,
+        candidatesTokenCount: 0,
+        totalTokenCount: 5,
+      }),
+      createResponse('r2', 'test-model', [{ text: 'ok' }]),
+    ];
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield* responses;
+      })(),
+    );
+    const generator = new LoggingContentGenerator(
+      createWrappedGenerator(vi.fn(), streamFn),
+      createConfig(),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: false,
+      },
+    );
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters,
+      'prompt-first-chunk-attribute-failure',
+    );
+    const seen: GenerateContentResponse[] = [];
+    for await (const response of stream) {
+      seen.push(response);
+    }
+
+    expect(seen).toEqual(responses);
+    expect(
+      loggingSpanAttributeSetAttempts.filter(
+        (key) => key === 'gen_ai.response.time_to_first_chunk',
+      ),
+    ).toHaveLength(1);
+    expect(
+      getStreamSpanRecord().attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeUndefined();
+  });
+
+  it('forwards cachedInputTokens to endLLMRequestSpan on non-stream success (Phase 4a)', async () => {
+    const generateFn = vi.fn().mockResolvedValue(
+      createResponse('resp-cache', 'test-model', [{ text: 'ok' }], {
+        promptTokenCount: 100,
+        candidatesTokenCount: 30,
+        cachedContentTokenCount: 60,
+        totalTokenCount: 190,
+      }),
+    );
+    const wrapped = createWrappedGenerator(generateFn, vi.fn());
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hi',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-cache-non-stream');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: true,
+      inputTokens: 100,
+      outputTokens: 30,
+      cachedInputTokens: 60,
+    });
+  });
+
+  it('preserves non-stream success when response and OpenAI logging fail', async () => {
+    vi.mocked(logApiResponse).mockImplementationOnce(() => {
+      throw new Error('response-log-fail');
+    });
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-safe', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockRejectedValueOnce(
+      new Error('openai-log-fail'),
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const response = await generator.generateContent(request, 'prompt-safe');
+
+    expect(response.responseId).toBe('resp-safe');
+    expect(logApiResponse).toHaveBeenCalledTimes(1);
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+    expect(getGenerateContentSpanRecord().statuses).toEqual([]);
+  });
+
+  it('truncates long response text in API response telemetry', async () => {
+    const longText = 'x'.repeat(MAX_RESPONSE_TEXT_LENGTH + 100);
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-long', 'test-model', [{ text: longText }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-long');
+
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toHaveLength(MAX_RESPONSE_TEXT_LENGTH);
+    expect(responseEvent.response_text).toBe(
+      `${longText.slice(
+        0,
+        MAX_RESPONSE_TEXT_LENGTH - RESPONSE_TEXT_TRUNCATION_SUFFIX.length,
+      )}${RESPONSE_TEXT_TRUNCATION_SUFFIX}`,
+    );
+  });
+
+  it.each([
+    ['thought-only', [{ text: 'hidden thought', thought: true }]],
+    [
+      'functionCall-only',
+      [{ functionCall: { id: 'call-1', name: 'tool', args: '{}' } }],
+    ],
+  ])('omits response_text for %s API responses', async (_name, parts) => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(createResponse('resp-empty', 'test-model', parts)),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-empty');
+
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.response_text).toBeUndefined();
   });
 
   it('logs errors with status code and request id, then rethrows', async () => {
@@ -273,6 +1924,46 @@ describe('LoggingContentGenerator', () => {
     const [, , loggedError] = openaiLoggerInstance.logInteraction.mock.calls[0];
     expect(loggedError).toBeInstanceOf(Error);
     expect((loggedError as Error).message).toBe('boom');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
+    ]);
+    expect(JSON.stringify(spanRecord.statuses)).not.toContain('boom');
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('sanitizes non-stream request logging errors in span status', async () => {
+    const generateContent = vi.fn();
+    vi.mocked(logApiRequest).mockImplementationOnce(() => {
+      throw new Error('request-log-secret');
+    });
+    const wrapped = createWrappedGenerator(generateContent, vi.fn());
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-log-prep'),
+    ).rejects.toThrow('request-log-secret');
+
+    expect(generateContent).not.toHaveBeenCalled();
+    expect(logApiError).toHaveBeenCalledTimes(1);
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
+    ]);
+    expect(JSON.stringify(spanRecord.statuses)).not.toContain(
+      'request-log-secret',
+    );
+    expect(spanRecord.ended).toBe(true);
   });
 
   it('logs streaming responses and consolidates tool calls', async () => {
@@ -302,8 +1993,14 @@ describe('LoggingContentGenerator', () => {
         { functionCall: { id: 'call-1', name: 'tool', args: '{"x":1}' } },
         { functionResponse: { name: 'tool', response: { output: 'ok' } } },
       ],
-      usage2,
+      undefined,
       'STOP',
+    );
+    const usageResponse = createResponse(
+      'resp-usage',
+      'model-stream',
+      [],
+      usage2,
     );
 
     const wrapped = createWrappedGenerator(
@@ -311,6 +2008,7 @@ describe('LoggingContentGenerator', () => {
       vi.fn().mockResolvedValue(
         (async function* () {
           yield response1;
+          yield usageResponse;
           yield response2;
         })(),
       ),
@@ -336,16 +2034,16 @@ describe('LoggingContentGenerator', () => {
     for await (const item of stream) {
       seen.push(item);
     }
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(3);
 
     expect(logApiResponse).toHaveBeenCalledTimes(1);
     const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
     expect(responseEvent.response_id).toBe('resp-1');
     expect(responseEvent.input_token_count).toBe(2);
+    expect(responseEvent.response_text).toBe('Hello world');
 
-    expect(convertGeminiResponseToOpenAISpy).toHaveBeenCalledTimes(1);
-    const [consolidatedResponse] =
-      convertGeminiResponseToOpenAISpy.mock.calls[0];
+    expect(convertLlmResponseToOpenAISpy).toHaveBeenCalledTimes(1);
+    const [consolidatedResponse] = convertLlmResponseToOpenAISpy.mock.calls[0];
     const consolidatedParts =
       consolidatedResponse.candidates?.[0]?.content?.parts || [];
     expect(consolidatedParts).toEqual([
@@ -357,12 +2055,241 @@ describe('LoggingContentGenerator', () => {
     expect(consolidatedResponse.usageMetadata).toBe(usage2);
     expect(consolidatedResponse.responseId).toBe('resp-2');
     expect(consolidatedResponse.candidates?.[0]?.finishReason).toBe('STOP');
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.statuses).toEqual([]);
+    expect(spanRecord.ended).toBe(true);
+    expect(
+      genAiExchangeState.controllers.at(-1)?.finalize,
+    ).toHaveBeenCalledWith(true);
+  });
+
+  it('does not retain every metadata-only streaming response for logging', async () => {
+    const contentResponse = createResponse('resp-content', 'model-stream', [
+      { text: 'Hello' },
+    ]);
+    const usageResponses = Array.from({ length: 1_000 }, (_, index) => {
+      const response = new GenerateContentResponse();
+      response.responseId = `resp-usage-${index}`;
+      response.modelVersion = 'model-stream';
+      response.candidates = [];
+      response.usageMetadata = {
+        totalTokenCount: index,
+      };
+      return response;
+    });
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield contentResponse;
+          yield* usageResponses;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+    });
+    const consolidateSpy = vi.spyOn(
+      generator as unknown as {
+        consolidateLlmResponsesForLogging: (
+          responses: GenerateContentResponse[],
+        ) => GenerateContentResponse | undefined;
+      },
+      'consolidateLlmResponsesForLogging',
+    );
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters,
+      'prompt-metadata-only',
+    );
+    for await (const _response of stream) {
+      // Drain the stream.
+    }
+
+    expect(consolidateSpy).toHaveBeenCalledOnce();
+    expect(consolidateSpy.mock.calls[0]?.[0]).toEqual([
+      contentResponse,
+      usageResponses.at(-1),
+    ]);
+  });
+
+  it('preserves stream success when response and OpenAI logging fail', async () => {
+    vi.mocked(logApiResponse).mockImplementationOnce(() => {
+      throw new Error('response-log-fail');
+    });
+    const response = createResponse('resp-safe-stream', 'model-stream', [
+      { text: 'ok' },
+    ]);
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockRejectedValueOnce(
+      new Error('openai-log-fail'),
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-safe-stream',
+    );
+    const seen: GenerateContentResponse[] = [];
+    for await (const item of stream) {
+      seen.push(item);
+    }
+
+    expect(seen).toEqual([response]);
+    expect(logApiResponse).toHaveBeenCalledTimes(1);
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+    expect(getStreamSpanRecord().ended).toBe(true);
+  });
+
+  it('leaves stream success status unset', async () => {
+    const response = createResponse('resp-status', 'model-stream', [
+      { text: 'ok' },
+    ]);
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-status',
+    );
+    const seen: GenerateContentResponse[] = [];
+    for await (const item of stream) {
+      seen.push(item);
+    }
+
+    expect(seen).toEqual([response]);
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.statuses).toEqual([]);
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('activates the stream span while the wrapped generator creates the stream', async () => {
+    const response = createResponse('resp-1', 'model-stream', [
+      { text: 'Hello' },
+    ]);
+    let activeContextDuringWrappedCall = '';
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockImplementation(async () => {
+        activeContextDuringWrappedCall = activeOtelContext.current;
+        return (async function* () {
+          yield response;
+        })();
+      }),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(request, 'prompt-3');
+    for await (const _item of stream) {
+      // Consume stream to trigger cleanup.
+    }
+
+    expect(activeContextDuringWrappedCall).toBe('qwen-code.llm_request');
+  });
+
+  it('logs stream setup errors before leaving the stream span context', async () => {
+    const setupError = new Error('setup-fail');
+    let activeContextDuringApiError = '';
+    let spanEndedDuringApiError = true;
+    vi.mocked(logApiError).mockImplementationOnce(() => {
+      activeContextDuringApiError = activeOtelContext.current;
+      spanEndedDuringApiError = getStreamSpanRecord().ended;
+    });
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockRejectedValue(setupError),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContentStream(request, 'prompt-setup-error'),
+    ).rejects.toThrow('setup-fail');
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+    expect(activeContextDuringApiError).toBe('qwen-code.llm_request');
+    expect(spanEndedDuringApiError).toBe(false);
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.attributes['gen_ai.request.stream']).toBe(true);
+    expect(spanRecord.attributes['llm_request.stream']).toBeUndefined();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeUndefined();
+    expect(spanRecord.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
+    ]);
+    expect(JSON.stringify(spanRecord.statuses)).not.toContain('setup-fail');
+    expect(spanRecord.ended).toBe(true);
   });
 
   it('logs stream errors and skips response logging', async () => {
-    const response1 = createResponse('resp-1', 'model-stream', [
-      { text: 'partial' },
-    ]);
+    const response1 = createResponse(
+      'resp-1',
+      'model-stream',
+      [{ text: 'partial' }],
+      {
+        promptTokenCount: 12,
+        candidatesTokenCount: 3,
+        totalTokenCount: 15,
+      },
+    );
     const streamError = new Error('stream-fail');
     const wrapped = createWrappedGenerator(
       vi.fn(),
@@ -401,12 +2328,661 @@ describe('LoggingContentGenerator', () => {
     const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
       ?.value as { logInteraction: ReturnType<typeof vi.fn> };
     expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+
+    const spanRecord = getStreamSpanRecord();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeGreaterThanOrEqual(0);
+    expect(spanRecord.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
+    ]);
+    expect(JSON.stringify(spanRecord.statuses)).not.toContain('stream-fail');
+    expect(spanRecord.endMetadata).toMatchObject({
+      responseModel: 'model-stream',
+      inputTokens: 12,
+      outputTokens: 3,
+    });
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('keeps a real partial-stream failure as an error when it races an abort', async () => {
+    const abortController = new AbortController();
+    const response = createResponse(
+      'resp-abort',
+      'model-stream',
+      [{ text: 'partial' }],
+      {
+        promptTokenCount: 9,
+        candidatesTokenCount: 2,
+        totalTokenCount: 11,
+      },
+      'STOP',
+    );
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response;
+          abortController.abort();
+          throw new Error('aborted upstream');
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'request-model',
+      authType: AuthType.USE_OPENAI,
+    });
+    const stream = await generator.generateContentStream(
+      {
+        model: 'request-model',
+        contents: 'Hello',
+        config: { abortSignal: abortController.signal },
+      } as never,
+      'prompt-abort',
+    );
+
+    await expect(async () => {
+      for await (const _ of stream) {
+        // consume
+      }
+    }).rejects.toThrow('aborted upstream');
+    const spanRecord = getStreamSpanRecord();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeGreaterThanOrEqual(0);
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: false,
+      cancelled: false,
+      error: 'API call failed',
+      responseModel: 'model-stream',
+      inputTokens: 9,
+      outputTokens: 2,
+      finishReasons: ['STOP'],
+    });
+  });
+
+  it('records cancellation when a provider ends normally after swallowing an abort', async () => {
+    const abortController = new AbortController();
+    const response = createResponse('resp-cancelled', 'model-stream', [
+      { text: 'partial' },
+    ]);
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response;
+          abortController.abort();
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'request-model',
+      authType: AuthType.USE_OPENAI,
+    });
+    const stream = await generator.generateContentStream(
+      {
+        model: 'request-model',
+        contents: 'Hello',
+        config: { abortSignal: abortController.signal },
+      } as never,
+      'prompt-swallowed-abort',
+    );
+
+    for await (const _ of stream) {
+      // Consume until the provider ends the stream normally.
+    }
+
+    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+      success: false,
+      cancelled: true,
+      error: 'API call aborted',
+    });
+    expect(logApiResponse).not.toHaveBeenCalled();
+  });
+
+  it('does not let an abort after stream completion rewrite success', async () => {
+    const abortController = new AbortController();
+    const response = createResponse('resp-complete', 'model-stream', [
+      { text: 'done' },
+    ]);
+    vi.mocked(logApiResponse).mockImplementationOnce(() =>
+      abortController.abort(),
+    );
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'request-model',
+      authType: AuthType.USE_OPENAI,
+    });
+    const stream = await generator.generateContentStream(
+      {
+        model: 'request-model',
+        contents: 'Hello',
+        config: { abortSignal: abortController.signal },
+      } as never,
+      'prompt-late-abort',
+    );
+
+    for await (const _ of stream) {
+      // Consume the successful stream.
+    }
+
+    expect(abortController.signal.aborted).toBe(true);
+    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+      success: true,
+      cancelled: false,
+    });
+  });
+
+  it('orders stream finish reasons by candidate index across chunks', async () => {
+    const firstResponse = createResponse(
+      'resp-multi',
+      'model-stream',
+      [{ text: 'partial' }],
+      undefined,
+      'SAFETY',
+    );
+    firstResponse.candidates = [
+      { ...firstResponse.candidates![0]!, index: 2 },
+      {
+        ...firstResponse.candidates![0]!,
+        index: 0,
+        finishReason: 'STOP' as never,
+      },
+    ];
+    const secondResponse = createResponse(
+      'resp-multi',
+      'model-stream',
+      [{ text: 'done' }],
+      undefined,
+      'MAX_TOKENS',
+    );
+    secondResponse.candidates![0]!.index = 1;
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield firstResponse;
+          yield secondResponse;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'request-model',
+      authType: AuthType.USE_OPENAI,
+    });
+    const stream = await generator.generateContentStream(
+      { model: 'request-model', contents: 'Hello' } as never,
+      'prompt-multi-candidate',
+    );
+
+    for await (const _ of stream) {
+      // Consume the stream so the span is finalized.
+    }
+
+    expect(getStreamSpanRecord().endMetadata).toMatchObject({
+      responseModel: 'model-stream',
+      finishReasons: ['STOP', 'MAX_TOKENS', 'SAFETY'],
+    });
+  });
+
+  it('skips success api_response log when stream span is ended by idle timeout (#4212)', async () => {
+    // The 5-min idle timeout would otherwise leave a contradictory pair of
+    // signals during incident response: the span says "timed out / error"
+    // while the api_response log says "success". We capture the idle-timeout
+    // callback through a setTimeout spy and invoke it manually — fake timers
+    // interact poorly with async-generator iteration.
+    const STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
+    let idleCallback: (() => void) | undefined;
+    const realSetTimeout = global.setTimeout;
+    type SetTimeoutArgs = Parameters<typeof setTimeout>;
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout').mockImplementation(((
+      ...args: SetTimeoutArgs
+    ) => {
+      const [cb, ms] = args;
+      if (ms === STREAM_IDLE_TIMEOUT_MS) {
+        idleCallback = cb as () => void;
+        return { unref: () => {} } as unknown as ReturnType<typeof setTimeout>;
+      }
+      return realSetTimeout(...args);
+    }) as typeof setTimeout);
+    const abortController = new AbortController();
+    const removeAbortListener = vi.spyOn(
+      abortController.signal,
+      'removeEventListener',
+    );
+
+    try {
+      let releaseStream: (() => void) | undefined;
+      // Set up the gate BEFORE the first yield so the outer test can
+      // release us as soon as it reads the first chunk.
+      const gate = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const response1 = createResponse(
+        'resp-idle',
+        'model-stream',
+        [{ text: 'partial' }],
+        {
+          promptTokenCount: 15,
+          candidatesTokenCount: 4,
+          totalTokenCount: 19,
+        },
+        'MAX_TOKENS',
+      );
+      const wrapped = createWrappedGenerator(
+        vi.fn(),
+        vi.fn().mockResolvedValue(
+          (async function* () {
+            yield response1;
+            // Pause until the test releases us — meanwhile the idle timer
+            // fires and ends the span as failed.
+            await gate;
+          })(),
+        ),
+      );
+      // Enable OpenAI logging so we can verify the post-loop OpenAI
+      // interaction log is also gated by spanEndedByTimeout — without this,
+      // safelyLogOpenAIInteraction short-circuits unconditionally and the
+      // skip behavior would go untested.
+      const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: true,
+      });
+      const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+        ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+
+      const request = {
+        model: 'test-model',
+        contents: 'Hello',
+        config: { abortSignal: abortController.signal },
+      } as unknown as GenerateContentParameters;
+
+      const stream = await generator.generateContentStream(
+        request,
+        'prompt-idle-timeout',
+      );
+      const iterator = stream[Symbol.asyncIterator]();
+
+      const first = await iterator.next();
+      expect(first.done).toBe(false);
+      expect(idleCallback).toBeDefined();
+
+      // Fire the idle timeout — span should end as timed-out.
+      idleCallback?.();
+      expect(removeAbortListener).toHaveBeenCalledWith(
+        'abort',
+        expect.any(Function),
+      );
+
+      const spanRecord = getStreamSpanRecord();
+      expect(spanRecord.attributes['stream.timed_out']).toBe(true);
+      expect(
+        spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+      ).toBeGreaterThanOrEqual(0);
+      expect(spanRecord.endMetadata?.success).toBe(false);
+      expect(spanRecord.endMetadata?.error).toBe(
+        'Stream span timed out (idle)',
+      );
+      expect(spanRecord.endMetadata).toMatchObject({
+        responseModel: 'model-stream',
+        inputTokens: 15,
+        outputTokens: 4,
+        finishReasons: ['MAX_TOKENS'],
+      });
+      expect(spanRecord.ended).toBe(true);
+      expect(
+        genAiExchangeState.controllers.at(-1)?.finalize,
+      ).toHaveBeenCalledWith(false);
+
+      releaseStream?.();
+      const done = await iterator.next();
+      expect(done.done).toBe(true);
+
+      // Despite the stream completing cleanly afterwards, no success-flavored
+      // api_response or OpenAI-interaction log should have been emitted —
+      // the span's timeout state is the canonical signal.
+      expect(logApiResponse).not.toHaveBeenCalled();
+      expect(openaiLoggerInstance.logInteraction).not.toHaveBeenCalled();
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('skips api_error log when stream throws after idle timeout already closed the span (#4302)', async () => {
+    // Same gating as the success path: when the 5-min idle timeout already
+    // closed the LLM span as failed, a downstream throw must not emit an
+    // api_error log either, otherwise telemetry shows "span timed-out + log
+    // api_error" — the contradictory pair the timeout fix targets.
+    const STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
+    let idleCallback: (() => void) | undefined;
+    const realSetTimeout = global.setTimeout;
+    type SetTimeoutArgs = Parameters<typeof setTimeout>;
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout').mockImplementation(((
+      ...args: SetTimeoutArgs
+    ) => {
+      const [cb, ms] = args;
+      if (ms === STREAM_IDLE_TIMEOUT_MS) {
+        idleCallback = cb as () => void;
+        return { unref: () => {} } as unknown as ReturnType<typeof setTimeout>;
+      }
+      return realSetTimeout(...args);
+    }) as typeof setTimeout);
+
+    try {
+      let releaseStream: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const response1 = createResponse('resp-throw', 'model-stream', [
+        { text: 'partial' },
+      ]);
+      const downstreamError = new Error('upstream-fail');
+      const wrapped = createWrappedGenerator(
+        vi.fn(),
+        vi.fn().mockResolvedValue(
+          (async function* () {
+            yield response1;
+            await gate;
+            throw downstreamError;
+          })(),
+        ),
+      );
+      const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: true,
+      });
+      const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+        ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+
+      const request = {
+        model: 'test-model',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters;
+
+      const stream = await generator.generateContentStream(
+        request,
+        'prompt-throw-after-timeout',
+      );
+      const iterator = stream[Symbol.asyncIterator]();
+
+      const first = await iterator.next();
+      expect(first.done).toBe(false);
+      expect(idleCallback).toBeDefined();
+
+      // Fire idle timeout — span is now closed as timed-out.
+      idleCallback?.();
+
+      // Now release the stream and let it throw.
+      releaseStream?.();
+      await expect(iterator.next()).rejects.toThrow('upstream-fail');
+
+      const spanRecord = getStreamSpanRecord();
+      expect(spanRecord.endMetadata?.error).toBe(
+        'Stream span timed out (idle)',
+      );
+      // Neither error-flavored telemetry path should fire — the span's
+      // timeout state is the canonical signal.
+      expect(logApiError).not.toHaveBeenCalled();
+      expect(openaiLoggerInstance.logInteraction).not.toHaveBeenCalled();
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  it('keeps an aborted hanging stream classified as cancelled when the idle timeout closes it', async () => {
+    vi.useFakeTimers();
+    const abortController = new AbortController();
+    let releaseStream: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          await gate;
+          yield createResponse('late', 'test-model', [{ text: 'late' }]);
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+        config: { abortSignal: abortController.signal },
+      } as unknown as GenerateContentParameters,
+      'prompt-aborted-idle-timeout',
+    );
+    const iterator = stream[Symbol.asyncIterator]();
+    const pendingNext = iterator.next();
+
+    abortController.abort();
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+    releaseStream?.();
+    await pendingNext;
+    await iterator.return(undefined);
+    vi.useRealTimers();
+
+    const record = getStreamSpanRecord();
+    expect(record.attributes['stream.timed_out']).toBe(true);
+    expect(record.endMetadata).toMatchObject({
+      success: false,
+      cancelled: true,
+      error: 'API call aborted',
+    });
+    expect(record.statuses).toHaveLength(0);
+  });
+
+  it('keeps an observed provider error when abort races blocked error logging', async () => {
+    vi.useFakeTimers();
+    const abortController = new AbortController();
+    let releaseErrorLog: (() => void) | undefined;
+    const errorLogGate = new Promise<void>((resolve) => {
+      releaseErrorLog = resolve;
+    });
+    const providerError = new Error('provider failed');
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield* [];
+          throw providerError;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockReturnValueOnce(errorLogGate);
+
+    const stream = await generator.generateContentStream(
+      {
+        model: 'test-model',
+        contents: 'Hello',
+        config: { abortSignal: abortController.signal },
+      } as unknown as GenerateContentParameters,
+      'prompt-error-abort-timeout',
+    );
+    const pendingNext = stream.next();
+    await vi.waitFor(() => expect(logApiError).toHaveBeenCalledTimes(1));
+
+    abortController.abort();
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+
+    const record = getStreamSpanRecord();
+    expect(record.attributes['stream.timed_out']).toBe(true);
+    expect(record.endMetadata).toMatchObject({
+      success: false,
+      cancelled: false,
+      error: 'API call failed',
+    });
+    expect(record.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
+    ]);
+
+    releaseErrorLog?.();
+    await expect(pendingNext).rejects.toThrow('provider failed');
+    vi.useRealTimers();
+  });
+
+  it('preserves stream errors when error logging fails', async () => {
+    const response1 = createResponse('resp-1', 'model-stream', [
+      { text: 'partial' },
+    ]);
+    const streamError = new Error('stream-fail');
+    vi.mocked(logApiError).mockImplementationOnce(() => {
+      throw new Error('api-log-fail');
+    });
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response1;
+          throw streamError;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockRejectedValueOnce(
+      new Error('openai-log-fail'),
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(request, 'prompt-4');
+    await expect(async () => {
+      for await (const _item of stream) {
+        // Consume stream to trigger error.
+      }
+    }).rejects.toThrow('stream-fail');
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.statuses).toEqual([
+      { code: SpanStatusCode.ERROR, message: 'API call failed' },
+    ]);
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('preserves stream errors when the error status update fails', async () => {
+    loggingSpanNamesWithSetStatusFailure.add('qwen-code.llm_request');
+    const response1 = createResponse('resp-1', 'model-stream', [
+      { text: 'partial' },
+    ]);
+    const streamError = new Error('stream-fail');
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response1;
+          throw streamError;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-error-status',
+    );
+    await expect(async () => {
+      for await (const _item of stream) {
+        // Consume stream to trigger error.
+      }
+    }).rejects.toThrow('stream-fail');
+
+    expect(logApiError).toHaveBeenCalledTimes(1);
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.statuses).toEqual([]);
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('ends the stream span when the consumer stops early', async () => {
+    const response1 = createResponse('resp-1', 'model-stream', [
+      { text: 'first' },
+    ]);
+    const response2 = createResponse('resp-2', 'model-stream', [
+      { text: 'second' },
+    ]);
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield response1;
+          yield response2;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(request, 'prompt-4');
+    for await (const _item of stream) {
+      break;
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    expect(
+      spanRecord.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeGreaterThanOrEqual(0);
+    expect(spanRecord.statuses).toEqual([]);
+    expect(spanRecord.ended).toBe(true);
+    expect(
+      genAiExchangeState.controllers.at(-1)?.finalize,
+    ).toHaveBeenCalledWith(false);
   });
 
   it('uses generator modalities when converting logged OpenAI requests', async () => {
-    convertGeminiRequestToOpenAISpy.mockImplementationOnce(
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(
       (request, requestContext, options) =>
-        realConvertGeminiRequestToOpenAI(request, requestContext, options),
+        realConvertLlmRequestToOpenAI(request, requestContext, options),
     );
 
     const wrapped = createWrappedGenerator(
@@ -422,6 +2998,7 @@ describe('LoggingContentGenerator', () => {
       authType: AuthType.USE_OPENAI,
       enableOpenAILogging: true,
       modalities: { image: true },
+      toolResultContentFormat: 'string' as const,
     };
     const generator = new LoggingContentGenerator(
       wrapped,
@@ -450,11 +3027,12 @@ describe('LoggingContentGenerator', () => {
 
     await generator.generateContent(request, 'prompt-5');
 
-    expect(convertGeminiRequestToOpenAISpy).toHaveBeenCalledWith(
+    expect(convertLlmRequestToOpenAISpy).toHaveBeenCalledWith(
       request,
       expect.objectContaining({
         model: 'test-model',
         modalities: { image: true },
+        toolResultContentFormat: 'string',
       }),
       { cleanOrphanToolCalls: false },
     );
@@ -479,8 +3057,352 @@ describe('LoggingContentGenerator', () => {
     ]);
   });
 
-  it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
-    'skips logApiRequest and OpenAI logging for internal promptId %s (generateContent)',
+  it('uses string tool result content in reconstructed OpenAI logs when configured', async () => {
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(
+      (request, requestContext, options) =>
+        realConvertLlmRequestToOpenAI(request, requestContext, options),
+    );
+
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-tool-log', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      toolResultContentFormat: 'string',
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: [
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call_1', name: 'shell', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_1',
+                name: 'shell',
+                response: { output: 'hello world' },
+              },
+            },
+          ],
+        },
+      ],
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-tool-log');
+
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    const [openaiRequest] = openaiLoggerInstance.logInteraction.mock
+      .calls[0] as [OpenAI.Chat.ChatCompletionCreateParams];
+    const toolMessage = openaiRequest.messages.find(
+      (message) => message.role === 'tool',
+    );
+    expect(toolMessage?.content).toBe('hello world');
+  });
+
+  it('logs the captured wire request including provider-injected fields (generateContent)', async () => {
+    const wireRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+      model: 'deepseek-v4-pro',
+      messages: [{ role: 'user', content: 'hi' }],
+      temperature: 0.5,
+      max_tokens: 1024,
+      // Provider-injected fields the synthetic reconstruction would drop:
+      reasoning_effort: 'max',
+      extra_body: { thinking: { type: 'enabled' }, enable_thinking: true },
+      metadata: { dashscope_user_id: 'abc' },
+    } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockImplementation(async () => {
+        openaiRequestCaptureContext.getStore()?.(wireRequest);
+        return createResponse('resp-cap', 'deepseek-v4-pro', [{ text: 'ok' }]);
+      }),
+      vi.fn(),
+    );
+
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'deepseek-v4-pro',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      openAILoggingDir: 'logs',
+    });
+
+    const request = {
+      model: 'deepseek-v4-pro',
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-cap');
+
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+    const [loggedRequest] = openaiLoggerInstance.logInteraction.mock
+      .calls[0] as [OpenAI.Chat.ChatCompletionCreateParams];
+    // The logger must observe the actual wire request, not a stripped reconstruction.
+    expect(loggedRequest).toBe(wireRequest);
+    expect(loggedRequest).toMatchObject({
+      reasoning_effort: 'max',
+      extra_body: { thinking: { type: 'enabled' }, enable_thinking: true },
+      metadata: { dashscope_user_id: 'abc' },
+    });
+  });
+
+  it('logs the captured wire request for streaming requests (generateContentStream)', async () => {
+    const wireRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+      model: 'glm-5.1',
+      messages: [{ role: 'user', content: 'hi' }],
+      stream: true,
+      stream_options: { include_usage: true },
+      extra_body: { thinking: { type: 'enabled' } },
+    } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+    const chunk = createResponse('resp-stream-cap', 'glm-5.1', [
+      { text: 'ok' },
+    ]);
+
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockImplementation(async () => {
+        openaiRequestCaptureContext.getStore()?.(wireRequest);
+        return (async function* () {
+          yield chunk;
+        })();
+      }),
+    );
+
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'glm-5.1',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      openAILoggingDir: 'logs',
+    });
+
+    const request = {
+      model: 'glm-5.1',
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-cap',
+    );
+    for await (const _ of stream) {
+      // drain
+    }
+
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+    const [loggedRequest] = openaiLoggerInstance.logInteraction.mock
+      .calls[0] as [OpenAI.Chat.ChatCompletionCreateParams];
+    expect(loggedRequest).toBe(wireRequest);
+    expect(loggedRequest).toMatchObject({
+      stream: true,
+      stream_options: { include_usage: true },
+      extra_body: { thinking: { type: 'enabled' } },
+    });
+  });
+
+  it('falls back to synthetic request when the wrapped generator does not capture', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-fallback', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      openAILoggingDir: 'logs',
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+      config: { temperature: 0.4 },
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-fallback');
+
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    const [loggedRequest] = openaiLoggerInstance.logInteraction.mock
+      .calls[0] as [OpenAI.Chat.ChatCompletionCreateParams];
+    expect(loggedRequest).toEqual(
+      expect.objectContaining({
+        model: 'test-model',
+        temperature: 0.4,
+      }),
+    );
+  });
+
+  it('does not propagate logging-side throws (success and error paths)', async () => {
+    const successResponse = createResponse('resp-safe', 'test-model', [
+      { text: 'ok' },
+    ]);
+    const successWrapped = createWrappedGenerator(
+      vi.fn().mockResolvedValue(successResponse),
+      vi.fn(),
+    );
+    const successGen = new LoggingContentGenerator(
+      successWrapped,
+      createConfig(),
+      {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: true,
+        openAILoggingDir: 'logs',
+      },
+    );
+
+    // No capture fires, so resolve() falls through to the synthetic builder.
+    // Force the synthetic build to throw, then verify the API result still surfaces.
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(() => {
+      throw new Error('synth-fail-success');
+    });
+
+    const request = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      successGen.generateContent(request, 'prompt-safe-success'),
+    ).resolves.toBe(successResponse);
+
+    const apiError = new Error('api-boom');
+    const errorWrapped = createWrappedGenerator(
+      vi.fn().mockRejectedValue(apiError),
+      vi.fn(),
+    );
+    const errorGen = new LoggingContentGenerator(errorWrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      openAILoggingDir: 'logs',
+    });
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(() => {
+      throw new Error('synth-fail-error');
+    });
+
+    await expect(
+      errorGen.generateContent(request, 'prompt-safe-error'),
+    ).rejects.toThrow('api-boom');
+  });
+
+  it('does not propagate logging-side throws on a successful stream', async () => {
+    const chunk1 = createResponse('resp-stream-safe-1', 'test-model', [
+      { text: 'hello' },
+    ]);
+    const chunk2 = createResponse('resp-stream-safe-2', 'test-model', [
+      { text: ' world' },
+    ]);
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield chunk1;
+          yield chunk2;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      openAILoggingDir: 'logs',
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockRejectedValueOnce(
+      new Error('log-fail-on-stream-success'),
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-safe-success',
+    );
+    const seen: GenerateContentResponse[] = [];
+    for await (const item of stream) {
+      seen.push(item);
+    }
+    // All chunks must reach the consumer; the logger throw must not surface.
+    expect(seen).toHaveLength(2);
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let logging-side throws replace the original stream error', async () => {
+    const chunk = createResponse('resp-stream-err', 'test-model', [
+      { text: 'partial' },
+    ]);
+    const apiError = new Error('stream-api-fail');
+    const wrapped = createWrappedGenerator(
+      vi.fn(),
+      vi.fn().mockResolvedValue(
+        (async function* () {
+          yield chunk;
+          throw apiError;
+        })(),
+      ),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: true,
+      openAILoggingDir: 'logs',
+    });
+    const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
+      ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+    openaiLoggerInstance.logInteraction.mockRejectedValueOnce(
+      new Error('log-fail-on-stream-error'),
+    );
+
+    const request = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-safe-error',
+    );
+    await expect(async () => {
+      for await (const _item of stream) {
+        // drain
+      }
+    }).rejects.toThrow('stream-api-fail');
+    expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    'prompt_suggestion',
+    'forked_query',
+    'speculation',
+    'side-query:session-title',
+  ])(
+    'skips logApiRequest but writes tagged OpenAI logging for internal promptId %s (generateContent)',
     async (promptId) => {
       const mockResponse = {
         responseId: 'internal-resp',
@@ -509,19 +3431,44 @@ describe('LoggingContentGenerator', () => {
 
       // logApiRequest should NOT be called for internal prompts
       expect(logApiRequest).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+          ?.contextUsage,
+      ).toBeUndefined();
       // logApiResponse SHOULD be called (for /stats token tracking)
       expect(logApiResponse).toHaveBeenCalled();
-      // OpenAI logger should be constructed, but no interaction should be logged
+      const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+      expect(responseEvent.response_text).toBeUndefined();
+      // OpenAI file logging is explicit diagnostic output, so internal prompts
+      // are written with a tag instead of being dropped.
       expect(OpenAILogger).toHaveBeenCalled();
       const loggerInstance = (
         OpenAILogger as unknown as ReturnType<typeof vi.fn>
       ).mock.results[0]?.value;
-      expect(loggerInstance.logInteraction).not.toHaveBeenCalled();
+      expect(loggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+      const [openaiRequest, openaiResponse, openaiError, options] =
+        loggerInstance.logInteraction.mock.calls[0];
+      expect(openaiRequest).toEqual(
+        expect.objectContaining({
+          model: 'test-model',
+          messages: [{ role: 'user', content: 'converted' }],
+        }),
+      );
+      expect(openaiResponse).toEqual(
+        expect.objectContaining({ id: 'openai-response' }),
+      );
+      expect(openaiError).toBeUndefined();
+      expect(options).toBe(promptId);
     },
   );
 
-  it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
-    'skips logApiRequest and OpenAI logging for internal promptId %s (generateContentStream)',
+  it.each([
+    'prompt_suggestion',
+    'forked_query',
+    'speculation',
+    'side-query:session-title',
+  ])(
+    'skips logApiRequest but writes tagged OpenAI logging for internal promptId %s (generateContentStream)',
     async (promptId) => {
       const mockChunk = {
         responseId: 'stream-resp',
@@ -557,12 +3504,302 @@ describe('LoggingContentGenerator', () => {
       }
 
       expect(logApiRequest).not.toHaveBeenCalled();
+      expect(
+        vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]
+          ?.contextUsage,
+      ).toBeUndefined();
       expect(logApiResponse).toHaveBeenCalled();
+      const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+      expect(responseEvent.response_text).toBeUndefined();
       expect(OpenAILogger).toHaveBeenCalled();
       const loggerInstance = (
         OpenAILogger as unknown as ReturnType<typeof vi.fn>
       ).mock.results[0]?.value;
-      expect(loggerInstance.logInteraction).not.toHaveBeenCalled();
+      expect(loggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+      const [openaiRequest, openaiResponse, openaiError, options] =
+        loggerInstance.logInteraction.mock.calls[0];
+      expect(openaiRequest).toEqual(
+        expect.objectContaining({
+          model: 'test-model',
+          messages: [{ role: 'user', content: 'converted' }],
+        }),
+      );
+      expect(openaiResponse).toEqual(
+        expect.objectContaining({ id: 'openai-response' }),
+      );
+      expect(openaiError).toBeUndefined();
+      expect(options).toBe(promptId);
     },
   );
+});
+
+// =========================================================================
+// Phase 4b — retryContext ALS propagation into LoggingContentGenerator.
+// Asserts the contract: when the LLM call runs inside a retryContext.run()
+// frame, endLLMRequestSpan receives the frame's values. When no frame is
+// present (warmup, side-query, direct call), `attempt` defaults to 1 and
+// requestSetupMs/retryTotalDelayMs stay undefined.
+// =========================================================================
+describe('LoggingContentGenerator — Phase 4b retry context propagation', () => {
+  beforeEach(() => {
+    loggingSpanRecords.length = 0;
+    vi.mocked(logApiRequest).mockClear();
+    vi.mocked(logApiResponse).mockClear();
+    vi.mocked(logApiError).mockClear();
+  });
+
+  it('non-stream: forwards retryContext.attempt/requestSetupMs/retryTotalDelayMs to endLLMRequestSpan', async () => {
+    const { retryContext } = await import('../../utils/retryContext.js');
+
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockResolvedValue(
+        createResponse('r-1', 'test-model', [{ text: 'ok' }], {
+          promptTokenCount: 10,
+          candidatesTokenCount: 5,
+          totalTokenCount: 15,
+        }),
+      ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // Simulate being invoked from within `retryWithBackoff`'s ALS frame —
+    // the LoggingContentGenerator must read these values and forward them.
+    await retryContext.run(
+      { attempt: 3, requestSetupMs: 1200, retryTotalDelayMs: 1000 },
+      async () => {
+        await generator.generateContent(request, 'prompt-retry');
+      },
+    );
+
+    const record = getGenerateContentSpanRecord();
+    expect(record.endMetadata).toMatchObject({
+      success: true,
+      attempt: 3,
+      requestSetupMs: 1200,
+      retryTotalDelayMs: 1000,
+    });
+  });
+
+  it('non-stream: defaults attempt=1 and leaves setup/delay undefined when no retry context (direct call / warmup)', async () => {
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockResolvedValue(
+        createResponse('r-2', 'test-model', [{ text: 'ok' }], {
+          promptTokenCount: 10,
+          candidatesTokenCount: 5,
+          totalTokenCount: 15,
+        }),
+      ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // No retryContext.run() — direct invocation.
+    await generator.generateContent(request, 'prompt-direct');
+
+    const record = getGenerateContentSpanRecord();
+    const meta = record.endMetadata as {
+      attempt?: number;
+      requestSetupMs?: number;
+      retryTotalDelayMs?: number;
+    };
+    expect(meta.attempt).toBe(1);
+    expect(meta.requestSetupMs).toBeUndefined();
+    expect(meta.retryTotalDelayMs).toBeUndefined();
+  });
+
+  it('stream: snapshots retry context in synchronous prelude and forwards through stream wrapper finally block', async () => {
+    const { retryContext } = await import('../../utils/retryContext.js');
+
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r-s1', 'test-model', [{ text: 'a' }]);
+        yield createResponse('r-s2', 'test-model', [{ text: 'b' }], {
+          promptTokenCount: 50,
+          candidatesTokenCount: 20,
+          totalTokenCount: 70,
+        });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    // Critical: the stream wrapper is iterated AFTER retryContext.run resolves
+    // its synchronous body. The closure-captured snapshot must carry values
+    // through to the finally block's endLLMRequestSpan call.
+    await retryContext.run(
+      { attempt: 2, requestSetupMs: 500, retryTotalDelayMs: 400 },
+      async () => {
+        const stream = await generator.generateContentStream(
+          request,
+          'prompt-retry-stream',
+        );
+        for await (const _ of stream) {
+          // consume
+        }
+      },
+    );
+
+    const record = getStreamSpanRecord();
+    expect(record.endMetadata).toMatchObject({
+      success: true,
+      attempt: 2,
+      requestSetupMs: 500,
+      retryTotalDelayMs: 400,
+      inputTokens: 50,
+      outputTokens: 20,
+    });
+  });
+
+  it('stream: defaults attempt=1 when iterated outside any retry frame', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r-s3', 'test-model', [{ text: 'a' }]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-direct',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const record = getStreamSpanRecord();
+    const meta = record.endMetadata as {
+      attempt?: number;
+      requestSetupMs?: number;
+      retryTotalDelayMs?: number;
+    };
+    expect(meta.attempt).toBe(1);
+    expect(meta.requestSetupMs).toBeUndefined();
+    expect(meta.retryTotalDelayMs).toBeUndefined();
+  });
+
+  it('stream idle-timeout path: retrySnapshot propagates to the setTimeout-fired endLLMRequestSpan (R2 #8)', async () => {
+    // Review comment R2 #8: the idle-timeout `setTimeout` fires in a separate
+    // macrotask. Verify the closure-captured retrySnapshot reaches its
+    // endLLMRequestSpan call with correct retry context values.
+    //
+    // Must use fake timers from the START so the 5-min setTimeout created
+    // inside loggingStreamWrapper uses the fake clock and can be advanced.
+    vi.useFakeTimers();
+
+    const { retryContext } = await import('../../utils/retryContext.js');
+
+    // Stream that resolves its first .next() only after we've advanced
+    // timers past the idle timeout. We use a deferred promise to hold
+    // iteration without actually hanging the test runner.
+    let releaseStream: () => void;
+    const streamBlocker = new Promise<void>((r) => {
+      releaseStream = r;
+    });
+    const neverYieldStream = (async function* () {
+      await streamBlocker; // holds until we release after timer advance
+      yield createResponse('never', 'test-model', [{ text: 'x' }]);
+    })();
+
+    const streamFn = vi.fn().mockResolvedValue(neverYieldStream);
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+    let iterator: AsyncGenerator<GenerateContentResponse> | undefined;
+    let pendingNext:
+      | Promise<IteratorResult<GenerateContentResponse>>
+      | undefined;
+
+    // Start the stream inside a retry context. The generator creation
+    // (generateContentStream) runs synchronously enough to capture the
+    // retrySnapshot. The consumer's first .next() call starts the for-await
+    // which immediately awaits the streamBlocker — at that point the idle
+    // timeout setTimeout(5min) is already scheduled.
+    await retryContext.run(
+      { attempt: 4, requestSetupMs: 3000, retryTotalDelayMs: 2500 },
+      async () => {
+        const stream = await generator.generateContentStream(
+          request,
+          'prompt-idle-timeout',
+        );
+        iterator = stream[Symbol.asyncIterator]();
+        // Start iteration — this enters for-await, resets the idle timer,
+        // then blocks on streamBlocker.
+        pendingNext = iterator.next();
+      },
+    );
+
+    // Advance past the 5-minute idle timeout (STREAM_IDLE_TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
+
+    // Release the stream so the generator can clean up
+    releaseStream!();
+    const lateChunk = await pendingNext;
+    expect(lateChunk?.done).toBe(false);
+    await iterator?.return(undefined);
+
+    vi.useRealTimers();
+
+    // Find the span that was ended by the idle timeout
+    const records = loggingSpanRecords.filter(
+      (r) => r.name === 'qwen-code.llm_request' && r.endMetadata !== undefined,
+    );
+    const timeoutRecord = records.find(
+      (r) => r.endMetadata?.error === 'Stream span timed out (idle)',
+    );
+    expect(timeoutRecord).toBeDefined();
+    expect(
+      timeoutRecord!.attributes['gen_ai.response.time_to_first_chunk'],
+    ).toBeUndefined();
+    const meta = timeoutRecord!.endMetadata as {
+      attempt?: number;
+      requestSetupMs?: number;
+      retryTotalDelayMs?: number;
+      error?: string;
+    };
+    expect(meta.attempt).toBe(4);
+    expect(meta.requestSetupMs).toBe(3000);
+    expect(meta.retryTotalDelayMs).toBe(2500);
+    expect(meta.error).toBe('Stream span timed out (idle)');
+  });
 });

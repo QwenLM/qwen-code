@@ -1,0 +1,78 @@
+{
+  "name": "@qwen-code/cua-sdk",
+  "version": "0.20.3",
+  "description": "Typed CUA Driver SDK and Computer Use API for Node.js",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./embedded": {
+      "types": "./dist/embedded.d.ts",
+      "import": "./dist/embedded.js"
+    },
+    "./electron": {
+      "types": "./dist/electron.d.ts",
+      "import": "./dist/electron.js"
+    },
+    "./computer-use": {
+      "types": "./computer-use/index.d.ts",
+      "import": "./computer-use/index.js"
+    }
+  },
+  "files": [
+    "dist/index.js",
+    "dist/index.d.ts",
+    "dist/embedded.js",
+    "dist/embedded.d.ts",
+    "dist/electron.js",
+    "dist/electron.d.ts",
+    "dist/native-assets.js",
+    "dist/native-assets.d.ts",
+    "dist/native",
+    "computer-use/index.js",
+    "computer-use/index.d.ts",
+    "computer-use/README.md",
+    "computer-use/SKILL.md",
+    "scripts/install-native.mjs",
+    "LICENSE.md",
+    "NOTICE.md",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "postinstall": "node scripts/install-native.mjs",
+    "prepack": "npm run build && node scripts/stage-computer-use-skill.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:computer-use": "tsc -p computer-use/test/tsconfig.json",
+    "test": "npm run build && npm run typecheck:computer-use && node --test test/*.test.mjs computer-use/test/computer-use.test.mjs",
+    "test:e2e": "node --test computer-use/test/daemon-integration.test.mjs",
+    "generate:uniffi": "node ../scripts/generate-uniffi-bindings.mjs",
+    "generate:uniffi:check": "node ../scripts/generate-uniffi-bindings.mjs --check",
+    "stage:uniffi": "node ../scripts/stage-uniffi-library.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "electron": "43.2.0",
+    "typescript": "^5.7.0",
+    "uniffi-bindgen-react-native": "0.31.0-3"
+  },
+  "dependencies": {
+    "@ubjs/core": "0.31.0-3",
+    "tar": "7.5.22"
+  }
+}

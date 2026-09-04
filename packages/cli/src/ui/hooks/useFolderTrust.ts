@@ -13,6 +13,7 @@ import {
   isWorkspaceTrusted,
 } from '../../config/trustedFolders.js';
 import * as process from 'node:process';
+import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
 
 export const useFolderTrust = (
   settings: LoadedSettings,
@@ -53,7 +54,15 @@ export const useFolderTrust = (
           return;
       }
 
-      trustedFolders.setValue(cwd, trustLevel);
+      try {
+        trustedFolders.setValue(cwd, trustLevel);
+      } catch (error) {
+        writeStderrLineSafe('Error saving trusted folders file.');
+        writeStderrLineSafe(
+          error instanceof Error ? error.message : String(error),
+        );
+        return;
+      }
       const currentIsTrusted =
         trustLevel === TrustLevel.TRUST_FOLDER ||
         trustLevel === TrustLevel.TRUST_PARENT;

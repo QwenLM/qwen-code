@@ -9,8 +9,7 @@ import { openDiff } from '../utils/editor.js';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import * as Diff from 'diff';
-import { DEFAULT_DIFF_OPTIONS } from './diffOptions.js';
+import { createPatchSmart } from './diffOptions.js';
 import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
@@ -115,13 +114,12 @@ function getUpdatedParams<ToolParams>(
     newContent,
     originalParams,
   );
-  const updatedDiff = Diff.createPatch(
+  const updatedDiff = createPatchSmart(
     path.basename(modifyContext.getFilePath(originalParams)),
     oldContent,
     newContent,
     'Current',
     'Proposed',
-    DEFAULT_DIFF_OPTIONS,
   );
 
   return { updatedParams, updatedDiff };

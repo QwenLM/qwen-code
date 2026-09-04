@@ -19,10 +19,12 @@ import { getProjectHash } from '../utils/paths.js';
 import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/jsonl-utils.js');
+vi.mock('../utils/runtimeStatus.js');
 
 describe('SessionService - rename and custom title', () => {
   let sessionService: SessionService;
@@ -81,9 +83,41 @@ describe('SessionService - rename and custom title', () => {
     vi.spyOn(fs, 'openSync').mockReturnValue(42);
     readSyncSpy = vi.spyOn(fs, 'readSync').mockReturnValue(0);
     vi.spyOn(fs, 'closeSync').mockImplementation(() => undefined);
+    // Platforms without O_NOFOLLOW (Windows) open session files through an
+    // lstat -> open -> fstat identity check (openSyncNoFollow). Spy both
+    // stats so that fallback accepts the fabricated paths above: a regular
+    // (non-symlink) file whose identity trivially matches itself. On
+    // platforms with the flag the spies stay inert.
+    vi.spyOn(fs, 'lstatSync').mockImplementation(
+      () =>
+        ({
+          dev: 1,
+          ino: 1,
+          isSymbolicLink: () => false,
+          isFile: () => true,
+        }) as unknown as fs.Stats,
+    );
+    vi.spyOn(fs, 'fstatSync').mockImplementation(
+      () =>
+        ({
+          dev: 1,
+          ino: 1,
+          // size 0 keeps readLatestTailIfGrown's grown-tail pass inert,
+          // matching the pre-rerouting behavior where it never ran.
+          size: 0,
+          isSymbolicLink: () => false,
+          isFile: () => true,
+        }) as unknown as fs.Stats,
+    );
 
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
+    vi.mocked(jsonl.readLinesWithIntegrity).mockImplementation(
+      async (filePath, count, options) => ({
+        records: await jsonl.readLines(filePath, count, options),
+        complete: true,
+      }),
+    );
     vi.mocked(jsonl.writeLineSync).mockImplementation(() => undefined);
   });
 
@@ -112,6 +146,85 @@ describe('SessionService - rename and custom title', () => {
         titleSource: 'manual',
       });
       expect(writtenRecord.sessionId).toBe(sessionIdA);
+    });
+
+    it('should rename a session in the archive store', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.renameSession(
+        sessionIdA,
+        'archived session',
+        'manual',
+        'archived',
+      );
+
+      expect(result).toBe(true);
+      expect(vi.mocked(jsonl.writeLineSync).mock.calls[0][0]).toContain(
+        `/archive/${sessionIdA}.jsonl`,
+      );
+    });
+
+    it('runs lifecycle mutation fences before appending the title', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const internals = sessionService as unknown as {
+        resolveMaintainableSessionSnapshot: () => Promise<{
+          location: 'active';
+          identities: Array<{
+            state: 'active';
+            filePath: string;
+            dev: number;
+            ino: number;
+            size: number;
+            mtimeMs: number;
+            ctimeMs: number;
+          }>;
+        }>;
+        assertMaintainableSessionUnchanged: () => void;
+      };
+      vi.spyOn(
+        internals,
+        'resolveMaintainableSessionSnapshot',
+      ).mockResolvedValue({
+        location: 'active',
+        identities: [
+          {
+            state: 'active',
+            filePath: `/chats/${sessionIdA}.jsonl`,
+            dev: 1,
+            ino: 1,
+            size: 1,
+            mtimeMs: 1,
+            ctimeMs: 1,
+          },
+        ],
+      });
+      vi.spyOn(
+        internals,
+        'assertMaintainableSessionUnchanged',
+      ).mockImplementation(() => undefined);
+      const order: string[] = [];
+      vi.mocked(jsonl.writeLineSync).mockImplementation(() => {
+        order.push('write');
+      });
+
+      await expect(
+        sessionService.renameSessionForLifecycle(
+          sessionIdA,
+          'lifecycle title',
+          'manual',
+          'active',
+          {
+            assertStorageUnchanged: () => {
+              order.push('storage');
+            },
+            assertCanMutate: () => {
+              order.push('runtime');
+            },
+          },
+        ),
+      ).resolves.toBe(true);
+
+      expect(order).toEqual(['storage', 'runtime', 'write']);
     });
 
     it('should return false when session does not exist', async () => {
@@ -323,12 +436,92 @@ describe('SessionService - rename and custom title', () => {
       expect(matches[0].sessionId).toBe(sessionIdA);
     });
 
+    it('omits messageCount and avoids createReadStream (perf contract)', async () => {
+      // findSessionsByTitle is the second user-facing call site that the
+      // perf work removed `messageCount` from. This test pins both
+      // contracts: matched items must have `messageCount === undefined`,
+      // and the per-match `fs.createReadStream` count pass must not run
+      // — re-introducing it would silently bring back the O(file-size)
+      // cost without any other test failing.
+      const titleContent =
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'my-feature' },
+        }) + '\n';
+
+      setupSessionFiles([
+        { id: sessionIdA, record: recordA1, mtime: now, titleContent },
+      ]);
+
+      readSyncSpy.mockImplementation(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (_fd: number, buffer: any) => {
+          const data = Buffer.from(titleContent);
+          data.copy(buffer);
+          return data.length;
+        },
+      );
+
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const matches = await sessionService.findSessionsByTitle('my-feature');
+
+      expect(matches).toHaveLength(1);
+      expect(matches[0].messageCount).toBeUndefined();
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+
     it('should return empty array when no session matches', async () => {
       setupSessionFiles([{ id: sessionIdA, record: recordA1, mtime: now }]);
 
       const matches = await sessionService.findSessionsByTitle('nonexistent');
 
       expect(matches).toHaveLength(0);
+    });
+
+    it('should find a migrated session when runtime status matches this project', async () => {
+      const titleContent =
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'my-feature' },
+        }) + '\n';
+      const migratedRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/old/project',
+      };
+
+      setupSessionFiles([
+        { id: sessionIdA, record: migratedRecord, mtime: now, titleContent },
+      ]);
+      vi.mocked(readRuntimeStatus).mockResolvedValue({
+        schemaVersion: 1,
+        pid: 123,
+        sessionId: sessionIdA,
+        workDir: '/test/project/root',
+        hostname: 'host',
+        startedAt: 1,
+        qwenVersion: null,
+      });
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+      readSyncSpy.mockImplementation(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (_fd: number, buffer: any) => {
+          const data = Buffer.from(titleContent);
+          data.copy(buffer);
+          return data.length;
+        },
+      );
+
+      const matches = await sessionService.findSessionsByTitle('my-feature');
+
+      expect(matches).toHaveLength(1);
+      expect(matches[0].sessionId).toBe(sessionIdA);
     });
 
     it('should not skip matches when multiple sessions share the same mtime (regression for PR #3093 review)', async () => {

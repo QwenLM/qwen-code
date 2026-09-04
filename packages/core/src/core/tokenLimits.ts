@@ -8,15 +8,86 @@ type TokenCount = number;
  */
 export type TokenLimitType = 'input' | 'output';
 
-export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072; // 128K (power-of-two)
+export const DEFAULT_TOKEN_LIMIT: TokenCount = 200_000; // 200K tokens
 export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
 
-// Capped default for slot-reservation optimization. 99% of outputs are under 5K
-// tokens, so 32K defaults over-reserve 4-6× slot capacity. With the cap
-// enabled, <1% of requests hit the limit; those get one clean retry at 64K
-// (see geminiChat.ts max_output_tokens escalation).
-export const CAPPED_DEFAULT_MAX_TOKENS: TokenCount = 8_000;
 export const ESCALATED_MAX_TOKENS: TokenCount = 64_000;
+
+/**
+ * Ceiling on the auto (non-user-configured) output request. Models
+ * advertising output limits above this are clipped down; users who
+ * genuinely need more set max_tokens explicitly (respected up to the
+ * model's real limit). Same value as the MAX_TOKENS escalation target —
+ * escalation-on-truncation raises the request up to this ceiling, never
+ * past it.
+ */
+export const OUTPUT_TOKEN_CEILING: TokenCount = ESCALATED_MAX_TOKENS;
+
+/**
+ * Floor applied to the window ROOM when clamping an output request: when the
+ * prompt has (nearly) filled the window, still ask for at least this much
+ * rather than max_tokens <= 0 — compaction/hard-rescue owns that regime. An
+ * explicit user ceiling below this floor is still respected (the floor
+ * bounds the room, not the ceiling). Must stay below ~5K so that
+ * `margin + MIN_CLAMPED_OUTPUT_TOKENS` fits inside the headroom compaction
+ * leaves free (15% of a 100K window); see the window-clamp design doc.
+ */
+export const MIN_CLAMPED_OUTPUT_TOKENS: TokenCount = 4_000;
+
+/**
+ * Safety headroom subtracted from the window before sizing the output
+ * request: absorbs prompt-estimation error plus system/tool/schema overhead
+ * not captured by the API-reported prompt count. Deliberately conservative —
+ * a generous margin only trims output in the final approach to compaction,
+ * while an under-sized one reintroduces the #5950 400s.
+ */
+export function outputClampMargin(contextWindowSize: number): TokenCount {
+  return Math.max(10_000, Math.round(0.05 * contextWindowSize));
+}
+
+/**
+ * Size an output request to the room actually left in the context window:
+ * `min(ceiling, window − prompt − margin)`, floored at
+ * MIN_CLAMPED_OUTPUT_TOKENS. Makes `prompt + max_tokens ≤ window` an
+ * invariant on every main-turn request (issue #5950 becomes structurally
+ * impossible), which is what lets compaction thresholds run against the
+ * full window with no output reservation.
+ *
+ * @param outputCeiling - Upper bound on the request: the user's explicit
+ *   max_tokens when set, else `min(tokenLimit(model,'output'),
+ *   OUTPUT_TOKEN_CEILING)`.
+ * @param contextWindowSize - The configured context window.
+ * @param promptTokens - Estimated prompt size; use the API-authoritative
+ *   count where available (a fresh chars/4 estimate under-counts CJK and
+ *   tool-heavy prompts, which is the one way a residual 400 could return).
+ */
+export function clampOutputTokensToWindow(
+  outputCeiling: number,
+  contextWindowSize: number,
+  promptTokens: number,
+): TokenCount {
+  const room =
+    contextWindowSize - promptTokens - outputClampMargin(contextWindowSize);
+  // Floor the ROOM, then cap by the ceiling — never the other way around: an
+  // explicit ceiling below MIN_CLAMPED_OUTPUT_TOKENS (e.g.
+  // QWEN_CODE_MAX_OUTPUT_TOKENS=2000 on a capacity-constrained backend) must
+  // be respected, not inflated to the floor.
+  return Math.min(outputCeiling, Math.max(MIN_CLAMPED_OUTPUT_TOKENS, room));
+}
+
+export function parsePositiveIntegerEnvValue(
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined) return undefined;
+
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return undefined;
+
+  return parsed;
+}
 
 /**
  * Accurate numeric limits:
@@ -32,6 +103,7 @@ const LIMITS = {
   '200k': 200_000, // vendor-declared decimal, used by OpenAI, Anthropic, etc.
   '256k': 262_144,
   '272k': 272_000, // vendor-declared decimal, GPT-5.x input (400K total - 128K output)
+  '384k': 384_000, // vendor-declared decimal, DeepSeek V4 max output
   '400k': 400_000, // vendor-declared decimal, used by OpenAI GPT-5.x
   '512k': 524_288,
   '1m': 1_000_000,
@@ -48,10 +120,46 @@ export function normalize(model: string): string {
   // keep final path segment (strip provider prefixes), handle pipe/colon
   s = s.replace(/^.*\//, '');
   s = s.split('|').pop() ?? s;
+
+  // A colon can sit on either side of the model name. `authType:model` and
+  // `family:model` put it on the left, and the split below keeps the right
+  // half. But OpenRouter variant suffixes and Ollama / LM Studio tags put it
+  // on the RIGHT — `qwen3-coder:free`, `gemini-2.5-pro:online`,
+  // `qwen2.5-coder:32b` — and there the right half is a tag, not a model, so
+  // keeping it discards the model name entirely and every such id silently
+  // falls through to the default limit. Those tags are a closed enough set to
+  // recognise, so they are removed first and the split below then sees a bare
+  // model name. `modelId.ts` documents the same collision from the other side
+  // ("Model IDs can legitimately contain colons").
+  s = s.replace(
+    /:(?:free|beta|extended|thinking|online|nitro|floor|latest|\d+(?:\.\d+)?(?:x\d+)?b(?:-[\w.]+)*)$/,
+    '',
+  );
+
   s = s.split(':').pop() ?? s;
 
   // collapse whitespace to single hyphen
   s = s.replace(/\s+/g, '-');
+
+  // Anthropic Claude Model Group aliases from LiteLLM / Vertex / Bedrock-style
+  // proxies frequently use a dotted minor version (`claude-opus-4.8`) rather
+  // than the canonical hyphenated form (`claude-opus-4-8`). The trailing-
+  // suffix strip below treats `-4.8` as a dashed-word version tag and eats
+  // it, collapsing the id to `claude-opus` which then falls through to the
+  // generic Claude fallback (200K input / 64K output) and defeats the 1M /
+  // 128K carve-outs for Opus 4.6+. Rewrite the dotted minor to hyphenated
+  // up front so every downstream regex sees the canonical form regardless
+  // of which alias the proxy exposed.
+  //
+  // Runs AFTER the whitespace collapse so space-separated display names
+  // (`Claude Opus 4.8`) reach it hyphenated. The family segment is matched
+  // as `[a-z]+` rather than an enumerated list so it can't drift from
+  // anthropicContentGenerator.ts's CLAUDE_MODEL_FAMILIES; this is safe
+  // because the rewrite only has observable effect via the family-specific
+  // downstream patterns. An already-hyphenated minor plus any further dotted
+  // components (`claude-opus-4-8.0`, `claude-opus-4.8.0`) is folded too so
+  // the version parser and the limit tables agree on every alias shape.
+  s = s.replace(/^(claude-[a-z]+-\d+(?:-\d+)?)\.(\d+)(?:\.\d+)*/, '$1-$2');
 
   // remove trailing build / date / revision suffixes:
   // - dates (e.g., -20250219), -v1, version numbers, 'latest', 'preview' etc.
@@ -85,6 +193,15 @@ export function normalize(model: string): string {
   return s;
 }
 
+/**
+ * Opus tiers that get the extended 1M input / 128K output window (Opus
+ * 4.6-4.8 and every 5.x). One pattern feeds the input table, the output
+ * table, and defaultOutputCeiling's ceiling exemption so a future tier bump
+ * can't update one site and silently leave another clamping the same model.
+ * No `g`/`y` flag, so sharing the instance across `.test()` sites is safe.
+ */
+const CLAUDE_OPUS_EXTENDED = /^claude-opus-(?:4-(?:6|7|8)|5)/;
+
 /** Ordered regex patterns: most specific -> most general (first match wins). */
 const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
@@ -103,6 +220,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Anthropic Claude
   // -------------------
+  [CLAUDE_OPUS_EXTENDED, LIMITS['1m']], // Opus 4.6-4.8, Opus 5.x: 1M
   [/^claude-/, LIMITS['200k']], // All Claude models: 200K
 
   // -------------------
@@ -119,29 +237,36 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3-max/, LIMITS['256k']],
   // Open-source Qwen3 variants: 256K native
   [/^qwen3-coder-/, LIMITS['256k']],
-  // Qwen fallback (VL, turbo, plus, 2.5, etc.): 128K
+  // Qwen fallback (VL, turbo, plus, 2.5, etc.): 256K
   [/^qwen/, LIMITS['256k']],
 
   // -------------------
   // DeepSeek
   // -------------------
+  [/^deepseek-v4/, LIMITS['1m']], // DeepSeek V4 (flash, pro): 1M
   [/^deepseek/, LIMITS['128k']],
 
   // -------------------
   // Zhipu GLM
   // -------------------
-  [/^glm-5/, 202_752 as TokenCount], // GLM-5: exact vendor limit
-  [/^glm-/, 202_752 as TokenCount], // GLM fallback: 128K
+  // 1M context is the forward default for new GLM releases (GLM-5.2+, GLM-6.x,
+  // and beyond) so they need no future code change. Confirmed 200K families
+  // (GLM-5 / 5.0 / 5.1, GLM-4.x and older) are pinned explicitly first.
+  [/^glm-5(\.[01])?(-|$)/, 202_752 as TokenCount], // GLM-5 / 5.0 / 5.1: 200K
+  [/^glm-(?:[5-9]|\d{2,})/, LIMITS['1m']], // GLM-5.2+, 6.x..9.x, 10.x+: 1M
+  [/^glm-/, 202_752 as TokenCount], // GLM <=4.x / non-numeric fallback: 200K
 
   // -------------------
   // MiniMax
   // -------------------
+  [/^minimax-m3/i, LIMITS['1m']], // MiniMax-M3: 1,000,000
   [/^minimax-m2\.5/i, LIMITS['192k']], // MiniMax-M2.5: 196,608
   [/^minimax-/i, LIMITS['200k']], // MiniMax fallback: 200K
 
   // -------------------
   // Moonshot / Kimi
   // -------------------
+  [/^kimi-k3/, LIMITS['1m']], // Kimi K3: 1M
   [/^kimi-/, LIMITS['256k']], // Kimi fallback: 256K
 
   // -------------------
@@ -166,28 +291,30 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
   // Anthropic Claude
-  [/^claude-opus-4-6/, LIMITS['128k']], // Opus 4.6: 128K
+  [CLAUDE_OPUS_EXTENDED, 128_000 as TokenCount], // Opus 4.6-4.8, Opus 5.x: 128K
   [/^claude-sonnet-4-6/, LIMITS['64k']], // Sonnet 4.6: 64K
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
   // Alibaba / Qwen
   [/^qwen3\.\d/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
-  [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
+  [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 32K
 
   // DeepSeek
+  [/^deepseek-v4/, LIMITS['384k']], // DeepSeek V4 (flash, pro): 384K
   [/^deepseek-reasoner/, LIMITS['64k']],
   [/^deepseek-r1/, LIMITS['64k']],
   [/^deepseek-chat/, LIMITS['8k']],
 
   // Zhipu GLM
-  [/^glm-5/, LIMITS['16k']],
+  [/^glm-5(?:\.\d+)?(?:-|$)/, LIMITS['128k']],
   [/^glm-4\.7/, LIMITS['16k']],
 
   // MiniMax
   [/^minimax-m2\.5/i, LIMITS['64k']],
 
   // Kimi
+  [/^kimi-k3/, LIMITS['128k']], // Kimi K3: 128K default max output (up to 1M configurable)
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];
 
@@ -250,4 +377,40 @@ export function tokenLimit(
     knownTokenLimit(model, type) ??
     (type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT)
   );
+}
+
+/**
+ * The default (non-user-configured) output request for a model: its
+ * advertised output limit, clipped to OUTPUT_TOKEN_CEILING. This is the one
+ * place that policy lives — the send path and both provider layers call it
+ * so a model advertising >64K output is clamped consistently everywhere.
+ */
+export function defaultOutputCeiling(model: Model): TokenCount {
+  const outputLimit = tokenLimit(model, 'output');
+  if (CLAUDE_OPUS_EXTENDED.test(normalize(model))) {
+    return outputLimit;
+  }
+  return Math.min(outputLimit, OUTPUT_TOKEN_CEILING);
+}
+
+/**
+ * Reconcile a user-configured `max_tokens` (from samplingParams) with the
+ * send path's window-clamped request value: the smaller wins, so a user's
+ * explicit ceiling is honored while never overriding the window clamp
+ * upward. Returns undefined when the two can't be reconciled (either side
+ * absent), leaving each provider to apply its own fallback — the shared
+ * invariant ("user max_tokens is a ceiling, not an escape hatch") stays in
+ * one place so a new provider can't silently reopen it.
+ */
+export function reconcileMaxTokens(
+  configMaxTokens: number | null | undefined,
+  requestMaxTokens: number | null | undefined,
+): number | undefined {
+  if (
+    typeof configMaxTokens === 'number' &&
+    typeof requestMaxTokens === 'number'
+  ) {
+    return Math.min(configMaxTokens, requestMaxTokens);
+  }
+  return undefined;
 }

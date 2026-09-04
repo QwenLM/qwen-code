@@ -4,22 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import { getFileName } from '../utils/webviewUtils.js';
-import { showDiffCommand } from '../../commands/index.js';
+import { closeDiffCommand, showDiffCommand } from '../../commands/index.js';
 import {
   findLeftGroupOfChatWebview,
-  ensureLeftGroupOfChatWebview,
+  findRightGroupOfChatWebview,
 } from '../../utils/editorGroupUtils.js';
 import { ReadonlyFileSystemProvider } from '../../services/readonlyFileSystemProvider.js';
-import { FileDiscoveryService } from '@qwen-code/qwen-code-core/src/services/fileDiscoveryService.js';
 import {
+  crawlCache,
+  FileDiscoveryService,
   FileSearchFactory,
   type FileSearch,
-} from '@qwen-code/qwen-code-core/src/utils/filesearch/fileSearch.js';
-import * as crawlCache from '@qwen-code/qwen-code-core/src/utils/filesearch/crawlCache.js';
+} from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import { shouldResolveAgainstWorkspace } from '../../utils/file-path.js';
 
 /**
  * File message handler
@@ -55,6 +57,8 @@ export class FileMessageHandler extends BaseMessageHandler {
       'getWorkspaceFiles',
       'openFile',
       'openDiff',
+      'openDiffList',
+      'closeDiff',
       'createAndOpenTempFile',
     ].includes(messageType);
   }
@@ -95,7 +99,7 @@ export class FileMessageHandler extends BaseMessageHandler {
       return this.fileSearchInstances.get(rootPath) ?? null;
     } catch (error) {
       this.fileSearchInitializing.delete(rootPath);
-      console.error(
+      logger.error(
         '[FileMessageHandler] Failed to initialize file search:',
         error,
       );
@@ -104,13 +108,29 @@ export class FileMessageHandler extends BaseMessageHandler {
   }
 
   private clearFileSearchCache(rootPath: string): void {
+    // Drop the instance from the Map first so any concurrent reader sees a
+    // miss, then dispose() the prior holder so its worker_threads worker
+    // (if RecursiveFileSearch promoted past the in-thread threshold)
+    // doesn't accumulate inside the long-running extension host. Fire-and-
+    // forget — dispose is best-effort.
+    const previous = this.fileSearchInstances.get(rootPath);
     this.fileSearchInstances.delete(rootPath);
     this.fileSearchInitializing.delete(rootPath);
+    void previous?.dispose?.().catch(() => {
+      // Already gone or never had a worker; nothing actionable here.
+    });
     crawlCache.clear();
-    console.log(
+    logger.log(
       '[FileMessageHandler] Cleared file search cache, trigger:',
       rootPath,
     );
+  }
+
+  private toZeroBasedEditorPosition(value: string | undefined): number {
+    if (!value) {
+      return 0;
+    }
+    return Math.max(0, parseInt(value, 10) - 1);
   }
 
   private createWatcherForFolder(folder: vscode.WorkspaceFolder): void {
@@ -171,6 +191,11 @@ export class FileMessageHandler extends BaseMessageHandler {
         }
         this.fileWatchers.clear();
         foldersChangeListener.dispose();
+        for (const instance of this.fileSearchInstances.values()) {
+          void instance.dispose?.().catch(() => {});
+        }
+        this.fileSearchInstances.clear();
+        this.fileSearchInitializing.clear();
       },
     };
   }
@@ -202,15 +227,24 @@ export class FileMessageHandler extends BaseMessageHandler {
         await this.handleOpenDiff(data);
         break;
 
+      case 'openDiffList':
+        await this.handleOpenDiffList(data);
+        break;
+
+      case 'closeDiff':
+        await vscode.commands.executeCommand(
+          closeDiffCommand,
+          (data?.path as string) || '',
+          typeof data?.requestId === 'string' ? data.requestId : undefined,
+        );
+        break;
+
       case 'createAndOpenTempFile':
         await this.handleCreateAndOpenTempFile(data);
         break;
 
       default:
-        console.warn(
-          '[FileMessageHandler] Unknown message type:',
-          message.type,
-        );
+        logger.warn('[FileMessageHandler] Unknown message type:', message.type);
         break;
     }
   }
@@ -242,7 +276,7 @@ export class FileMessageHandler extends BaseMessageHandler {
         });
       }
     } catch (error) {
-      console.error('[FileMessageHandler] Failed to attach file:', error);
+      logger.error('[FileMessageHandler] Failed to attach file:', error);
       const errorMsg = getErrorMessage(error);
       this.sendToWebView({
         type: 'error',
@@ -325,7 +359,7 @@ export class FileMessageHandler extends BaseMessageHandler {
         }
       }
     } catch (error) {
-      console.error(
+      logger.error(
         '[FileMessageHandler] Failed to show context picker:',
         error,
       );
@@ -345,7 +379,7 @@ export class FileMessageHandler extends BaseMessageHandler {
     requestId?: number,
   ): Promise<void> {
     try {
-      console.log('[FileMessageHandler] handleGetWorkspaceFiles start', {
+      logger.log('[FileMessageHandler] handleGetWorkspaceFiles start', {
         query,
         requestId,
       });
@@ -406,7 +440,7 @@ export class FileMessageHandler extends BaseMessageHandler {
 
       // Search or show recent files
       if (query) {
-        console.log(
+        logger.log(
           '[FileMessageHandler] Searching workspace files with fuzzy search for query',
           query,
         );
@@ -469,12 +503,12 @@ export class FileMessageHandler extends BaseMessageHandler {
             type: 'workspaceFiles',
             data: { files, query, requestId },
           });
-          console.log(
+          logger.log(
             '[FileMessageHandler] Sent initial workspaceFiles (open tabs/active)',
             files.length,
           );
         } catch (e) {
-          console.warn(
+          logger.warn(
             '[FileMessageHandler] Failed sending initial response',
             e,
           );
@@ -501,12 +535,12 @@ export class FileMessageHandler extends BaseMessageHandler {
         type: 'workspaceFiles',
         data: { files, query, requestId },
       });
-      console.log(
+      logger.log(
         '[FileMessageHandler] Sent final workspaceFiles',
         files.length,
       );
     } catch (error) {
-      console.error(
+      logger.error(
         '[FileMessageHandler] Failed to get workspace files:',
         error,
       );
@@ -523,28 +557,28 @@ export class FileMessageHandler extends BaseMessageHandler {
    */
   private async handleOpenFile(filePath?: string): Promise<void> {
     if (!filePath) {
-      console.warn('[FileMessageHandler] No path provided for openFile');
+      logger.warn('[FileMessageHandler] No path provided for openFile');
       return;
     }
 
     try {
-      console.log('[FileOperations] Opening file:', filePath);
+      logger.log('[FileOperations] Opening file:', filePath);
 
       // Parse file path, line number, and column number
       // Formats: path/to/file.ts, path/to/file.ts:123, path/to/file.ts:123:45
       const match = filePath.match(/^(.+?)(?::(\d+))?(?::(\d+))?$/);
       if (!match) {
-        console.warn('[FileOperations] Invalid file path format:', filePath);
+        logger.warn('[FileOperations] Invalid file path format:', filePath);
         return;
       }
 
       const [, path, lineStr, columnStr] = match;
-      const lineNumber = lineStr ? parseInt(lineStr, 10) - 1 : 0; // VS Code uses 0-based line numbers
-      const columnNumber = columnStr ? parseInt(columnStr, 10) - 1 : 0; // VS Code uses 0-based column numbers
+      const lineNumber = this.toZeroBasedEditorPosition(lineStr);
+      const columnNumber = this.toZeroBasedEditorPosition(columnStr);
 
       // Convert to absolute path if relative
       let absolutePath = path;
-      if (!path.startsWith('/') && !path.match(/^[a-zA-Z]:/)) {
+      if (shouldResolveAgainstWorkspace(path)) {
         // Relative path - resolve against workspace
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
         if (workspaceFolder) {
@@ -570,9 +604,9 @@ export class FileMessageHandler extends BaseMessageHandler {
         );
       }
 
-      console.log('[FileOperations] File opened successfully:', absolutePath);
+      logger.log('[FileOperations] File opened successfully:', absolutePath);
     } catch (error) {
-      console.error('[FileMessageHandler] Failed to open file:', error);
+      logger.error('[FileMessageHandler] Failed to open file:', error);
       vscode.window.showErrorMessage(
         `Failed to open file: ${getErrorMessage(error)}`,
       );
@@ -586,7 +620,7 @@ export class FileMessageHandler extends BaseMessageHandler {
     data: Record<string, unknown> | undefined,
   ): Promise<void> {
     if (!data) {
-      console.warn('[FileMessageHandler] No data provided for openDiff');
+      logger.warn('[FileMessageHandler] No data provided for openDiff');
       return;
     }
 
@@ -595,13 +629,68 @@ export class FileMessageHandler extends BaseMessageHandler {
         path: (data.path as string) || '',
         oldText: (data.oldText as string) || '',
         newText: (data.newText as string) || '',
+        // Web-shell permission diffs cannot send edited content back to the
+        // daemon: the approving tool applies its own proposed content. Open
+        // them read-only so hand edits cannot be silently discarded.
+        readOnly: data.source === 'web-shell',
+        permissionRequestId:
+          typeof data.requestId === 'string' ? data.requestId : undefined,
       });
     } catch (error) {
-      console.error('[FileMessageHandler] Failed to open diff:', error);
+      logger.error('[FileMessageHandler] Failed to open diff:', error);
       vscode.window.showErrorMessage(
         `Failed to open diff: ${getErrorMessage(error)}`,
       );
     }
+  }
+
+  private async handleOpenDiffList(
+    data: Record<string, unknown> | undefined,
+  ): Promise<void> {
+    const changes = Array.isArray(data?.changes)
+      ? (data.changes as Array<Record<string, unknown>>)
+      : [];
+    if (changes.length === 0) return;
+
+    const selectedPath = data?.selectedPath as string | undefined;
+    let selected = selectedPath
+      ? changes.find((change) => change.path === selectedPath)
+      : undefined;
+    if (!selected) {
+      const items = changes.flatMap((change) => {
+        const path = typeof change.path === 'string' ? change.path : '';
+        if (!path) return [];
+        const additions = Number(change.additions ?? 0);
+        const deletions = Number(change.deletions ?? 0);
+        return [
+          {
+            label: getFileName(path),
+            description: path,
+            detail: `+${additions} −${deletions}`,
+            change,
+          },
+        ];
+      });
+      selected = (
+        await vscode.window.showQuickPick(items, {
+          title: 'Review changes',
+          placeHolder: 'Select a file to open its diff',
+        })
+      )?.change;
+    }
+    if (!selected) return;
+
+    const diffs = Array.isArray(selected.diffs)
+      ? (selected.diffs as Array<Record<string, unknown>>)
+      : [];
+    const latest = diffs[diffs.length - 1];
+    const path = typeof selected.path === 'string' ? selected.path : '';
+    if (!path || !latest) return;
+    await this.handleOpenDiff({
+      path,
+      oldText: typeof latest.oldText === 'string' ? latest.oldText : '',
+      newText: typeof latest.newText === 'string' ? latest.newText : '',
+    });
   }
 
   /**
@@ -611,7 +700,7 @@ export class FileMessageHandler extends BaseMessageHandler {
     data: Record<string, unknown> | undefined,
   ): Promise<void> {
     if (!data) {
-      console.warn(
+      logger.warn(
         '[FileMessageHandler] No data provided for createAndOpenTempFile',
       );
       return;
@@ -625,7 +714,7 @@ export class FileMessageHandler extends BaseMessageHandler {
       const readonlyProvider = ReadonlyFileSystemProvider.getInstance();
       if (!readonlyProvider) {
         const errorMessage = 'Readonly file system provider not initialized';
-        console.error('[FileMessageHandler]', errorMessage);
+        logger.error('[FileMessageHandler]', errorMessage);
         this.sendToWebView({
           type: 'error',
           data: { message: errorMessage },
@@ -664,7 +753,7 @@ export class FileMessageHandler extends BaseMessageHandler {
           showOptions.viewColumn = existingViewColumn;
         }
         await vscode.window.showTextDocument(document, showOptions);
-        console.log(
+        logger.log(
           '[FileMessageHandler] Focused on existing readonly file:',
           uri.toString(),
           'in viewColumn:',
@@ -673,28 +762,31 @@ export class FileMessageHandler extends BaseMessageHandler {
         return;
       }
 
-      // Find or ensure left group of chat webview
-      let targetViewColumn = findLeftGroupOfChatWebview();
-      if (targetViewColumn === undefined) {
-        targetViewColumn = await ensureLeftGroupOfChatWebview();
-      }
+      // Find the nearest editor group to the left or right of the chat webview.
+      // Sidebar chat has no editor group, so reuse the active group instead of
+      // creating a new group for every opened file.
+      const targetViewColumn =
+        findLeftGroupOfChatWebview() ??
+        findRightGroupOfChatWebview() ??
+        vscode.window.activeTextEditor?.viewColumn ??
+        vscode.ViewColumn.Active;
 
-      // Open as readonly document in the left group and focus it (single click should be enough)
+      // Open as readonly document in the selected neighboring group and focus it (single click should be enough)
       const document = await vscode.workspace.openTextDocument(uri);
       await vscode.window.showTextDocument(document, {
-        viewColumn: targetViewColumn ?? vscode.ViewColumn.Beside,
+        viewColumn: targetViewColumn,
         preview: false,
         preserveFocus: false,
       });
 
-      console.log(
+      logger.log(
         '[FileMessageHandler] Created and opened readonly file:',
         uri.toString(),
         'in viewColumn:',
-        targetViewColumn ?? 'Beside',
+        targetViewColumn,
       );
     } catch (error) {
-      console.error(
+      logger.error(
         '[FileMessageHandler] Failed to create and open temporary file:',
         error,
       );

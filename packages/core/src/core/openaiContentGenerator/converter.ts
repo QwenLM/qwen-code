@@ -21,13 +21,32 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import type { RequestContext } from './types.js';
+import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
+import {
+  estimateTextTokens,
+  estimateTextTokenUnits,
+  TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+} from '../../utils/request-tokenizer/textTokenizer.js';
+import type { RequestContext, StreamingTextDeltaState } from './types.js';
+import {
+  parseTaggedThinkingText,
+  TaggedThinkingParser,
+} from './taggedThinkingParser.js';
 import {
   convertSchema,
+  relaxSchemaForFunctionCalling,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
+import {
+  setToolCallPreparations,
+  type ToolCallPreparation,
+} from '../tool-call-preparation.js';
+import { InvalidStreamError } from '../invalid-stream-error.js';
+import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
+import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
+const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
 
 /**
  * Extended usage type that supports both OpenAI standard format and alternative formats
@@ -37,7 +56,7 @@ interface ExtendedCompletionUsage extends OpenAI.CompletionUsage {
   cached_tokens?: number;
 }
 
-interface ExtendedChatCompletionAssistantMessageParam
+export interface ExtendedChatCompletionAssistantMessageParam
   extends OpenAI.Chat.ChatCompletionAssistantMessageParam {
   reasoning_content?: string | null;
 }
@@ -56,6 +75,149 @@ export interface ExtendedCompletionChunkDelta
   extends OpenAI.Chat.ChatCompletionChunk.Choice.Delta {
   reasoning_content?: string | null;
   reasoning?: string | null;
+}
+
+// Threshold for treating an exact-repeat chunk as a cumulative marker rather
+// than legitimate repeated content. Cumulative providers replay the entire
+// accumulated buffer (typically hundreds of bytes) on each re-send, while
+// legitimate repeats in real output (duplicated import lines, repeated short
+// boilerplate like "</div>\n</div>", repeated emoji sequences) are usually
+// well under this threshold. 64 sits comfortably above realistic legit-repeat
+// lengths while remaining far below any practical cumulative-buffer replay,
+// so it preserves catch-rate without silently suppressing legitimate chunks.
+const CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH = 64;
+
+// Once this many bytes have been emitted without entering cumulative mode the
+// stream is almost certainly a standard incremental provider. Stop growing
+// emittedText beyond this point to bound per-stream memory and CPU. The true
+// emitted total is preserved separately in `state.emittedLength` so a late
+// transition into cumulative mode still slices the correct suffix.
+const CUMULATIVE_DETECTION_WINDOW_BYTES = 1024;
+
+/**
+ * Some OpenAI-compatible providers (e.g. DashScope) send the entire
+ * accumulated content in each `delta.content` field instead of incremental
+ * suffixes. Normalize that shape to incremental suffixes before the Gemini
+ * stream layer appends it to the live transcript.
+ *
+ * State invariants and lifecycle:
+ * - `state` is per-stream and per-channel — the content and reasoning
+ *   channels are tracked independently to avoid cross-contamination. State
+ *   MUST NOT be shared or reused across requests; stale state will silently
+ *   corrupt text output.
+ * - In cumulative mode `state.emittedText` retains the full accumulated text
+ *   for the request lifetime (worst case: ~final response size, e.g. ~100KB
+ *   for a long answer). This is single-request scoped and bounded by request
+ *   completion. A future optimization could retain only the last N bytes once
+ *   cumulative mode is firmly established, but is not required today.
+ * - In non-cumulative mode `state.emittedText` is capped at
+ *   CUMULATIVE_DETECTION_WINDOW_BYTES; `state.emittedLength` tracks the true
+ *   user-visible total separately so a late transition into cumulative mode
+ *   still produces the correct suffix.
+ * - The "exit cumulative" path is a verbatim-emit path with no overlap
+ *   reconciliation: the diverged chunk is assumed to be fully fresh content.
+ *   Cumulative providers that emit a half-overlapping chunk on exit (not
+ *   observed on DashScope-class providers) would produce visible duplication
+ *   on the overlap.
+ */
+function normalizeStreamingTextDelta(
+  rawDelta: string,
+  state: StreamingTextDeltaState,
+): string {
+  if (rawDelta.length === 0) {
+    return '';
+  }
+
+  if (state.emittedText.length === 0) {
+    state.emittedText = rawDelta;
+    state.emittedLength = rawDelta.length;
+    return rawDelta;
+  }
+
+  if (state.cumulativeMode) {
+    if (rawDelta.startsWith(state.emittedText)) {
+      const suffix = rawDelta.slice(state.emittedText.length);
+      state.emittedText = rawDelta;
+      state.emittedLength = rawDelta.length;
+      return suffix;
+    }
+
+    if (state.emittedText.startsWith(rawDelta)) {
+      debugLogger.debug(
+        `normalizeStreamingTextDelta: cumulative rewind suppression (emitted=${state.emittedText.length}b, chunk=${rawDelta.length}b)`,
+      );
+      return '';
+    }
+
+    debugLogger.debug(
+      'normalizeStreamingTextDelta: exiting cumulative mode (chunk does not match prior accumulated text)',
+    );
+    state.cumulativeMode = false;
+    // Reset baseline to current chunk so future prefix checks use fresh state.
+    // Note: this is a verbatim-emit path with no overlap reconciliation — the
+    // diverged chunk is assumed to be fully fresh content. If a cumulative
+    // provider were to emit a half-overlapping chunk on exit (rare; not
+    // observed on DashScope-class providers) the overlap would be visible.
+    state.emittedText = rawDelta;
+    state.emittedLength += rawDelta.length;
+    return rawDelta;
+  }
+
+  if (
+    rawDelta.length > state.emittedText.length &&
+    rawDelta.startsWith(state.emittedText)
+  ) {
+    const baselineLen = state.emittedText.length;
+    // The baseline may have been frozen at CUMULATIVE_DETECTION_WINDOW_BYTES
+    // during a long incremental phase. If the cap actually kicked in and the
+    // real emitted total exceeds the (frozen) baseline, slice the suffix from
+    // the real total so an incremental-then-cumulative hybrid stream doesn't
+    // re-emit bytes the user already saw between the cap and the true total.
+    // Outside that hybrid-after-cap case, use the baseline so the historical
+    // short-repeat-then-extend behaviour is preserved (the baseline is kept
+    // unmodified across short exact repeats specifically to support that
+    // case).
+    const baselineFrozenAtCap =
+      baselineLen >= CUMULATIVE_DETECTION_WINDOW_BYTES &&
+      state.emittedLength > baselineLen;
+    const sliceFrom = baselineFrozenAtCap ? state.emittedLength : baselineLen;
+    if (rawDelta.length > sliceFrom) {
+      const suffix = rawDelta.slice(sliceFrom);
+      state.emittedText = rawDelta;
+      state.emittedLength = rawDelta.length;
+      state.cumulativeMode = true;
+      debugLogger.debug(
+        `normalizeStreamingTextDelta: entered cumulative mode (prefix overlap, baseline=${baselineLen}b sliceFrom=${sliceFrom}b -> curr=${rawDelta.length}b)`,
+      );
+      return suffix;
+    }
+    // rawDelta startsWith baseline but isn't strictly longer than sliceFrom.
+    // Only reachable in the baselineFrozenAtCap branch when the cumulative
+    // chunk is shorter than the real emitted total (a cumulative-rewind-like
+    // shape during the transition). Treat as a no-op: don't enter cumulative
+    // mode here, fall through to the rewind/passthrough branches below.
+  }
+
+  if (rawDelta === state.emittedText) {
+    if (rawDelta.length >= CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH) {
+      state.cumulativeMode = true;
+      debugLogger.debug(
+        `normalizeStreamingTextDelta: entered cumulative mode (exact repeat, ${rawDelta.length}b)`,
+      );
+      return '';
+    }
+    // Short exact repeat: don't mutate emittedText so it remains a valid
+    // prefix baseline for the next prefix-overlap check. The chunk is still
+    // emitted verbatim, so bump emittedLength to track user-visible bytes.
+    state.emittedLength += rawDelta.length;
+    return rawDelta;
+  }
+
+  if (state.emittedText.length < CUMULATIVE_DETECTION_WINDOW_BYTES) {
+    state.emittedText += rawDelta;
+  }
+  state.emittedLength += rawDelta.length;
+  return rawDelta;
 }
 
 /**
@@ -92,7 +254,7 @@ type OpenAIContentPart =
 /**
  * Convert Gemini tool parameters to OpenAI JSON Schema format.
  */
-export function convertGeminiToolParametersToOpenAI(
+export function convertLlmToolParametersToOpenAI(
   parameters: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
   if (!parameters || typeof parameters !== 'object') {
@@ -112,7 +274,14 @@ export function convertGeminiToolParametersToOpenAI(
 
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
-      if (key === 'type' && typeof value === 'string') {
+      // A property can legitimately be NAMED after a JSON-Schema keyword —
+      // `{ properties: { maximum: { type: 'INTEGER' } } }` declares a tool
+      // parameter called "maximum". Recursing on any object value first keeps
+      // such subschemas converted; the keyword branches below then only ever
+      // see primitives, which is all they were meant to coerce.
+      if (typeof value === 'object' && value !== null) {
+        result[key] = convertTypes(value);
+      } else if (key === 'type' && typeof value === 'string') {
         // Convert Gemini types to OpenAI JSON Schema types
         const lowerValue = value.toLowerCase();
         if (lowerValue === 'integer') {
@@ -140,13 +309,16 @@ export function convertGeminiToolParametersToOpenAI(
         key === 'maxItems'
       ) {
         // Ensure length constraints are integers, not strings
-        if (typeof value === 'string' && !isNaN(Number(value))) {
-          result[key] = parseInt(value, 10);
+        const numberValue = typeof value === 'string' ? Number(value) : NaN;
+        if (
+          typeof value === 'string' &&
+          value.trim() !== '' &&
+          Number.isInteger(numberValue)
+        ) {
+          result[key] = numberValue;
         } else {
           result[key] = value;
         }
-      } else if (typeof value === 'object') {
-        result[key] = convertTypes(value);
       } else {
         result[key] = value;
       }
@@ -162,13 +334,13 @@ export function convertGeminiToolParametersToOpenAI(
  * Handles both Gemini tools (using 'parameters' field) and MCP tools
  * (using 'parametersJsonSchema' field).
  */
-export async function convertGeminiToolsToOpenAI(
-  geminiTools: ToolListUnion,
+export async function convertLlmToolsToOpenAI(
+  llmTools: ToolListUnion,
   schemaCompliance: SchemaComplianceMode = 'auto',
 ): Promise<OpenAI.Chat.ChatCompletionTool[]> {
   const openAITools: OpenAI.Chat.ChatCompletionTool[] = [];
 
-  for (const tool of geminiTools) {
+  for (const tool of llmTools) {
     let actualTool: Tool;
 
     // Handle CallableTool vs Tool
@@ -182,7 +354,7 @@ export async function convertGeminiToolsToOpenAI(
 
     if (actualTool.functionDeclarations) {
       for (const func of actualTool.functionDeclarations) {
-        if (func.name && func.description) {
+        if (func.name) {
           let parameters: Record<string, unknown> | undefined;
 
           // Handle both Gemini tools (parameters) and MCP tools (parametersJsonSchema)
@@ -195,20 +367,27 @@ export async function convertGeminiToolsToOpenAI(
             parameters = paramsCopy;
           } else if (func.parameters) {
             // Gemini tool format - convert parameters to OpenAI format
-            parameters = convertGeminiToolParametersToOpenAI(
+            parameters = convertLlmToolParametersToOpenAI(
               func.parameters as Record<string, unknown>,
             );
           }
 
           if (parameters) {
             parameters = convertSchema(parameters, schemaCompliance);
+            // #7315: gateways enforcing OpenAI's structured-output contract
+            // promote every property to required when an object level has
+            // `additionalProperties: false` — forcing the model to emit
+            // mutually exclusive optional fields (Agent working_dir vs
+            // isolation). Relax the wire schema; client-side
+            // validateToolParams still enforces the source schema.
+            parameters = relaxSchemaForFunctionCalling(parameters);
           }
 
           openAITools.push({
             type: 'function',
             function: {
               name: func.name,
-              description: func.description,
+              description: func.description ?? '',
               parameters,
             },
           });
@@ -223,7 +402,7 @@ export async function convertGeminiToolsToOpenAI(
 /**
  * Convert Gemini request to OpenAI message format.
  */
-export function convertGeminiRequestToOpenAI(
+export function convertLlmRequestToOpenAI(
   request: GenerateContentParameters,
   requestContext: RequestContext,
   options: { cleanOrphanToolCalls: boolean } = { cleanOrphanToolCalls: true },
@@ -236,11 +415,11 @@ export function convertGeminiRequestToOpenAI(
   // Handle contents
   processContents(request.contents, messages, requestContext);
 
-  // Clean up orphaned tool calls and merge consecutive assistant messages
+  messages = mergeConsecutiveAssistantMessages(messages);
   if (options.cleanOrphanToolCalls) {
     messages = cleanOrphanedToolCalls(messages);
+    messages = mergeConsecutiveAssistantMessages(messages);
   }
-  messages = mergeConsecutiveAssistantMessages(messages);
 
   return messages;
 }
@@ -248,7 +427,7 @@ export function convertGeminiRequestToOpenAI(
 /**
  * Convert Gemini response to OpenAI completion format (for logging).
  */
-export function convertGeminiResponseToOpenAI(
+export function convertLlmResponseToOpenAI(
   response: GenerateContentResponse,
   requestContext: RequestContext,
 ): OpenAI.Chat.ChatCompletion {
@@ -298,7 +477,7 @@ export function convertGeminiResponseToOpenAI(
     message.tool_calls = toolCalls;
   }
 
-  const finishReason = mapGeminiFinishReasonToOpenAI(candidate?.finishReason);
+  const finishReason = mapLlmFinishReasonToOpenAI(candidate?.finishReason);
 
   const usageMetadata = response.usageMetadata;
   const usage: OpenAI.CompletionUsage = {
@@ -400,6 +579,19 @@ function processContent(
   const reasoningParts: string[] = [];
   const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = [];
   let toolCallIndex = 0;
+  const emittedFunctionCallIds = new Set<string>();
+  const emittedFunctionResponseIds = new Set<string>();
+  // New history is normalized before reaching this converter. These local
+  // guards only keep already-corrupted or programmatic duplicate parts from
+  // leaking duplicate IDs into OpenAI payloads.
+  // When `splitToolMedia` is enabled, media stripped from tool messages is
+  // accumulated here and emitted as a single follow-up user message after
+  // ALL tool messages in this group have been pushed. OpenAI Chat
+  // Completions requires every `role: "tool"` response for a given assistant
+  // turn to appear contiguously before any non-tool message; emitting the
+  // user message inline (after each tool message) would interleave and
+  // break that contract when multiple parallel tool calls return media.
+  const accumulatedSplitMedia: OpenAIContentPart[] = [];
 
   for (const part of parts) {
     if (typeof part === 'string') {
@@ -423,11 +615,22 @@ function processContent(
     }
 
     if ('functionCall' in part && part.functionCall && role === 'assistant') {
+      const callId = part.functionCall.id;
+      if (callId) {
+        if (emittedFunctionCallIds.has(callId)) {
+          debugLogger.debug(
+            `Dropping duplicate functionCall id=${callId} while converting content`,
+          );
+          continue;
+        }
+        emittedFunctionCallIds.add(callId);
+      }
+
       toolCalls.push({
-        id: part.functionCall.id || `call_${toolCallIndex}`,
+        id: callId || `call_${toolCallIndex}`,
         type: 'function' as const,
         function: {
-          name: part.functionCall.name || '',
+          name: normalizeMcpToolName(part.functionCall.name || ''),
           arguments: JSON.stringify(part.functionCall.args || {}),
         },
       });
@@ -435,15 +638,92 @@ function processContent(
     }
 
     if (part.functionResponse && role === 'user') {
+      const responseId = part.functionResponse.id;
+      if (responseId) {
+        if (emittedFunctionResponseIds.has(responseId)) {
+          continue;
+        }
+        emittedFunctionResponseIds.add(responseId);
+      }
+
       // Create tool message for the function response (with embedded media)
       const toolMessage = createToolMessage(
         part.functionResponse,
         requestContext,
       );
       if (toolMessage) {
+        // Controlled by ContentGeneratorConfig.splitToolMedia (default true;
+        // resolved in pipeline.ts). OpenAI spec only permits string / text-part
+        // content on `role: "tool"` messages. Strict OpenAI-compatible servers
+        // (e.g. doubao / new-api / LM Studio) silently drop or reject tool
+        // messages containing image_url / input_audio / video_url / file parts
+        // (HTTP 400 "Invalid 'messages' in payload"), so an image read via
+        // read_file never reaches the model. When the flag is set, strip
+        // non-text media from this tool message and accumulate it; the combined
+        // media is emitted as a single follow-up user message after the parts
+        // loop completes — preserving the "all tool responses contiguous"
+        // requirement for parallel tool calls. Opt out (flag false) to restore
+        // the legacy behavior: media embedded in the tool message, which only
+        // permissive providers accept. See #4876, #3616.
+        if (
+          requestContext.splitToolMedia &&
+          Array.isArray(toolMessage.content)
+        ) {
+          const mediaParts: OpenAIContentPart[] = [];
+          const textParts: OpenAI.Chat.ChatCompletionContentPartText[] = [];
+          for (const cp of toolMessage.content as OpenAIContentPart[]) {
+            if (
+              cp &&
+              (cp.type === 'image_url' ||
+                cp.type === 'input_audio' ||
+                cp.type === 'video_url' ||
+                cp.type === 'file')
+            ) {
+              mediaParts.push(cp);
+            } else if (cp && cp.type === 'text') {
+              textParts.push(cp);
+            }
+          }
+          if (mediaParts.length > 0) {
+            const textOnly = textParts.map((p) => p.text).join('\n');
+            toolMessage.content =
+              textOnly || '[media attached in following user message]';
+            accumulatedSplitMedia.push(...mediaParts);
+          }
+        }
+        if (
+          requestContext.toolResultContentFormat === 'string' &&
+          Array.isArray(toolMessage.content)
+        ) {
+          const toolContent = toolMessage.content as OpenAIContentPart[];
+          if (
+            toolContent.every(
+              (cp): cp is OpenAI.Chat.ChatCompletionContentPartText =>
+                cp?.type === 'text',
+            )
+          ) {
+            toolMessage.content = toolContent.map((cp) => cp.text).join('\n');
+          }
+        }
         messages.push(toolMessage);
       }
     }
+  }
+
+  // Emit one combined user message containing all media stripped from the
+  // tool messages in this group. Runs after the parts loop so all tool
+  // messages remain contiguous (OpenAI requirement for parallel tool calls).
+  if (accumulatedSplitMedia.length > 0) {
+    messages.push({
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text: SPLIT_TOOL_MEDIA_TEXT,
+        },
+        ...accumulatedSplitMedia,
+      ] as unknown as OpenAI.Chat.ChatCompletionContentPartText[],
+    });
   }
 
   if (role === 'assistant') {
@@ -538,8 +818,22 @@ function createToolMessage(
     contentParts.push({ type: 'text' as const, text: textContent });
   }
 
-  // Add media parts from function response
+  // Add nested parts from the function response. Most entries here are
+  // media (image/document attachments) — but the compaction slimmer
+  // replaces inlineData/fileData with text placeholders like
+  // `[image: image/png]` so the summary side-query doesn't carry raw
+  // base64. Pass those text placeholders through as text content;
+  // otherwise they'd be silently dropped by createMediaContentPart
+  // (which only knows image_url / file_url shapes), and the summary
+  // model would receive an empty tool response with no indication that
+  // an image was ever there.
   for (const part of response.parts || []) {
+    if ('text' in part && typeof part.text === 'string') {
+      if (part.text.length > 0) {
+        contentParts.push({ type: 'text' as const, text: part.text });
+      }
+      continue;
+    }
     const mediaPart = createMediaContentPart(part, requestContext);
     if (mediaPart) {
       contentParts.push(mediaPart);
@@ -800,31 +1094,153 @@ function extractTextFromContentUnion(contentUnion: unknown): string {
   return '';
 }
 
+function convertOpenAITextToParts(
+  text: string,
+  requestContext: RequestContext,
+  final = true,
+): Part[] {
+  if (
+    !requestContext.responseParsingOptions?.taggedThinkingTags &&
+    !requestContext.taggedThinkingParser
+  ) {
+    return text ? [{ text }] : [];
+  }
+
+  if (requestContext.taggedThinkingParser) {
+    return requestContext.taggedThinkingParser.parse(text, final);
+  }
+
+  return parseTaggedThinkingText(text);
+}
+
+function hasThoughtPart(parts: Part[]): boolean {
+  return parts.some((part) => part.thought === true);
+}
+
+const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\s*>/i;
+const CLOSING_THINKING_TAG_PATTERN = /\n[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
+const LEADING_CLOSING_THINKING_TAG_PATTERN =
+  /^[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
+const LEADING_THINKING_TAG_PATTERN = /^\s*<\/?think(?:ing)?\s*>/i;
+const STANDALONE_CLOSING_THINKING_TAG_PATTERN =
+  /^\s*<\/(think|thinking)\s*>\s*$/i;
+const STANDALONE_OPENING_THINKING_TAG_PATTERN =
+  /^\s*<(think|thinking)\s*>\s*$/i;
+const MAX_THINKING_TAG_CANDIDATE_LENGTH = 128;
+
+function canBeStandaloneThinkingTagPrefix(text: string): boolean {
+  const candidate = text.trimStart().toLowerCase();
+  if (!candidate) return true;
+
+  return ['<think', '<thinking', '</think', '</thinking'].some((tag) => {
+    if (tag.startsWith(candidate)) return true;
+    if (!candidate.startsWith(tag)) return false;
+    return /^\s*(?:>\s*)?$/.test(candidate.slice(tag.length));
+  });
+}
+
+function classifyContentOnlyThinkingTagPrefix(
+  text: string,
+  streamFinished: boolean,
+): 'clean' | 'pending' | 'suspicious' | 'leaked' {
+  const candidate = text.trimStart().toLowerCase();
+  if (!candidate) return 'clean';
+
+  const consumeTag = (
+    value: string,
+    closing: boolean,
+  ): number | null | undefined => {
+    const match = LEADING_THINKING_TAG_PATTERN.exec(value)?.[0];
+    if (match) {
+      return match.trimStart().startsWith('</') === closing
+        ? match.length
+        : undefined;
+    }
+
+    if (!canBeStandaloneThinkingTagPrefix(value)) return undefined;
+    if (!value || value === '<') return null;
+    return closing === value.startsWith('</') ? null : undefined;
+  };
+
+  let rest = candidate;
+  for (const closing of [false, true, false]) {
+    const tagLength = consumeTag(rest, closing);
+    if (tagLength === null) return 'pending';
+    if (tagLength === undefined) {
+      if (!closing) return 'clean';
+      break;
+    }
+    rest = rest.slice(tagLength).trimStart();
+    if (closing && !rest) return 'clean';
+    // An opening tag followed by ordinary text is only a legitimate literal
+    // if a closing tag still balances it later. Without one, the turn is an
+    // unclosed thinking block — the exact shape of the recorded production
+    // leaks (issue #6666). Hold it mid-stream (a closing tag may still
+    // arrive) and reject it once the stream finishes. Whitespace-only tails
+    // stay undecided: they may still resolve into a closing tag.
+    if (
+      closing === false &&
+      /\S/.test(rest) &&
+      !/<\/think(?:ing)?\s*>/i.test(rest)
+    ) {
+      return streamFinished ? 'leaked' : 'pending';
+    }
+  }
+
+  let depth = 1;
+  let hasNestedOpening = false;
+  for (;;) {
+    const nextTag = THINKING_TAG_PATTERN.exec(rest);
+    if (!nextTag) break;
+
+    const closing = nextTag[0].startsWith('</');
+    depth += closing ? -1 : 1;
+    if (depth === 0) return 'clean';
+    hasNestedOpening ||= !closing;
+    rest = rest.slice(nextTag.index + nextTag[0].length);
+  }
+
+  if (!hasNestedOpening) return 'pending';
+  return streamFinished ? 'leaked' : 'suspicious';
+}
+
+function throwProtocolTagLeak(requestContext: RequestContext): never {
+  requestContext.pendingThinkingTagCandidate = undefined;
+  requestContext.pendingUntrustedResponseParts = undefined;
+  throw new InvalidStreamError(
+    'Model response leaked thinking tags.',
+    'PROTOCOL_TAG_LEAK',
+  );
+}
+
 /**
  * Convert OpenAI response to Gemini format.
  */
-export function convertOpenAIResponseToGemini(
+export function convertOpenAIResponseToLlm(
   openaiResponse: OpenAI.Chat.ChatCompletion,
   requestContext: RequestContext,
 ): GenerateContentResponse {
   const choice = openaiResponse.choices?.[0];
+  const message = choice?.message as ExtendedCompletionMessage | undefined;
+  const reasoningText = message?.reasoning_content ?? message?.reasoning;
   const response = new GenerateContentResponse();
 
   if (choice) {
     const parts: Part[] = [];
+    const textParts = choice.message.content
+      ? convertOpenAITextToParts(choice.message.content, requestContext)
+      : [];
 
-    // Handle reasoning content (thoughts)
-    const reasoningText =
-      (choice.message as ExtendedCompletionMessage).reasoning_content ??
-      (choice.message as ExtendedCompletionMessage).reasoning;
-    if (reasoningText) {
-      parts.push({ text: reasoningText, thought: true });
+    // Handle reasoning content (thoughts).
+    // Tagged thinking providers may put thoughts in content, while other
+    // responses still use reasoning_content. Preserve the separate reasoning
+    // channel unless content parsing already produced thought parts.
+    if (reasoningText && !hasThoughtPart(textParts)) {
+      parts.push(createOpenAIReasoningThoughtPart(reasoningText));
     }
 
     // Handle text content
-    if (choice.message.content) {
-      parts.push({ text: choice.message.content });
-    }
+    parts.push(...textParts);
 
     // Handle tool calls
     if (choice.message.tool_calls) {
@@ -852,7 +1268,7 @@ export function convertOpenAIResponseToGemini(
           parts,
           role: 'model' as const,
         },
-        finishReason: mapOpenAIFinishReasonToGemini(
+        finishReason: mapOpenAIFinishReasonToLlm(
           choice.finish_reason || 'stop',
         ),
         index: 0,
@@ -868,7 +1284,7 @@ export function convertOpenAIResponseToGemini(
     ? openaiResponse.created.toString()
     : new Date().getTime().toString();
 
-  response.modelVersion = requestContext.model;
+  response.modelVersion = openaiResponse.model || undefined;
   response.promptFeedback = { safetyRatings: [] };
 
   // Add usage metadata if available
@@ -885,27 +1301,42 @@ export function convertOpenAIResponseToGemini(
       usage.prompt_tokens_details?.cached_tokens ??
       extendedUsage.cached_tokens ??
       0;
-    const thinkingTokens =
-      usage.completion_tokens_details?.reasoning_tokens || 0;
-
-    // If we only have total tokens but no breakdown, estimate the split
-    // Typically input is ~70% and output is ~30% for most conversations
-    let finalPromptTokens = promptTokens;
-    let finalCompletionTokens = completionTokens;
-
-    if (totalTokens > 0 && promptTokens === 0 && completionTokens === 0) {
-      // Estimate: assume 70% input, 30% output
-      finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = Math.round(totalTokens * 0.3);
+    const cachedInputTokensReported =
+      typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
+      typeof extendedUsage.cached_tokens === 'number';
+    const providerReasoningTokens =
+      usage.completion_tokens_details?.reasoning_tokens;
+    let thinkingTokens = providerReasoningTokens;
+    if (thinkingTokens == null) {
+      const estimatedThinkingTokens = estimateTextTokens(reasoningText ?? '');
+      thinkingTokens =
+        completionTokens > 0
+          ? Math.min(estimatedThinkingTokens, completionTokens)
+          : estimatedThinkingTokens;
+      if (thinkingTokens > 0) {
+        debugLogger.debug(
+          `convertOpenAIResponseToLlm: reasoning_tokens absent; estimated ${thinkingTokens} from text`,
+        );
+      }
     }
 
+    const hasTokenBreakdown =
+      totalTokens === 0 || promptTokens !== 0 || completionTokens !== 0;
+
     response.usageMetadata = {
-      promptTokenCount: finalPromptTokens,
-      candidatesTokenCount: finalCompletionTokens,
+      ...(hasTokenBreakdown
+        ? {
+            promptTokenCount: promptTokens,
+            candidatesTokenCount: completionTokens,
+          }
+        : {}),
       totalTokenCount: totalTokens,
       cachedContentTokenCount: cachedTokens,
       thoughtsTokenCount: thinkingTokens,
     };
+    setGenAiUsageProvenance(response.usageMetadata, {
+      cachedInputTokensReported,
+    });
   }
 
   return response;
@@ -919,35 +1350,188 @@ export function convertOpenAIResponseToGemini(
  * same instance for every chunk of that stream. Concurrent streams MUST use
  * distinct parsers or their tool-call buffers will interleave (issue #3516).
  */
-export function convertOpenAIChunkToGemini(
+export function convertOpenAIChunkToLlm(
   chunk: OpenAI.Chat.ChatCompletionChunk,
   requestContext: RequestContext,
 ): GenerateContentResponse {
   const choice = chunk.choices?.[0];
   const response = new GenerateContentResponse();
+  const preparations: ToolCallPreparation[] = [];
   const toolCallParser = requestContext.toolCallParser;
   if (!toolCallParser) {
     throw new Error(
-      'convertOpenAIChunkToGemini requires requestContext.toolCallParser — attach a fresh StreamingToolCallParser at stream start.',
+      'convertOpenAIChunkToLlm requires requestContext.toolCallParser — attach a fresh StreamingToolCallParser at stream start.',
     );
   }
 
   if (choice) {
-    const parts: Part[] = [];
+    let parts: Part[] = [];
+    let contentParts: Part[] = [];
 
+    // Handle reasoning content (thoughts).
     const reasoningText =
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
-    if (reasoningText) {
-      parts.push({ text: reasoningText, thought: true });
-    }
 
     // Handle text content
-    if (choice.delta?.content) {
-      if (typeof choice.delta.content === 'string') {
-        parts.push({ text: choice.delta.content });
+    if (typeof choice.delta?.content === 'string') {
+      const rawContent = choice.delta.content;
+      const replayState = requestContext.textDeltaState;
+      const replayedTaggedThinkingSnapshot =
+        requestContext.responseParsingOptions
+          ?.taggedThinkingTagsAfterReasoning === true &&
+        requestContext.taggedThinkingParser !== undefined &&
+        replayState !== undefined &&
+        (replayState.emittedText === rawContent ||
+          (rawContent.length === replayState.emittedLength &&
+            rawContent.startsWith(replayState.emittedText))) &&
+        THINKING_TAG_PATTERN.test(rawContent);
+      if (replayedTaggedThinkingSnapshot) {
+        replayState.emittedText = rawContent;
+        replayState.emittedLength = rawContent.length;
+        replayState.cumulativeMode = true;
+      }
+      const normalizedContent = replayedTaggedThinkingSnapshot
+        ? ''
+        : normalizeStreamingTextDelta(
+            rawContent,
+            (requestContext.textDeltaState ??= {
+              emittedText: '',
+              emittedLength: 0,
+              cumulativeMode: false,
+            }),
+          );
+      const taggedThinkingCandidate =
+        (requestContext.pendingThinkingTagCandidate?.text ?? '') +
+        normalizedContent;
+      if (
+        requestContext.responseParsingOptions
+          ?.taggedThinkingTagsAfterReasoning &&
+        (requestContext.hasStructuredReasoningContent || reasoningText) &&
+        LEADING_THINKING_TAG_PATTERN.test(taggedThinkingCandidate) &&
+        !taggedThinkingCandidate.trimStart().startsWith('</')
+      ) {
+        requestContext.taggedThinkingParser ??= new TaggedThinkingParser();
+        requestContext.pendingThinkingTagCandidate = undefined;
+        contentParts = requestContext.taggedThinkingParser.parse(
+          taggedThinkingCandidate,
+          Boolean(choice.finish_reason),
+        );
+      } else if (normalizedContent || choice.finish_reason) {
+        // Skip empty-string push mid-stream; still call on finish_reason to
+        // flush any buffered tagged-thinking content.
+        contentParts = convertOpenAITextToParts(
+          normalizedContent,
+          requestContext,
+          Boolean(choice.finish_reason),
+        );
+      }
+    } else if (choice.finish_reason) {
+      // Flush any buffered tagged-thinking content on stream end
+      contentParts = convertOpenAITextToParts('', requestContext, true);
+    }
+
+    if (
+      choice.finish_reason &&
+      requestContext.responseParsingOptions?.taggedThinkingTagsAfterReasoning &&
+      requestContext.taggedThinkingParser?.hasUnclosedThought()
+    ) {
+      throwProtocolTagLeak(requestContext);
+    }
+
+    if (hasThoughtPart(contentParts)) {
+      requestContext.hasTaggedThinkingThought = true;
+      requestContext.pendingReasoningText = undefined;
+      debugLogger.debug(
+        'convertOpenAIChunkToLlm: tagged thinking content emitted a thought; dropping buffered reasoning',
+      );
+      if (requestContext.pendingContentParts?.length) {
+        debugLogger.debug(
+          `convertOpenAIChunkToLlm: flushing ${requestContext.pendingContentParts.length} buffered content part(s) before tagged content`,
+        );
+        parts.push(...requestContext.pendingContentParts);
+        requestContext.pendingContentParts = undefined;
       }
     }
+
+    if (
+      reasoningText &&
+      (!requestContext.responseParsingOptions?.taggedThinkingTags ||
+        !requestContext.hasTaggedThinkingThought)
+    ) {
+      const reasoningDeltaState = (requestContext.reasoningDeltaState ??= {
+        emittedText: '',
+        emittedLength: 0,
+        cumulativeMode: false,
+      });
+      const normalizedReasoningText = normalizeStreamingTextDelta(
+        reasoningText,
+        reasoningDeltaState,
+      );
+      if (normalizedReasoningText) {
+        reasoningDeltaState.emittedTokenUnits =
+          (reasoningDeltaState.emittedTokenUnits ?? 0) +
+          estimateTextTokenUnits(normalizedReasoningText);
+        requestContext.hasStructuredReasoningContent = true;
+        if (THINKING_TAG_PATTERN.test(normalizedReasoningText)) {
+          requestContext.hasThinkingTagInReasoning = true;
+        }
+      }
+      if (
+        normalizedReasoningText &&
+        !requestContext.responseParsingOptions?.taggedThinkingTags
+      ) {
+        parts.push(createOpenAIReasoningThoughtPart(normalizedReasoningText));
+      } else if (
+        normalizedReasoningText &&
+        !requestContext.hasTaggedThinkingThought
+      ) {
+        requestContext.pendingReasoningText =
+          (requestContext.pendingReasoningText ?? '') + normalizedReasoningText;
+        debugLogger.debug(
+          `convertOpenAIChunkToLlm: buffered reasoning text (${requestContext.pendingReasoningText.length} chars) for tagged stream`,
+        );
+      }
+    }
+
+    if (
+      requestContext.responseParsingOptions?.taggedThinkingTags &&
+      !requestContext.hasTaggedThinkingThought &&
+      requestContext.pendingReasoningText &&
+      contentParts.length
+    ) {
+      requestContext.pendingContentParts = [
+        ...(requestContext.pendingContentParts ?? []),
+        ...contentParts,
+      ];
+      debugLogger.debug(
+        `convertOpenAIChunkToLlm: buffered ${contentParts.length} content part(s) behind pending reasoning`,
+      );
+      contentParts = [];
+    }
+
+    if (
+      choice.finish_reason &&
+      requestContext.responseParsingOptions?.taggedThinkingTags &&
+      !requestContext.hasTaggedThinkingThought &&
+      requestContext.pendingReasoningText
+    ) {
+      debugLogger.debug(
+        'convertOpenAIChunkToLlm: flushing buffered reasoning for tagged stream with no tagged thought',
+      );
+      parts.push(
+        createOpenAIReasoningThoughtPart(requestContext.pendingReasoningText),
+      );
+      requestContext.pendingReasoningText = undefined;
+    }
+    if (choice.finish_reason && requestContext.pendingContentParts?.length) {
+      debugLogger.debug(
+        `convertOpenAIChunkToLlm: flushing ${requestContext.pendingContentParts.length} buffered content part(s) on stream finish`,
+      );
+      parts.push(...requestContext.pendingContentParts);
+      requestContext.pendingContentParts = undefined;
+    }
+    parts.push(...contentParts);
 
     // Handle tool calls using the stream-local parser
     if (choice.delta?.tool_calls) {
@@ -955,35 +1539,240 @@ export function convertOpenAIChunkToGemini(
         const index = toolCall.index ?? 0;
 
         // Process the tool call chunk through the streaming parser
-        if (toolCall.function?.arguments) {
-          toolCallParser.addChunk(
-            index,
-            toolCall.function.arguments,
-            toolCall.id,
-            toolCall.function.name,
-          );
-        } else {
-          // Handle metadata-only chunks (id and/or name without arguments)
-          toolCallParser.addChunk(
-            index,
-            '', // Empty chunk for metadata-only updates
-            toolCall.id,
-            toolCall.function?.name,
-          );
+        const parseResult = toolCall.function?.arguments
+          ? toolCallParser.addChunk(
+              index,
+              toolCall.function.arguments,
+              toolCall.id,
+              toolCall.function.name,
+            )
+          : toolCallParser.addChunk(
+              index,
+              '', // Empty chunk for metadata-only updates
+              toolCall.id,
+              toolCall.function?.name,
+            );
+
+        const { id: callId, name: toolName } = toolCallParser.getToolCallMeta(
+          parseResult.actualIndex ?? index,
+        );
+        if (callId && toolName) {
+          const emitted = (requestContext.preparedToolCallIds ??= new Set());
+          if (!emitted.has(callId)) {
+            emitted.add(callId);
+            preparations.push({ callId, toolName });
+          }
         }
       }
     }
 
+    const getVisibleText = (part: Part): string =>
+      part.thought !== true && typeof part.text === 'string' ? part.text : '';
+    let visibleText = parts.map(getVisibleText).join('');
+
+    const pendingTagCandidate = requestContext.pendingThinkingTagCandidate;
+    const replayedTagPrefix =
+      !pendingTagCandidate?.closingTagName &&
+      /\S/.test(pendingTagCandidate?.text ?? '') &&
+      pendingTagCandidate?.text === visibleText;
+    const replayedClosingTag =
+      STANDALONE_CLOSING_THINKING_TAG_PATTERN.exec(
+        visibleText,
+      )?.[1]?.toLowerCase();
+    if (
+      replayedTagPrefix ||
+      (pendingTagCandidate?.closingTagName &&
+        pendingTagCandidate.closingTagName === replayedClosingTag)
+    ) {
+      parts = parts.filter((part) => !getVisibleText(part));
+      visibleText = '';
+    }
+    const combinedCandidateText =
+      (pendingTagCandidate?.text ?? '') + visibleText;
+    const hasStructuredReasoning =
+      requestContext.hasStructuredReasoningContent === true;
+    const detectContentOnlyThinkingTagLeaks =
+      requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks ===
+      true;
+    const contentOnlyThinkingState =
+      hasStructuredReasoning ||
+      requestContext.hasVisibleContent === true ||
+      !detectContentOnlyThinkingTagLeaks
+        ? 'clean'
+        : classifyContentOnlyThinkingTagPrefix(
+            combinedCandidateText,
+            Boolean(choice.finish_reason),
+          );
+    const canStartTagCandidate =
+      requestContext.hasVisibleContent !== true &&
+      visibleText.length > 0 &&
+      ((hasStructuredReasoning &&
+        canBeStandaloneThinkingTagPrefix(combinedCandidateText)) ||
+        contentOnlyThinkingState !== 'clean');
+
+    if (pendingTagCandidate || canStartTagCandidate) {
+      const closingTag = STANDALONE_CLOSING_THINKING_TAG_PATTERN.exec(
+        combinedCandidateText,
+      )?.[1]?.toLowerCase();
+      const closingTagName =
+        closingTag === 'think' || closingTag === 'thinking'
+          ? closingTag
+          : undefined;
+      const openingTag = STANDALONE_OPENING_THINKING_TAG_PATTERN.test(
+        combinedCandidateText,
+      );
+      const isPossibleTag =
+        canBeStandaloneThinkingTagPrefix(combinedCandidateText) ||
+        contentOnlyThinkingState === 'pending' ||
+        contentOnlyThinkingState === 'suspicious';
+      const finishedWhitespaceCandidate =
+        Boolean(choice.finish_reason) &&
+        !closingTagName &&
+        !/\S/.test(combinedCandidateText);
+      // The length cap releases undecided prefixes (e.g. a literal "<t" that
+      // never resolves) so ordinary content is not buffered forever. Once the
+      // candidate has committed to a complete opening tag, though, releasing
+      // it can leak the whole block — production thinking-tag leaks are longer
+      // than the cap (issue #6666). Keep those held until a closing tag arrives
+      // or the finished-stream check rejects an unclosed block.
+      const confirmedOpeningTagCandidate =
+        LEADING_THINKING_TAG_PATTERN.test(combinedCandidateText) &&
+        !combinedCandidateText.trimStart().startsWith('</');
+      const releaseContentOnlyCandidate =
+        contentOnlyThinkingState === 'pending' &&
+        !confirmedOpeningTagCandidate &&
+        (Boolean(choice.finish_reason) ||
+          combinedCandidateText.trimStart().length >
+            MAX_THINKING_TAG_CANDIDATE_LENGTH);
+
+      if (contentOnlyThinkingState === 'leaked') {
+        throwProtocolTagLeak(requestContext);
+      }
+
+      if (openingTag && hasStructuredReasoning) {
+        throwProtocolTagLeak(requestContext);
+      }
+
+      if (pendingTagCandidate?.closingTagName && !closingTagName) {
+        throwProtocolTagLeak(requestContext);
+      }
+
+      if (finishedWhitespaceCandidate || releaseContentOnlyCandidate) {
+        parts = parts.filter((part) => !getVisibleText(part));
+        if (combinedCandidateText) {
+          parts.push({ text: combinedCandidateText });
+        }
+        visibleText = combinedCandidateText;
+        requestContext.pendingThinkingTagCandidate = undefined;
+      } else if (isPossibleTag) {
+        if (
+          !confirmedOpeningTagCandidate &&
+          !closingTagName &&
+          combinedCandidateText.trimStart().length >
+            MAX_THINKING_TAG_CANDIDATE_LENGTH
+        ) {
+          throwProtocolTagLeak(requestContext);
+        }
+        requestContext.pendingThinkingTagCandidate = closingTagName
+          ? { text: `</${closingTagName}>`, closingTagName }
+          : { text: combinedCandidateText };
+        parts = parts.filter((part) => !getVisibleText(part));
+        visibleText = '';
+
+        if (choice.finish_reason && !closingTagName) {
+          throwProtocolTagLeak(requestContext);
+        }
+      } else if (pendingTagCandidate) {
+        parts = parts.filter((part) => !getVisibleText(part));
+        parts.push({ text: combinedCandidateText });
+        visibleText = combinedCandidateText;
+        requestContext.pendingThinkingTagCandidate = undefined;
+      }
+    }
+
+    const leakedThinkingTag =
+      requestContext.hasStructuredReasoningContent === true &&
+      ((requestContext.hasVisibleContent !== true &&
+        LEADING_THINKING_TAG_PATTERN.test(visibleText)) ||
+        (requestContext.hasThinkingTagInReasoning === true &&
+          (CLOSING_THINKING_TAG_PATTERN.test(visibleText) ||
+            (requestContext.atVisibleLineStart === true &&
+              LEADING_CLOSING_THINKING_TAG_PATTERN.test(visibleText)))));
+
+    if (/\S/.test(visibleText)) {
+      requestContext.hasVisibleContent = true;
+    }
+    if (visibleText && requestContext.hasThinkingTagInReasoning === true) {
+      const lastLineBreak = visibleText.lastIndexOf('\n');
+      const lineSuffix = visibleText.slice(lastLineBreak + 1);
+      requestContext.atVisibleLineStart =
+        (lastLineBreak >= 0 || requestContext.atVisibleLineStart === true) &&
+        /^[^\S\r\n]*$/.test(lineSuffix);
+    }
+    if (leakedThinkingTag) {
+      throwProtocolTagLeak(requestContext);
+    }
+
+    const toolCallWithoutName = toolCallParser.hasNamelessToolCall();
+    const completedToolCalls = choice.finish_reason
+      ? toolCallParser.getCompletedToolCalls()
+      : [];
+    // Some providers report "stop" or "tool_calls" for JSON cut off by the
+    // token limit, so validate the parser state independently of finish_reason.
+    const toolCallsTruncated = choice.finish_reason
+      ? toolCallParser.hasIncompleteToolCalls()
+      : false;
+    if (
+      choice.finish_reason &&
+      requestContext.pendingThinkingTagCandidate?.closingTagName
+    ) {
+      if (
+        requestContext.hasThinkingTagInReasoning === true ||
+        choice.finish_reason !== 'tool_calls' ||
+        completedToolCalls.length === 0 ||
+        toolCallWithoutName ||
+        toolCallParser.hasConflictingToolCallIdentity() ||
+        toolCallsTruncated ||
+        toolCallParser.hasInvalidToolCallArguments()
+      ) {
+        throwProtocolTagLeak(requestContext);
+      }
+      requestContext.protocolTagSanitized = {
+        tagName: requestContext.pendingThinkingTagCandidate.closingTagName,
+        toolCallCount: completedToolCalls.length,
+      };
+      requestContext.pendingThinkingTagCandidate = undefined;
+    }
+
+    if (
+      choice.finish_reason &&
+      (toolCallParser.hasInvalidToolCallIndex() ||
+        toolCallWithoutName ||
+        (choice.finish_reason === 'tool_calls' &&
+          completedToolCalls.length === 0))
+    ) {
+      requestContext.pendingUntrustedResponseParts = undefined;
+      throw new InvalidStreamError(
+        'Model response contained a malformed tool call.',
+        'MALFORMED_TOOL_CALL',
+      );
+    }
+
+    const shouldHoldParts =
+      !choice.finish_reason &&
+      (toolCallWithoutName ||
+        requestContext.hasThinkingTagInReasoning === true ||
+        requestContext.pendingThinkingTagCandidate !== undefined);
+    if (shouldHoldParts) {
+      (requestContext.pendingUntrustedResponseParts ??= []).push(...parts);
+      parts.length = 0;
+    } else if (requestContext.pendingUntrustedResponseParts) {
+      parts = requestContext.pendingUntrustedResponseParts.concat(parts);
+      requestContext.pendingUntrustedResponseParts = undefined;
+    }
+
     // Only emit function calls when streaming is complete (finish_reason is present)
-    let toolCallsTruncated = false;
     if (choice.finish_reason) {
-      // Detect truncation the provider may not report correctly.
-      // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
-      // even when output was cut off mid-JSON due to max_tokens.
-      toolCallsTruncated = toolCallParser.hasIncompleteToolCalls();
-
-      const completedToolCalls = toolCallParser.getCompletedToolCalls();
-
       for (const toolCall of completedToolCalls) {
         if (toolCall.name) {
           parts.push({
@@ -1016,7 +1805,7 @@ export function convertOpenAIChunkToGemini(
       safetyRatings: [],
     };
     if (effectiveFinishReason) {
-      candidate.finishReason = mapOpenAIFinishReasonToGemini(
+      candidate.finishReason = mapOpenAIFinishReasonToLlm(
         effectiveFinishReason,
       );
     }
@@ -1030,7 +1819,7 @@ export function convertOpenAIChunkToGemini(
     ? chunk.created.toString()
     : new Date().getTime().toString();
 
-  response.modelVersion = requestContext.model;
+  response.modelVersion = chunk.model || undefined;
   response.promptFeedback = { safetyRatings: [] };
 
   // Add usage metadata if available in the chunk
@@ -1040,8 +1829,22 @@ export function convertOpenAIChunkToGemini(
     const promptTokens = usage.prompt_tokens || 0;
     const completionTokens = usage.completion_tokens || 0;
     const totalTokens = usage.total_tokens || 0;
+    const providerReasoningTokens =
+      usage.completion_tokens_details?.reasoning_tokens;
+    const estimatedThinkingTokens = Math.ceil(
+      (requestContext.reasoningDeltaState?.emittedTokenUnits ?? 0) /
+        TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+    );
     const thinkingTokens =
-      usage.completion_tokens_details?.reasoning_tokens || 0;
+      providerReasoningTokens ??
+      (completionTokens > 0
+        ? Math.min(estimatedThinkingTokens, completionTokens)
+        : estimatedThinkingTokens);
+    if (providerReasoningTokens == null && estimatedThinkingTokens > 0) {
+      debugLogger.debug(
+        `convertOpenAIChunkToLlm: reasoning_tokens absent; estimated ${thinkingTokens} from streamed text`,
+      );
+    }
     // Support both formats: prompt_tokens_details.cached_tokens (OpenAI standard)
     // and cached_tokens (some models return it at top level)
     const extendedUsage = usage as ExtendedCompletionUsage;
@@ -1049,111 +1852,222 @@ export function convertOpenAIChunkToGemini(
       usage.prompt_tokens_details?.cached_tokens ??
       extendedUsage.cached_tokens ??
       0;
+    const cachedInputTokensReported =
+      typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
+      typeof extendedUsage.cached_tokens === 'number';
 
-    // If we only have total tokens but no breakdown, estimate the split
-    // Typically input is ~70% and output is ~30% for most conversations
-    let finalPromptTokens = promptTokens;
-    let finalCompletionTokens = completionTokens;
-
-    if (totalTokens > 0 && promptTokens === 0 && completionTokens === 0) {
-      // Estimate: assume 70% input, 30% output
-      finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = Math.round(totalTokens * 0.3);
-    }
+    const hasTokenBreakdown =
+      totalTokens === 0 || promptTokens !== 0 || completionTokens !== 0;
 
     response.usageMetadata = {
-      promptTokenCount: finalPromptTokens,
-      candidatesTokenCount: finalCompletionTokens,
+      ...(hasTokenBreakdown
+        ? {
+            promptTokenCount: promptTokens,
+            candidatesTokenCount: completionTokens,
+          }
+        : {}),
       thoughtsTokenCount: thinkingTokens,
       totalTokenCount: totalTokens,
       cachedContentTokenCount: cachedTokens,
     };
+    setGenAiUsageProvenance(response.usageMetadata, {
+      cachedInputTokensReported,
+    });
+  }
+
+  if (preparations.length > 0) {
+    setToolCallPreparations(response, preparations);
   }
 
   return response;
 }
 
-function mapOpenAIFinishReasonToGemini(
-  openaiReason: string | null,
-): FinishReason {
-  if (!openaiReason) return FinishReason.FINISH_REASON_UNSPECIFIED;
+function mapOpenAIFinishReasonToLlm(openaiReason: string | null): FinishReason {
+  if (typeof openaiReason !== 'string') {
+    return FinishReason.FINISH_REASON_UNSPECIFIED;
+  }
   const mapping: Record<string, FinishReason> = {
     stop: FinishReason.STOP,
     length: FinishReason.MAX_TOKENS,
+    max_tokens: FinishReason.MAX_TOKENS,
     content_filter: FinishReason.SAFETY,
     function_call: FinishReason.STOP,
     tool_calls: FinishReason.STOP,
   };
-  return mapping[openaiReason] || FinishReason.FINISH_REASON_UNSPECIFIED;
+  return (
+    mapping[openaiReason.toLowerCase()] ||
+    FinishReason.FINISH_REASON_UNSPECIFIED
+  );
 }
 
-function mapGeminiFinishReasonToOpenAI(
-  geminiReason?: FinishReason,
+function mapLlmFinishReasonToOpenAI(
+  llmReason?: FinishReason,
 ): 'stop' | 'length' | 'tool_calls' | 'content_filter' | 'function_call' {
-  if (!geminiReason) {
+  if (!llmReason) {
     return 'stop';
   }
 
-  switch (geminiReason) {
+  switch (llmReason) {
     case FinishReason.STOP:
       return 'stop';
     case FinishReason.MAX_TOKENS:
       return 'length';
     case FinishReason.SAFETY:
+    case FinishReason.RECITATION:
+    case FinishReason.BLOCKLIST:
+    case FinishReason.PROHIBITED_CONTENT:
+    case FinishReason.SPII:
+    case FinishReason.IMAGE_SAFETY:
+    case FinishReason.IMAGE_RECITATION:
+    case FinishReason.IMAGE_PROHIBITED_CONTENT:
+    case FinishReason.IMAGE_OTHER:
       return 'content_filter';
+    case FinishReason.NO_IMAGE:
+      return 'stop';
     default:
-      if (geminiReason === ('RECITATION' as FinishReason)) {
-        return 'content_filter';
-      }
       return 'stop';
   }
 }
 
+/** Type guard: is this an assistant message with at least one tool call? */
+function hasToolCalls(
+  message: OpenAI.Chat.ChatCompletionMessageParam,
+): message is OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+  tool_calls: OpenAI.Chat.ChatCompletionMessageToolCall[];
+} {
+  return (
+    message.role === 'assistant' &&
+    'tool_calls' in message &&
+    Array.isArray(message.tool_calls) &&
+    message.tool_calls.length > 0
+  );
+}
+
+function isSplitToolMediaMessage(
+  message: OpenAI.Chat.ChatCompletionMessageParam,
+): boolean {
+  if (
+    message.role !== 'user' ||
+    !('content' in message) ||
+    !Array.isArray(message.content)
+  ) {
+    return false;
+  }
+
+  const firstPart = message.content[0] as
+    | { type?: string; text?: string }
+    | undefined;
+  return firstPart?.type === 'text' && firstPart.text === SPLIT_TOOL_MEDIA_TEXT;
+}
+
 /**
  * Clean up orphaned tool calls from message history to prevent OpenAI API errors.
+ *
+ * Assumes consecutive assistant messages have already been merged.
  */
 function cleanOrphanedToolCalls(
   messages: OpenAI.Chat.ChatCompletionMessageParam[],
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
   const cleaned: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-  const toolCallIds = new Set<string>();
-  const toolResponseIds = new Set<string>();
+  const validToolCallsByAssistant = new Map<
+    number,
+    OpenAI.Chat.ChatCompletionMessageToolCall[]
+  >();
+  const validToolResponseIndexesByAssistant = new Map<number, number[]>();
+  const splitMediaIndexesByAssistant = new Map<number, number[]>();
+  const emittedWithAssistant = new Set<number>();
+  const survivingToolCallIds = new Set<string>();
 
-  // First pass: collect all tool call IDs and tool response IDs
-  for (const message of messages) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (hasToolCalls(message)) {
+      const candidateToolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] =
+        [];
+      const candidateToolCallIds = new Set<string>();
       for (const toolCall of message.tool_calls) {
-        if (toolCall.id) {
-          toolCallIds.add(toolCall.id);
+        const id = toolCall.id;
+        if (!id || survivingToolCallIds.has(id)) {
+          continue;
         }
+        if (candidateToolCallIds.has(id)) {
+          continue;
+        }
+        candidateToolCallIds.add(id);
+        candidateToolCalls.push(toolCall);
       }
-    } else if (
-      message.role === 'tool' &&
-      'tool_call_id' in message &&
-      message.tool_call_id
-    ) {
-      toolResponseIds.add(message.tool_call_id);
+
+      const adjacentToolResponseIds = new Set<string>();
+      const toolResponseIndexes: number[] = [];
+      const splitMediaIndexes: number[] = [];
+      let lastToolResponseMatchesAssistant = false;
+
+      for (
+        let nextIndex = index + 1;
+        nextIndex < messages.length;
+        nextIndex += 1
+      ) {
+        const nextMessage = messages[nextIndex];
+        if (nextMessage.role === 'tool' && 'tool_call_id' in nextMessage) {
+          if (!nextMessage.tool_call_id) {
+            lastToolResponseMatchesAssistant = false;
+            continue;
+          }
+
+          if (
+            candidateToolCallIds.has(nextMessage.tool_call_id) &&
+            !adjacentToolResponseIds.has(nextMessage.tool_call_id)
+          ) {
+            adjacentToolResponseIds.add(nextMessage.tool_call_id);
+            toolResponseIndexes.push(nextIndex);
+            lastToolResponseMatchesAssistant = true;
+          } else {
+            lastToolResponseMatchesAssistant = false;
+          }
+
+          // Other tool responses in this block may belong to another assistant.
+          continue;
+        }
+
+        if (isSplitToolMediaMessage(nextMessage)) {
+          if (lastToolResponseMatchesAssistant) {
+            splitMediaIndexes.push(nextIndex);
+          }
+          continue;
+        }
+
+        if (nextMessage.role === 'assistant' && !hasToolCalls(nextMessage)) {
+          // Consecutive assistant turns are merged before cleanup.
+          continue;
+        }
+
+        break;
+      }
+
+      const validToolCalls = candidateToolCalls.filter((toolCall) =>
+        adjacentToolResponseIds.has(toolCall.id),
+      );
+      for (const toolCall of validToolCalls) {
+        survivingToolCallIds.add(toolCall.id);
+      }
+      validToolCallsByAssistant.set(index, validToolCalls);
+      validToolResponseIndexesByAssistant.set(index, toolResponseIndexes);
+      splitMediaIndexesByAssistant.set(index, splitMediaIndexes);
     }
   }
 
-  // Second pass: filter out orphaned messages
-  for (const message of messages) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
-      // Filter out tool calls that don't have corresponding responses
-      const validToolCalls = message.tool_calls.filter(
-        (toolCall) => toolCall.id && toolResponseIds.has(toolCall.id),
-      );
+  for (let index = 0; index < messages.length; index += 1) {
+    if (emittedWithAssistant.has(index)) {
+      continue;
+    }
+
+    const message = messages[index];
+    if (hasToolCalls(message)) {
+      const reasoningContent = (
+        message as ExtendedChatCompletionAssistantMessageParam
+      ).reasoning_content;
+      const validToolCalls = validToolCallsByAssistant.get(index) ?? [];
 
       if (validToolCalls.length > 0) {
-        // Keep the message but only with valid tool calls
         const cleanedMessage = { ...message };
         (
           cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
@@ -1161,11 +2075,30 @@ function cleanOrphanedToolCalls(
           }
         ).tool_calls = validToolCalls;
         cleaned.push(cleanedMessage);
+
+        for (const toolResponseIndex of validToolResponseIndexesByAssistant.get(
+          index,
+        ) ?? []) {
+          const toolResponse = messages[toolResponseIndex];
+          if (toolResponse) {
+            cleaned.push(toolResponse);
+            emittedWithAssistant.add(toolResponseIndex);
+          }
+        }
+
+        for (const splitMediaIndex of splitMediaIndexesByAssistant.get(index) ??
+          []) {
+          const splitMediaMessage = messages[splitMediaIndex];
+          if (splitMediaMessage) {
+            cleaned.push(splitMediaMessage);
+            emittedWithAssistant.add(splitMediaIndex);
+          }
+        }
       } else if (
-        typeof message.content === 'string' &&
-        message.content.trim()
+        (typeof message.content === 'string' && message.content.trim()) ||
+        reasoningContent
       ) {
-        // Keep the message if it has text content, but remove tool calls
+        // Keep text/reasoning content, but remove orphaned tool calls.
         const cleanedMessage = { ...message };
         delete (
           cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
@@ -1173,91 +2106,25 @@ function cleanOrphanedToolCalls(
           }
         ).tool_calls;
         cleaned.push(cleanedMessage);
+      } else {
+        debugLogger.debug(
+          `cleanOrphanedToolCalls: dropping assistant with ${message.tool_calls.length} orphaned tool call(s) and no text/reasoning content`,
+        );
       }
-      // If no valid tool calls and no content, skip the message entirely
-    } else if (
-      message.role === 'tool' &&
-      'tool_call_id' in message &&
-      message.tool_call_id
-    ) {
-      // Only keep tool responses that have corresponding tool calls
-      if (toolCallIds.has(message.tool_call_id)) {
-        cleaned.push(message);
-      }
+    } else if (message.role === 'tool' && 'tool_call_id' in message) {
+      debugLogger.debug(
+        `cleanOrphanedToolCalls: dropping orphaned tool response ${message.tool_call_id || '<empty>'}`,
+      );
+    } else if (isSplitToolMediaMessage(message)) {
+      debugLogger.debug(
+        'cleanOrphanedToolCalls: dropping orphaned split tool media message',
+      );
     } else {
-      // Keep all other messages as-is
       cleaned.push(message);
     }
   }
 
-  // Final validation: ensure every assistant message with tool_calls has corresponding tool responses
-  const finalCleaned: OpenAI.Chat.ChatCompletionMessageParam[] = [];
-  const finalToolCallIds = new Set<string>();
-
-  // Collect all remaining tool call IDs
-  for (const message of cleaned) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
-      for (const toolCall of message.tool_calls) {
-        if (toolCall.id) {
-          finalToolCallIds.add(toolCall.id);
-        }
-      }
-    }
-  }
-
-  // Verify all tool calls have responses
-  const finalToolResponseIds = new Set<string>();
-  for (const message of cleaned) {
-    if (
-      message.role === 'tool' &&
-      'tool_call_id' in message &&
-      message.tool_call_id
-    ) {
-      finalToolResponseIds.add(message.tool_call_id);
-    }
-  }
-
-  // Remove any remaining orphaned tool calls
-  for (const message of cleaned) {
-    if (
-      message.role === 'assistant' &&
-      'tool_calls' in message &&
-      message.tool_calls
-    ) {
-      const finalValidToolCalls = message.tool_calls.filter(
-        (toolCall) => toolCall.id && finalToolResponseIds.has(toolCall.id),
-      );
-
-      if (finalValidToolCalls.length > 0) {
-        const cleanedMessage = { ...message };
-        (
-          cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-            tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
-          }
-        ).tool_calls = finalValidToolCalls;
-        finalCleaned.push(cleanedMessage);
-      } else if (
-        typeof message.content === 'string' &&
-        message.content.trim()
-      ) {
-        const cleanedMessage = { ...message };
-        delete (
-          cleanedMessage as OpenAI.Chat.ChatCompletionMessageParam & {
-            tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
-          }
-        ).tool_calls;
-        finalCleaned.push(cleanedMessage);
-      }
-    } else {
-      finalCleaned.push(message);
-    }
-  }
-
-  return finalCleaned;
+  return cleaned;
 }
 
 /**
@@ -1337,6 +2204,24 @@ function mergeConsecutiveAssistantMessages(
           ).tool_calls = combinedToolCalls;
         }
 
+        // Combine reasoning_content the same way content is combined. Otherwise
+        // the merged-away turn's reasoning is silently dropped, while
+        // cleanOrphanedToolCalls (which also merges assistant turns) keeps it.
+        const lastReasoning = (
+          lastMessage as ExtendedChatCompletionAssistantMessageParam
+        ).reasoning_content;
+        const currentReasoning = (
+          message as ExtendedChatCompletionAssistantMessageParam
+        ).reasoning_content;
+        const combinedReasoning = [lastReasoning, currentReasoning]
+          .filter(Boolean)
+          .join('');
+        if (combinedReasoning) {
+          (
+            lastMessage as ExtendedChatCompletionAssistantMessageParam
+          ).reasoning_content = combinedReasoning;
+        }
+
         continue; // Skip adding the current message since it's been merged
       }
     }
@@ -1349,10 +2234,10 @@ function mergeConsecutiveAssistantMessages(
 }
 
 export const OpenAIContentConverter = {
-  convertGeminiToolParametersToOpenAI,
-  convertGeminiToolsToOpenAI,
-  convertGeminiRequestToOpenAI,
-  convertGeminiResponseToOpenAI,
-  convertOpenAIResponseToGemini,
-  convertOpenAIChunkToGemini,
+  convertLlmToolParametersToOpenAI,
+  convertLlmToolsToOpenAI,
+  convertLlmRequestToOpenAI,
+  convertLlmResponseToOpenAI,
+  convertOpenAIResponseToLlm,
+  convertOpenAIChunkToLlm,
 };

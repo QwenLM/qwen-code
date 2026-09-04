@@ -1,0 +1,10 @@
+# Chrome extension signing private key — NEVER commit it.
+# Load-unpacked debugging uses the public "key" in manifest.json (which fixes
+# the extension id); the .pem is only needed to package a .crx for distribution,
+# and should be kept out of git (e.g. in a password manager) and copied between
+# machines through a secure channel — not the repo.
+*.pem
+.extension-key.pem
+
+# Packaging output of `npm run package`; regenerated, never committed.
+chrome-extension.zip

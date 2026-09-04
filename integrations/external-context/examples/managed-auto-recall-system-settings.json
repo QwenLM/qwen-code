@@ -1,0 +1,32 @@
+{
+  "disableAllHooks": false,
+  "general": {
+    "chatRecording": false
+  },
+  "ui": {
+    "enableSpeculation": false
+  },
+  "memory": {
+    "enableManagedAutoMemory": false,
+    "enableManagedAutoDream": false,
+    "enableTeamMemory": false,
+    "enableTeamMemorySync": false,
+    "enableAutoSkill": false
+  },
+  "slashCommands": {
+    "disabled": ["memory", "remember", "forget", "dream", "cd"]
+  },
+  "tools": {
+    "approvalMode": "default",
+    "autoAccept": false
+  },
+  "privacy": {
+    "usageStatisticsEnabled": false
+  },
+  "telemetry": {
+    "enabled": false,
+    "logPrompts": false,
+    "includeSensitiveSpanAttributes": false
+  },
+  "$version": 4
+}

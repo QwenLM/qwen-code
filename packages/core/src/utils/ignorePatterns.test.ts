@@ -13,8 +13,8 @@ import {
 import type { Config } from '../config/config.js';
 
 // Mock the memoryTool module
-vi.mock('../memory/const.js', () => ({
-  getAllGeminiMdFilenames: vi.fn(() => ['GEMINI.md', 'AGENTS.md']),
+vi.mock('./memory-constants.js', () => ({
+  getAllMemoryFilenames: vi.fn(() => ['GEMINI.md', 'AGENTS.md']),
 }));
 
 describe('FileExclusions', () => {
@@ -214,9 +214,12 @@ describe('BINARY_EXTENSIONS', () => {
   });
 
   it('should include additional binary extensions', () => {
-    expect(BINARY_EXTENSIONS).toContain('.dat');
     expect(BINARY_EXTENSIONS).toContain('.obj');
     expect(BINARY_EXTENSIONS).toContain('.wasm');
+  });
+
+  it('should not force generic data extensions to binary', () => {
+    expect(BINARY_EXTENSIONS).not.toContain('.dat');
   });
 
   it('should include media file extensions', () => {

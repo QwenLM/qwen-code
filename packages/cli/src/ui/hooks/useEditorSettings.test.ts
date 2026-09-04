@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import {
   afterEach,
@@ -18,9 +19,10 @@ import { renderHook } from '@testing-library/react';
 import { useEditorSettings } from './useEditorSettings.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { SettingScope } from '../../config/settings.js';
-import { MessageType, type HistoryItem } from '../types.js';
+import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
   type EditorType,
+  type Config,
   checkHasEditorType,
   allowEditorTypeInSandbox,
 } from '@qwen-code/qwen-code-core';
@@ -41,7 +43,7 @@ describe('useEditorSettings', () => {
   let mockLoadedSettings: LoadedSettings;
   let mockSetEditorError: MockedFunction<(error: string | null) => void>;
   let mockAddItem: MockedFunction<
-    (item: Omit<HistoryItem, 'id'>, timestamp: number) => void
+    (item: HistoryItemWithoutId, timestamp: number) => void
   >;
 
   beforeEach(() => {
@@ -95,8 +97,17 @@ describe('useEditorSettings', () => {
   });
 
   it('should handle editor selection successfully', () => {
+    const recordSlashCommand = vi.fn();
+    const config = {
+      getChatRecordingService: () => ({ recordSlashCommand }),
+    } as unknown as Config;
     const { result } = renderHook(() =>
-      useEditorSettings(mockLoadedSettings, mockSetEditorError, mockAddItem),
+      useEditorSettings(
+        mockLoadedSettings,
+        mockSetEditorError,
+        mockAddItem,
+        config,
+      ),
     );
 
     const editorType: EditorType = 'vscode';
@@ -120,6 +131,16 @@ describe('useEditorSettings', () => {
       },
       expect.any(Number),
     );
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/editor',
+      outputHistoryItems: [
+        {
+          type: MessageType.INFO,
+          text: 'Editor preference set to "vscode" in User settings.',
+        },
+      ],
+    });
 
     expect(mockSetEditorError).toHaveBeenCalledWith(null);
     expect(result.current.isEditorDialogOpen).toBe(false);

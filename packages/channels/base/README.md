@@ -1,6 +1,6 @@
 # @qwen-code/channel-base
 
-Base infrastructure for building Qwen Code channel adapters. Provides the abstract base class, access control, session routing, and the ACP bridge that communicates with the agent.
+Base infrastructure for building Qwen Code channel adapters. Provides the abstract base class, access control, session routing, and the adapter-facing bridge interface used to communicate with the agent.
 
 If you're building a channel plugin, this is your only dependency.
 
@@ -17,12 +17,22 @@ Subclass `ChannelBase` and implement three methods:
 ```typescript
 import { ChannelBase } from '@qwen-code/channel-base';
 import type {
+  ChannelAgentBridge,
+  ChannelBaseOptions,
   ChannelConfig,
   Envelope,
-  AcpBridge,
 } from '@qwen-code/channel-base';
 
 class MyChannel extends ChannelBase {
+  constructor(
+    name: string,
+    config: ChannelConfig,
+    bridge: ChannelAgentBridge,
+    options?: ChannelBaseOptions,
+  ) {
+    super(name, config, bridge, options);
+  }
+
   async connect(): Promise<void> {
     // Connect to platform API, register message handlers.
     // When a message arrives, build an Envelope and call:
@@ -55,6 +65,17 @@ export const plugin: ChannelPlugin = {
 
 For a complete working example, see [`@qwen-code/channel-plugin-example`](../plugin-example/).
 
+Migration note for existing TypeScript plugins: if your adapter constructor or factory explicitly types `bridge` as `AcpBridge`, change that annotation to `ChannelAgentBridge` and keep using only the methods exposed by that contract. JavaScript plugins are unaffected at runtime, and standalone `qwen channel start` still passes the current `AcpBridge` implementation.
+
+## Runtime modes
+
+Channel adapters can run in two host modes:
+
+- `qwen channel start [name]` is the standalone service. It uses `AcpBridge` over a `qwen-code --acp` child process and remains the default channel command.
+- `qwen serve --channel <name>` and `qwen serve --channel all` are experimental daemon-managed modes. Named channels are grouped by owning workspace and `qwen serve` starts one out-of-process worker per owning runtime. Each worker connects back to the daemon through the SDK, and adapters receive a `DaemonChannelBridge`-backed `ChannelAgentBridge` facade. `--channel all` stays primary-only.
+
+In daemon-managed mode, every named channel's `cwd` must resolve to exactly one registered, trusted workspace. Its worker receives that runtime's cwd and environment overlay; an ambiguous or untrusted selection fails instead of using primary. The optional `btw` and `shellCommand` methods are exposed to adapters only when the daemon advertises the `session_btw` and `session_shell_command` capabilities, respectively.
+
 ## Architecture
 
 ```
@@ -63,9 +84,9 @@ Inbound:  Platform message
             → GroupGate (group policy + mention gating)
             → SenderGate (allowlist / pairing / open)
             → Slash commands (/clear, /help, /status)
-            → SessionRouter (resolve or create ACP session)
+            → SessionRouter (resolve or create agent session)
             → Resolve attachments (images → bridge, files → prompt text)
-            → AcpBridge.prompt() → agent
+            → ChannelAgentBridge.prompt() → agent
 
 Outbound: Agent response
             → BlockStreamer (if enabled: split into blocks at paragraph boundaries)
@@ -78,36 +99,40 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 
 ### Classes
 
-| Class           | Purpose                                                          |
-| --------------- | ---------------------------------------------------------------- |
-| `ChannelBase`   | Abstract base class — extend this to build a channel adapter     |
-| `AcpBridge`     | Spawns and communicates with the `qwen-code --acp` agent process |
-| `BlockStreamer` | Progressive multi-message delivery for block streaming           |
-| `SessionRouter` | Maps senders to ACP sessions with configurable scoping           |
-| `SenderGate`    | DM access control (allowlist / pairing / open)                   |
-| `GroupGate`     | Group chat policy and @mention gating                            |
-| `PairingStore`  | Pairing code generation, approval, and allowlist persistence     |
+| Class           | Purpose                                                                              |
+| --------------- | ------------------------------------------------------------------------------------ |
+| `ChannelBase`   | Abstract base class — extend this to build a channel adapter                         |
+| `AcpBridge`     | Current standalone `qwen channel start` bridge implementation over `qwen-code --acp` |
+| `BlockStreamer` | Progressive multi-message delivery for block streaming                               |
+| `SessionRouter` | Maps senders to agent sessions with configurable scoping                             |
+| `SenderGate`    | DM access control (allowlist / pairing / open)                                       |
+| `GroupGate`     | Group chat policy and @mention gating                                                |
+| `PairingStore`  | Pairing code generation, approval, and allowlist persistence                         |
 
 ### Types
 
-| Type            | Description                                    |
-| --------------- | ---------------------------------------------- |
-| `Attachment`    | Structured file/image/audio/video attachment   |
-| `ChannelConfig` | Channel configuration from `settings.json`     |
-| `ChannelPlugin` | Plugin factory interface (what you export)     |
-| `Envelope`      | Normalized inbound message format              |
-| `SenderPolicy`  | `'allowlist' \| 'pairing' \| 'open'`           |
-| `GroupPolicy`   | `'disabled' \| 'allowlist' \| 'open'`          |
-| `SessionScope`  | `'user' \| 'thread' \| 'single'`               |
-| `GroupConfig`   | Per-group settings (e.g. `requireMention`)     |
-| `SessionTarget` | Maps a session back to its channel/sender/chat |
+| Type                 | Description                                                              |
+| -------------------- | ------------------------------------------------------------------------ |
+| `Attachment`         | Structured file/image/audio/video attachment                             |
+| `AvailableCommand`   | Agent command advertised through the bridge                              |
+| `ChannelBtwResult`   | BTW result `{ sessionId, answer }`; `answer` can be `null`               |
+| `ChannelAgentBridge` | Adapter-facing bridge contract used by `ChannelBase` and `SessionRouter` |
+| `ChannelConfig`      | Channel configuration from `settings.json`                               |
+| `ChannelPlugin`      | Plugin factory interface (what you export)                               |
+| `Envelope`           | Normalized inbound message format                                        |
+| `SenderPolicy`       | `'allowlist' \| 'pairing' \| 'open'`                                     |
+| `GroupPolicy`        | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'`                       |
+| `SessionScope`       | `'user' \| 'chat_thread' \| 'single'`; legacy `'thread'` is deprecated   |
+| `GroupConfig`        | Per-group settings (e.g. `requireMention`)                               |
+| `SessionTarget`      | Maps a session back to its channel/sender/chat                           |
+| `ToolCallEvent`      | Agent tool-call event delivered to adapters                              |
 
 ## API reference
 
 ### ChannelBase
 
 ```typescript
-constructor(name: string, config: ChannelConfig, bridge: AcpBridge, options?: ChannelBaseOptions)
+constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, options?: ChannelBaseOptions)
 ```
 
 **Abstract methods** (you must implement):
@@ -120,35 +145,97 @@ constructor(name: string, config: ChannelConfig, bridge: AcpBridge, options?: Ch
 
 **Provided methods:**
 
-| Method                                            | Description                                                                                                                       |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `handleInbound(envelope)`                         | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler. |
-| `setBridge(bridge)`                               | Replace the ACP bridge after crash recovery                                                                                       |
-| `registerCommand(name, handler)`                  | Register a custom slash command (e.g. `/mycommand`)                                                                               |
-| `onToolCall(chatId, event)`                       | Hook called on agent tool invocations — override to show indicators                                                               |
-| `onResponseChunk(chatId, chunk, sessionId)`       | Hook called per streaming text chunk — override for progressive display (default: no-op)                                          |
-| `onResponseComplete(chatId, fullText, sessionId)` | Hook called when full response is ready — override to customize delivery (default: `sendMessage()`)                               |
+| Method                                                     | Description                                                                                                                                           |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `handleInbound(envelope)`                                  | Route an inbound message through the full pipeline (gate checks, commands, session, prompt). Call this from your message handler.                     |
+| `setBridge(bridge)`                                        | Replace the agent bridge after crash recovery                                                                                                         |
+| `registerCommand(name, handler)`                           | Register a custom slash command (e.g. `/mycommand`)                                                                                                   |
+| `onToolCall(chatId, event)`                                | Hook called on agent tool invocations — override to show indicators                                                                                   |
+| `onResponseChunk(chatId, chunk, sessionId, segment)`       | Hook called per streaming text chunk — override for progressive display while preserving immutable `segment.sourceLabel` attribution (default: no-op) |
+| `onResponseComplete(chatId, fullText, sessionId, segment)` | Hook called when full response is ready — override to customize delivery (default: attributes delivery with `segment.sourceLabel` in named-task mode) |
 
 **Block streaming:** When `blockStreaming: "on"` is set in the channel config, the base class automatically splits the agent's streaming response into multiple messages at paragraph boundaries. See [Block Streaming](#block-streaming) below.
 
 **Built-in slash commands:** `/clear` (`/reset`, `/new`), `/help`, `/status`
 
+**ChannelBaseOptions:**
+
+| Option                 | Description                                                                                                                                                |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `router`               | Optional `SessionRouter`. Omit for the default standalone router.                                                                                          |
+| `proxy`                | Optional proxy URL made available to adapters.                                                                                                             |
+| `registerBridgeEvents` | Set only when the adapter owns a supplied router and `ChannelBase` should consume bridge events directly. Leave unset for routers supplied by the gateway. |
+
+### ChannelAgentBridge
+
+`ChannelAgentBridge` is the adapter-facing contract. Channel adapters, channel plugins, `ChannelBase`, and `SessionRouter` should depend on this type instead of a concrete bridge implementation.
+
+`btw` and `shellCommand` are optional. Adapters should check for each before enabling the feature it backs — a BTW side question, or `!cmd`-style shell execution — because daemon-managed hosts expose them only when the connected daemon advertises the matching capability (`session_btw`, `session_shell_command`).
+
+```typescript
+interface ChannelAgentBridge {
+  readonly availableCommands: AvailableCommand[];
+  on(eventName: 'toolCall', listener: (event: ToolCallEvent) => void): unknown;
+  on(
+    eventName: 'textChunk',
+    listener: (sessionId: string, chunk: string) => void,
+  ): unknown;
+  on(
+    eventName: 'sessionDied',
+    listener: (event: { sessionId: string; reason?: string }) => void,
+  ): unknown;
+  off(eventName: 'toolCall', listener: (event: ToolCallEvent) => void): unknown;
+  off(
+    eventName: 'textChunk',
+    listener: (sessionId: string, chunk: string) => void,
+  ): unknown;
+  off(
+    eventName: 'sessionDied',
+    listener: (event: { sessionId: string; reason?: string }) => void,
+  ): unknown;
+  newSession(cwd: string): Promise<string>;
+  loadSession(sessionId: string, cwd: string): Promise<string>;
+  prompt(
+    sessionId: string,
+    text: string,
+    options?: {
+      images?: Array<{ data: string; mimeType: string }>; // ordered, preferred
+      imageBase64?: string; // legacy fallback (first image only)
+      imageMimeType?: string; // legacy fallback (first image only)
+    },
+  ): Promise<string>;
+  btw?(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult>;
+  cancelSession(sessionId: string): Promise<void>;
+  shellCommand?(
+    sessionId: string,
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+}
+```
+
+`prompt` carries images through `options.images` — an ordered array of `{ data, mimeType }` entries delivered to the model in array order. The legacy `imageBase64`/`imageMimeType` pair is a fallback that carries only the first image. Built-in bridges normalize MIME types before use: lowercased, parameters stripped (`image/png; charset=binary` → `image/png`), and the `image/jpg` alias mapped to `image/jpeg`. Daemon-backed bridges upload images to the daemon attachment store and restrict them to its supported subtypes (`image/bmp`, `image/gif`, `image/jpeg`, `image/png`, `image/webp`) and its per-item admission rule (non-empty and at most 8 MiB once decoded); daemons without attachment support take the same images inline in the prompt body, kept under an aggregate base64 budget. Images outside those limits are skipped with a log line instead of failing the turn, while `AcpBridge` delivers any normalized `image/*` inline.
+
 ### AcpBridge
 
-Manages the `qwen-code --acp` child process and ACP sessions.
+`AcpBridge` is the current implementation used by standalone `qwen channel start`. It manages the `qwen-code --acp` child process and implements `ChannelAgentBridge`.
 
 ```typescript
 constructor(options: { cliEntryPath: string; cwd: string; model?: string })
 ```
 
-| Method                              | Description                                                                                                       |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `start()`                           | Spawn the agent process                                                                                           |
-| `stop()`                            | Kill the agent process                                                                                            |
-| `newSession(cwd)`                   | Create a new ACP session, returns `sessionId`                                                                     |
-| `loadSession(sessionId, cwd)`       | Restore an existing session                                                                                       |
-| `prompt(sessionId, text, options?)` | Send a message to the agent, returns the full response text. Supports optional `imageBase64` and `imageMimeType`. |
-| `isConnected`                       | Whether the agent process is alive                                                                                |
+| Method                              | Description                                                                                                                                                                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `start()`                           | Spawn the agent process                                                                                                                                                                                                        |
+| `stop()`                            | Kill the agent process                                                                                                                                                                                                         |
+| `newSession(cwd)`                   | Create a new ACP session, returns `sessionId`                                                                                                                                                                                  |
+| `loadSession(sessionId, cwd)`       | Restore an existing session                                                                                                                                                                                                    |
+| `prompt(sessionId, text, options?)` | Send a message to the agent, returns the full response text. Supports an ordered `images` array (`{ data, mimeType }` per image, preferred), falling back to the legacy `imageBase64`/`imageMimeType` pair for a single image. |
+| `isConnected`                       | Whether the agent process is alive                                                                                                                                                                                             |
 
 **Events** (EventEmitter):
 
@@ -160,10 +247,10 @@ constructor(options: { cliEntryPath: string; cwd: string; model?: string })
 
 ### SessionRouter
 
-Maps senders to ACP sessions based on the configured scope.
+Maps senders to agent sessions based on the configured scope.
 
 ```typescript
-constructor(bridge: AcpBridge, defaultCwd: string, scope?: SessionScope, persistPath?: string)
+constructor(bridge: ChannelAgentBridge, defaultCwd: string, scope?: SessionScope, persistPath?: string)
 ```
 
 **Routing keys by scope:**
@@ -174,12 +261,13 @@ constructor(bridge: AcpBridge, defaultCwd: string, scope?: SessionScope, persist
 | `thread`         | `channel:threadId`        | One session per thread                    |
 | `single`         | `channel:__single__`      | One shared session for the entire channel |
 
-| Method                                                    | Description                                                 |
-| --------------------------------------------------------- | ----------------------------------------------------------- |
-| `resolve(channelName, senderId, chatId, threadId?, cwd?)` | Get or create a session for the given sender                |
-| `removeSession(channelName, senderId, chatId?)`           | Remove session(s) — used by `/clear`                        |
-| `restoreSessions()`                                       | Reload sessions from disk after bridge restart              |
-| `clearAll()`                                              | Clear all sessions and delete persist file (clean shutdown) |
+| Method                                                     | Description                                                 |
+| ---------------------------------------------------------- | ----------------------------------------------------------- |
+| `resolve(channelName, senderId, chatId, threadId?, cwd?)`  | Get or create a session for the given sender                |
+| `removeSession(channelName, senderId, chatId?, threadId?)` | Remove session(s) — used by `/clear`                        |
+| `removeSessionId(sessionId)`                               | Remove all routing state for a bridge session ID            |
+| `restoreSessions()`                                        | Reload sessions from disk after bridge restart              |
+| `clearAll()`                                               | Clear all sessions and delete persist file (clean shutdown) |
 
 ### SenderGate
 
@@ -187,9 +275,9 @@ constructor(bridge: AcpBridge, defaultCwd: string, scope?: SessionScope, persist
 constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: PairingStore)
 ```
 
-| Method                         | Description                                                  |
-| ------------------------------ | ------------------------------------------------------------ |
-| `check(senderId, senderName?)` | Returns `{ allowed: boolean, pairingCode?: string \| null }` |
+| Method                         | Description                                                          |
+| ------------------------------ | -------------------------------------------------------------------- |
+| `check(senderId, senderName?)` | Returns `{ allowed: boolean, pairing?: CreatePairingRequestResult }` |
 
 **Policy behavior:**
 
@@ -202,12 +290,12 @@ constructor(policy: SenderPolicy, allowedUsers?: string[], pairingStore?: Pairin
 ### GroupGate
 
 ```typescript
-constructor(policy?: GroupPolicy, groups?: Record<string, GroupConfig>)
+constructor(policy?: GroupPolicy, groups?: Record<string, GroupConfig>, pairingStore?: PairingStore)
 ```
 
-| Method            | Description                                                                                    |
-| ----------------- | ---------------------------------------------------------------------------------------------- |
-| `check(envelope)` | Returns `{ allowed: boolean, reason?: 'disabled' \| 'not_allowlisted' \| 'mention_required' }` |
+| Method                      | Description                                                                                                                                                                                                                            |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check(envelope, options?)` | Returns the group policy decision and an optional pairing result. Under `pairing`, a mention/reply from an unapproved group creates (or reuses) a pending pairing request; pass `{ createPairingRequest: false }` for read-only probes |
 
 **Policy behavior:**
 
@@ -215,6 +303,7 @@ constructor(policy?: GroupPolicy, groups?: Record<string, GroupConfig>)
 | ----------- | ---------------------------------------- |
 | `disabled`  | All group messages rejected              |
 | `allowlist` | Only groups listed in config are allowed |
+| `pairing`   | A group must be approved once by chat ID |
 | `open`      | All groups allowed                       |
 
 When `requireMention` is `true` (default), group messages are only processed if the bot is @mentioned or the message is a reply to the bot.
@@ -222,17 +311,23 @@ When `requireMention` is `true` (default), group messages are only processed if 
 ### PairingStore
 
 ```typescript
-constructor(channelName: string)
+constructor(channelName: string, workspaceCwd?: string)
 ```
 
-Persists pairing state to `~/.qwen/channels/{channelName}-pairing.json` and `{channelName}-allowlist.json`.
+Persists pending pairing state to `{channelName}-pairing.json`, user approvals to `{channelName}-allowlist.json`, and group approvals to `{channelName}-groups.json`. With `workspaceCwd` (what `ChannelBase` passes — the channel's `cwd`), the files live under the workspace-scoped directory `~/.qwen/channels/<workspace-scope>/` so two workspaces reusing the same channel name never share pairing requests or allowlist entries. Without it, the legacy global `~/.qwen/channels/` layout is used. The first time a given (workspace, channel) pair is constructed, existing legacy global files are copied in once (grandfathering) so already-approved senders stay approved; a per-channel `<channel>.migrated` sentinel in the scope directory marks that decision, after which legacy files are never consulted again for that channel. Channel names are URI-encoded in file names, so a name containing path separators cannot escape the scope directory. `revoke(senderId)` removes the sender only from this store's allowlist and never mutates the legacy global baseline.
 
-| Method                                | Description                                                                                               |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `createRequest(senderId, senderName)` | Generate an 8-char pairing code (or return existing). Returns `null` if 3 pending requests already exist. |
-| `approve(code)`                       | Approve a pairing request, adds sender to allowlist. Returns the request or `null`.                       |
-| `isApproved(senderId)`                | Check if sender is in the approved allowlist                                                              |
-| `listPending()`                       | Get active (non-expired) pending requests                                                                 |
+| Method                                | Description                                                                                                                                                                                                       |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `createRequest(senderId, senderName)` | Generate an 8-char pairing code (or return the existing one). Returns `{ rejected: 'sender_pending' }` if the sender already holds a request, or `{ rejected: 'cap_reached' }` if 3 requests are already pending. |
+| `createGroupRequest(...)`             | Generate a request keyed by stable group ID and record its initiating sender.                                                                                                                                     |
+| `approve(code)`                       | Approve a user or group request and update its corresponding allowlist.                                                                                                                                           |
+| `isApproved(senderId)`                | Check if sender is in the approved allowlist                                                                                                                                                                      |
+| `isGroupApproved(groupId)`            | Check if a group is approved                                                                                                                                                                                      |
+| `listPending()`                       | Get active (non-expired) pending requests                                                                                                                                                                         |
+| `getAllowlist()`                      | Get approved sender IDs                                                                                                                                                                                           |
+| `getGroupAllowlist()`                 | Get approved group IDs                                                                                                                                                                                            |
+| `revoke(senderId)`                    | Remove an approved sender. Returns whether the sender was present.                                                                                                                                                |
+| `revokeGroup(groupId)`                | Remove an approved group. Returns whether the group was present.                                                                                                                                                  |
 
 ## Envelope
 
@@ -244,6 +339,7 @@ interface Envelope {
   senderId: string; // stable, unique sender ID
   senderName: string; // display name
   chatId: string; // distinguishes DMs from groups
+  chatName?: string; // inbound group display name, when provided
   text: string; // message text (@mentions stripped)
   messageId?: string; // platform message ID
   threadId?: string; // for thread-scoped sessions
@@ -291,5 +387,5 @@ Block streaming and `onResponseChunk` work independently — plugins can overrid
 
 ## Further reading
 
-- [Channel Plugin Developer Guide](../../docs/developers/channel-plugins.md)
+- [Channel Plugin Developer Guide](../../../docs/developers/channel-plugins.md)
 - [`@qwen-code/channel-plugin-example`](../plugin-example/) — working reference implementation

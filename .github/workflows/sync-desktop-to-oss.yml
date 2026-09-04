@@ -1,0 +1,244 @@
+name: 'Sync Qwen Code Desktop to Aliyun OSS'
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: 'string'
+      source:
+        required: true
+        type: 'string'
+    secrets:
+      ALIYUN_OSS_ACCESS_KEY_ID:
+        required: true
+      ALIYUN_OSS_ACCESS_KEY_SECRET:
+        required: true
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Stable Desktop version to mirror, for example 0.1.2 or v0.1.2.'
+        required: true
+        type: 'string'
+      source:
+        description: 'Download the assets from the matching GitHub release.'
+        required: true
+        default: 'release'
+        type: 'choice'
+        options:
+          - 'release'
+
+concurrency:
+  group: 'sync-desktop-to-oss'
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: 'Mirror Qwen Code Desktop to Aliyun OSS'
+    if: "${{ github.repository == 'QwenLM/qwen-code' && github.ref == 'refs/heads/main' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 90
+    environment:
+      name: 'production-release'
+    permissions:
+      actions: 'read'
+      contents: 'read'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Resolve release'
+        id: 'release'
+        env:
+          INPUT_SOURCE: '${{ inputs.source }}'
+          INPUT_VERSION: '${{ inputs.version }}'
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Desktop OSS mirrors require a stable X.Y.Z version (got '$INPUT_VERSION')."
+            exit 1
+          fi
+          if [[ "$INPUT_SOURCE" != 'artifact' && "$INPUT_SOURCE" != 'release' ]]; then
+            echo "::error::Desktop mirror source must be artifact or release (got '$INPUT_SOURCE')."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source=$INPUT_SOURCE" >> "$GITHUB_OUTPUT"
+
+      - name: 'Download release workflow artifacts'
+        if: "${{ steps.release.outputs.source == 'artifact' }}"
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          pattern: 'desktop-*'
+          path: 'dist/desktop'
+          merge-multiple: true
+
+      - name: 'Download GitHub release assets'
+        if: "${{ steps.release.outputs.source == 'release' }}"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          VERSION: '${{ steps.release.outputs.version }}'
+        run: |
+          set -euo pipefail
+          metadata="$(gh release view "desktop-v${VERSION}" --json isDraft,isPrerelease)"
+          if ! jq -e '.isDraft == false and .isPrerelease == false' <<<"$metadata" >/dev/null; then
+            echo "::error::desktop-v${VERSION} is not a published stable release."
+            exit 1
+          fi
+          mkdir -p dist/desktop
+          gh release download "desktop-v${VERSION}" --dir dist/desktop
+
+      - name: 'Verify and prepare mirror assets'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          VERSION: '${{ steps.release.outputs.version }}'
+        run: |
+          set -euo pipefail
+          cd dist/desktop
+          if [[ -f SHA256SUMS.txt ]]; then
+            sha256sum -c SHA256SUMS.txt
+          fi
+          for asset in Qwen-Code-Desktop-arm64.dmg Qwen-Code-Desktop-x64.dmg; do
+            test -f "$asset" || { echo "::error::Missing Desktop installer $asset"; exit 1; }
+          done
+          find . -maxdepth 1 -name '*_x64-setup.exe' -print -quit | grep -q . \
+            || { echo "::error::Missing Desktop installer matching *_x64-setup.exe"; exit 1; }
+          find . -maxdepth 1 -name '*.AppImage' -print -quit | grep -q . \
+            || { echo "::error::Missing Desktop installer matching *.AppImage"; exit 1; }
+          find . -maxdepth 1 -name '*.deb' -print -quit | grep -q . \
+            || { echo "::error::Missing Desktop installer matching *.deb"; exit 1; }
+          rm -f desktop-latest.json SHA256SUMS.txt
+          node ../../.github/scripts/create-desktop-update-manifest.mjs \
+            --assets . \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "desktop-v${VERSION}" \
+            --version "$VERSION" \
+            --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/desktop/v${VERSION}" \
+            --output desktop-latest.json
+          sha256sum -- * > SHA256SUMS.txt
+
+      - name: 'Install ossutil'
+        env:
+          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
+          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
+        run: |
+          set -euo pipefail
+          tmp_dir="$(mktemp -d)"
+          curl -fsSL --connect-timeout 15 --max-time 300 "$OSSUTIL_URL" -o "$tmp_dir/ossutil.zip"
+          echo "$OSSUTIL_SHA256  $tmp_dir/ossutil.zip" | sha256sum -c -
+          unzip -q "$tmp_dir/ossutil.zip" -d "$tmp_dir"
+          ossutil_path="$(find "$tmp_dir" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
+          if [[ -z "$ossutil_path" ]]; then echo '::error::ossutil binary not found'; exit 1; fi
+          chmod +x "$ossutil_path"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$ossutil_path" "$HOME/.local/bin/ossutil"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          rm -rf "$tmp_dir"
+          "$HOME/.local/bin/ossutil" >/dev/null
+
+      - name: 'Configure Aliyun OSS credentials'
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |
+          set -euo pipefail
+          if [[ -z "$ALIYUN_OSS_ACCESS_KEY_ID" || -z "$ALIYUN_OSS_ACCESS_KEY_SECRET" ]]; then
+            echo '::error::Missing Aliyun OSS credentials in the production-release environment.'
+            exit 1
+          fi
+          ossutil config -e "$ALIYUN_OSS_ENDPOINT" -i "$ALIYUN_OSS_ACCESS_KEY_ID" -k "$ALIYUN_OSS_ACCESS_KEY_SECRET" -L EN -c "$RUNNER_TEMP/.ossutilconfig"
+
+      - name: 'Upload versioned assets to Aliyun OSS'
+        env:
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          VERSION: '${{ steps.release.outputs.version }}'
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find dist/desktop -maxdepth 1 -type f -print0)
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "$ALIYUN_OSS_BUCKET" \
+            --config "$RUNNER_TEMP/.ossutilconfig" \
+            --prefix "desktop/v${VERSION}" \
+            "${assets[@]}"
+
+      - name: 'Verify versioned assets on Aliyun OSS'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          VERSION: '${{ steps.release.outputs.version }}'
+        run: |
+          set -euo pipefail
+          base="${ALIYUN_OSS_PUBLIC_BASE_URL}/desktop/v${VERSION}"
+          directory="$(mktemp -d)"
+          trap 'rm -rf "$directory"' EXIT
+          cp dist/desktop/SHA256SUMS.txt "$directory/SHA256SUMS.txt"
+          while read -r _ asset; do
+            curl -fsSL --connect-timeout 15 --max-time 3600 "$base/$asset" -o "$directory/$asset"
+          done < "$directory/SHA256SUMS.txt"
+          (cd "$directory" && sha256sum -c SHA256SUMS.txt)
+
+      - name: 'Check whether release matches GitHub stable feed'
+        id: 'latest'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          SOURCE: '${{ steps.release.outputs.source }}'
+        run: |
+          set -euo pipefail
+          directory="$(mktemp -d)"
+          trap 'rm -rf "$directory"' EXIT
+          gh release download 'desktop-latest' --dir "$directory" --pattern 'desktop-latest.json'
+          expected="$(jq -r '.version' dist/desktop/desktop-latest.json)"
+          actual="$(jq -r '.version' "$directory/desktop-latest.json")"
+          if [ "$actual" = "$expected" ]; then
+            echo 'matches=true' >> "$GITHUB_OUTPUT"
+          elif [[ "$actual" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ "$(printf '%s\n%s\n' "$expected" "$actual" | sort -V | tail -n 1)" = "$actual" ]; then
+            echo 'matches=false' >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub stable feed is already newer at $actual; mirrored version $expected will not replace the OSS latest feed."
+          elif [ "$SOURCE" = 'artifact' ]; then
+            echo "::error::GitHub stable feed is $actual after publishing Desktop $expected."
+            exit 1
+          else
+            echo 'matches=false' >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub stable feed is $actual; mirrored version $expected will not replace the OSS latest feed."
+          fi
+
+      - name: 'Publish latest manifest to Aliyun OSS'
+        if: "${{ steps.latest.outputs.matches == 'true' }}"
+        env:
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+        run: |
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "$ALIYUN_OSS_BUCKET" \
+            --config "$RUNNER_TEMP/.ossutilconfig" \
+            --prefix 'desktop/latest' \
+            dist/desktop/desktop-latest.json
+
+      - name: 'Verify latest manifest on Aliyun OSS'
+        if: "${{ steps.latest.outputs.matches == 'true' }}"
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |
+          set -euo pipefail
+          curl -fsSL --connect-timeout 15 --max-time 300 "$ALIYUN_OSS_PUBLIC_BASE_URL/desktop/latest/desktop-latest.json" -o "$RUNNER_TEMP/desktop-latest.json"
+          cmp dist/desktop/desktop-latest.json "$RUNNER_TEMP/desktop-latest.json"
+
+      - name: 'Publish mirror summary'
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          IS_LATEST: '${{ steps.latest.outputs.matches }}'
+          VERSION: '${{ steps.release.outputs.version }}'
+        run: |
+          {
+            echo '## Desktop OSS mirror'
+            echo
+            echo "Version: $VERSION"
+            echo "Assets: ${ALIYUN_OSS_PUBLIC_BASE_URL}/desktop/v${VERSION}/"
+            if [ "$IS_LATEST" != 'true' ]; then
+              echo 'Latest feed: unchanged (the mirrored version is not the current GitHub stable release)'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Cleanup Aliyun OSS credentials'
+        if: '${{ always() }}'
+        run: 'rm -f "$RUNNER_TEMP/.ossutilconfig"'

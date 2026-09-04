@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { Storage } from '../../config/storage.js';
 
 import type {
   StartSessionEvent,
@@ -30,6 +31,8 @@ import type {
   ChatCompressionEvent,
   InvalidChunkEvent,
   ContentRetryEvent,
+  ProtocolTagSanitizedEvent,
+  ApiRetryEvent,
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
   SubagentExecutionEvent,
@@ -44,6 +47,7 @@ import type {
   UserFeedbackEvent,
   UserRetryEvent,
   RipgrepFallbackEvent,
+  RipgrepRuntimeRecoveryEvent,
   EndSessionEvent,
   ExtensionUpdateEvent,
   ArenaSessionStartedEvent,
@@ -67,7 +71,7 @@ import {
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { sanitizeHookName } from '../sanitize.js';
-import { InstallationManager } from '../../utils/installationManager.js';
+import { InstallationManager } from '../../config/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
 
@@ -302,17 +306,29 @@ export class QwenLogger {
 
   readSourceInfo(): string {
     try {
-      const sourceJsonPath = path.join(os.homedir(), '.qwen', 'source.json');
-      if (fs.existsSync(sourceJsonPath)) {
-        const sourceJsonContent = fs.readFileSync(sourceJsonPath, 'utf8');
-        const sourceData = JSON.parse(sourceJsonContent);
-        if (
-          sourceData &&
-          typeof sourceData === 'object' &&
-          sourceData.source &&
-          sourceData.source !== 'unknown'
-        ) {
-          return sourceData.source;
+      const globalDir = Storage.getGlobalQwenDir();
+      const sourceJsonPath = path.join(globalDir, 'source.json');
+
+      // Also check legacy ~/.qwen/source.json when QWEN_HOME is set,
+      // since the installer writes to ~/.qwen/ regardless of the env var.
+      const legacyPath = path.join(os.homedir(), '.qwen', 'source.json');
+      const candidates =
+        path.normalize(sourceJsonPath) !== path.normalize(legacyPath)
+          ? [sourceJsonPath, legacyPath]
+          : [sourceJsonPath];
+
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate)) {
+          const sourceJsonContent = fs.readFileSync(candidate, 'utf8');
+          const sourceData = JSON.parse(sourceJsonContent);
+          if (
+            sourceData &&
+            typeof sourceData === 'object' &&
+            sourceData.source &&
+            sourceData.source !== 'unknown'
+          ) {
+            return sourceData.source;
+          }
         }
       }
     } catch (_error) {
@@ -473,6 +489,7 @@ export class QwenLogger {
       properties: {
         prompt_id: event.prompt_id,
         prompt_length: event.prompt_length,
+        ...(event.model ? { model: event.model } : {}),
       },
     });
 
@@ -521,9 +538,13 @@ export class QwenLogger {
       `tool_call#${event.function_name}`,
       {
         properties: {
+          call_id: event.call_id,
           prompt_id: event.prompt_id,
           response_id: event.response_id,
           tool_name: event.function_name,
+          status: event.status,
+          execution_status: event.execution_status,
+          tool_type: event.tool_type,
           permission: event.decision,
           success: event.success ? 1 : 0,
           duration_ms: event.duration_ms,
@@ -563,6 +584,7 @@ export class QwenLogger {
         subagent_name: event.subagent_name,
         status: event.status,
         terminate_reason: event.terminate_reason,
+        ...(event.loop_type ? { loop_type: event.loop_type } : {}),
       },
       snapshots: JSON.stringify({
         ...(event.execution_summary
@@ -623,7 +645,6 @@ export class QwenLogger {
         output_token_count: event.output_token_count,
         cached_content_token_count: event.cached_content_token_count,
         thoughts_token_count: event.thoughts_token_count,
-        tool_token_count: event.tool_token_count,
       }),
     });
 
@@ -637,6 +658,7 @@ export class QwenLogger {
         model: event.model,
         prompt_id: event.prompt_id,
         auth_type: event.auth_type,
+        loop_wakeups_cancelled: event.loop_wakeups_cancelled,
       },
     });
 
@@ -869,6 +891,28 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logRipgrepRuntimeRecoveryEvent(event: RipgrepRuntimeRecoveryEvent): void {
+    const rumEvent = this.createActionEvent(
+      'misc',
+      'ripgrep_runtime_recovery',
+      {
+        properties: {
+          platform: process.platform,
+          arch: process.arch,
+          selection_mode: event.selection_mode,
+          retry_triggered: event.retry_triggered,
+          ...(event.retry_succeeded !== undefined
+            ? { retry_succeeded: event.retry_succeeded }
+            : {}),
+          failure_kind: event.failure_kind,
+        },
+      },
+    );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   logLoopDetectionDisabledEvent(): void {
     const rumEvent = this.createActionEvent(
       'misc',
@@ -898,6 +942,7 @@ export class QwenLogger {
       properties: {
         skill_name: event.skill_name,
         success: event.success ? 1 : 0,
+        prompt_id: event.prompt_id,
       },
     });
 
@@ -938,6 +983,41 @@ export class QwenLogger {
         error_type: event.error_type,
         attempt_number: event.attempt_number,
         retry_delay_ms: event.retry_delay_ms,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logProtocolTagSanitizedEvent(event: ProtocolTagSanitizedEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'protocol_tag_sanitized', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        response_id: event.response_id ?? '',
+        tag_name: event.tag_name,
+        tool_call_count: event.tool_call_count,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // Phase 4b — HTTP-status retry from retryWithBackoff (429/5xx). Distinct from
+  // logContentRetryEvent which is fired by llmChat's content-recovery loop.
+  logApiRetryEvent(event: ApiRetryEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'api_retry', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        attempt_number: event.attempt_number,
+        error_type: event.error_type ?? 'unknown',
+        status_code:
+          event.status_code !== undefined ? String(event.status_code) : '',
+        retry_delay_ms: event.retry_delay_ms,
+        subagent_name: event.subagent_name ?? '',
       },
     });
 
@@ -1036,7 +1116,7 @@ export class QwenLogger {
     if (!proxyUrl) return undefined;
     // undici which is widely used in the repo can only support http & https proxy protocol,
     // https://github.com/nodejs/undici/issues/2224
-    if (proxyUrl.startsWith('http')) {
+    if (/^https?:\/\//i.test(proxyUrl)) {
       return new HttpsProxyAgent(proxyUrl);
     } else {
       throw new Error('Unsupported proxy type');

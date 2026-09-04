@@ -1,0 +1,851 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  checkAcpImportBoundary,
+  checkEntryBootstrapIntact,
+  checkSdkImplProtocolBoundary,
+  checkServeFastPathBundle,
+  findAcpImportBoundaryOffenders,
+  findSdkImplProtocolOffenders,
+  findServeFastPathBundleOffenders,
+  formatServeFastPathBundleOffenders,
+  normalizeMetafilePath,
+} from '../check-serve-fast-path-bundle.js';
+
+const checkScriptPath = fileURLToPath(
+  new URL('../check-serve-fast-path-bundle.js', import.meta.url),
+);
+
+function makeMetafile(outputs) {
+  return {
+    outputs: {
+      // A healthy bundle compiles the entry module into the entry output.
+      'dist/cli.js': output({ inputs: ['packages/cli/src/cli.ts'] }),
+      'dist/chunks/fast-path.js': output({
+        inputs: ['packages/cli/src/serve/fast-path.ts'],
+      }),
+      'dist/chunks/fast-path-settings.js': output({
+        inputs: ['packages/cli/src/serve/fast-path-settings.ts'],
+      }),
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+      }),
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+      }),
+      'dist/chunks/sdk-impl.js': output({
+        inputs: ['packages/core/src/telemetry/sdk-impl.ts'],
+      }),
+      ...outputs,
+    },
+  };
+}
+
+function output({ inputs = [], imports = [], bytes = 1 } = {}) {
+  return {
+    bytes,
+    inputs: Object.fromEntries(
+      inputs.map((input) => [input, { bytesInOutput: 1 }]),
+    ),
+    imports,
+  };
+}
+
+function writeMetafile(tempDir, metafile) {
+  mkdirSync(join(tempDir, 'dist'));
+  const metafilePath = join(tempDir, 'dist', 'esbuild.json');
+  writeFileSync(metafilePath, JSON.stringify(metafile));
+  return metafilePath;
+}
+
+function staticImport(path) {
+  return { path, kind: 'import-statement' };
+}
+
+function dynamicImport(path) {
+  return { path, kind: 'dynamic-import' };
+}
+
+describe('serve fast-path bundle check', () => {
+  it('reports forbidden source files reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [staticImport('dist/chunks/acp-runtime.js')],
+      }),
+      'dist/chunks/acp-runtime.js': output({
+        bytes: 179_129,
+        inputs: ['packages/acp-bridge/src/bridgeClient.ts'],
+      }),
+    });
+
+    const offenders = findServeFastPathBundleOffenders(metafile);
+    const diagnostic = formatServeFastPathBundleOffenders(offenders);
+
+    expect(offenders).toEqual([
+      expect.objectContaining({
+        label: 'ACP bridge client runtime',
+        matchedInput: 'packages/acp-bridge/src/bridgeClient.ts',
+        outputPath: 'dist/chunks/acp-runtime.js',
+        bytes: 179_129,
+        importPath: [
+          'dist/chunks/run-qwen-serve.js',
+          'dist/chunks/acp-runtime.js',
+        ],
+      }),
+    ]);
+    expect(diagnostic).toContain('- ACP bridge client runtime');
+    expect(diagnostic).toContain(
+      'output: dist/chunks/acp-runtime.js (179129 bytes)',
+    );
+    expect(diagnostic).toContain(
+      'static path: dist/chunks/run-qwen-serve.js -> dist/chunks/acp-runtime.js',
+    );
+  });
+
+  it('keeps the ACP startup profiler out of the pre-listen closure', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: [
+          'packages/cli/src/serve/run-qwen-serve.ts',
+          'packages/cli/src/utils/acp-startup-profiler.ts',
+        ],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([
+      expect.objectContaining({ label: 'ACP startup profiler' }),
+    ]);
+  });
+
+  it('keeps the Gemini and ACP runtimes out of the pre-listen closure', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: [
+          'packages/cli/src/serve/run-qwen-serve.ts',
+          'packages/cli/src/llm.tsx',
+          'packages/cli/src/acp-integration/acpAgent.ts',
+        ],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'Gemini runtime' }),
+        expect.objectContaining({ label: 'ACP agent runtime' }),
+      ]),
+    );
+  });
+
+  it('reports forbidden built package files reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/dist/src/serve/run-qwen-serve.js'],
+        imports: [staticImport('dist/chunks/acp-runtime.js')],
+      }),
+      'dist/chunks/acp-runtime.js': output({
+        inputs: ['packages/acp-bridge/dist/bridge.js'],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'ACP bridge runtime',
+        matchedInput: 'packages/acp-bridge/dist/bridge.js',
+      }),
+    ]);
+  });
+
+  it('checks fast-path modules that run before runQwenServe listens', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/fast-path.js': output({
+        inputs: ['packages/cli/src/serve/fast-path.ts'],
+        imports: [staticImport('dist/chunks/core-runtime.js')],
+      }),
+      'dist/chunks/core-runtime.js': output({
+        inputs: ['packages/core/dist/src/tools/shell.js'],
+      }),
+    });
+
+    const offenders = findServeFastPathBundleOffenders(metafile);
+
+    expect(offenders).toEqual([
+      expect.objectContaining({
+        label: 'Core shell tool runtime',
+        matchedInput: 'packages/core/dist/src/tools/shell.js',
+        importPath: ['dist/chunks/fast-path.js', 'dist/chunks/core-runtime.js'],
+      }),
+    ]);
+  });
+
+  it('allows forbidden runtime files behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [dynamicImport('dist/chunks/bridge.js')],
+      }),
+      'dist/chunks/bridge.js': output({
+        inputs: ['packages/acp-bridge/src/bridge.ts'],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([]);
+  });
+
+  it('ignores external imports in the static closure', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [
+          {
+            path: 'dist/chunks/acp-runtime.js',
+            kind: 'import-statement',
+            external: true,
+          },
+        ],
+      }),
+      'dist/chunks/acp-runtime.js': output({
+        inputs: ['packages/acp-bridge/src/bridge.ts'],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([]);
+  });
+
+  it('reports vendor packages reached through the core runtime chunk', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [staticImport('dist/chunks/core-runtime.js')],
+      }),
+      'dist/chunks/core-runtime.js': output({
+        bytes: 6_015_919,
+        inputs: [
+          'packages/core/src/tools/shell.ts',
+          'node_modules/.pnpm/glob@10.5.0/node_modules/glob/dist/esm/index.js',
+          'node_modules/.pnpm/@iarna+toml@2.2.5/node_modules/@iarna/toml/toml.js',
+          'node_modules/chokidar/esm/index.js',
+          'node_modules/fzf/dist/fzf.es.js',
+        ],
+      }),
+    });
+
+    const offenders = findServeFastPathBundleOffenders(metafile);
+
+    expect(offenders.map((offender) => offender.label)).toEqual([
+      'Core shell tool runtime',
+      'glob vendor package',
+      '@iarna/toml vendor package',
+      'chokidar vendor package',
+      'fzf vendor package',
+    ]);
+    expect(offenders[0].importPath).toEqual([
+      'dist/chunks/run-qwen-serve.js',
+      'dist/chunks/core-runtime.js',
+    ]);
+  });
+
+  it('keeps leaf core imports from pulling the core barrel into serve', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [staticImport('dist/chunks/no-follow-open.js')],
+      }),
+      'dist/chunks/no-follow-open.js': output({
+        inputs: ['packages/core/src/utils/no-follow-open.ts'],
+      }),
+    });
+
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([]);
+  });
+
+  it('matches normalized source suffixes without accepting partial names', () => {
+    const metafile = makeMetafile({
+      'dist\\chunks\\run-qwen-serve.js': output({
+        inputs: ['..\\..\\packages\\cli\\src\\serve\\run-qwen-serve.ts'],
+        imports: [staticImport('dist\\chunks\\false-positive.js')],
+      }),
+      'dist\\chunks\\false-positive.js': output({
+        inputs: ['packages/acp-bridge/src/not-bridge.ts'],
+      }),
+    });
+
+    expect(normalizeMetafilePath('dist\\chunks\\run-qwen-serve.js')).toBe(
+      'dist/chunks/run-qwen-serve.js',
+    );
+    expect(findServeFastPathBundleOffenders(metafile)).toEqual([]);
+  });
+
+  it('throws when serve pre-listen roots are missing', () => {
+    const metafile = {
+      outputs: {
+        'dist/chunks/unrelated.js': output({
+          inputs: ['packages/cli/src/unrelated.ts'],
+        }),
+      },
+    };
+
+    expect(() => findServeFastPathBundleOffenders(metafile)).toThrow(
+      /Could not find bundled outputs for serve pre-listen roots/,
+    );
+    expect(() => findServeFastPathBundleOffenders(metafile)).toThrow(
+      /node scripts\/clean-package-build-artifacts\.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle/,
+    );
+  });
+
+  it('reports each matched input for the same forbidden label and output', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/run-qwen-serve.js': output({
+        inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+        imports: [staticImport('dist/chunks/acp-runtime.js')],
+      }),
+      'dist/chunks/acp-runtime.js': output({
+        inputs: [
+          'packages/acp-bridge/src/bridge.ts',
+          'packages/acp-bridge/dist/bridge.js',
+        ],
+      }),
+    });
+
+    const offenders = findServeFastPathBundleOffenders(metafile);
+
+    expect(offenders).toEqual([
+      expect.objectContaining({
+        label: 'ACP bridge runtime',
+        matchedInput: 'packages/acp-bridge/src/bridge.ts',
+      }),
+      expect.objectContaining({
+        label: 'ACP bridge runtime',
+        matchedInput: 'packages/acp-bridge/dist/bridge.js',
+      }),
+    ]);
+  });
+
+  it('reads a metafile path and returns bundle offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      const metafilePath = writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/run-qwen-serve.js': output({
+            inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+            imports: [staticImport('dist/chunks/acp-runtime.js')],
+          }),
+          'dist/chunks/acp-runtime.js': output({
+            inputs: ['packages/acp-bridge/src/bridge.ts'],
+          }),
+        }),
+      );
+
+      expect(checkServeFastPathBundle({ metafilePath })).toEqual({
+        ok: false,
+        offenders: [
+          expect.objectContaining({
+            label: 'ACP bridge runtime',
+            matchedInput: 'packages/acp-bridge/src/bridge.ts',
+          }),
+        ],
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when the checked metafile path is missing', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      expect(() =>
+        checkServeFastPathBundle({
+          metafilePath: join(tempDir, 'dist', 'esbuild.json'),
+        }),
+      ).toThrow(/Missing esbuild metafile/);
+      expect(() =>
+        checkServeFastPathBundle({
+          metafilePath: join(tempDir, 'dist', 'esbuild.json'),
+        }),
+      ).toThrow(
+        /node scripts\/clean-package-build-artifacts\.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle/,
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws with context when the metafile is invalid JSON', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      mkdirSync(join(tempDir, 'dist'));
+      const metafilePath = join(tempDir, 'dist', 'esbuild.json');
+      writeFileSync(metafilePath, '{');
+
+      expect(() => checkServeFastPathBundle({ metafilePath })).toThrow(
+        /Invalid esbuild metafile at .*dist[/\\]esbuild\.json/,
+      );
+      expect(() => checkServeFastPathBundle({ metafilePath })).toThrow(
+        /Run `node scripts\/clean-package-build-artifacts\.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle` to regenerate it/,
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits non-zero with CLI diagnostics for bundle offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/run-qwen-serve.js': output({
+            inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+            imports: [staticImport('dist/chunks/acp-runtime.js')],
+          }),
+          'dist/chunks/acp-runtime.js': output({
+            bytes: 179_129,
+            inputs: ['packages/acp-bridge/src/bridge.ts'],
+          }),
+        }),
+      );
+
+      expect(() =>
+        execFileSync(process.execPath, [checkScriptPath], {
+          cwd: tempDir,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      ).toThrow(/Serve fast-path bundle closure includes pre-listen runtime/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits non-zero when the metafile is missing', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      expect(() =>
+        execFileSync(process.execPath, [checkScriptPath], {
+          cwd: tempDir,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      ).toThrow(/Missing esbuild metafile/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ACP import boundary check', () => {
+  it('reports TUI packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/tui.js')],
+      }),
+      'dist/chunks/tui.js': output({
+        bytes: 250_000,
+        inputs: [
+          'node_modules/ink/build/index.js',
+          'node_modules/react/index.js',
+          'node_modules/react-reconciler/index.js',
+          'node_modules/yoga-layout/dist/src/index.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'Ink TUI runtime' }),
+        expect.objectContaining({ label: 'React runtime' }),
+        expect.objectContaining({ label: 'React reconciler runtime' }),
+        expect.objectContaining({ label: 'Yoga layout runtime' }),
+      ]),
+    );
+  });
+
+  it('allows TUI packages behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [dynamicImport('dist/chunks/tui.js')],
+      }),
+      'dist/chunks/tui.js': output({
+        inputs: ['node_modules/ink/build/index.js'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
+  });
+
+  it('reports a statically imported Google GenAI SDK', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/google-genai.js')],
+      }),
+      'dist/chunks/google-genai.js': output({
+        bytes: 1_196_331,
+        inputs: ['node_modules/@google/genai/dist/node/index.mjs'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'Google GenAI SDK',
+        matchedInput: 'node_modules/@google/genai/dist/node/index.mjs',
+      }),
+    ]);
+  });
+
+  it('allows the Google GenAI SDK behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [dynamicImport('dist/chunks/google-genai.js')],
+      }),
+      'dist/chunks/google-genai.js': output({
+        inputs: ['node_modules/@google/genai/dist/node/index.mjs'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
+  });
+
+  it('reports first-use dependency packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/first-use-dependencies.js')],
+      }),
+      'dist/chunks/first-use-dependencies.js': output({
+        inputs: [
+          'node_modules/iconv-lite/lib/index.js',
+          'node_modules/@xterm/headless/lib-headless/xterm-headless.js',
+          'node_modules/simple-git/dist/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'iconv-lite encoding tables' }),
+        expect.objectContaining({ label: 'xterm headless runtime' }),
+        expect.objectContaining({ label: 'simple-git runtime' }),
+      ]),
+    );
+  });
+
+  it('allows first-use dependency packages behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [dynamicImport('dist/chunks/first-use-dependencies.js')],
+      }),
+      'dist/chunks/first-use-dependencies.js': output({
+        inputs: [
+          'node_modules/iconv-lite/lib/index.js',
+          'node_modules/@xterm/headless/lib-headless/xterm-headless.js',
+          'node_modules/simple-git/dist/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
+  });
+
+  it('reports legacy JSONC parser packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/settings-parser.js')],
+      }),
+      'dist/chunks/settings-parser.js': output({
+        inputs: [
+          'node_modules/comment-json/src/index.js',
+          'node_modules/esprima/dist/esprima.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'comment-json parser' }),
+        expect.objectContaining({ label: 'esprima parser' }),
+      ]),
+    );
+  });
+
+  it('rejects the jsonc-parser UMD build from the ACP bundle', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/settings-parser.js')],
+      }),
+      'dist/chunks/settings-parser.js': output({
+        inputs: ['node_modules/jsonc-parser/lib/umd/main.js'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'jsonc-parser UMD build',
+        matchedInput: 'node_modules/jsonc-parser/lib/umd/main.js',
+      }),
+    ]);
+  });
+
+  it('reads a metafile path and returns ACP boundary offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'acp-import-boundary-'));
+    try {
+      const metafilePath = writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/acp-agent.js': output({
+            inputs: [
+              'packages/cli/src/acp-integration/acpAgent.ts',
+              'node_modules/ink/build/index.js',
+            ],
+          }),
+        }),
+      );
+
+      expect(checkAcpImportBoundary({ metafilePath })).toEqual({
+        ok: false,
+        offenders: [
+          expect.objectContaining({
+            label: 'Ink TUI runtime',
+            matchedInput: 'node_modules/ink/build/index.js',
+          }),
+        ],
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('telemetry sdk-impl protocol boundary check', () => {
+  it('reports gRPC cluster packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/sdk-impl.js': output({
+        inputs: ['packages/core/src/telemetry/sdk-impl.ts'],
+        imports: [staticImport('dist/chunks/grpc-chain.js')],
+      }),
+      'dist/chunks/grpc-chain.js': output({
+        inputs: [
+          'node_modules/@grpc/grpc-js/build/src/index.js',
+          'node_modules/protobufjs/index.js',
+          'node_modules/@opentelemetry/exporter-trace-otlp-grpc/build/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findSdkImplProtocolOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'gRPC runtime' }),
+        expect.objectContaining({ label: 'protobufjs runtime' }),
+        expect.objectContaining({ label: 'OTLP gRPC trace exporter' }),
+      ]),
+    );
+  });
+
+  it('reports the shared OTLP serialization layer reached statically', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/sdk-impl.js': output({
+        inputs: [
+          'packages/core/src/telemetry/sdk-impl.ts',
+          'node_modules/@opentelemetry/otlp-transformer/build/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findSdkImplProtocolOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'OTLP transformer',
+        matchedInput:
+          'node_modules/@opentelemetry/otlp-transformer/build/esm/index.js',
+      }),
+    ]);
+  });
+
+  it('allows protocol chains behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/sdk-impl.js': output({
+        inputs: ['packages/core/src/telemetry/sdk-impl.ts'],
+        imports: [
+          dynamicImport('dist/chunks/grpc-chain.js'),
+          dynamicImport('dist/chunks/http-chain.js'),
+        ],
+      }),
+      'dist/chunks/grpc-chain.js': output({
+        inputs: ['node_modules/@grpc/grpc-js/build/src/index.js'],
+      }),
+      'dist/chunks/http-chain.js': output({
+        inputs: [
+          'node_modules/@opentelemetry/otlp-transformer/build/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findSdkImplProtocolOffenders(metafile)).toEqual([]);
+  });
+
+  it('throws when the sdk-impl chunk is missing', () => {
+    const metafile = {
+      outputs: {
+        'dist/chunks/unrelated.js': output({
+          inputs: ['packages/cli/src/unrelated.ts'],
+        }),
+      },
+    };
+
+    expect(() => findSdkImplProtocolOffenders(metafile)).toThrow(
+      /Could not find bundled output for telemetry sdk-impl/,
+    );
+  });
+
+  it('reads a metafile path and returns sdk-impl boundary offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'sdk-impl-boundary-'));
+    try {
+      const metafilePath = writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/sdk-impl.js': output({
+            inputs: [
+              'packages/core/src/telemetry/sdk-impl.ts',
+              'node_modules/@grpc/grpc-js/build/src/index.js',
+            ],
+          }),
+        }),
+      );
+
+      expect(checkSdkImplProtocolBoundary({ metafilePath })).toEqual({
+        ok: false,
+        offenders: [
+          expect.objectContaining({
+            label: 'gRPC runtime',
+            matchedInput: 'node_modules/@grpc/grpc-js/build/src/index.js',
+          }),
+        ],
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits non-zero with CLI diagnostics for sdk-impl offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'sdk-impl-boundary-'));
+    try {
+      writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/sdk-impl.js': output({
+            inputs: [
+              'packages/core/src/telemetry/sdk-impl.ts',
+              'node_modules/@grpc/grpc-js/build/src/index.js',
+            ],
+          }),
+        }),
+      );
+
+      expect(() =>
+        execFileSync(process.execPath, [checkScriptPath], {
+          cwd: tempDir,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      ).toThrow(
+        /Telemetry sdk-impl static closure includes OTLP protocol chain modules/,
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('bundled entry bootstrap check', () => {
+  it('accepts an entry output that still contains the entry module', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      const metafilePath = writeMetafile(tempDir, makeMetafile({}));
+      expect(checkEntryBootstrapIntact({ metafilePath }).ok).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an entry hoisted into a shared chunk by code splitting', () => {
+    // What a static `import ... from './cli.js'` inside a lazily-loaded module
+    // does to the bundle: dist/cli.js keeps no inputs of its own and becomes a
+    // re-export stub, so cli.ts's main-module bootstrap guard never fires.
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      const metafilePath = writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/cli.js': output({
+            imports: [staticImport('dist/chunks/cli-entry.js')],
+          }),
+          'dist/chunks/cli-entry.js': output({
+            inputs: ['packages/cli/src/cli.ts'],
+          }),
+        }),
+      );
+
+      expect(checkEntryBootstrapIntact({ metafilePath }).ok).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws when the entry output is absent from the metafile', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      const metafile = makeMetafile({});
+      delete metafile.outputs['dist/cli.js'];
+      const metafilePath = writeMetafile(tempDir, metafile);
+
+      expect(() => checkEntryBootstrapIntact({ metafilePath })).toThrow(
+        /Missing dist\/cli\.js in the esbuild metafile/,
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits non-zero with CLI diagnostics for a hoisted entry', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'serve-fast-path-bundle-'));
+    try {
+      writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/cli.js': output({
+            imports: [staticImport('dist/chunks/cli-entry.js')],
+          }),
+          'dist/chunks/cli-entry.js': output({
+            inputs: ['packages/cli/src/cli.ts'],
+          }),
+        }),
+      );
+
+      expect(() =>
+        execFileSync(process.execPath, [checkScriptPath], {
+          cwd: tempDir,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      ).toThrow(/no longer contains packages\/cli\/src\/cli\.ts/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});

@@ -24,6 +24,12 @@ export interface QwenAuthState {
   authMessage: string | null;
 }
 
+export interface ExternalAuthState {
+  title: string;
+  message: string;
+  detail?: string;
+}
+
 export const useQwenAuth = (
   pendingAuthType: AuthType | undefined,
   isAuthenticating: boolean,

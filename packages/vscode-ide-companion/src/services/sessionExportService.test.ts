@@ -128,6 +128,15 @@ describe('sessionExportService', () => {
         'Unsupported /export format. Use /export html, /export md, /export json, or /export jsonl.',
       );
     });
+
+    it('strips leading zero-width space placeholder before parsing', () => {
+      expect(parseExportSlashCommand('\u200B/export html')).toBe('html');
+      expect(parseExportSlashCommand('\u200B/export md')).toBe('md');
+    });
+
+    it('returns null for zero-width space only input', () => {
+      expect(parseExportSlashCommand('\u200B')).toBeNull();
+    });
   });
 
   describe('exportSessionToFile', () => {

@@ -6,7 +6,7 @@
  * Speculation Engine
  *
  * Speculatively executes the accepted suggestion before the user confirms,
- * using a forked GeminiChat with copy-on-write file isolation.
+ * using a forked LlmChat with copy-on-write file isolation.
  *
  * Flow:
  * 1. Suggestion shown → startSpeculation() fires
@@ -17,23 +17,73 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
-import type { GeminiClient } from '../core/client.js';
-import { StreamEventType } from '../core/geminiChat.js';
+import type { LlmClient } from '../core/client.js';
+import type { ToolArtifact } from '../tools/tools.js';
+import { StreamEventType } from '../core/llm-chat.js';
+import {
+  convertToFunctionErrorResponse,
+  convertToFunctionResponse,
+} from '../core/coreToolScheduler.js';
+import { canonicalToolName } from '../tools/tool-names.js';
+import { evaluateToolInvocationGuard } from '../core/tool-invocation-guard.js';
+import { getInvocationContext } from '../utils/invocation-context.js';
+import { stripToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
 import { OverlayFs } from './overlayFs.js';
 import { evaluateToolCall, rewritePathArgs } from './speculationToolGate.js';
 import {
   getCacheSafeParams,
   createForkedChat,
   runForkedAgent,
-} from '../utils/forkedAgent.js';
+  runWithForkedChatModel,
+} from '../agents/forkedAgent.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
+import {
+  finalizeToolResponses,
+  type ToolResponseBudgetEntry,
+} from '../tools/tool-response-finalizer.js';
+import {
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+} from '../tools/tool-result-boundary-diagnostics.js';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
+const debugLogger = createDebugLogger('SPECULATION');
+
 const MAX_SPECULATION_TURNS = 20;
 const MAX_SPECULATION_MESSAGES = 100;
+
+function observeSpeculationProducer(params: {
+  config: Config;
+  callId: string;
+  toolName: string;
+  persistedOutputFiles?: string[];
+  artifacts?: ReadonlyArray<{ kind?: unknown }>;
+  knownNone?: boolean;
+  values: () => ReturnType<typeof toolResultPartDiagnosticValues>;
+}): void {
+  try {
+    observeToolResultBoundary({
+      stage: 'producer',
+      sessionId: params.config.getSessionId?.(),
+      toolCallId: params.callId,
+      toolName: params.toolName,
+      artifacts: [
+        toolResultBoundaryArtifact(
+          params.knownNone ? [] : params.persistedOutputFiles,
+          params.artifacts,
+        ),
+      ],
+      values: params.values,
+    });
+  } catch {
+    // Diagnostics must not affect speculative execution.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -91,7 +141,7 @@ export async function startSpeculation(
   parentSignal?: AbortSignal,
   options?: { model?: string },
 ): Promise<SpeculationState> {
-  const cacheSafe = getCacheSafeParams();
+  const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error('CacheSafeParams not available for speculation');
   }
@@ -197,202 +247,339 @@ interface LoopResult {
 async function runSpeculativeLoop(
   config: Config,
   state: SpeculationState,
-  cacheSafe: import('../utils/forkedAgent.js').CacheSafeParams,
+  cacheSafe: import('../agents/forkedAgent.js').CacheSafeParams,
   modelOverride?: string,
 ): Promise<LoopResult> {
-  const chat = createForkedChat(config, cacheSafe);
-  const model = modelOverride || cacheSafe.model;
-  const approvalMode = config.getApprovalMode();
-  const messages: Content[] = [];
+  const modelSelector =
+    modelOverride ?? config.getFastModel() ?? cacheSafe.model;
+  return runWithForkedChatModel(config, modelSelector, async (model) => {
+    const chat = createForkedChat(config, cacheSafe);
+    const approvalMode = config.getApprovalMode();
+    const messages: Content[] = [];
 
-  // Add the suggestion as the initial user message
-  const userMsg: Content = {
-    role: 'user',
-    parts: [{ text: state.suggestion }],
-  };
-  messages.push(userMsg);
+    // Add the suggestion as the initial user message
+    const userMsg: Content = {
+      role: 'user',
+      parts: [{ text: state.suggestion }],
+    };
+    messages.push(userMsg);
 
-  for (let turn = 0; turn < MAX_SPECULATION_TURNS; turn++) {
-    if (state.abortController?.signal.aborted) break;
-    if (messages.length >= MAX_SPECULATION_MESSAGES) break;
-
-    // Send user message for this turn
-    const lastUserMsg = messages[messages.length - 1];
-    const stream = await chat.sendMessageStream(
-      model,
-      { message: lastUserMsg.parts ?? [] },
-      'speculation',
-    );
-
-    const modelParts: Part[] = [];
-    for await (const event of stream) {
+    for (let turn = 0; turn < MAX_SPECULATION_TURNS; turn++) {
       if (state.abortController?.signal.aborted) break;
-      if (event.type !== StreamEventType.CHUNK) continue;
-      const response = event.value;
-      const parts = response.candidates?.[0]?.content?.parts ?? [];
-      for (const part of parts) {
-        // Skip thought/reasoning parts — only capture visible text + function calls
-        if (part.text && !(part as Record<string, unknown>)['thought']) {
-          modelParts.push({ text: part.text });
-        }
-        if (part.functionCall && part.functionCall.name) {
-          modelParts.push({
-            functionCall: {
-              name: part.functionCall.name,
-              args: part.functionCall.args,
-            },
-          });
-        }
-      }
-    }
+      if (messages.length >= MAX_SPECULATION_MESSAGES) break;
 
-    if (state.abortController?.signal.aborted) break;
-    if (modelParts.length === 0) break;
-
-    const modelMsg: Content = { role: 'model', parts: modelParts };
-    messages.push(modelMsg);
-
-    // Extract function calls from model response
-    const functionCalls = modelParts.filter(
-      (p): p is Part & { functionCall: NonNullable<Part['functionCall']> } =>
-        p.functionCall !== undefined,
-    );
-
-    if (functionCalls.length === 0) {
-      // No tool calls — speculation complete (text-only response)
-      break;
-    }
-
-    // Process each function call through the tool gate
-    const functionResponses: Part[] = [];
-    let hitBoundary = false;
-
-    for (const part of functionCalls) {
-      const fc = part.functionCall;
-      const name = fc.name ?? '';
-      const args = (fc.args ?? {}) as Record<string, unknown>;
-      const gate = await evaluateToolCall(
-        name,
-        args,
-        state.overlayFs!,
-        approvalMode,
+      // Send user message for this turn
+      const lastUserMsg = messages[messages.length - 1];
+      const stream = await chat.sendMessageStream(
+        model,
+        { message: lastUserMsg.parts ?? [] },
+        'speculation',
       );
 
-      if (gate.action === 'boundary') {
-        hitBoundary = true;
+      const modelParts: Part[] = [];
+      for await (const event of stream) {
+        if (state.abortController?.signal.aborted) break;
+        if (event.type !== StreamEventType.CHUNK) continue;
+        const response = event.value;
+        const parts = response.candidates?.[0]?.content?.parts ?? [];
+        for (const part of parts) {
+          // Skip thought/reasoning parts — only capture visible text + function calls
+          if (part.text && !(part as Record<string, unknown>)['thought']) {
+            modelParts.push({ text: part.text });
+          }
+          if (part.functionCall && part.functionCall.name) {
+            modelParts.push({
+              functionCall: {
+                ...(part.functionCall.id ? { id: part.functionCall.id } : {}),
+                name: part.functionCall.name,
+                args: part.functionCall.args,
+              },
+            });
+          }
+        }
+      }
+
+      if (state.abortController?.signal.aborted) break;
+      if (modelParts.length === 0) break;
+
+      const modelMsg: Content = { role: 'model', parts: modelParts };
+      messages.push(modelMsg);
+
+      // Extract function calls from model response
+      const functionCalls = modelParts.filter(
+        (p): p is Part & { functionCall: NonNullable<Part['functionCall']> } =>
+          p.functionCall !== undefined,
+      );
+
+      if (functionCalls.length === 0) {
+        // No tool calls — speculation complete (text-only response)
         break;
       }
 
-      if (gate.action === 'redirect') {
-        try {
-          await rewritePathArgs(args, state.overlayFs!);
-        } catch {
-          // Path rewrite failed (e.g., absolute path outside cwd) — treat as boundary
+      // Process each function call through the tool gate
+      let functionResponses: Part[] = [];
+      const responseEntries: ToolResponseBudgetEntry[] = [];
+      let hitBoundary = false;
+
+      for (const part of functionCalls) {
+        const fc = part.functionCall;
+        const name = fc.name ?? '';
+        const id = fc.id;
+        const args = (fc.args ?? {}) as Record<string, unknown>;
+        const toolRegistry = config.getToolRegistry();
+        // Permission-deferred calls must use the normal scheduler approval
+        // path; speculation deliberately bypasses that path.
+        if (toolRegistry.isPermissionDeferred?.(name)) {
           hitBoundary = true;
           break;
         }
-      }
-
-      // Execute the tool directly (bypassing CoreToolScheduler)
-      // SECURITY: Only reaches here for read-only tools or writes gated by approvalMode
-      try {
-        const toolRegistry = config.getToolRegistry();
-        const tool = await toolRegistry.ensureTool(name);
-        if (!tool) {
-          functionResponses.push({
-            functionResponse: {
-              name,
-              response: { error: `Tool '${name}' not found` },
-            },
+        const persistenceCallId =
+          id ?? `${name}-${state.id}-${turn}-${responseEntries.length}`;
+        let producerObserved = false;
+        const observeProducer = (
+          params: Omit<
+            Parameters<typeof observeSpeculationProducer>[0],
+            'config' | 'callId' | 'toolName'
+          >,
+        ) => {
+          if (producerObserved) return;
+          producerObserved = true;
+          observeSpeculationProducer({
+            ...params,
+            config,
+            callId: persistenceCallId,
+            toolName: name,
           });
-          continue;
-        }
-
-        const invocation = tool.build(args);
-        const result = await invocation.execute(state.abortController!.signal);
-        state.toolUseCount++;
-
-        const responseContent =
-          typeof result.llmContent === 'string'
-            ? { output: result.llmContent }
-            : { output: JSON.stringify(result.llmContent) };
-        functionResponses.push({
-          functionResponse: { name, response: responseContent },
-        });
-      } catch (error: unknown) {
-        functionResponses.push({
-          functionResponse: {
-            name,
-            response: {
-              error:
-                error instanceof Error
-                  ? error.message
-                  : 'Tool execution failed',
-            },
-          },
-        });
-      }
-    }
-
-    if (hitBoundary) {
-      // Keep already-executed tool responses, strip unexecuted function calls
-      // from model message, and add the partial responses we do have (#18)
-      if (functionResponses.length > 0) {
-        // Some tools were executed before boundary — keep only the first N
-        // functionCall parts (matching functionResponses.length) by order,
-        // not by name, to handle duplicate tool names correctly.
-        let keptFunctionCalls = 0;
-        const keptModelParts = modelParts.filter((p) => {
-          if (!p.functionCall) return true;
-          if (keptFunctionCalls < functionResponses.length) {
-            keptFunctionCalls++;
-            return true;
-          }
-          return false;
-        });
-        if (keptModelParts.length > 0) {
-          messages[messages.length - 1] = {
-            role: 'model',
-            parts: keptModelParts,
-          };
-          // Add the tool results we have
-          messages.push({ role: 'user', parts: functionResponses });
-        } else {
-          messages.pop();
-        }
-      } else {
-        // No tools were executed — remove the model message entirely
-        const textOnlyParts = modelParts.filter(
-          (p) => p.functionCall === undefined,
+        };
+        const gate = await evaluateToolCall(
+          name,
+          args,
+          state.overlayFs!,
+          approvalMode,
+          config.getTargetDir?.(),
         );
-        if (textOnlyParts.length > 0) {
-          messages[messages.length - 1] = {
-            role: 'model',
-            parts: textOnlyParts,
+
+        if (gate.action === 'boundary') {
+          hitBoundary = true;
+          break;
+        }
+
+        if (gate.action === 'redirect') {
+          try {
+            await rewritePathArgs(args, state.overlayFs!);
+          } catch {
+            // Path rewrite failed (e.g., absolute path outside cwd) — treat as boundary
+            hitBoundary = true;
+            break;
+          }
+        }
+
+        // Execute the tool directly (bypassing CoreToolScheduler)
+        // SECURITY: Only reaches here for read-only tools or writes gated by approvalMode
+        try {
+          const tool = await toolRegistry.ensureTool(name);
+          if (!tool) {
+            const responsePart: Part = {
+              functionResponse: {
+                ...(id ? { id } : {}),
+                name,
+                response: { error: `Tool '${name}' not found` },
+              },
+            };
+            observeProducer({
+              knownNone: true,
+              values: () => toolResultPartDiagnosticValues(responsePart),
+            });
+            functionResponses.push(responsePart);
+            responseEntries.push({
+              callId: persistenceCallId,
+              toolName: name,
+              responseParts: [responsePart],
+            });
+            continue;
+          }
+
+          const invocation = tool.build(args);
+          const toolInvocationGuard = config.getToolInvocationGuard?.();
+          if (toolInvocationGuard) {
+            const invocationContext = getInvocationContext();
+            const guardDecision = await evaluateToolInvocationGuard(
+              toolInvocationGuard,
+              {
+                callId: persistenceCallId,
+                toolName: canonicalToolName(name),
+                args: invocation.params as Record<string, unknown>,
+                signal: state.abortController!.signal,
+                sessionId: config.getSessionId(),
+                cwd: config.getTargetDir(),
+                ...(invocationContext ? { invocationContext } : {}),
+              },
+            );
+            if (state.abortController!.signal.aborted) {
+              hitBoundary = true;
+              break;
+            }
+            if (!guardDecision.allowed) {
+              debugLogger.debug(
+                `Speculative guard denial: ${guardDecision.reason}`,
+              );
+              hitBoundary = true;
+              break;
+            }
+          }
+          const result = await invocation.execute(
+            state.abortController!.signal,
+          );
+          state.toolUseCount++;
+          let resultArtifacts: ToolArtifact[] | undefined;
+          let resultPersistedOutputFiles: string[] | undefined;
+          try {
+            resultArtifacts = result.artifacts;
+          } catch {
+            // Optional result metadata must not affect execution.
+          }
+          try {
+            resultPersistedOutputFiles = result.persistedOutputFiles;
+          } catch {
+            // Optional result metadata must not affect execution.
+          }
+
+          observeProducer({
+            persistedOutputFiles: resultPersistedOutputFiles,
+            artifacts: resultArtifacts,
+            values: () => [
+              ...toolResultPartDiagnosticValues(result.llmContent),
+              ...(typeof result.returnDisplay === 'string'
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: result.returnDisplay,
+                    },
+                  ]
+                : []),
+            ],
+          });
+
+          const convertedResponseParts = result.error
+            ? convertToFunctionErrorResponse(
+                name,
+                id ?? '',
+                result.llmContent,
+                result.error.message,
+              )
+            : convertToFunctionResponse(name, id ?? '', result.llmContent);
+          const bridgedResponseParts = stripToolResultImages(
+            convertedResponseParts,
+          );
+          const responseParts = id
+            ? bridgedResponseParts
+            : bridgedResponseParts.map((responsePart) => {
+                if (!responsePart.functionResponse) {
+                  return responsePart;
+                }
+                const { id: _id, ...functionResponse } =
+                  responsePart.functionResponse;
+                return { ...responsePart, functionResponse };
+              });
+          functionResponses.push(...responseParts);
+          responseEntries.push({
+            callId: persistenceCallId,
+            toolName: name,
+            responseParts,
+            persistedOutputFiles: resultPersistedOutputFiles,
+            artifacts: resultArtifacts,
+          });
+        } catch (error: unknown) {
+          const responsePart: Part = {
+            functionResponse: {
+              ...(id ? { id } : {}),
+              name,
+              response: {
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : 'Tool execution failed',
+              },
+            },
           };
-        } else {
-          messages.pop();
+          observeProducer({
+            knownNone: true,
+            values: () => toolResultPartDiagnosticValues(responsePart),
+          });
+          functionResponses.push(responsePart);
+          responseEntries.push({
+            callId: persistenceCallId,
+            toolName: name,
+            responseParts: [responsePart],
+          });
         }
       }
 
-      return {
-        messages,
-        boundary: {
-          type: 'boundary',
-          detail: 'speculation_boundary',
-          completedAt: Date.now(),
-        },
-      };
+      if (responseEntries.length > 0) {
+        const finalized = await finalizeToolResponses(config, responseEntries);
+        functionResponses = finalized.flatMap((entry) => entry.responseParts);
+      }
+
+      if (hitBoundary) {
+        // Keep already-executed tool responses, strip unexecuted function calls
+        // from model message, and add the partial responses we do have (#18)
+        if (functionResponses.length > 0) {
+          // Some tools were executed before boundary — keep only the first N
+          // functionCall parts (matching functionResponses.length) by order,
+          // not by name, to handle duplicate tool names correctly.
+          let keptFunctionCalls = 0;
+          const keptModelParts = modelParts.filter((p) => {
+            if (!p.functionCall) return true;
+            if (keptFunctionCalls < functionResponses.length) {
+              keptFunctionCalls++;
+              return true;
+            }
+            return false;
+          });
+          if (keptModelParts.length > 0) {
+            messages[messages.length - 1] = {
+              role: 'model',
+              parts: keptModelParts,
+            };
+            // Add the tool results we have
+            messages.push({ role: 'user', parts: functionResponses });
+          } else {
+            messages.pop();
+          }
+        } else {
+          // No tools were executed — remove the model message entirely
+          const textOnlyParts = modelParts.filter(
+            (p) => p.functionCall === undefined,
+          );
+          if (textOnlyParts.length > 0) {
+            messages[messages.length - 1] = {
+              role: 'model',
+              parts: textOnlyParts,
+            };
+          } else {
+            messages.pop();
+          }
+        }
+
+        return {
+          messages,
+          boundary: {
+            type: 'boundary',
+            detail: 'speculation_boundary',
+            completedAt: Date.now(),
+          },
+        };
+      }
+
+      // Add tool results to history for next turn
+      if (functionResponses.length > 0) {
+        const resultMsg: Content = { role: 'user', parts: functionResponses };
+        messages.push(resultMsg);
+      }
     }
 
-    // Add tool results to history for next turn
-    if (functionResponses.length > 0) {
-      const resultMsg: Content = { role: 'user', parts: functionResponses };
-      messages.push(resultMsg);
-    }
-  }
-
-  return { messages };
+    return { messages };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -405,7 +592,7 @@ async function runSpeculativeLoop(
  */
 export async function acceptSpeculation(
   state: SpeculationState,
-  geminiClient: GeminiClient,
+  llmClient: LlmClient,
 ): Promise<SpeculationResult> {
   const timeSavedMs = state.boundary
     ? Math.max(0, state.boundary.completedAt - state.startTime)
@@ -422,7 +609,7 @@ export async function acceptSpeculation(
 
     // Inject into main conversation
     for (const msg of cleanMessages) {
-      await geminiClient.addHistory(msg);
+      await llmClient.addHistory(msg);
     }
 
     state.status = 'completed';
@@ -537,15 +724,18 @@ The assistant responded: ${speculatedSummary || '(tool calls executed)'}
 
 ${SUGGESTION_PROMPT}`;
 
-    const cacheSafeParams = getCacheSafeParams();
+    const cacheSafeParams = getCacheSafeParams(config.getSessionId());
     if (!cacheSafeParams) return null;
+    const model = modelOverride ?? config.getFastModel();
+    const resolvedModel = model ?? cacheSafeParams.model;
     const result = await runForkedAgent({
       config,
       userMessage: augmentedPrompt,
       cacheSafeParams,
       jsonSchema: PIPELINED_SCHEMA,
-      model: modelOverride,
+      ...(model !== undefined ? { model } : {}),
       abortSignal,
+      preserveTools: resolvedModel === cacheSafeParams.model,
     });
 
     if (abortSignal.aborted) return null;

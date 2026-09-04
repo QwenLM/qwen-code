@@ -13,7 +13,11 @@
  */
 
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import type {
+  MCPServerConfig,
+  TeammateApprovalRequestEvent,
+  WorkflowApproval,
+} from '@qwen-code/qwen-code-core';
 import type { PermissionSuggestion } from '../../types.js';
 
 /**
@@ -46,6 +50,20 @@ export interface PermissionServiceAPI {
    * @returns Callback function that processes tool call updates
    */
   getToolCallUpdateCallback(): (toolCalls: unknown[]) => void;
+
+  /**
+   * Handle a teammate tool approval request routed via the
+   * TEAMMATE_APPROVAL_REQUEST team event. Stream-json sessions ask the
+   * SDK host for permission; other modes are handled by the caller.
+   */
+  handleTeammateApproval(event: TeammateApprovalRequestEvent): Promise<void>;
+
+  handleWorkflowApproval(
+    runId: string,
+    approval: WorkflowApproval,
+    rawArgs: Record<string, unknown>,
+    approvalSignal: AbortSignal,
+  ): Promise<void>;
 }
 
 /**

@@ -67,7 +67,10 @@ vi.mock('@opentelemetry/api');
 
 describe('Telemetry Metrics', () => {
   let initializeMetricsModule: typeof import('./metrics.js').initializeMetrics;
+  let recordToolCallMetricsModule: typeof import('./metrics.js').recordToolCallMetrics;
   let recordTokenUsageMetricsModule: typeof import('./metrics.js').recordTokenUsageMetrics;
+  let recordToolExecutionMetricsModule: typeof import('./metrics.js').recordToolExecutionMetrics;
+  let recordRepeatedToolFailureGuardMetricsModule: typeof import('./metrics.js').recordRepeatedToolFailureGuardMetrics;
   let recordFileOperationMetricModule: typeof import('./metrics.js').recordFileOperationMetric;
   let recordChatCompressionMetricsModule: typeof import('./metrics.js').recordChatCompressionMetrics;
   let recordStartupPerformanceModule: typeof import('./metrics.js').recordStartupPerformance;
@@ -80,6 +83,8 @@ describe('Telemetry Metrics', () => {
   let recordPerformanceScoreModule: typeof import('./metrics.js').recordPerformanceScore;
   let recordPerformanceRegressionModule: typeof import('./metrics.js').recordPerformanceRegression;
   let recordBaselineComparisonModule: typeof import('./metrics.js').recordBaselineComparison;
+  let recordChannelMemoryRecallMetricsModule: typeof import('./metrics.js').recordChannelMemoryRecallMetrics;
+  let recordMemoryRecallDeliveryMetricsModule: typeof import('./metrics.js').recordMemoryRecallDeliveryMetrics;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -91,7 +96,12 @@ describe('Telemetry Metrics', () => {
 
     const metricsJsModule = await import('./metrics.js');
     initializeMetricsModule = metricsJsModule.initializeMetrics;
+    recordToolCallMetricsModule = metricsJsModule.recordToolCallMetrics;
     recordTokenUsageMetricsModule = metricsJsModule.recordTokenUsageMetrics;
+    recordToolExecutionMetricsModule =
+      metricsJsModule.recordToolExecutionMetrics;
+    recordRepeatedToolFailureGuardMetricsModule =
+      metricsJsModule.recordRepeatedToolFailureGuardMetrics;
     recordFileOperationMetricModule = metricsJsModule.recordFileOperationMetric;
     recordChatCompressionMetricsModule =
       metricsJsModule.recordChatCompressionMetrics;
@@ -107,6 +117,10 @@ describe('Telemetry Metrics', () => {
     recordPerformanceRegressionModule =
       metricsJsModule.recordPerformanceRegression;
     recordBaselineComparisonModule = metricsJsModule.recordBaselineComparison;
+    recordChannelMemoryRecallMetricsModule =
+      metricsJsModule.recordChannelMemoryRecallMetrics;
+    recordMemoryRecallDeliveryMetricsModule =
+      metricsJsModule.recordMemoryRecallDeliveryMetrics;
 
     const otelApiModule = await import('@opentelemetry/api');
 
@@ -119,6 +133,48 @@ describe('Telemetry Metrics', () => {
     (otelApiModule.metrics.getMeter as Mock).mockReturnValue(mockMeterInstance);
     mockCreateCounterFn.mockReturnValue(mockCounterInstance);
     mockCreateHistogramFn.mockReturnValue(mockHistogramInstance);
+  });
+
+  describe('recordToolCallMetrics', () => {
+    const config = makeFakeConfig({
+      sessionId: 'test-session-id',
+    });
+
+    it('records an explicit terminal status only on the counter', () => {
+      initializeMetricsModule(config);
+
+      recordToolCallMetricsModule(config, 25, {
+        function_name: 'read_file',
+        success: false,
+        status: 'cancelled',
+        tool_type: 'native',
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        function_name: 'read_file',
+        success: false,
+        status: 'cancelled',
+        tool_type: 'native',
+      });
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(25, {
+        function_name: 'read_file',
+      });
+    });
+
+    it('derives status from success for legacy callers', () => {
+      initializeMetricsModule(config);
+
+      recordToolCallMetricsModule(config, 10, {
+        function_name: 'legacy_tool',
+        success: false,
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        function_name: 'legacy_tool',
+        success: false,
+        status: 'error',
+      });
+    });
   });
 
   describe('recordChatCompressionMetrics', () => {
@@ -145,7 +201,6 @@ describe('Telemetry Metrics', () => {
       });
 
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
-        'session.id': 'test-session-id',
         tokens_after: 100,
         tokens_before: 200,
       });
@@ -156,6 +211,7 @@ describe('Telemetry Metrics', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getTelemetryEnabled: () => true,
+      getTelemetryMetricsIncludeSessionId: () => false,
     } as unknown as Config;
 
     it('should not record metrics if not initialized', () => {
@@ -173,11 +229,8 @@ describe('Telemetry Metrics', () => {
         type: 'input',
       });
       expect(mockCounterAddFn).toHaveBeenCalledTimes(2);
-      expect(mockCounterAddFn).toHaveBeenNthCalledWith(1, 1, {
-        'session.id': 'test-session-id',
-      });
+      expect(mockCounterAddFn).toHaveBeenNthCalledWith(1, 1, {});
       expect(mockCounterAddFn).toHaveBeenNthCalledWith(2, 100, {
-        'session.id': 'test-session-id',
         model: 'gemini-pro',
         type: 'input',
       });
@@ -192,7 +245,6 @@ describe('Telemetry Metrics', () => {
         type: 'output',
       });
       expect(mockCounterAddFn).toHaveBeenCalledWith(50, {
-        'session.id': 'test-session-id',
         model: 'gemini-pro',
         type: 'output',
       });
@@ -202,7 +254,6 @@ describe('Telemetry Metrics', () => {
         type: 'thought',
       });
       expect(mockCounterAddFn).toHaveBeenCalledWith(25, {
-        'session.id': 'test-session-id',
         model: 'gemini-pro',
         type: 'thought',
       });
@@ -212,19 +263,8 @@ describe('Telemetry Metrics', () => {
         type: 'cache',
       });
       expect(mockCounterAddFn).toHaveBeenCalledWith(75, {
-        'session.id': 'test-session-id',
         model: 'gemini-pro',
         type: 'cache',
-      });
-
-      recordTokenUsageMetricsModule(mockConfig, 125, {
-        model: 'gemini-pro',
-        type: 'tool',
-      });
-      expect(mockCounterAddFn).toHaveBeenCalledWith(125, {
-        'session.id': 'test-session-id',
-        model: 'gemini-pro',
-        type: 'tool',
       });
     });
 
@@ -237,9 +277,105 @@ describe('Telemetry Metrics', () => {
         type: 'input',
       });
       expect(mockCounterAddFn).toHaveBeenCalledWith(200, {
-        'session.id': 'test-session-id',
         model: 'gemini-ultra',
         type: 'input',
+      });
+    });
+  });
+
+  describe('recordToolExecutionMetrics', () => {
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getTelemetryEnabled: () => true,
+      getTelemetryMetricsIncludeSessionId: () => false,
+    } as unknown as Config;
+
+    it('does not record before metrics are initialized', () => {
+      recordToolExecutionMetricsModule(mockConfig, {
+        execution_status: 'unknown',
+        tool_type: 'native',
+      });
+
+      expect(mockCounterAddFn).not.toHaveBeenCalled();
+    });
+
+    it('uses a dedicated low-cardinality counter', () => {
+      initializeMetricsModule(mockConfig);
+      mockCounterAddFn.mockClear();
+
+      recordToolExecutionMetricsModule(mockConfig, {
+        execution_status: 'error',
+        tool_type: 'mcp',
+      });
+
+      expect(mockCreateCounterFn).toHaveBeenCalledWith(
+        'qwen-code.tool.execution.count',
+        expect.any(Object),
+      );
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        execution_status: 'error',
+        tool_type: 'mcp',
+      });
+    });
+
+    it('merges common attributes when session id is opted in', () => {
+      const configWithSession = {
+        ...mockConfig,
+        getTelemetryMetricsIncludeSessionId: () => true,
+      } as unknown as Config;
+      initializeMetricsModule(configWithSession);
+      mockCounterAddFn.mockClear();
+
+      recordToolExecutionMetricsModule(configWithSession, {
+        execution_status: 'success',
+        tool_type: 'native',
+      });
+
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        'session.id': 'test-session-id',
+        execution_status: 'success',
+        tool_type: 'native',
+      });
+    });
+  });
+
+  describe('recordRepeatedToolFailureGuardMetrics', () => {
+    const config = makeFakeConfig({
+      sessionId: 'test-session-id',
+    });
+
+    it('records only low-cardinality transition attributes', () => {
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+
+      recordRepeatedToolFailureGuardMetricsModule({
+        route: 'acp_foreground',
+        mode: 'enforce',
+        phase_before: 'warned',
+        phase_after: 'latched',
+        decision: 'stopped',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '3+',
+        terminal_status: 'error',
+        execution_status: 'error',
+        tool_type: 'mcp',
+      });
+
+      expect(mockCreateCounterFn).toHaveBeenCalledWith(
+        'qwen-code.repeated_tool_failure_guard.count',
+        expect.any(Object),
+      );
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
+        route: 'acp_foreground',
+        mode: 'enforce',
+        phase_before: 'warned',
+        phase_after: 'latched',
+        decision: 'stopped',
+        failure_count_bucket: '8+',
+        batch_count_bucket: '3+',
+        terminal_status: 'error',
+        execution_status: 'error',
+        tool_type: 'mcp',
       });
     });
   });
@@ -248,6 +384,7 @@ describe('Telemetry Metrics', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getTelemetryEnabled: () => true,
+      getTelemetryMetricsIncludeSessionId: () => false,
     } as unknown as Config;
 
     it('should not record metrics if not initialized', () => {
@@ -270,11 +407,8 @@ describe('Telemetry Metrics', () => {
       });
 
       expect(mockCounterAddFn).toHaveBeenCalledTimes(2);
-      expect(mockCounterAddFn).toHaveBeenNthCalledWith(1, 1, {
-        'session.id': 'test-session-id',
-      });
+      expect(mockCounterAddFn).toHaveBeenNthCalledWith(1, 1, {});
       expect(mockCounterAddFn).toHaveBeenNthCalledWith(2, 1, {
-        'session.id': 'test-session-id',
         operation: FileOperation.CREATE,
         lines: 10,
         mimetype: 'text/plain',
@@ -290,7 +424,6 @@ describe('Telemetry Metrics', () => {
         operation: FileOperation.READ,
       });
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
-        'session.id': 'test-session-id',
         operation: FileOperation.READ,
       });
     });
@@ -304,7 +437,6 @@ describe('Telemetry Metrics', () => {
         mimetype: 'application/javascript',
       });
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
-        'session.id': 'test-session-id',
         operation: FileOperation.UPDATE,
         mimetype: 'application/javascript',
       });
@@ -319,7 +451,6 @@ describe('Telemetry Metrics', () => {
       });
 
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
-        'session.id': 'test-session-id',
         operation: FileOperation.UPDATE,
       });
     });
@@ -336,7 +467,6 @@ describe('Telemetry Metrics', () => {
       });
 
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
-        'session.id': 'test-session-id',
         operation: FileOperation.UPDATE,
         lines: 10,
         mimetype: 'text/plain',
@@ -353,7 +483,6 @@ describe('Telemetry Metrics', () => {
       });
 
       expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
-        'session.id': 'test-session-id',
         operation: FileOperation.UPDATE,
       });
     });
@@ -363,6 +492,7 @@ describe('Telemetry Metrics', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',
       getTelemetryEnabled: () => true,
+      getTelemetryMetricsIncludeSessionId: () => false,
     } as unknown as Config;
 
     describe('recordStartupPerformance', () => {
@@ -371,6 +501,7 @@ describe('Telemetry Metrics', () => {
         const mockConfigDisabled = {
           getSessionId: () => 'test-session-id',
           getTelemetryEnabled: () => false, // Disable telemetry to disable performance monitoring
+          getTelemetryMetricsIncludeSessionId: () => false,
         } as unknown as Config;
 
         initializeMetricsModule(mockConfigDisabled);
@@ -400,7 +531,6 @@ describe('Telemetry Metrics', () => {
         });
 
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(150, {
-          'session.id': 'test-session-id',
           phase: 'settings_loading',
           auth_type: 'gemini',
           telemetry_enabled: true,
@@ -415,7 +545,6 @@ describe('Telemetry Metrics', () => {
         recordStartupPerformanceModule(mockConfig, 50, { phase: 'cleanup' });
 
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(50, {
-          'session.id': 'test-session-id',
           phase: 'cleanup',
         });
       });
@@ -437,7 +566,6 @@ describe('Telemetry Metrics', () => {
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(
           floatingPointDuration,
           {
-            'session.id': 'test-session-id',
             phase: 'total_startup',
             is_tty: true,
             has_question: false,
@@ -457,7 +585,6 @@ describe('Telemetry Metrics', () => {
         });
 
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(15728640, {
-          'session.id': 'test-session-id',
           memory_type: 'heap_used',
           component: 'startup',
         });
@@ -482,17 +609,14 @@ describe('Telemetry Metrics', () => {
 
         expect(mockHistogramRecordFn).toHaveBeenCalledTimes(3); // One for each call
         expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(1, 31457280, {
-          'session.id': 'test-session-id',
           memory_type: 'heap_total',
           component: 'api_call',
         });
         expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(2, 2097152, {
-          'session.id': 'test-session-id',
           memory_type: 'external',
           component: 'tool_execution',
         });
         expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(3, 41943040, {
-          'session.id': 'test-session-id',
           memory_type: 'rss',
           component: 'memory_monitor',
         });
@@ -507,7 +631,6 @@ describe('Telemetry Metrics', () => {
         });
 
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(15728640, {
-          'session.id': 'test-session-id',
           memory_type: 'heap_used',
         });
       });
@@ -523,7 +646,6 @@ describe('Telemetry Metrics', () => {
         });
 
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(85.5, {
-          'session.id': 'test-session-id',
           component: 'tool_execution',
         });
       });
@@ -534,9 +656,7 @@ describe('Telemetry Metrics', () => {
 
         recordCpuUsageModule(mockConfig, 42.3, {});
 
-        expect(mockHistogramRecordFn).toHaveBeenCalledWith(42.3, {
-          'session.id': 'test-session-id',
-        });
+        expect(mockHistogramRecordFn).toHaveBeenCalledWith(42.3, {});
       });
     });
 
@@ -547,9 +667,7 @@ describe('Telemetry Metrics', () => {
 
         recordToolQueueDepthModule(mockConfig, 3);
 
-        expect(mockHistogramRecordFn).toHaveBeenCalledWith(3, {
-          'session.id': 'test-session-id',
-        });
+        expect(mockHistogramRecordFn).toHaveBeenCalledWith(3, {});
       });
 
       it('should record zero queue depth', () => {
@@ -558,9 +676,7 @@ describe('Telemetry Metrics', () => {
 
         recordToolQueueDepthModule(mockConfig, 0);
 
-        expect(mockHistogramRecordFn).toHaveBeenCalledWith(0, {
-          'session.id': 'test-session-id',
-        });
+        expect(mockHistogramRecordFn).toHaveBeenCalledWith(0, {});
       });
     });
 
@@ -575,7 +691,6 @@ describe('Telemetry Metrics', () => {
         });
 
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(25, {
-          'session.id': 'test-session-id',
           function_name: 'Read',
           phase: 'validation',
         });
@@ -600,17 +715,14 @@ describe('Telemetry Metrics', () => {
 
         expect(mockHistogramRecordFn).toHaveBeenCalledTimes(3); // One for each call
         expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(1, 50, {
-          'session.id': 'test-session-id',
           function_name: 'Bash',
           phase: 'preparation',
         });
         expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(2, 1500, {
-          'session.id': 'test-session-id',
           function_name: 'Bash',
           phase: 'execution',
         });
         expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(3, 75, {
-          'session.id': 'test-session-id',
           function_name: 'Bash',
           phase: 'result_processing',
         });
@@ -629,7 +741,6 @@ describe('Telemetry Metrics', () => {
         });
 
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(0.85, {
-          'session.id': 'test-session-id',
           model: 'gemini-pro',
           metric: 'cache_hit_rate',
           context: 'api_request',
@@ -646,7 +757,6 @@ describe('Telemetry Metrics', () => {
         });
 
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(125.5, {
-          'session.id': 'test-session-id',
           model: 'gemini-pro',
           metric: 'tokens_per_operation',
         });
@@ -664,7 +774,6 @@ describe('Telemetry Metrics', () => {
         });
 
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(15, {
-          'session.id': 'test-session-id',
           model: 'gemini-pro',
           phase: 'request_preparation',
         });
@@ -689,17 +798,14 @@ describe('Telemetry Metrics', () => {
 
         expect(mockHistogramRecordFn).toHaveBeenCalledTimes(3); // One for each call
         expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(1, 250, {
-          'session.id': 'test-session-id',
           model: 'gemini-pro',
           phase: 'network_latency',
         });
         expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(2, 100, {
-          'session.id': 'test-session-id',
           model: 'gemini-pro',
           phase: 'response_processing',
         });
         expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(3, 50, {
-          'session.id': 'test-session-id',
           model: 'gemini-pro',
           phase: 'token_processing',
         });
@@ -717,7 +823,6 @@ describe('Telemetry Metrics', () => {
         });
 
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(85.5, {
-          'session.id': 'test-session-id',
           category: 'memory_efficiency',
           baseline: 80.0,
         });
@@ -732,7 +837,6 @@ describe('Telemetry Metrics', () => {
         });
 
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(92.3, {
-          'session.id': 'test-session-id',
           category: 'overall_performance',
         });
       });
@@ -753,7 +857,6 @@ describe('Telemetry Metrics', () => {
 
         // Verify regression counter
         expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
-          'session.id': 'test-session-id',
           metric: 'startup_time',
           severity: 'medium',
           current_value: 1200,
@@ -762,7 +865,6 @@ describe('Telemetry Metrics', () => {
 
         // Verify baseline comparison histogram (20% increase)
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(20, {
-          'session.id': 'test-session-id',
           metric: 'startup_time',
           severity: 'medium',
           current_value: 1200,
@@ -784,7 +886,6 @@ describe('Telemetry Metrics', () => {
 
         // Verify regression counter still recorded
         expect(mockCounterAddFn).toHaveBeenCalledWith(1, {
-          'session.id': 'test-session-id',
           metric: 'memory_usage',
           severity: 'high',
           current_value: 100,
@@ -813,14 +914,12 @@ describe('Telemetry Metrics', () => {
         });
 
         expect(mockCounterAddFn).toHaveBeenNthCalledWith(1, 1, {
-          'session.id': 'test-session-id',
           metric: 'api_latency',
           severity: 'low',
           current_value: 500,
           baseline_value: 400,
         });
         expect(mockCounterAddFn).toHaveBeenNthCalledWith(2, 1, {
-          'session.id': 'test-session-id',
           metric: 'cpu_usage',
           severity: 'high',
           current_value: 90,
@@ -843,7 +942,6 @@ describe('Telemetry Metrics', () => {
 
         // 20% increase: (120 - 100) / 100 * 100 = 20%
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(20, {
-          'session.id': 'test-session-id',
           metric: 'memory_usage',
           category: 'performance_tracking',
           current_value: 120,
@@ -864,7 +962,6 @@ describe('Telemetry Metrics', () => {
 
         // 20% decrease: (800 - 1000) / 1000 * 100 = -20%
         expect(mockHistogramRecordFn).toHaveBeenCalledWith(-20, {
-          'session.id': 'test-session-id',
           metric: 'startup_time',
           category: 'optimization',
           current_value: 800,
@@ -894,6 +991,122 @@ describe('Telemetry Metrics', () => {
         );
         expect(mockHistogramRecordFn).not.toHaveBeenCalled();
       });
+    });
+  });
+
+  describe('metric attribute cardinality controls', () => {
+    it('records memory recall delivery with low-cardinality attributes', () => {
+      const config = makeFakeConfig({ sessionId: 'cardinality-test' });
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+      mockHistogramRecordFn.mockClear();
+
+      recordMemoryRecallDeliveryMetricsModule(config, 42, {
+        phase: 'refined',
+        delivery_point: 'discarded',
+        discard_reason: 'reset',
+        strategy: 'model',
+      });
+
+      const expectedAttrs = {
+        phase: 'refined',
+        delivery_point: 'discarded',
+        discard_reason: 'reset',
+        strategy: 'model',
+      };
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, expectedAttrs);
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(42, expectedAttrs);
+    });
+
+    it('omits session.id from metric attributes by default', () => {
+      const config = makeFakeConfig({ sessionId: 'cardinality-test' });
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+
+      recordChatCompressionMetricsModule(config, {
+        tokens_after: 1,
+        tokens_before: 2,
+      });
+
+      const attrs = mockCounterAddFn.mock.calls[0]?.[1] ?? {};
+      expect(attrs).not.toHaveProperty('session.id');
+    });
+
+    it('includes session.id when telemetry.metrics.includeSessionId is true', () => {
+      const config = makeFakeConfig({
+        sessionId: 'cardinality-test',
+        telemetry: { metrics: { includeSessionId: true } },
+      });
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+
+      recordChatCompressionMetricsModule(config, {
+        tokens_after: 1,
+        tokens_before: 2,
+      });
+
+      const attrs = mockCounterAddFn.mock.calls[0]?.[1] ?? {};
+      expect(attrs['session.id']).toBe('cardinality-test');
+    });
+  });
+
+  describe('recordChannelMemoryRecallMetrics', () => {
+    it('does not record before metrics are initialized', () => {
+      recordChannelMemoryRecallMetricsModule({
+        durationMs: 12,
+        cache: 'hit',
+        result: 'selected',
+        selectedCount: 2,
+      });
+
+      expect(mockCounterAddFn).not.toHaveBeenCalled();
+      expect(mockHistogramRecordFn).not.toHaveBeenCalled();
+    });
+
+    it('records only bounded recall outcome attributes', () => {
+      initializeMetricsModule(makeFakeConfig({ sessionId: 'secret-session' }));
+      mockCounterAddFn.mockClear();
+      mockHistogramRecordFn.mockClear();
+
+      recordChannelMemoryRecallMetricsModule({
+        durationMs: 12.5,
+        cache: 'miss',
+        result: 'revision_unstable',
+        selectedCount: 1,
+      });
+
+      const attributes = {
+        cache: 'miss',
+        result: 'revision_unstable',
+      };
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, attributes);
+      expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(
+        1,
+        12.5,
+        attributes,
+      );
+      expect(mockHistogramRecordFn).toHaveBeenNthCalledWith(2, 1, attributes);
+      expect(Object.keys(mockCounterAddFn.mock.calls[0]![1]!).sort()).toEqual([
+        'cache',
+        'result',
+      ]);
+    });
+
+    it('initializes dedicated channel memory recall instruments', () => {
+      initializeMetricsModule(makeFakeConfig({}));
+
+      expect(mockCreateCounterFn).toHaveBeenCalledWith(
+        'qwen-code.channel.memory.recall.count',
+        expect.any(Object),
+      );
+      expect(mockCreateHistogramFn).toHaveBeenCalledWith(
+        'qwen-code.channel.memory.recall.duration',
+        expect.objectContaining({ unit: 'ms' }),
+      );
+      expect(mockCreateHistogramFn).toHaveBeenCalledWith(
+        'qwen-code.channel.memory.recall.selected_count',
+        expect.any(Object),
+      );
     });
   });
 });

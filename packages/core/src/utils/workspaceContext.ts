@@ -14,6 +14,11 @@ const debugLogger = createDebugLogger('WORKSPACE');
 
 export type Unsubscribe = () => void;
 
+export interface ResolvedWorkspaceDirectories {
+  directories: Set<string>;
+  initialDirectories: Set<string>;
+}
+
 /**
  * WorkspaceContext manages multiple workspace directories and validates paths
  * against them. This allows the CLI to operate on files from multiple directories
@@ -81,7 +86,10 @@ export class WorkspaceContext {
    */
   addDirectory(directory: string, basePath: string = process.cwd()): void {
     try {
-      const resolved = this.resolveAndValidateDir(directory, basePath);
+      const resolved = WorkspaceContext.resolveAndValidateDir(
+        directory,
+        basePath,
+      );
       if (this.directories.has(resolved)) {
         return;
       }
@@ -94,7 +102,7 @@ export class WorkspaceContext {
     }
   }
 
-  private resolveAndValidateDir(
+  private static resolveAndValidateDir(
     directory: string,
     basePath: string = process.cwd(),
   ): string {
@@ -111,6 +119,24 @@ export class WorkspaceContext {
     }
 
     return fs.realpathSync(absolutePath);
+  }
+
+  static resolveRootDirectories(
+    directory: string,
+    additionalDirectories: readonly string[] = [],
+  ): ResolvedWorkspaceDirectories {
+    const primaryDirectory = WorkspaceContext.resolveAndValidateDir(directory);
+    const directories = new Set<string>([primaryDirectory]);
+    for (const additionalDirectory of additionalDirectories) {
+      directories.add(
+        WorkspaceContext.resolveAndValidateDir(additionalDirectory),
+      );
+    }
+
+    return {
+      directories,
+      initialDirectories: new Set([primaryDirectory]),
+    };
   }
 
   /**
@@ -135,7 +161,7 @@ export class WorkspaceContext {
     // Resolve to match the stored form
     let resolved: string;
     try {
-      resolved = this.resolveAndValidateDir(directory);
+      resolved = WorkspaceContext.resolveAndValidateDir(directory);
     } catch {
       // If we can't resolve it, try matching by raw string (e.g. directory was deleted)
       resolved = path.isAbsolute(directory)
@@ -162,7 +188,7 @@ export class WorkspaceContext {
    */
   isInitialDirectory(directory: string): boolean {
     try {
-      const resolved = this.resolveAndValidateDir(directory);
+      const resolved = WorkspaceContext.resolveAndValidateDir(directory);
       return this.initialDirectories.has(resolved);
     } catch {
       const absolutePath = path.isAbsolute(directory)
@@ -175,7 +201,7 @@ export class WorkspaceContext {
   setDirectories(directories: readonly string[]): void {
     const newDirectories = new Set<string>();
     for (const dir of directories) {
-      newDirectories.add(this.resolveAndValidateDir(dir));
+      newDirectories.add(WorkspaceContext.resolveAndValidateDir(dir));
     }
 
     if (
@@ -183,6 +209,30 @@ export class WorkspaceContext {
       ![...newDirectories].every((d) => this.directories.has(d))
     ) {
       this.directories = newDirectories;
+      this.notifyDirectoriesChanged();
+    }
+  }
+
+  applyRootDirectories(resolved: ResolvedWorkspaceDirectories): void {
+    const newDirectories = new Set(resolved.directories);
+    const newInitialDirectories = new Set(resolved.initialDirectories);
+    for (const existing of this.directories) {
+      if (!this.initialDirectories.has(existing)) {
+        newDirectories.add(existing);
+      }
+    }
+    const directoriesChanged =
+      newDirectories.size !== this.directories.size ||
+      ![...newDirectories].every((d) => this.directories.has(d));
+    const initialDirectoriesChanged =
+      newInitialDirectories.size !== this.initialDirectories.size ||
+      ![...newInitialDirectories].every((d) => this.initialDirectories.has(d));
+
+    this.directories = newDirectories;
+    this.initialDirectories = newInitialDirectories;
+    this.resolvedPathCache.clear();
+
+    if (directoriesChanged || initialDirectoriesChanged) {
       this.notifyDirectoriesChanged();
     }
   }
@@ -223,25 +273,7 @@ export class WorkspaceContext {
     if (cached !== undefined) {
       return cached;
     }
-    let resolved: string;
-    try {
-      resolved = fs.realpathSync(pathToCheck);
-    } catch (e: unknown) {
-      if (
-        isNodeError(e) &&
-        e.code === 'ENOENT' &&
-        e.path &&
-        // realpathSync does not set e.path correctly for symlinks to
-        // non-existent files.
-        !this.isFileSymlink(e.path)
-      ) {
-        // If it doesn't exist, e.path contains the fully resolved path.
-        resolved = e.path;
-      } else {
-        // Don't cache exceptions — the path may exist on retry.
-        throw e;
-      }
-    }
+    const resolved = resolveWorkspacePath(pathToCheck);
     if (
       this.resolvedPathCache.size >= WorkspaceContext.RESOLVED_PATH_CACHE_MAX
     ) {
@@ -252,16 +284,67 @@ export class WorkspaceContext {
     this.resolvedPathCache.set(pathToCheck, resolved);
     return resolved;
   }
+}
 
-  /**
-   * Checks if a file path is a symbolic link that points to a file.
-   */
-  private isFileSymlink(filePath: string): boolean {
-    try {
-      return !fs.readlinkSync(filePath).endsWith('/');
-    } catch (_error) {
-      return false;
+/**
+ * Resolves a workspace path using the same missing-path and symlink semantics
+ * used by WorkspaceContext containment checks.
+ */
+export function resolveWorkspacePath(pathToCheck: string): string {
+  try {
+    const resolved = fs.realpathSync(pathToCheck);
+    return typeof resolved === 'string' ? resolved : pathToCheck;
+  } catch (error: unknown) {
+    if (isResolvableMissingPathError(error)) {
+      return resolveMissingPath(pathToCheck);
     }
+
+    throw error;
+  }
+}
+
+function resolveMissingPath(pathToCheck: string): string {
+  const missingTail: string[] = [];
+  let ancestor = pathToCheck;
+
+  while (true) {
+    try {
+      const resolvedAncestor = fs.realpathSync(ancestor);
+      return path.join(resolvedAncestor, ...missingTail);
+    } catch (error: unknown) {
+      if (!isResolvableMissingPathError(error)) {
+        throw error;
+      }
+
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) {
+        return pathToCheck;
+      }
+      missingTail.unshift(path.basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+function isResolvableMissingPathError(error: unknown): boolean {
+  return (
+    isNodeError(error) &&
+    error.code === 'ENOENT' &&
+    !!error.path &&
+    // realpathSync does not set error.path correctly for symlinks to
+    // non-existent files.
+    !isFileSymlink(error.path)
+  );
+}
+
+/**
+ * Checks if a file path is a symbolic link that points to a file.
+ */
+function isFileSymlink(filePath: string): boolean {
+  try {
+    return !fs.readlinkSync(filePath).endsWith('/');
+  } catch (_error) {
+    return false;
   }
 }
 

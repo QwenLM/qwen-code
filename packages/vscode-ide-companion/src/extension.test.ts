@@ -6,19 +6,17 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
+import { DiffManager } from './diff-manager.js';
 import { activate } from './extension.js';
-import {
-  IDE_DEFINITIONS,
-  detectIdeFromEnv,
-} from '@qwen-code/qwen-code-core/src/ide/detect-ide.js';
+import { ChatProviderRegistry } from './webview/providers/ChatProviderRegistry.js';
+import { IDE_DEFINITIONS, detectIdeFromEnv } from '@qwen-code/qwen-code-core';
 
-vi.mock('@qwen-code/qwen-code-core/src/ide/detect-ide.js', async () => {
-  const actual = await vi.importActual(
-    '@qwen-code/qwen-code-core/src/ide/detect-ide.js',
-  );
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
-    detectIdeFromEnv: vi.fn(() => IDE_DEFINITIONS.vscode),
+    detectIdeFromEnv: vi.fn(() => actual.IDE_DEFINITIONS.vscode),
   };
 });
 
@@ -86,6 +84,11 @@ describe('activate', () => {
     vi.mocked(vscode.window.showInformationMessage).mockResolvedValue(
       undefined,
     );
+    (
+      vscode.workspace as unknown as {
+        workspaceFolders: vscode.WorkspaceFolder[];
+      }
+    ).workspaceFolders = [];
     context = {
       subscriptions: [],
       environmentVariableCollection: {
@@ -103,6 +106,7 @@ describe('activate', () => {
           version: '1.1.0',
         },
       },
+      extensionMode: vscode.ExtensionMode.Production,
     } as unknown as vscode.ExtensionContext;
   });
 
@@ -124,6 +128,65 @@ describe('activate', () => {
     );
   });
 
+  it('writes production logs to the Qwen Code Companion output channel', async () => {
+    const appendLine = vi.fn();
+    vi.mocked(vscode.window.createOutputChannel).mockReturnValue({
+      appendLine,
+    } as unknown as vscode.LogOutputChannel);
+
+    await activate(context);
+
+    expect(vscode.window.createOutputChannel).toHaveBeenCalledWith(
+      'Qwen Code Companion',
+    );
+    expect(appendLine).toHaveBeenCalledWith('[INFO] Extension activated');
+  });
+
+  it('launches Qwen Code with the full multi-root workspace env', async () => {
+    vi.mocked(context.globalState.get).mockReturnValue(true);
+    const first = {
+      name: 'first',
+      index: 0,
+      uri: { fsPath: '/workspace/first' },
+    } as vscode.WorkspaceFolder;
+    const second = {
+      name: 'second',
+      index: 1,
+      uri: { fsPath: '/workspace/second' },
+    } as vscode.WorkspaceFolder;
+    (
+      vscode.workspace as unknown as {
+        workspaceFolders: vscode.WorkspaceFolder[];
+      }
+    ).workspaceFolders = [first, second];
+    vi.mocked(vscode.window.showWorkspaceFolderPick).mockResolvedValue(second);
+    vi.mocked(vscode.Uri.joinPath).mockReturnValue({
+      fsPath: '/extension/dist/qwen-cli/cli.js',
+    } as vscode.Uri);
+
+    await activate(context);
+
+    const command = vi
+      .mocked(vscode.commands.registerCommand)
+      .mock.calls.find(([id]) => id === 'qwen-code.runQwenCode')?.[1] as
+      | (() => Promise<void>)
+      | undefined;
+    expect(command).toBeDefined();
+    await command!();
+
+    expect(vscode.window.createTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: '/workspace/second',
+        env: {
+          QWEN_CODE_IDE_WORKSPACE_PATH: JSON.stringify([
+            '/workspace/first',
+            '/workspace/second',
+          ]),
+        },
+      }),
+    );
+  });
+
   it('should not show the info message on subsequent activations', async () => {
     vi.mocked(context.globalState.get).mockReturnValue(true);
     vi.mocked(vscode.extensions.getExtension).mockReturnValue({
@@ -138,20 +201,16 @@ describe('activate', () => {
     expect(vscode.workspace.onDidGrantWorkspaceTrust).toHaveBeenCalled();
   });
 
-  it('should register webview view providers for sidebar and secondary positions', async () => {
+  it('should register the webview view provider for the sidebar position', async () => {
     await activate(context);
 
-    // Verify registerWebviewViewProvider was called 2 times (sidebar + secondary)
     const registerCalls = vi.mocked(vscode.window.registerWebviewViewProvider)
       .mock.calls;
-    expect(registerCalls).toHaveLength(2);
+    expect(registerCalls).toHaveLength(1);
 
-    // Extract view IDs from the calls
     const viewIds = registerCalls.map((call) => call[0]);
 
-    // Only sidebar and secondary are registered; panel view was removed
     expect(viewIds).toContain('qwen-code.chatView.sidebar');
-    expect(viewIds).toContain('qwen-code.chatView.secondary');
   });
 
   it('should launch the Qwen Code when the user clicks the button', async () => {
@@ -313,6 +372,75 @@ describe('activate', () => {
       await activate(context);
 
       expect(showInformationMessageMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('diff vote command gate', () => {
+    it('derives fromDiffEditor from the diff scheme and honors the pending gate', async () => {
+      vi.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        statusText: 'Internal Server Error',
+      } as Response);
+
+      const provider = {
+        hasPendingPermission: vi.fn(() => true),
+        respondToPendingPermission: vi.fn(),
+        dispose: vi.fn(),
+      };
+      const registrySpy = vi
+        .spyOn(ChatProviderRegistry.prototype, 'getPermissionAwareProviders')
+        .mockReturnValue([provider] as never);
+
+      await activate(context);
+
+      const findHandler = (name: string) =>
+        vi
+          .mocked(vscode.commands.registerCommand)
+          .mock.calls.find(([id]) => id === name)?.[1] as
+          | ((uri?: unknown) => void)
+          | undefined;
+      const acceptHandler = findHandler('qwen.diff.accept');
+      expect(acceptHandler).toBeDefined();
+
+      const diffUri = {
+        scheme: 'qwen-diff',
+        fsPath: '/workspace/src/app.ts',
+        toString: () => 'qwen-diff:///workspace/src/app.ts',
+      };
+      const hasDiff = vi
+        .spyOn(DiffManager.prototype, 'hasDiff')
+        .mockReturnValue(true);
+      const getPermissionRequestId = vi
+        .spyOn(DiffManager.prototype, 'getPermissionRequestId')
+        .mockReturnValue('req-1');
+
+      await acceptHandler!(diffUri);
+      expect(provider.respondToPendingPermission).toHaveBeenCalledWith(
+        'allow',
+        { fromDiffEditor: true, permissionRequestId: 'req-1' },
+      );
+
+      provider.respondToPendingPermission.mockClear();
+      const fileUri = {
+        scheme: 'file',
+        fsPath: '/workspace/src/app.ts',
+        toString: () => 'file:///workspace/src/app.ts',
+      };
+      await acceptHandler!(fileUri);
+      expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
+
+      getPermissionRequestId.mockReturnValue(undefined);
+      await acceptHandler!(diffUri);
+      expect(provider.respondToPendingPermission).toHaveBeenCalledWith('allow');
+
+      provider.respondToPendingPermission.mockClear();
+      provider.hasPendingPermission.mockReturnValue(false);
+      await acceptHandler!(diffUri);
+      expect(provider.respondToPendingPermission).not.toHaveBeenCalled();
+
+      hasDiff.mockRestore();
+      getPermissionRequestId.mockRestore();
+      registrySpy.mockRestore();
     });
   });
 });

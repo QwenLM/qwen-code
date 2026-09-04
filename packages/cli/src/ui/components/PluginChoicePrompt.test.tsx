@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render } from 'ink-testing-library';
+import { act } from '@testing-library/react';
 import { PluginChoicePrompt } from './PluginChoicePrompt.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 
@@ -222,6 +223,37 @@ describe('PluginChoicePrompt', () => {
       keypressHandler({ name: '2', sequence: '2' } as never);
 
       expect(onSelect).toHaveBeenCalledWith('plugin2');
+    });
+
+    it('navigates with Ctrl+N/P readline aliases', () => {
+      const { lastFrame } = render(
+        <PluginChoicePrompt
+          marketplaceName="test"
+          plugins={[{ name: 'plugin1' }, { name: 'plugin2' }]}
+          onSelect={onSelect}
+          onCancel={onCancel}
+          terminalWidth={terminalWidth}
+        />,
+      );
+
+      const keypressHandler = mockedUseKeypress.mock.calls[0][0];
+      act(() => {
+        keypressHandler({
+          name: 'n',
+          sequence: '\u000E',
+          ctrl: true,
+        } as never);
+      });
+      expect(lastFrame()).toContain('❯ plugin2');
+
+      act(() => {
+        keypressHandler({
+          name: 'p',
+          sequence: '\u0010',
+          ctrl: true,
+        } as never);
+      });
+      expect(lastFrame()).toContain('❯ plugin1');
     });
   });
 

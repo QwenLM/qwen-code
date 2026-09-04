@@ -7,14 +7,14 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
-// Note: yaml package would need to be added as a dependency
-// For now, we'll use a simple YAML parser implementation
+import { randomUUID } from 'crypto';
 import {
   parse as parseYaml,
   stringify as stringifyYaml,
 } from '../utils/yaml-parser.js';
 import type {
   SubagentConfig,
+  SubagentModelRoute,
   SubagentRuntimeConfig,
   SubagentLevel,
   ListSubagentsOptions,
@@ -26,32 +26,75 @@ import type {
   RunConfig,
   ToolConfig,
 } from '../agents/runtime/agent-types.js';
-import { SubagentError, SubagentErrorCode } from './types.js';
+import {
+  BUBBLE_APPROVAL_MODE,
+  SubagentError,
+  SubagentErrorCode,
+} from './types.js';
 import { SubagentValidator } from './validation.js';
 import { AgentHeadless } from '../agents/runtime/agent-headless.js';
 import type {
   AgentEventEmitter,
   AgentHooks,
 } from '../agents/runtime/agent-events.js';
-import type { Config } from '../config/config.js';
-import { APPROVAL_MODES } from '../config/config.js';
+import type { Config, MCPServerConfig } from '../config/config.js';
+import { APPROVAL_MODES, deriveConfig } from '../config/config.js';
+import type { HookDefinition, HookEventName } from '../hooks/types.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
-  type AuthType,
-  type ContentGenerator,
-  type ContentGeneratorConfig,
-  createContentGenerator,
-} from '../core/contentGenerator.js';
-import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
+  createRuntimeContentGeneratorView,
+  type AuthOverrides,
+} from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
-import { parseSubagentModelSelection } from './model-selection.js';
-
+import {
+  buildModelIdContext,
+  resolveModelId,
+  type ResolvedModelId,
+} from '../utils/modelId.js';
 const debugLogger = createDebugLogger('SUBAGENT_MANAGER');
 import { BuiltinAgentRegistry } from './builtin-agents.js';
-import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
+import {
+  COLOR_VALUES,
+  isColor,
+  isPermissionMode,
+  parseAgentHooks,
+  parseAgentMcpServers,
+  parseMaxTurns,
+  claudePermissionModeToApprovalMode,
+} from './agent-frontmatter-schema.js';
+import { ToolDisplayNamesMigration, ToolNames } from '../tools/tool-names.js';
+import { QWEN_DIR, Storage } from '../config/storage.js';
+import {
+  hasRebuiltToolRegistry,
+  rebuildToolRegistryOnOverride,
+} from '../tools/agent/agent.js';
 
-const QWEN_CONFIG_DIR = '.qwen';
 const AGENT_CONFIG_DIR = 'agents';
+
+/**
+ * Whether `mode` is valid on a subagent definition's `approvalMode`: any
+ * session-level {@link APPROVAL_MODES} value, plus the subagent-only
+ * {@link BUBBLE_APPROVAL_MODE}. `'bubble'` is intentionally NOT a member of the
+ * global `ApprovalMode` enum (it would pollute the session model/approval
+ * pickers); it is valid only here.
+ *
+ * Reads `APPROVAL_MODES` lazily (inside the call) rather than via a top-level
+ * spread: this module sits in an import cycle with `config.ts`, and an eager
+ * `[...APPROVAL_MODES]` at module-eval time can observe `APPROVAL_MODES`
+ * before `config.ts` has finished initializing it.
+ */
+function isSubagentApprovalMode(mode: string): boolean {
+  return (
+    (APPROVAL_MODES as readonly string[]).includes(mode) ||
+    mode === BUBBLE_APPROVAL_MODE
+  );
+}
+
+/** Human-readable list of valid subagent approval modes, for error messages. */
+function subagentApprovalModesLabel(): string {
+  return [...APPROVAL_MODES, BUBBLE_APPROVAL_MODE].join(', ');
+}
 
 /**
  * Manages subagent configurations stored as Markdown files with YAML frontmatter.
@@ -81,6 +124,85 @@ export class SubagentManager {
         debugLogger.warn('Subagent change listener threw an error:', error);
       }
     }
+  }
+
+  private applyBuiltinSettings(config: SubagentConfig): SubagentConfig {
+    if (config.name !== 'Explore') {
+      return config;
+    }
+
+    const configuredModel =
+      this.config.getAgentsSettings().builtin?.exploreModel;
+    if (typeof configuredModel !== 'string') {
+      return config;
+    }
+
+    const exploreModel = configuredModel.trim();
+    if (!exploreModel) {
+      return config;
+    }
+
+    return { ...config, model: exploreModel };
+  }
+
+  resolveModelGrade(
+    grade: string | undefined,
+    agentConfig: SubagentConfig,
+  ): string | undefined {
+    const configuredModel = agentConfig.model?.trim();
+    if (
+      !agentConfig.isBuiltin &&
+      configuredModel &&
+      configuredModel !== 'inherit'
+    ) {
+      return undefined;
+    }
+
+    if (!grade) {
+      return undefined;
+    }
+
+    return this.getAvailableModelGrades().get(grade);
+  }
+
+  getAvailableModelGrades(): Map<string, string> {
+    const { modelGrades, allowedGrades } = this.config.getAgentsSettings();
+    if (
+      !modelGrades ||
+      typeof modelGrades !== 'object' ||
+      Array.isArray(modelGrades) ||
+      (allowedGrades !== undefined && !Array.isArray(allowedGrades))
+    ) {
+      return new Map();
+    }
+
+    return new Map(
+      Object.entries(modelGrades).flatMap(([grade, model]) => {
+        const normalizedGrade = grade.trim();
+        return normalizedGrade !== '' &&
+          typeof model === 'string' &&
+          model.trim() !== '' &&
+          (allowedGrades === undefined ||
+            allowedGrades.some(
+              (allowedGrade) =>
+                typeof allowedGrade === 'string' &&
+                allowedGrade.trim() === normalizedGrade,
+            ))
+          ? [[normalizedGrade, model.trim()] as const]
+          : [];
+      }),
+    );
+  }
+
+  private getBuiltinAgent(name: string): SubagentConfig | null {
+    const config = BuiltinAgentRegistry.getBuiltinAgent(name);
+    return config ? this.applyBuiltinSettings(config) : null;
+  }
+
+  private getBuiltinAgents(): SubagentConfig[] {
+    return BuiltinAgentRegistry.getBuiltinAgents().map((config) =>
+      this.applyBuiltinSettings(config),
+    );
   }
 
   /**
@@ -126,6 +248,7 @@ export class SubagentManager {
 
     // Ensure directory exists
     const dir = path.dirname(filePath);
+    options.assertCanCommit?.();
     await fs.mkdir(dir, { recursive: true });
 
     // Update config with actual file path and level
@@ -138,6 +261,7 @@ export class SubagentManager {
     // Serialize and write the file
     const content = this.serializeSubagent(finalConfig);
 
+    options.assertCanCommit?.();
     try {
       await fs.writeFile(filePath, content, 'utf8');
       // Refresh cache after successful creation
@@ -169,7 +293,7 @@ export class SubagentManager {
     if (level) {
       // Search only the specified level
       if (level === 'builtin') {
-        return BuiltinAgentRegistry.getBuiltinAgent(name);
+        return this.getBuiltinAgent(name);
       }
 
       if (level === 'session') {
@@ -215,7 +339,7 @@ export class SubagentManager {
     }
 
     // Try built-in agents as fallback
-    return BuiltinAgentRegistry.getBuiltinAgent(name);
+    return this.getBuiltinAgent(name);
   }
 
   /**
@@ -229,6 +353,7 @@ export class SubagentManager {
     name: string,
     updates: Partial<SubagentConfig>,
     level?: SubagentLevel,
+    options?: { assertCanCommit?: () => void },
   ): Promise<void> {
     const existing = await this.loadSubagent(name, level);
     if (!existing) {
@@ -257,6 +382,14 @@ export class SubagentManager {
       );
     }
 
+    if (existing.level === 'extension') {
+      throw new SubagentError(
+        `Cannot update extension-provided subagent "${name}"`,
+        SubagentErrorCode.INVALID_CONFIG,
+        name,
+      );
+    }
+
     // Merge updates with existing configuration
     const updatedConfig = this.mergeConfigurations(existing, updates);
 
@@ -275,6 +408,7 @@ export class SubagentManager {
     // Write the updated configuration
     const content = this.serializeSubagent(updatedConfig);
 
+    options?.assertCanCommit?.();
     try {
       await fs.writeFile(existing.filePath, content, 'utf8');
       // Refresh cache after successful update
@@ -299,6 +433,7 @@ export class SubagentManager {
     name: string,
     level?: SubagentLevel,
     extensionName?: string,
+    options?: { assertCanCommit?: () => void },
   ): Promise<void> {
     // Check if it's a built-in agent first
     if (BuiltinAgentRegistry.isBuiltinAgent(name)) {
@@ -321,6 +456,9 @@ export class SubagentManager {
       : ['project', 'user'];
     let deleted = false;
 
+    // Assert once before any deletion so a closed generation fails atomically
+    // instead of unlinking some level files and then throwing mid-loop.
+    options?.assertCanCommit?.();
     for (const currentLevel of levelsToCheck) {
       // Skip builtin and session levels for deletion
       if (currentLevel === 'builtin' || currentLevel === 'session') {
@@ -390,9 +528,24 @@ export class SubagentManager {
     }
 
     // Normal mode: load from project, user, and builtin levels
-    const levelsToCheck: SubagentLevel[] = options.level
-      ? [options.level]
+    // Safe mode: only builtin subagents are available
+    const defaultLevels: SubagentLevel[] = this.config.isSafeMode()
+      ? ['builtin']
       : ['project', 'user', 'builtin', 'extension'];
+    if (
+      this.config.isSafeMode() &&
+      options.level &&
+      options.level !== 'builtin'
+    ) {
+      debugLogger.debug(
+        `Safe mode: overriding requested level '${options.level}' to 'builtin'`,
+      );
+    }
+    const levelsToCheck: SubagentLevel[] = options.level
+      ? this.config.isSafeMode() && options.level !== 'builtin'
+        ? ['builtin']
+        : [options.level]
+      : defaultLevels;
 
     // Check if we should use cache or force refresh
     const shouldUseCache = !options.force && this.subagentsCache !== null;
@@ -490,7 +643,10 @@ export class SubagentManager {
   async refreshCache(): Promise<void> {
     const subagentsCache = new Map();
 
-    const levels: SubagentLevel[] = ['project', 'user', 'builtin', 'extension'];
+    // Safe mode: only load builtin subagents
+    const levels: SubagentLevel[] = this.config.isSafeMode()
+      ? ['builtin']
+      : ['project', 'user', 'builtin', 'extension'];
 
     for (const level of levels) {
       const levelSubagents = await this.listSubagentsAtLevel(level);
@@ -599,15 +755,35 @@ export class SubagentManager {
       frontmatter['color'] = config.color;
     }
 
-    if (
-      config.approvalMode &&
-      APPROVAL_MODES.includes(config.approvalMode as never)
-    ) {
+    if (config.approvalMode && isSubagentApprovalMode(config.approvalMode)) {
       frontmatter['approvalMode'] = config.approvalMode;
     }
 
     if (config.background) {
       frontmatter['background'] = true;
+    }
+
+    // CC 2.1.168 declarative-agent fields (round-trip parity).
+    // Skip permissionMode when approvalMode is already being written: on the
+    // next load the parser takes approvalMode (explicit wins over bridge),
+    // making permissionMode dead frontmatter that silently ignores any
+    // later user edits.
+    if (config.permissionMode && frontmatter['approvalMode'] === undefined) {
+      frontmatter['permissionMode'] = config.permissionMode;
+    }
+
+    if (config.maxTurns !== undefined) {
+      frontmatter['maxTurns'] = config.maxTurns;
+    }
+
+    // Nested CC fields. Safe to round-trip with the eemeli/yaml parser; the
+    // previous skip-list carve-out is gone (see docs/design/yaml-parser-replacement.md).
+    if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
+      frontmatter['mcpServers'] = config.mcpServers;
+    }
+
+    if (config.hooks && Object.keys(config.hooks).length > 0) {
+      frontmatter['hooks'] = config.hooks;
     }
 
     // Serialize to YAML
@@ -621,11 +797,29 @@ export class SubagentManager {
   }
 
   /**
-   * Creates an AgentHeadless from a subagent configuration.
+   * Creates an AgentHeadless from a subagent configuration and returns a
+   * `dispose` callback that releases the per-spawn cleanup-bearing resources
+   * (ephemeral hook entries registered against the session's HookRegistry,
+   * the per-agent tool registry created when `mcpServers` triggers a force
+   * rebuild and the MCP child processes / sockets it owns).
+   *
+   * Callers MUST invoke `dispose` in a `finally` block around the
+   * `subagent.execute()` call. This is the only reliable way to clean up
+   * across every execute() exit path: the inner try/finally inside
+   * `AgentHeadless.execute()` does not fire `onStop` on the early-exit
+   * paths (`createChat()` returning null, `prepareTools()` throwing), and a
+   * leaked HookRegistry entry would fire globally for every matching event
+   * for the rest of the session; a leaked ToolRegistry would leave stdio
+   * child processes alive until process exit.
+   *
+   * `dispose` is idempotent — calling it twice is safe (the unregister
+   * callback filters by `agentScope` and is a no-op the second time; the
+   * registry's `stop()` is itself documented idempotent).
    *
    * @param config - Subagent configuration
    * @param runtimeContext - Runtime context
-   * @returns Promise resolving to AgentHeadless
+   * @returns the AgentHeadless and a `dispose` callback to run in the
+   *          caller's `finally` block.
    */
   async createAgentHeadless(
     config: SubagentConfig,
@@ -633,29 +827,156 @@ export class SubagentManager {
     options?: {
       eventEmitter?: AgentEventEmitter;
       hooks?: AgentHooks;
+      promptConfigOverrides?: Partial<PromptConfig>;
+      modelConfigOverrides?: Partial<ModelConfig>;
+      runtimeAuthOverrides?: AuthOverrides;
+      runConfigOverrides?: Partial<RunConfig>;
+      toolConfigOverride?: ToolConfig;
+      /** Business/task name used for local per-invocation usage labels. */
+      taskName?: string;
+      /** Stable id used to keep one invocation grouped across resume. */
+      subagentId?: string;
     },
-  ): Promise<AgentHeadless> {
-    try {
-      const runtimeConfig = await this.convertToRuntimeConfig(config);
+  ): Promise<{ subagent: AgentHeadless; dispose: () => Promise<void> }> {
+    // Track per-spawn cleanup callbacks declared outside the inner
+    // `try/catch` so the catch can fire them on a constructor failure
+    // before the caller ever receives the return value. The successful
+    // path puts the same callbacks behind `dispose`. Both inner callbacks
+    // are idempotent at the source (`HookRegistry.addAgentHooks` filters
+    // by `agentScope`; `ToolRegistry.stop` is documented idempotent), so
+    // `runCleanup` doesn't need its own null-out guards — a duplicate
+    // invocation is at worst wasted work, never a re-fire of side effects.
+    let unregisterAgentHooks: (() => void) | undefined;
+    let disposeSubagentRegistry: (() => Promise<void>) | undefined;
+    const runCleanup = async (): Promise<void> => {
+      if (unregisterAgentHooks) {
+        try {
+          unregisterAgentHooks();
+        } catch (error) {
+          debugLogger.warn(
+            `Subagent "${config.name}": failed to unregister per-agent hooks: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      if (disposeSubagentRegistry) {
+        try {
+          await disposeSubagentRegistry();
+        } catch (error) {
+          debugLogger.warn(
+            `Subagent "${config.name}": failed to stop per-agent ToolRegistry: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    };
 
-      // When the model selector specifies a different provider, build a
-      // per-agent Config with a dedicated ContentGenerator so the subagent
-      // talks to the right API without affecting the parent process.
-      const agentContext = await this.maybeOverrideContentGenerator(
+    try {
+      const runtimeConfig = await this.convertToRuntimeConfig(
         config,
         runtimeContext,
       );
+      const promptConfig: PromptConfig = {
+        ...runtimeConfig.promptConfig,
+        ...options?.promptConfigOverrides,
+      };
+      const modelConfig: ModelConfig = {
+        ...runtimeConfig.modelConfig,
+        ...options?.modelConfigOverrides,
+      };
+      const runConfig: RunConfig = {
+        ...runtimeConfig.runConfig,
+        ...options?.runConfigOverrides,
+      };
+      const configuredToolConfig =
+        options?.toolConfigOverride ?? runtimeConfig.toolConfig;
+      const toolConfig: ToolConfig = {
+        tools: configuredToolConfig?.tools ?? ['*'],
+        ...(configuredToolConfig?.executionAllowedTools !== undefined
+          ? {
+              executionAllowedTools: [
+                ...configuredToolConfig.executionAllowedTools,
+              ],
+            }
+          : {}),
+        disallowedTools: Array.from(
+          new Set([
+            ...(configuredToolConfig?.disallowedTools ?? []),
+            ToolNames.ASK_USER_QUESTION,
+          ]),
+        ),
+      };
 
-      return await AgentHeadless.create(
-        config.name,
-        agentContext,
-        runtimeConfig.promptConfig,
-        runtimeConfig.modelConfig,
-        runtimeConfig.runConfig,
-        runtimeConfig.toolConfig,
-        options?.eventEmitter,
-        options?.hooks,
+      // When the model selector specifies a different provider, build a
+      // dedicated ContentGenerator + view so the subagent talks to the
+      // right API without affecting the parent process. The view is
+      // applied via AsyncLocalStorage when the agent runs.
+      const runtimeView = await this.buildRuntimeContentGeneratorView(
+        config,
+        runtimeContext,
+        modelConfig.model,
+        options?.runtimeAuthOverrides,
       );
+
+      const { context: subagentContext, cleanup } =
+        await this.buildSubagentContextOverride(runtimeContext, config);
+      disposeSubagentRegistry = cleanup;
+
+      // Register per-agent frontmatter hooks. The returned unregister callback
+      // is invoked from `dispose` (and from the catch block below on a
+      // constructor failure). v1 limitation: while the entries live in the
+      // registry they fire for every event of their declared type, regardless
+      // of which agent is currently active — proper per-agent scope filtering
+      // is deferred.
+      const hookSystem = runtimeContext.getHookSystem();
+      const hookRegistry = hookSystem?.getRegistry();
+      if (config.hooks && Object.keys(config.hooks).length > 0) {
+        if (config.level === 'project' && !runtimeContext.isTrustedFolder()) {
+          // Project agents load from <repo>/.qwen/agents/ regardless of
+          // trust (read-only use is fine), but their hooks are repo-supplied
+          // code execution — the same gate Config.getProjectHooks() applies
+          // to settings-file hooks.
+          debugLogger.warn(
+            `Subagent "${config.name}" is a project agent in an untrusted folder; ignoring its hooks.`,
+          );
+        } else if (hookRegistry) {
+          const agentScope = `agent:${config.name}:${randomUUID()}`;
+          unregisterAgentHooks = hookRegistry.addAgentHooks(
+            config.hooks as { [K in HookEventName]?: HookDefinition[] },
+            agentScope,
+          );
+        } else {
+          // Single outer guard; nested branch on hookRegistry. The pre-fix
+          // structure repeated the `config.hooks && Object.keys(...).length`
+          // predicate across two `if`/`else if` arms, which made it easy to
+          // drift one side during future edits.
+          debugLogger.warn(
+            `Subagent "${config.name}" declares hooks but the host has no HookSystem; ignoring per-agent hooks.`,
+          );
+        }
+      }
+
+      try {
+        const subagent = await AgentHeadless.create(
+          config.name,
+          subagentContext,
+          promptConfig,
+          modelConfig,
+          runConfig,
+          toolConfig,
+          options?.eventEmitter,
+          options?.hooks,
+          runtimeView,
+          options?.taskName,
+          options?.subagentId,
+        );
+        return { subagent, dispose: runCleanup };
+      } catch (innerError) {
+        // The caller never received the return value — `dispose` cannot
+        // possibly fire. Run the cleanup ourselves so the registered hook
+        // entries and the rebuilt ToolRegistry don't leak past this
+        // constructor failure.
+        await runCleanup();
+        throw innerError;
+      }
     } catch (error) {
       if (error instanceof Error) {
         throw new SubagentError(
@@ -669,51 +990,264 @@ export class SubagentManager {
   }
 
   /**
-   * When a subagent's model selector specifies a model (bare ID or
-   * authType-prefixed), build a Config override with a dedicated
-   * ContentGenerator so the model actually reaches the API.
-   * Returns the original context unchanged for inherit selectors.
+   * Build the per-subagent Config override used as the AgentHeadless
+   * runtime context. The override is a thin factory-derived wrapper: no
+   * method changes, but a distinct
+   * instance triggers the lazy own-property init in
+   * `Config.getFileReadCache()` so the subagent gets its own cache
+   * rather than inheriting the parent's recorded reads — which would
+   * silently weaken prior-read enforcement on its mutation paths.
+   *
+   * The tool registry is also rebuilt on the override so `EditTool` /
+   * `WriteFileTool` / `ReadFileTool` resolve `this.config` to the
+   * subagent — without that step, the parent's cached tool instances
+   * still reach the parent's FileReadCache. The rebuild is skipped when
+   * a wrapper above `runtimeContext` already rebuilt one (typically
+   * `agent.ts:createApprovalModeOverride`, which marks itself via a
+   * Symbol-keyed flag — Symbol lookup walks the prototype chain, so
+   * this also catches wrapper-on-wrapper layering like the background
+   * launch passing its stamped `createApprovalModeOverride` override directly
+   * as `runtimeContext`). Rebuilding twice would waste work,
+   * leak listeners on shared managers, and split caches across registry
+   * layers.
    */
-  private async maybeOverrideContentGenerator(
+  private async buildSubagentContextOverride(
+    runtimeContext: Config,
+    config: SubagentConfig,
+  ): Promise<{
+    context: Config;
+    /**
+     * Set only when this call force-rebuilt the registry to land per-agent
+     * MCP server connections. The freshly built registry owns stdio child
+     * processes / sockets that the parent's `Config.shutdown` cannot reach,
+     * so the caller (`createAgentHeadless`) carries this callback through
+     * to its `dispose` closure and runs it when the subagent terminates.
+     *
+     * Field name matches the `cleanup` field on
+     * `ApprovalModeOverrideHandle` (the sibling override-builder return
+     * shape) for cross-API consistency.
+     */
+    cleanup?: () => Promise<void>;
+  }> {
+    const subagentContext = deriveConfig(runtimeContext);
+
+    // Session Workflow plan-revision state is session-global on the base
+    // Config. The prototype set/clear assign
+    // `this.sessionWorkflowPlanRevision`, which would land as an OWN property
+    // on this wrapper and shadow the base value — a subagent's divergent
+    // todo_write would clear the approved revision only for itself while the
+    // parent keeps rejecting Agent launches against a plan that no longer
+    // exists. Forward mutations through to the wrapped Config
+    // (runtimeContext may itself be a write-through wrapper — the forwarding
+    // chain bottoms out at the base Config); keep in sync with
+    // `createApprovalModeOverride` in tools/agent/agent.ts.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (subagentContext as any).setSessionWorkflowPlanRevision = (
+      revision: Parameters<Config['setSessionWorkflowPlanRevision']>[0],
+    ): void => {
+      runtimeContext.setSessionWorkflowPlanRevision(revision);
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (subagentContext as any).clearSessionWorkflowPlanRevision = (): void => {
+      runtimeContext.clearSessionWorkflowPlanRevision();
+    };
+
+    // Per-agent MCP server overrides. Frontmatter `mcpServers` entries shadow
+    // session-level servers on key collision (more-specific-wins, matching
+    // CC's `scope: 'agent'` semantics). The runtime MCP loader still owns
+    // the per-spec discriminated union validation; this only widens the set
+    // of servers visible to the subagent's tool registry.
+    const hasAgentMcpServers =
+      config.mcpServers && Object.keys(config.mcpServers).length > 0;
+    if (hasAgentMcpServers) {
+      const sessionServers = runtimeContext.getMcpServers() ?? {};
+      // Cast: per-frontmatter specs share the same record-of-records shape as
+      // MCPServerConfig but the type assertion at this boundary is intentional
+      // — the discovery layer downstream will refuse malformed specs at
+      // connect time, surfacing a precise error instead of a typecheck noise.
+      const merged: Record<string, MCPServerConfig> = {
+        ...sessionServers,
+        ...(config.mcpServers as Record<string, MCPServerConfig>),
+      };
+      subagentContext.getMcpServers = () => merged;
+    }
+
+    // The skip-rebuild optimization (`hasRebuiltToolRegistry`) is bypassed
+    // when per-agent `mcpServers` are present: without a fresh rebuild
+    // anchored on `subagentContext`, the existing wrapper-owned registry's
+    // McpClientManager would resolve `cliConfig.getMcpServers()` to the
+    // parent's session list and never see our merged override, so the
+    // discovery loop below would silently no-op. Forcing a rebuild here
+    // ties the manager to `subagentContext`, which is the only config in
+    // the chain that knows about the per-agent servers.
+    if (hasAgentMcpServers || !hasRebuiltToolRegistry(runtimeContext)) {
+      await rebuildToolRegistryOnOverride(subagentContext, runtimeContext);
+    }
+
+    // The freshly rebuilt subagent ToolRegistry is constructed with
+    // `skipDiscovery: true` and then back-fills tools by copying from the
+    // parent's registry — which only knows about the session-level MCP
+    // servers. Per-agent servers (or per-agent overrides of an existing
+    // server) therefore need explicit discovery here so their tools land in
+    // the subagent's registry before AgentHeadless runs. The discovery
+    // method is idempotent and de-dupes in-flight calls, so a key shared
+    // with the session set is safe to discover again — it picks up the
+    // override spec rather than the session one.
+    if (hasAgentMcpServers && config.mcpServers) {
+      const subagentRegistry = subagentContext.getToolRegistry();
+      const serverNames = Object.keys(config.mcpServers);
+      // Parallel discovery: one misbehaving server (e.g. a stdio command
+      // that hangs at startup) shouldn't serialise behind the others and
+      // delay the subagent spawn by the sum of every per-server timeout.
+      // Each call still carries the MCP layer's own per-server connect
+      // timeout (stdio default 30s, remote default 5s, per-spec override
+      // via `discoveryTimeoutMs`); `allSettled` only removes the
+      // serialisation between siblings. Rejections are logged-and-dropped
+      // so a single bad server doesn't block the others' tools from
+      // landing in the subagent's registry.
+      const results = await Promise.allSettled(
+        serverNames.map((name) =>
+          subagentRegistry.discoverToolsForServer(name),
+        ),
+      );
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        if (r.status === 'rejected') {
+          debugLogger.warn(
+            `Failed to discover per-agent MCP server "${serverNames[i]}" for subagent "${config.name}": ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`,
+          );
+        }
+      }
+      return {
+        context: subagentContext,
+        cleanup: () => subagentRegistry.stop(),
+      };
+    }
+    return { context: subagentContext };
+  }
+
+  /**
+   * When a subagent's model selector resolves to a concrete model, build a
+   * dedicated ContentGenerator and the view the agent runtime should publish
+   * via AsyncLocalStorage during the run. Returns `undefined` when no
+   * override is needed — including `inherit`, an unset `fast` selector, or
+   * any selector that fails to resolve to a configured model.
+   *
+   * FileReadCache isolation and tool-registry rebuilding are handled
+   * separately in {@link buildSubagentContextOverride} — every subagent
+   * (inherit or explicit) gets that, regardless of whether a runtime
+   * view is built here.
+   */
+  private async buildRuntimeContentGeneratorView(
     config: SubagentConfig,
     base: Config,
-  ): Promise<Config> {
-    const selection = parseSubagentModelSelection(config.model);
-    if (selection.inherits) {
-      return base;
+    fallbackModelId?: string,
+    runtimeAuthOverrides?: AuthOverrides,
+  ): Promise<RuntimeContentGeneratorView | undefined> {
+    const route = this.resolveModelRoute(
+      config,
+      base,
+      runtimeAuthOverrides?.authType,
+    );
+    const modelId = route?.modelId ?? fallbackModelId;
+    if (!modelId) {
+      return undefined;
     }
 
     const authType =
-      selection.authType ?? base.getContentGeneratorConfig().authType;
-    const authOverrides = {
-      authType: authType as string,
-    };
+      route?.authType ??
+      runtimeAuthOverrides?.authType ??
+      base.getContentGeneratorConfig().authType;
+    const authOverrides: AuthOverrides = route
+      ? { authType: authType as string }
+      : {
+          ...runtimeAuthOverrides,
+          authType: authType as string,
+        };
 
-    const agentGeneratorConfig = buildAgentContentGeneratorConfig(
+    const view = await createRuntimeContentGeneratorView(
       base,
-      selection.modelId,
+      base,
+      modelId,
       authOverrides,
     );
 
-    const agentGenerator = await createContentGenerator(
-      agentGeneratorConfig,
-      base,
-    );
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const override = Object.create(base) as any;
-    override.getContentGenerator = (): ContentGenerator => agentGenerator;
-    override.getContentGeneratorConfig = (): ContentGeneratorConfig =>
-      agentGeneratorConfig;
-    override.getAuthType = (): AuthType | undefined =>
-      agentGeneratorConfig.authType;
-    override.getModel = (): string => agentGeneratorConfig.model;
-
     debugLogger.info(
-      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${agentGeneratorConfig.model}`,
+      `Created per-agent ContentGenerator for subagent "${config.name}": authType=${authType}, model=${view.contentGeneratorConfig.model}`,
     );
 
-    return override as Config;
+    return view;
+  }
+
+  private resolveModelOverride(
+    model: string | undefined,
+    runtimeContext?: Config,
+  ): ResolvedModelId | undefined {
+    // Omit currentModel so `inherit` resolves to undefined; subagents treat
+    // "inherit / no override" as a signal to skip building a dedicated
+    // ContentGenerator entirely.
+    const context = runtimeContext ? buildModelIdContext(runtimeContext) : {};
+    return resolveModelId(model, { ...context, currentModel: undefined });
+  }
+
+  /**
+   * Shared route-resolution core for a subagent definition's `model:`
+   * selector: resolve it against `runtimeContext` (with `currentModel`
+   * stripped, so `inherit` yields nothing) and return the concrete model
+   * ID plus the auth type a dedicated ContentGenerator must be created
+   * with. Returns `undefined` when the selector does not resolve to a
+   * concrete model — `inherit`, an unset `fast` selector, or no selector.
+   *
+   * Every spawn path must resolve routes through this single helper so the
+   * same `.qwen/agents/<name>.md` definition always maps to the same
+   * provider route, whether it runs as an ordinary subagent
+   * ({@link buildRuntimeContentGeneratorView}) or as a named teammate
+   * ({@link resolveSubagentModelRoute}).
+   *
+   * @param fallbackAuthType - Middle step of the ordinary-spawn auth
+   * fallback chain: runtime auth overrides carried by the caller. Spawn
+   * paths without such overrides (teammates) pass nothing.
+   */
+  private resolveModelRoute(
+    config: SubagentConfig,
+    runtimeContext: Config,
+    fallbackAuthType?: string,
+  ): SubagentModelRoute | undefined {
+    const resolvedModel = this.resolveModelOverride(
+      config.model,
+      runtimeContext,
+    );
+    if (!resolvedModel?.modelId) {
+      return undefined;
+    }
+    const authType =
+      resolvedModel.authType ??
+      fallbackAuthType ??
+      runtimeContext.getContentGeneratorConfig().authType;
+    return {
+      modelId: resolvedModel.modelId,
+      authType: authType as string,
+    };
+  }
+
+  /**
+   * Resolve a subagent definition's model selector the way the ordinary
+   * subagent spawn path does ({@link buildRuntimeContentGeneratorView}),
+   * returning the concrete model ID plus the auth type a dedicated
+   * ContentGenerator must be created with. Returns `undefined` when the
+   * selector does not resolve to a concrete model — `inherit`, an unset
+   * `fast` selector, or no selector — in which case the caller should
+   * inherit the parent's ContentGenerator unchanged.
+   *
+   * Used by spawn paths outside `createAgentHeadless` that still need the
+   * definition's provider route — the Agent Team teammate path (#10071)
+   * passes it as `inProcess.authOverrides` so InProcessBackend builds the
+   * same per-agent ContentGenerator an ordinary subagent would get.
+   */
+  resolveSubagentModelRoute(
+    config: SubagentConfig,
+  ): SubagentModelRoute | undefined {
+    return this.resolveModelRoute(config, this.config);
   }
 
   /**
@@ -725,18 +1259,26 @@ export class SubagentManager {
    */
   async convertToRuntimeConfig(
     config: SubagentConfig,
+    runtimeContext?: Config,
   ): Promise<SubagentRuntimeConfig> {
     const promptConfig: PromptConfig = {
       systemPrompt: config.systemPrompt,
     };
 
-    const selection = parseSubagentModelSelection(config.model);
+    const resolvedModel = this.resolveModelOverride(
+      config.model,
+      runtimeContext,
+    );
     const modelConfig: ModelConfig = {
-      ...(selection.modelId ? { model: selection.modelId } : {}),
+      ...(resolvedModel ? { model: resolvedModel.modelId } : {}),
     };
 
     const runConfig: RunConfig = {
       ...config.runConfig,
+      // Top-level CC-style `maxTurns` wins over legacy nested
+      // `runConfig.max_turns`. Both are kept for backward compatibility, but
+      // when both are set, the top-level field is the authoritative source.
+      ...(config.maxTurns !== undefined ? { max_turns: config.maxTurns } : {}),
     };
 
     let toolConfig: ToolConfig | undefined;
@@ -744,6 +1286,13 @@ export class SubagentManager {
       (config.tools && config.tools.length > 0) ||
       (config.disallowedTools && config.disallowedTools.length > 0)
     ) {
+      // Unresolved names (e.g. `WebSearch` while the opt-in web_search tool
+      // is unregistered) stay in the list as dead, restrictive entries: an
+      // explicit allow-list must never be widened on resolution failure, so
+      // an agent whose every tool is unavailable runs tool-less (fail
+      // closed) rather than inheriting shell/write it was not configured
+      // for. Deliberate: this supersedes the earlier compatibility fallback
+      // for converted Claude agents.
       const toolNames = config.tools
         ? await this.transformToToolNames(config.tools)
         : ['*'];
@@ -859,12 +1408,8 @@ export class SubagentManager {
 
     const baseDir =
       level === 'project'
-        ? path.join(
-            this.config.getProjectRoot(),
-            QWEN_CONFIG_DIR,
-            AGENT_CONFIG_DIR,
-          )
-        : path.join(os.homedir(), QWEN_CONFIG_DIR, AGENT_CONFIG_DIR);
+        ? path.join(this.config.getProjectRoot(), QWEN_DIR, AGENT_CONFIG_DIR)
+        : path.join(Storage.getGlobalQwenDir(), AGENT_CONFIG_DIR);
 
     return path.join(baseDir, `${name}.md`);
   }
@@ -881,7 +1426,7 @@ export class SubagentManager {
   ): Promise<SubagentConfig[]> {
     // Handle built-in agents
     if (level === 'builtin') {
-      return BuiltinAgentRegistry.getBuiltinAgents();
+      return this.getBuiltinAgents();
     }
 
     if (level === 'extension') {
@@ -899,8 +1444,10 @@ export class SubagentManager {
       return [];
     }
 
-    let baseDir = level === 'project' ? projectRoot : homeDir;
-    baseDir = path.join(baseDir, QWEN_CONFIG_DIR, AGENT_CONFIG_DIR);
+    const baseDir =
+      level === 'project'
+        ? path.join(projectRoot, QWEN_DIR, AGENT_CONFIG_DIR)
+        : path.join(Storage.getGlobalQwenDir(), AGENT_CONFIG_DIR);
 
     try {
       const files = await fs.readdir(baseDir);
@@ -1050,7 +1597,15 @@ function parseSubagentContent(
     const description = String(descriptionRaw);
 
     // Extract optional fields
-    const tools = frontmatter['tools'] as string[] | undefined;
+    const toolsRaw = frontmatter['tools'];
+    const tools: string[] | undefined = Array.isArray(toolsRaw)
+      ? toolsRaw.filter((item): item is string => typeof item === 'string')
+      : typeof toolsRaw === 'string'
+        ? toolsRaw
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : undefined;
     const disallowedToolsRaw = frontmatter['disallowedTools'];
     const disallowedTools: string[] | undefined = Array.isArray(
       disallowedToolsRaw,
@@ -1059,7 +1614,10 @@ function parseSubagentContent(
           (item): item is string => typeof item === 'string',
         )
       : typeof disallowedToolsRaw === 'string'
-        ? [disallowedToolsRaw]
+        ? disallowedToolsRaw
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
         : undefined;
     const modelRaw = frontmatter['model'];
     const legacyModelConfig = frontmatter['modelConfig'] as
@@ -1068,7 +1626,22 @@ function parseSubagentContent(
     const runConfig = frontmatter['runConfig'] as
       | Record<string, unknown>
       | undefined;
-    const color = frontmatter['color'] as string | undefined;
+    const colorRaw = frontmatter['color'];
+    // CC silently drops colors outside the allowlist (_Y). Preserve the
+    // legacy qwen `auto` sentinel for backward compat with existing files.
+    const color =
+      typeof colorRaw === 'string' && (isColor(colorRaw) || colorRaw === 'auto')
+        ? colorRaw
+        : undefined;
+    if (
+      colorRaw !== undefined &&
+      color === undefined &&
+      typeof colorRaw === 'string'
+    ) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid color '${colorRaw}'. Valid options: ${COLOR_VALUES.join(', ')}, auto. Dropping field.`,
+      );
+    }
     const approvalModeRaw = frontmatter['approvalMode'];
     if (
       approvalModeRaw !== undefined &&
@@ -1076,19 +1649,16 @@ function parseSubagentContent(
       typeof approvalModeRaw !== 'string'
     ) {
       throw new Error(
-        `Invalid "approvalMode" value: expected a string, got ${typeof approvalModeRaw}. Valid values: ${APPROVAL_MODES.join(', ')}`,
+        `Invalid "approvalMode" value: expected a string, got ${typeof approvalModeRaw}. Valid values: ${subagentApprovalModesLabel()}`,
       );
     }
     const approvalMode =
       typeof approvalModeRaw === 'string' && approvalModeRaw !== ''
         ? approvalModeRaw
         : undefined;
-    if (
-      approvalMode !== undefined &&
-      !APPROVAL_MODES.includes(approvalMode as never)
-    ) {
+    if (approvalMode !== undefined && !isSubagentApprovalMode(approvalMode)) {
       throw new Error(
-        `Invalid "approvalMode" value "${approvalMode}". Valid values: ${APPROVAL_MODES.join(', ')}`,
+        `Invalid "approvalMode" value "${approvalMode}". Valid values: ${subagentApprovalModesLabel()}`,
       );
     }
     const model =
@@ -1113,12 +1683,63 @@ function parseSubagentContent(
     const background =
       backgroundRaw === 'true' || backgroundRaw === true ? true : undefined;
 
+    // --- CC 2.1.168 declarative-agent fields (DL7-parity lenient parse) ---
+
+    // permissionMode: CC enum carried verbatim. Bridges to approvalMode only
+    // when approvalMode is unset.
+    const permissionModeRaw = frontmatter['permissionMode'];
+    const permissionMode = isPermissionMode(permissionModeRaw)
+      ? permissionModeRaw
+      : undefined;
+    if (
+      permissionModeRaw !== undefined &&
+      permissionModeRaw !== null &&
+      permissionMode === undefined
+    ) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid permissionMode '${permissionModeRaw}'. Dropping field.`,
+      );
+    }
+    const bridgedApprovalMode =
+      approvalMode === undefined && permissionMode !== undefined
+        ? claudePermissionModeToApprovalMode(permissionMode)
+        : undefined;
+    const effectiveApprovalMode = approvalMode ?? bridgedApprovalMode;
+
+    // maxTurns: positive integer (or numeric string).
+    const maxTurns = parseMaxTurns(frontmatter['maxTurns']);
+    if (frontmatter['maxTurns'] !== undefined && maxTurns === undefined) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid maxTurns '${frontmatter['maxTurns']}'. Dropping field.`,
+      );
+    }
+
+    // mcpServers: record-of-records shape (CC `gS8` shallow validation).
+    // Strict per-spec union is deferred to the runtime MCP loader.
+    const mcpServersRaw = frontmatter['mcpServers'];
+    const mcpServers = parseAgentMcpServers(mcpServersRaw);
+    if (mcpServersRaw !== undefined && mcpServers === undefined) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid mcpServers (expected an object of server-name → spec). Dropping field.`,
+      );
+    }
+
+    // hooks: record-of-arrays shape (CC `TKO` shallow validation).
+    // Strict per-matcher union is deferred to the runtime hook subsystem.
+    const hooksRaw = frontmatter['hooks'];
+    const hooks = parseAgentHooks(hooksRaw);
+    if (hooksRaw !== undefined && hooks === undefined) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid hooks (expected an object of HookEventName → matcher array). Dropping field.`,
+      );
+    }
+
     const config: SubagentConfig = {
       name,
       description,
       tools,
       disallowedTools,
-      approvalMode,
+      approvalMode: effectiveApprovalMode,
       systemPrompt: systemPrompt.trim(),
       filePath,
       model,
@@ -1126,6 +1747,10 @@ function parseSubagentContent(
       color,
       level,
       ...(background ? { background } : {}),
+      ...(permissionMode !== undefined ? { permissionMode } : {}),
+      ...(maxTurns !== undefined ? { maxTurns } : {}),
+      ...(mcpServers !== undefined ? { mcpServers } : {}),
+      ...(hooks !== undefined ? { hooks } : {}),
     };
 
     // Validate the parsed configuration

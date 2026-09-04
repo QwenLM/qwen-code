@@ -4,6 +4,7 @@ import { t } from '../i18n/index.js';
 import { useUIActions } from './contexts/UIActionsContext.js';
 import { useUIState } from './contexts/UIStateContext.js';
 import { useKeypress } from './hooks/useKeypress.js';
+import { ICON } from './constants.js';
 
 export const FEEDBACK_OPTIONS = {
   GOOD: 1,
@@ -47,7 +48,7 @@ export const FeedbackDialog: React.FC = () => {
   return (
     <Box flexDirection="column" marginY={1}>
       <Box>
-        <Text color="cyan">● </Text>
+        <Text color="cyan">{ICON.CIRCLE_FILLED + ' '}</Text>
         <Text bold>{t('How is Qwen doing this session? (optional)')}</Text>
       </Box>
       <Box marginTop={1}>

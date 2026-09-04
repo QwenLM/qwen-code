@@ -100,8 +100,21 @@ export const useTrustModify = (
         setPendingTrustLevel(trustLevel);
         setNeedsRestart(true);
       } else {
+        setPendingTrustLevel(undefined);
+        setNeedsRestart(false);
         const folders = loadTrustedFolders();
-        folders.setValue(cwd, trustLevel);
+        try {
+          folders.setValue(cwd, trustLevel);
+        } catch (error) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: `Could not update workspace trust: ${error instanceof Error ? error.message : String(error)}`,
+            },
+            Date.now(),
+          );
+          return;
+        }
         onExit();
       }
     },
@@ -109,11 +122,22 @@ export const useTrustModify = (
   );
 
   const commitTrustLevelChange = useCallback(() => {
-    if (pendingTrustLevel) {
-      const folders = loadTrustedFolders();
+    if (!pendingTrustLevel) return false;
+    const folders = loadTrustedFolders();
+    try {
       folders.setValue(cwd, pendingTrustLevel);
+      return true;
+    } catch (error) {
+      addItem(
+        {
+          type: MessageType.ERROR,
+          text: `Could not update workspace trust: ${error instanceof Error ? error.message : String(error)}`,
+        },
+        Date.now(),
+      );
+      return false;
     }
-  }, [cwd, pendingTrustLevel]);
+  }, [addItem, cwd, pendingTrustLevel]);
 
   return {
     cwd,

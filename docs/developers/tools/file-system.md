@@ -8,6 +8,8 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 
 `list_directory` lists the names of files and subdirectories directly within a specified directory path. It can optionally ignore entries matching provided glob patterns.
 
+**Note:** This tool is opt-in and disabled by default because `glob` covers directory listing in most cases. Enable it by setting `tools.listDirectory.enabled` to `true` in your settings, or by explicitly listing `list_directory` in the `coreTools` allowlist (`--core-tools` / `tools.core`).
+
 - **Tool name:** `list_directory`
 - **Display name:** ListFiles
 - **File:** `ls.ts`
@@ -24,18 +26,21 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 
 ## 2. `read_file` (ReadFile)
 
-`read_file` reads and returns the content of a specified file. This tool handles text files and media files (images, PDFs, audio, video) whose modality is supported by the current model. For text files, it can read specific line ranges. Media files whose modality is not supported by the current model are rejected with a helpful error message. Other binary file types are generally skipped.
+`read_file` reads and returns the content of a specified file. This tool handles text files and media files (images, PDFs, audio, video) whose modality is supported by the current model. For text files, it can read specific line ranges. Unsupported PDFs attempt text extraction and the bounded vision fallback described below; other unsupported media files return a helpful error message. Other binary file types are generally skipped.
 
 - **Tool name:** `read_file`
 - **Display name:** ReadFile
 - **File:** `read-file.ts`
 - **Parameters:**
-  - `path` (string, required): The absolute path to the file to read.
+  - `file_path` (string, required): The absolute path to the file to read.
   - `offset` (number, optional): For text files, the 0-based line number to start reading from. Requires `limit` to be set.
   - `limit` (number, optional): For text files, the maximum number of lines to read. If omitted, reads a default maximum (e.g., 2000 lines) or the entire file if feasible.
+  - `pages` (string, optional): For PDFs, a 1-indexed page or closed page range such as `"3"` or `"20-25"`. A request may contain at most 20 pages.
 - **Behavior:**
   - For text files: Returns the content. If `offset` and `limit` are used, returns only that slice of lines. Indicates if content was truncated due to line limits or line length limits.
   - For media files (images, PDFs, audio, video): If the current model supports the file's modality, returns the file content as a base64-encoded `inlineData` object. If the model does not support the modality, returns an error message with guidance (e.g., suggesting skills or external tools).
+  - For PDFs with a text-only primary model: Text extraction is attempted first. If extraction fails, or an explicitly requested (or actual) single page still exceeds the 12K-token text budget, a configured vision bridge automatically renders and transcribes at most four pages beginning at the requested first page. The requested range is clipped to the actual document end when known. The result identifies the transcribed range and either the pages known to remain or, when the page count is unavailable, that additional pages may exist. Ordinary multi-page text overflow still asks for a narrower `pages` range instead of switching to vision.
+  - Vision bridge PDF transcription is lossy and marked as untrusted machine-generated content. The tool result contains text rather than rendered images, and its user-facing TUI, ACP, non-interactive structured output, and export displays identify the vision model and endpoint when known. If the bridge fails, the exact original PDF extraction error is returned to the model while the user display still discloses the bridge attempt.
   - For other binary files: Attempts to identify and skip them, returning a message indicating it's a generic binary file.
 - **Output:** (`llmContent`):
   - For text files: The file content, potentially prefixed with a truncation message (e.g., `[File content truncated: showing lines 1-100 of 500 total lines...]\nActual file content...`).
@@ -44,7 +49,72 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
   - For other binary files: A message like `Cannot display content of binary file: /path/to/data.bin`.
 - **Confirmation:** No.
 
-## 3. `write_file` (WriteFile)
+### Jupyter notebook reads
+
+For Jupyter notebooks (`.ipynb`), `read_file` parses the notebook JSON and returns a structured, model-readable notebook view instead of raw JSON. The rendered output includes the notebook language, ordered cells, cell IDs, source, and summarized outputs.
+
+Notebook cells can then be edited with `notebook_edit`. The model should use the cell IDs shown by `read_file` when targeting a cell.
+
+`offset` and `limit` are not supported for `.ipynb` files. Notebook reads are treated as structured full-file reads; if the rendered notebook output is internally truncated because it is too large, `notebook_edit` will reject cell-level edits and ask you to reduce outputs or split the notebook before editing.
+
+## 3. `notebook_edit` (NotebookEdit)
+
+`notebook_edit` edits Jupyter notebook (`.ipynb`) files safely at the cell level. Use it instead of `edit` or `write_file` when changing notebook cells.
+
+- **Tool name:** `notebook_edit`
+- **Display name:** NotebookEdit
+- **File:** `notebook-edit.ts`
+- **Parameters:**
+  - `notebook_path` (string, required): The absolute path to the `.ipynb` file.
+  - `cell_id` (string, optional): The target cell ID shown by `read_file`. Required for `replace` and `delete`. For `insert`, the new cell is inserted after this cell; if omitted, the new cell is inserted at the beginning.
+  - `new_source` (string, optional): The new cell source for `replace` and `insert`. Not required for `delete`.
+  - `cell_type` (`code` or `markdown`, optional): The cell type for inserted cells, or the target type when replacing a cell.
+  - `edit_mode` (`replace`, `insert`, or `delete`, optional): The edit operation. Defaults to `replace`.
+- **Behavior:**
+  - Requires the notebook to have been read first with `read_file` in the current session.
+  - Targets cells using the IDs rendered by `read_file`, including real notebook cell IDs and displayed `cell-N` fallback IDs.
+  - Rejects ambiguous rendered cell IDs instead of guessing.
+  - For code cells, clears stale outputs and resets `execution_count` when source changes.
+  - Preserves notebook JSON formatting, line endings, encoding, and BOM where possible.
+  - Invalidates the prior-read state after structural edits when displayed fallback IDs can shift, so the next notebook edit requires a fresh `read_file`.
+- **Output (`llmContent`):** A success message describing the edited notebook cell and, for non-delete operations, the updated source.
+- **Confirmation:** Yes. Shows a notebook JSON diff and asks for user approval before writing, unless the current permission mode or rules auto-approve edit tools.
+
+### `notebook_edit` examples
+
+Replace a code cell:
+
+```
+notebook_edit(
+  notebook_path="/path/to/analysis.ipynb",
+  cell_id="load-data",
+  new_source="result = 41 + 1\nprint(result)"
+)
+```
+
+Insert a markdown cell after an existing cell:
+
+```
+notebook_edit(
+  notebook_path="/path/to/analysis.ipynb",
+  edit_mode="insert",
+  cell_id="summary",
+  cell_type="markdown",
+  new_source="## Findings\n\nThe cleaned data is ready for modeling."
+)
+```
+
+Delete a cell:
+
+```
+notebook_edit(
+  notebook_path="/path/to/analysis.ipynb",
+  edit_mode="delete",
+  cell_id="old-experiment"
+)
+```
+
+## 4. `write_file` (WriteFile)
 
 `write_file` writes content to a specified file. If the file exists, it will be overwritten. If the file doesn't exist, it (and any necessary parent directories) will be created.
 
@@ -56,11 +126,12 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
   - `content` (string, required): The content to write into the file.
 - **Behavior:**
   - Writes the provided `content` to the `file_path`.
+  - Does not write raw Jupyter notebook JSON. Use `notebook_edit` for `.ipynb` cell edits.
   - Creates parent directories if they don't exist.
 - **Output (`llmContent`):** A success message, e.g., `Successfully overwrote file: /path/to/your/file.txt` or `Successfully created and wrote to new file: /path/to/new/file.txt`.
 - **Confirmation:** Yes. Shows a diff of changes and asks for user approval before writing.
 
-## 4. `glob` (Glob)
+## 5. `glob` (Glob)
 
 `glob` finds files matching specific glob patterns (e.g., `src/**/*.ts`, `*.md`), returning absolute paths sorted by modification time (newest first).
 
@@ -73,12 +144,12 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 - **Behavior:**
   - Searches for files matching the glob pattern within the specified directory.
   - Returns a list of absolute paths, sorted with the most recently modified files first.
-  - Respects .gitignore and .qwenignore patterns by default.
+  - Respects .gitignore, .qwenignore, and configured custom Qwen ignore files by default.
   - Limits results to 100 files to prevent context overflow.
 - **Output (`llmContent`):** A message like: `Found 5 file(s) matching "*.ts" within /path/to/search/dir, sorted by modification time (newest first):\n---\n/path/to/file1.ts\n/path/to/subdir/file2.ts\n---\n[95 files truncated] ...`
 - **Confirmation:** No.
 
-## 5. `grep_search` (Grep)
+## 6. `grep_search` (Grep)
 
 `grep_search` searches for a regular expression pattern within the content of files in a specified directory. Can filter files by a glob pattern. Returns the lines containing matches, along with their file paths and line numbers.
 
@@ -89,12 +160,12 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
   - `pattern` (string, required): The regular expression pattern to search for in file contents (e.g., `"function\\s+myFunction"`, `"log.*Error"`).
   - `path` (string, optional): File or directory to search in. Defaults to current working directory.
   - `glob` (string, optional): Glob pattern to filter files (e.g. `"*.js"`, `"src/**/*.{ts,tsx}"`).
-  - `limit` (number, optional): Limit output to first N matching lines. Optional - shows all matches if not specified.
+  - `limit` (integer, optional): Limit output to first N matching lines. Must be a positive integer. Optional - shows all matches if not specified.
 - **Behavior:**
   - Uses ripgrep for fast search when available; otherwise falls back to a JavaScript-based search implementation.
   - Returns matching lines with file paths and line numbers.
   - Case-insensitive by default.
-  - Respects .gitignore and .qwenignore patterns.
+  - Respects .gitignore, .qwenignore, and configured custom Qwen ignore files.
   - Limits output to prevent context overflow.
 - **Output (`llmContent`):** A formatted string of matches, e.g.:
 
@@ -131,7 +202,7 @@ Search for a pattern with file filtering and custom result limiting:
 grep_search(pattern="function", glob="*.js", limit=10)
 ```
 
-## 6. `edit` (Edit)
+## 7. `edit` (Edit)
 
 `edit` replaces text within a file. By default it requires `old_string` to match a single unique location; set `replace_all` to `true` when you intentionally want to change every occurrence. This tool is designed for precise, targeted changes and requires significant context around the `old_string` to ensure it modifies the correct location.
 
@@ -148,6 +219,7 @@ grep_search(pattern="function", glob="*.js", limit=10)
   - `replace_all` (boolean, optional): Replace all occurrences of `old_string`. Defaults to `false`.
 
 - **Behavior:**
+  - Does not edit raw Jupyter notebook JSON. Use `notebook_edit` for `.ipynb` cell edits.
   - If `old_string` is empty and `file_path` does not exist, creates a new file with `new_string` as content.
   - If `old_string` is provided, it reads the `file_path` and attempts to find exactly one occurrence unless `replace_all` is true.
   - If the match is unique (or `replace_all` is true), it replaces the text with `new_string`.

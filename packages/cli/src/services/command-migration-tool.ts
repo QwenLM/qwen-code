@@ -148,7 +148,7 @@ export function generateMigrationPrompt(tomlFiles: string[]): string {
       : `  - ${tomlFiles.slice(0, 3).join('\n  - ')}\n  - ${t('... and {{count}} more', { count: String(moreCount) })}`;
 
   return `
-⚠️  ${t('TOML Command Format Deprecation Notice')}
+⚠  ${t('TOML Command Format Deprecation Notice')}
 
 ${t('Found {{count}} command file(s) in TOML format:', { count: String(count) })}
 ${fileList}

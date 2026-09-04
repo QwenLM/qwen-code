@@ -7,7 +7,9 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
+import { ICON } from '../../../constants.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { type SubagentConfig } from '@qwen-code/qwen-code-core';
 import { t } from '../../../../i18n/index.js';
 
@@ -76,7 +78,7 @@ export const AgentSelectionStep = ({
     (key) => {
       const { name } = key;
 
-      if (name === 'up' || name === 'k') {
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         setNavigation((prev) => {
           if (prev.currentBlock === 'project') {
             if (prev.projectIndex > 0) {
@@ -194,7 +196,7 @@ export const AgentSelectionStep = ({
             }
           }
         });
-      } else if (name === 'down' || name === 'j') {
+      } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setNavigation((prev) => {
           if (prev.currentBlock === 'project') {
             if (prev.projectIndex < projectAgents.length - 1) {
@@ -320,7 +322,7 @@ export const AgentSelectionStep = ({
       <Box key={`${agent.name}-${agent.level}`} alignItems="center">
         <Box minWidth={2} flexShrink={0}>
           <Text color={isSelected ? theme.text.accent : theme.text.primary}>
-            {isSelected ? '●' : ' '}
+            {isSelected ? ICON.CIRCLE_FILLED : ' '}
           </Text>
         </Box>
         <Text color={textColor} wrap="truncate">

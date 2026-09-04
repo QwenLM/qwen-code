@@ -13,6 +13,8 @@ import {
   getFunctionCallsFromPartsAsJson,
   getStructuredResponse,
   getStructuredResponseFromParts,
+  getToolResponseDisplayText,
+  TOOL_SUCCEEDED_OUTPUT,
 } from './generateContentResponseUtilities.js';
 import type {
   GenerateContentResponse,
@@ -278,6 +280,81 @@ describe('generateContentResponseUtilities', () => {
     it('should return undefined if neither text nor function calls exist in parts', () => {
       const parts: Part[] = [];
       expect(getStructuredResponseFromParts(parts)).toBeUndefined();
+    });
+  });
+
+  describe('getToolResponseDisplayText', () => {
+    const frPart = (output: unknown, nested?: Part[]): Part => ({
+      functionResponse: {
+        id: 'call-1',
+        name: 'read_file',
+        response: output === undefined ? {} : { output },
+        ...(nested ? { parts: nested } : {}),
+      },
+    });
+
+    it('returns undefined for undefined / empty parts', () => {
+      expect(getToolResponseDisplayText(undefined)).toBeUndefined();
+      expect(getToolResponseDisplayText([])).toBeUndefined();
+    });
+
+    it('returns the full functionResponse output text', () => {
+      const parts = [frPart('line1\nline2\nline3')];
+      expect(getToolResponseDisplayText(parts)).toBe('line1\nline2\nline3');
+    });
+
+    it('skips the non-informative "Tool execution succeeded." placeholder', () => {
+      expect(
+        getToolResponseDisplayText([frPart(TOOL_SUCCEEDED_OUTPUT)]),
+      ).toBeUndefined();
+    });
+
+    it('emits <media: mime> placeholders for nested inline/file data', () => {
+      const parts = [
+        frPart(TOOL_SUCCEEDED_OUTPUT, [
+          { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
+          { fileData: { mimeType: 'application/pdf', fileUri: 'file:///x' } },
+        ]),
+      ];
+      expect(getToolResponseDisplayText(parts)).toBe(
+        '<media: image/png>\n<media: application/pdf>',
+      );
+    });
+
+    it('sanitizes control chars and angle brackets in media placeholders', () => {
+      const parts = [
+        frPart(TOOL_SUCCEEDED_OUTPUT, [
+          { inlineData: { mimeType: 'image/png\x1b[31m<b>', data: 'AAAA' } },
+          { fileData: { fileUri: 'file:///x\x07<script>' } },
+        ]),
+      ];
+      // Control bytes and `<`/`>` are stripped so the placeholder stays
+      // well-formed and can't inject terminal codes or forge markup.
+      expect(getToolResponseDisplayText(parts)).toBe(
+        '<media: image/png[31mb>\n<media: file:///xscript>',
+      );
+    });
+
+    it('concatenates output and nested media, keeping nested text', () => {
+      const parts = [
+        frPart('main output', [
+          { text: 'nested note' },
+          { inlineData: { mimeType: 'image/jpeg', data: 'BBBB' } },
+        ]),
+      ];
+      expect(getToolResponseDisplayText(parts)).toBe(
+        'main output\nnested note\n<media: image/jpeg>',
+      );
+    });
+
+    it('keeps text from a plain (non-functionResponse) part', () => {
+      expect(getToolResponseDisplayText([{ text: 'plain text' }])).toBe(
+        'plain text',
+      );
+    });
+
+    it('returns undefined when nothing is extractable', () => {
+      expect(getToolResponseDisplayText([frPart(undefined)])).toBeUndefined();
     });
   });
 });

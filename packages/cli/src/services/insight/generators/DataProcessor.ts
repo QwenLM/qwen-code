@@ -31,21 +31,180 @@ import type {
 } from '../types/QualitativeInsightTypes.js';
 import {
   getInsightPrompt,
+  runSideQuery,
+  projectUserTranscriptForDisplay,
   type Config,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { dayKey, hourOfDay, parseDayKey, todayKey } from '../dates.js';
 
 const logger = createDebugLogger('DataProcessor');
 
 const CONCURRENCY_LIMIT = 4;
+const SESSION_OUTCOMES = [
+  'fully_achieved',
+  'mostly_achieved',
+  'partially_achieved',
+  'not_achieved',
+  'unclear_from_transcript',
+] as const;
+const OUTCOME_FALLBACK = 'unclear_from_transcript';
+const QWEN_HELPFULNESS_LEVELS = [
+  'unhelpful',
+  'slightly_helpful',
+  'moderately_helpful',
+  'very_helpful',
+  'essential',
+] as const;
+const SESSION_TYPES = [
+  'single_task',
+  'multi_task',
+  'iterative_refinement',
+  'exploration',
+  'quick_question',
+] as const;
+const PRIMARY_SUCCESS_VALUES = [
+  'none',
+  'fast_accurate_search',
+  'correct_code_edits',
+  'good_explanations',
+  'proactive_help',
+  'multi_file_changes',
+  'good_debugging',
+] as const;
+const PRIMARY_SUCCESS_FALLBACK = 'none';
+
+// Keep in sync with packages/web-templates/src/insight/src/App.tsx.
+function hasMeaningfulInsightValue(value: unknown): boolean {
+  if (typeof value === 'string') {
+    return value.trim().length > 0;
+  }
+
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value !== 0;
+  }
+
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.some((item) => hasMeaningfulInsightValue(item));
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.values(value).some((item) => hasMeaningfulInsightValue(item));
+  }
+
+  return false;
+}
+
+function normalizeInsightText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeInsightCountRecord(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.entries(value).reduce<Record<string, number>>(
+    (acc, [key, count]) => {
+      if (typeof count === 'number' && Number.isFinite(count) && count > 0) {
+        acc[key] = count;
+      }
+      return acc;
+    },
+    {},
+  );
+}
+
+function getInsightCountEntries(value: unknown): Array<[string, number]> {
+  return Object.entries(normalizeInsightCountRecord(value));
+}
+
+function normalizeInsightEnum<T extends string>(
+  value: unknown,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (trimmed) {
+    const match = allowed.find(
+      (item) => String(item).toLowerCase() === trimmed.toLowerCase(),
+    );
+    if (match) return match;
+  }
+
+  logger.debug(
+    `Normalized unknown insight enum value "${String(value)}" to fallback "${fallback}"`,
+  );
+  return fallback;
+}
+
+function normalizeSessionFacet(
+  facet: unknown,
+  sessionId: string,
+): SessionFacets | null {
+  if (!facet || typeof facet !== 'object' || Array.isArray(facet)) {
+    return null;
+  }
+
+  const rawFacet = facet as Record<string, unknown>;
+  const normalizedFacet: SessionFacets = {
+    session_id: sessionId,
+    underlying_goal: normalizeInsightText(rawFacet['underlying_goal']),
+    goal_categories: normalizeInsightCountRecord(rawFacet['goal_categories']),
+    outcome: normalizeInsightEnum(
+      rawFacet['outcome'],
+      SESSION_OUTCOMES,
+      OUTCOME_FALLBACK,
+    ),
+    user_satisfaction_counts: normalizeInsightCountRecord(
+      rawFacet['user_satisfaction_counts'],
+    ),
+    Qwen_helpfulness: normalizeInsightEnum(
+      rawFacet['Qwen_helpfulness'],
+      QWEN_HELPFULNESS_LEVELS,
+      'moderately_helpful',
+    ),
+    session_type: normalizeInsightEnum(
+      rawFacet['session_type'],
+      SESSION_TYPES,
+      'single_task',
+    ),
+    friction_counts: normalizeInsightCountRecord(rawFacet['friction_counts']),
+    friction_detail: normalizeInsightText(rawFacet['friction_detail']),
+    primary_success: normalizeInsightEnum(
+      rawFacet['primary_success'],
+      PRIMARY_SUCCESS_VALUES,
+      PRIMARY_SUCCESS_FALLBACK,
+    ),
+    brief_summary: normalizeInsightText(rawFacet['brief_summary']),
+  };
+
+  const meaningfulContent = {
+    underlying_goal: normalizedFacet.underlying_goal,
+    goal_categories: normalizedFacet.goal_categories,
+    outcome:
+      normalizedFacet.outcome === OUTCOME_FALLBACK
+        ? ''
+        : normalizedFacet.outcome,
+    user_satisfaction_counts: normalizedFacet.user_satisfaction_counts,
+    friction_counts: normalizedFacet.friction_counts,
+    friction_detail: normalizedFacet.friction_detail,
+    primary_success:
+      normalizedFacet.primary_success === PRIMARY_SUCCESS_FALLBACK
+        ? ''
+        : normalizedFacet.primary_success,
+    brief_summary: normalizedFacet.brief_summary,
+  };
+
+  return hasMeaningfulInsightValue(meaningfulContent) ? normalizedFacet : null;
+}
 
 export class DataProcessor {
   constructor(private config: Config) {}
-
-  // Helper function to format date as YYYY-MM-DD
-  private formatDate(date: Date): string {
-    return date.toISOString().split('T')[0];
-  }
 
   // Format chat records for LLM analysis
   private formatRecordsForAnalysis(records: ChatRecord[]): string {
@@ -59,10 +218,19 @@ export class DataProcessor {
 
     for (const record of records) {
       if (record.type === 'user') {
+        const projection = projectUserTranscriptForDisplay(record);
         const text =
-          record.message?.parts
-            ?.map((p) => ('text' in p ? p.text : ''))
-            .join('') || '';
+          projection.displayText ??
+          projection.parts
+            .map((part) =>
+              typeof part === 'object' &&
+              part !== null &&
+              'text' in part &&
+              typeof part.text === 'string'
+                ? part.text
+                : '',
+            )
+            .join('');
         output += `[User]: ${text}\n`;
       } else if (record.type === 'assistant') {
         if (record.message?.parts) {
@@ -196,11 +364,15 @@ export class DataProcessor {
     const prompt = `${getInsightPrompt('analysis')}\n\nSESSION:\n${sessionText}`;
 
     try {
-      const result = await this.config.getBaseLlmClient().generateJson({
-        // Use the configured model
+      const result = await runSideQuery<Record<string, unknown>>(this.config, {
+        purpose: 'insight-session-analysis',
+        // Quality is the entire point — keep main model + reasoning on.
         model: this.config.getModel(),
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
         schema: INSIGHT_SCHEMA,
+        config: {
+          thinkingConfig: { includeThoughts: true },
+        },
         abortSignal: AbortSignal.timeout(600000), // 10 minute timeout per session
       });
 
@@ -208,10 +380,17 @@ export class DataProcessor {
         return null;
       }
 
-      return {
-        ...(result as unknown as SessionFacets),
-        session_id: records[0].sessionId,
-      };
+      const sessionId = records[0].sessionId;
+      const normalizedFacet = normalizeSessionFacet(result, sessionId);
+
+      if (!normalizedFacet) {
+        logger.warn(
+          `Ignoring malformed insight facet for session ${sessionId}`,
+        );
+        return null;
+      }
+
+      return normalizedFacet;
     } catch (error) {
       logger.error(
         `Failed to analyze session ${records[0]?.sessionId}:`,
@@ -227,21 +406,24 @@ export class DataProcessor {
       return { currentStreak: 0, longestStreak: 0, dates: [] };
     }
 
-    // Convert string dates to Date objects and sort them
-    const dateObjects = dates.map((dateStr) => new Date(dateStr));
+    // Day keys parse to local midnight (see parseDayKey) — the previous
+    // `new Date(key)` parse produced UTC midnight, which the local
+    // normalization then shifted to the previous day in negative-offset
+    // timezones, making the today/yesterday comparison off by one.
+    const dateObjects = dates.map((dateStr) => parseDayKey(dateStr));
     dateObjects.sort((a, b) => a.getTime() - b.getTime());
 
     let currentStreak = 1;
     let maxStreak = 1;
-    let currentDate = new Date(dateObjects[0]);
-    currentDate.setHours(0, 0, 0, 0); // Normalize to start of day
+    let currentDate = dateObjects[0];
 
     for (let i = 1; i < dateObjects.length; i++) {
-      const nextDate = new Date(dateObjects[i]);
-      nextDate.setHours(0, 0, 0, 0); // Normalize to start of day
+      const nextDate = dateObjects[i];
 
-      // Calculate difference in days
-      const diffDays = Math.floor(
+      // Round, not floor: local midnights straddling a DST change are
+      // 23 or 25 hours apart, and floor would misread the 23-hour day
+      // as "same day".
+      const diffDays = Math.round(
         (nextDate.getTime() - currentDate.getTime()) / (1000 * 60 * 60 * 24),
       );
 
@@ -258,17 +440,19 @@ export class DataProcessor {
       currentDate = nextDate;
     }
 
-    // Check if the streak is still ongoing (if last activity was yesterday or today)
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // `currentStreak` means "the streak ending today or yesterday"
+    // (#6835): a run that ended earlier is history, not a current
+    // streak — without this reset, a user inactive for months still
+    // saw a non-zero current streak.
+    const today = parseDayKey(todayKey());
     const yesterday = new Date(today);
     yesterday.setDate(yesterday.getDate() - 1);
 
     if (
-      currentDate.getTime() === today.getTime() ||
-      currentDate.getTime() === yesterday.getTime()
+      currentDate.getTime() !== today.getTime() &&
+      currentDate.getTime() !== yesterday.getTime()
     ) {
-      // The streak might still be active, so we don't reset it
+      currentStreak = 0;
     }
 
     return {
@@ -338,28 +522,38 @@ export class DataProcessor {
 
     facets.forEach((facet) => {
       // Aggregate satisfaction
-      Object.entries(facet.user_satisfaction_counts).forEach(([sat, count]) => {
-        satisfactionAgg[sat] = (satisfactionAgg[sat] || 0) + count;
-      });
+      getInsightCountEntries(facet.user_satisfaction_counts).forEach(
+        ([sat, count]) => {
+          satisfactionAgg[sat] = (satisfactionAgg[sat] || 0) + count;
+        },
+      );
 
       // Aggregate friction
-      Object.entries(facet.friction_counts).forEach(([fric, count]) => {
+      getInsightCountEntries(facet.friction_counts).forEach(([fric, count]) => {
         frictionAgg[fric] = (frictionAgg[fric] || 0) + count;
       });
 
       // Aggregate primary success
-      if (facet.primary_success && facet.primary_success !== 'none') {
-        primarySuccessAgg[facet.primary_success] =
-          (primarySuccessAgg[facet.primary_success] || 0) + 1;
+      const primarySuccess = normalizeInsightEnum(
+        facet.primary_success,
+        PRIMARY_SUCCESS_VALUES,
+        PRIMARY_SUCCESS_FALLBACK,
+      );
+      if (primarySuccess !== PRIMARY_SUCCESS_FALLBACK) {
+        primarySuccessAgg[primarySuccess] =
+          (primarySuccessAgg[primarySuccess] || 0) + 1;
       }
 
       // Aggregate outcomes
-      if (facet.outcome) {
-        outcomesAgg[facet.outcome] = (outcomesAgg[facet.outcome] || 0) + 1;
-      }
+      const outcome = normalizeInsightEnum(
+        facet.outcome,
+        SESSION_OUTCOMES,
+        OUTCOME_FALLBACK,
+      );
+      outcomesAgg[outcome] = (outcomesAgg[outcome] || 0) + 1;
 
       // Aggregate goals
-      Object.entries(facet.goal_categories).forEach(([goal, count]) => {
+      getInsightCountEntries(facet.goal_categories).forEach(([goal, count]) => {
         goalsAgg[goal] = (goalsAgg[goal] || 0) + count;
       });
     });
@@ -391,12 +585,19 @@ export class DataProcessor {
     ): Promise<T | undefined> => {
       const prompt = `${promptTemplate}\n\n${commonData}`;
       try {
-        const result = await this.config.getBaseLlmClient().generateJson({
-          model: this.config.getModel(),
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          schema,
-          abortSignal: AbortSignal.timeout(600000),
-        });
+        const result = await runSideQuery<Record<string, unknown>>(
+          this.config,
+          {
+            purpose: 'insight-qualitative-generate',
+            model: this.config.getModel(),
+            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            schema,
+            config: {
+              thinkingConfig: { includeThoughts: true },
+            },
+            abortSignal: AbortSignal.timeout(600000),
+          },
+        );
         return result as T;
       } catch (error) {
         logger.error('Failed to generate insight:', error);
@@ -659,7 +860,7 @@ export class DataProcessor {
         ),
       );
 
-      return {
+      const qualitative = {
         impressiveWorkflows,
         projectAreas,
         futureOpportunities,
@@ -669,6 +870,8 @@ export class DataProcessor {
         interactionStyle,
         atAGlance,
       };
+
+      return hasMeaningfulInsightValue(qualitative) ? qualitative : undefined;
     } catch (e) {
       logger.error('Error generating qualitative insights:', e);
       return undefined;
@@ -688,27 +891,38 @@ export class DataProcessor {
 
     facets.forEach((facet) => {
       // Aggregate goals
-      Object.entries(facet.goal_categories).forEach(([goal, count]) => {
+      getInsightCountEntries(facet.goal_categories).forEach(([goal, count]) => {
         goalsAgg[goal] = (goalsAgg[goal] || 0) + count;
       });
 
       // Aggregate outcomes
-      outcomesAgg[facet.outcome] = (outcomesAgg[facet.outcome] || 0) + 1;
+      const outcome = normalizeInsightEnum(
+        facet.outcome,
+        SESSION_OUTCOMES,
+        OUTCOME_FALLBACK,
+      );
+      outcomesAgg[outcome] = (outcomesAgg[outcome] || 0) + 1;
 
       // Aggregate satisfaction
-      Object.entries(facet.user_satisfaction_counts).forEach(([sat, count]) => {
-        satisfactionAgg[sat] = (satisfactionAgg[sat] || 0) + count;
-      });
+      getInsightCountEntries(facet.user_satisfaction_counts).forEach(
+        ([sat, count]) => {
+          satisfactionAgg[sat] = (satisfactionAgg[sat] || 0) + count;
+        },
+      );
 
       // Aggregate friction
-      Object.entries(facet.friction_counts).forEach(([fric, count]) => {
+      getInsightCountEntries(facet.friction_counts).forEach(([fric, count]) => {
         frictionAgg[fric] = (frictionAgg[fric] || 0) + count;
       });
 
       // Aggregate success (primary_success)
-      if (facet.primary_success && facet.primary_success !== 'none') {
-        successAgg[facet.primary_success] =
-          (successAgg[facet.primary_success] || 0) + 1;
+      const primarySuccess = normalizeInsightEnum(
+        facet.primary_success,
+        PRIMARY_SUCCESS_VALUES,
+        PRIMARY_SUCCESS_FALLBACK,
+      );
+      if (primarySuccess !== PRIMARY_SUCCESS_FALLBACK) {
+        successAgg[primarySuccess] = (successAgg[primarySuccess] || 0) + 1;
       }
     });
 
@@ -736,13 +950,16 @@ export class DataProcessor {
 
     // 2. SESSION SUMMARIES section
     const sessionSummaries = facets
-      .map((f) => `- ${f.brief_summary}`)
+      .map((f) => normalizeInsightText(f.brief_summary))
+      .filter((summary) => summary.length > 0)
+      .map((summary) => `- ${summary}`)
       .join('\n');
 
     // 3. FRICTION DETAILS section
     const frictionDetails = facets
-      .filter((f) => f.friction_detail && f.friction_detail.trim().length > 0)
-      .map((f) => `- ${f.friction_detail}`)
+      .map((f) => normalizeInsightText(f.friction_detail))
+      .filter((detail) => detail.length > 0)
+      .map((detail) => `- ${detail}`)
       .join('\n');
 
     return `DATA:
@@ -779,7 +996,13 @@ None captured`;
           try {
             // Get all chat files in the chats directory
             const files = await fs.readdir(chatsDir);
-            const chatFiles = files.filter((file) => file.endsWith('.jsonl'));
+            // The prompt terminal ledger sidecar (<id>.ledger.jsonl) is not
+            // a transcript — only real session JSONL files carry chat
+            // records.
+            const chatFiles = files.filter(
+              (file) =>
+                file.endsWith('.jsonl') && !file.endsWith('.ledger.jsonl'),
+            );
 
             for (const file of chatFiles) {
               const filePath = path.join(chatsDir, file);
@@ -822,6 +1045,8 @@ None captured`;
     // Initialize data structures
     const heatmap: HeatMapData = {};
     const activeHours: { [hour: number]: number } = {};
+    // Real timestamp of the most recent user interaction, for latestActiveTime.
+    let latestActiveTimestamp: Date | null = null;
     const sessionStartTimes: { [sessionId: string]: Date } = {};
     const sessionEndTimes: { [sessionId: string]: Date } = {};
     let totalMessages = 0;
@@ -846,8 +1071,11 @@ None captured`;
           // Process each record
           for (const record of records) {
             const timestamp = new Date(record.timestamp);
-            const dateKey = this.formatDate(timestamp);
-            const hour = timestamp.getHours();
+            // Same local basis for the day key and the hour bucket — the
+            // previous UTC day key put this record's activity on a
+            // different "day" than its own active-hours bucket (#6835).
+            const dateKey = dayKey(timestamp);
+            const hour = hourOfDay(timestamp);
 
             // Count user messages and slash commands (actual user interactions)
             const isUserMessage = record.type === 'user';
@@ -861,6 +1089,14 @@ None captured`;
 
               // Update active hours
               activeHours[hour] = (activeHours[hour] || 0) + 1;
+
+              // Track the most recent activity for latestActiveTime.
+              if (
+                latestActiveTimestamp === null ||
+                timestamp > latestActiveTimestamp
+              ) {
+                latestActiveTimestamp = timestamp;
+              }
             }
 
             // Track session times
@@ -954,25 +1190,22 @@ None captured`;
 
       if (durationMinutes > longestWorkDuration) {
         longestWorkDuration = durationMinutes;
-        longestWorkDate = this.formatDate(start);
+        longestWorkDate = dayKey(start);
       }
     }
 
     const totalHours = Math.round(totalDurationMs / (1000 * 60 * 60));
 
-    // Calculate latest active time
-    let latestActiveTime: string | null = null;
-    let latestTimestamp = new Date(0);
-    for (const dateStr in heatmap) {
-      const date = new Date(dateStr);
-      if (date > latestTimestamp) {
-        latestTimestamp = date;
-        latestActiveTime = date.toLocaleTimeString([], {
+    // Format the most recent activity's wall-clock time. (This previously
+    // iterated the date-only heatmap keys, so `new Date(key)` was UTC midnight
+    // and the derived time was a constant — the timezone offset — rather than
+    // the real last-active time.)
+    const latestActiveTime: string | null = latestActiveTimestamp
+      ? latestActiveTimestamp.toLocaleTimeString([], {
           hour: '2-digit',
           minute: '2-digit',
-        });
-      }
-    }
+        })
+      : null;
 
     // Calculate top tools
     const topTools = Object.entries(toolUsage)
@@ -1060,6 +1293,31 @@ None captured`;
                   'utf-8',
                 );
                 const existingFacet = JSON.parse(existingData);
+                const normalizedFacet = normalizeSessionFacet(
+                  existingFacet,
+                  sessionId,
+                );
+                if (!normalizedFacet) {
+                  logger.warn(
+                    `Cached insight facet for ${sessionId} is malformed, regenerating.`,
+                  );
+                  throw new Error('Malformed cached insight facet');
+                }
+                const normalizedData = JSON.stringify(normalizedFacet, null, 2);
+                if (existingData !== normalizedData) {
+                  try {
+                    await fs.writeFile(
+                      existingFacetPath,
+                      normalizedData,
+                      'utf-8',
+                    );
+                  } catch (writeError) {
+                    logger.warn(
+                      `Failed to write back normalized facet for ${sessionId}:`,
+                      writeError,
+                    );
+                  }
+                }
                 completed++;
                 if (onProgress) {
                   const percent = 20 + Math.round((completed / total) * 60);
@@ -1069,7 +1327,7 @@ None captured`;
                     `${completed}/${total}`,
                   );
                 }
-                return existingFacet;
+                return normalizedFacet;
               } catch (readError) {
                 // File doesn't exist or is invalid, proceed to analyze
                 if ((readError as NodeJS.ErrnoException).code !== 'ENOENT') {

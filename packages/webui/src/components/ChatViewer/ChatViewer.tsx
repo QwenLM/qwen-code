@@ -10,25 +10,21 @@ import {
   useImperativeHandle,
   useMemo,
   useRef,
+  useState,
 } from 'react';
 import { UserMessage } from '../messages/UserMessage.js';
 import { AssistantMessage } from '../messages/Assistant/AssistantMessage.js';
 import { ThinkingMessage } from '../messages/ThinkingMessage.js';
 import {
-  AgentToolCall,
-  GenericToolCall,
-  ThinkToolCall,
-  EditToolCall,
-  WriteToolCall,
-  SearchToolCall,
-  UpdatedPlanToolCall,
-  ShellToolCall,
-  ReadToolCall,
-  WebFetchToolCall,
   shouldShowToolCall,
-  isAgentExecutionToolCall,
+  getToolCallComponent,
 } from '../toolcalls/index.js';
 import type { ToolCallData as BaseToolCallData } from '../toolcalls/index.js';
+import { getUserTranscriptDisplayText } from '../../adapters/userTranscriptDisplay.js';
+import {
+  ExpandControlContext,
+  type ExpandControlContextValue,
+} from '../../context/ExpandControlContext.js';
 import './ChatViewer.css';
 
 /**
@@ -72,6 +68,7 @@ export interface ChatMessageData {
   model?: string; // for assistant messages
   // Tool call data
   toolCall?: ToolCallData;
+  systemPayload?: unknown;
   // Additional Claude format fields
   cwd?: string;
   gitBranch?: string;
@@ -107,6 +104,14 @@ export interface ChatViewerProps {
   theme?: 'dark' | 'light' | 'auto';
   /** Show empty state icon (default: true) */
   showEmptyIcon?: boolean;
+  /**
+   * Show a global "Expand all / Collapse all" control above the messages
+   * (default: false). When enabled, the control broadcasts expand/collapse
+   * signals to every collapsible section (thinking blocks, tool outputs,
+   * file references) via {@link ExpandControlContext}; individual toggles
+   * keep working between global commands.
+   */
+  showExpandControl?: boolean;
 }
 
 /**
@@ -142,56 +147,6 @@ function extractContent(message: ChatMessageData['message']): string {
 function parseTimestamp(isoString: string): number {
   const date = new Date(isoString);
   return isNaN(date.getTime()) ? Date.now() : date.getTime();
-}
-
-/**
- * Get the appropriate tool call component based on kind
- */
-function getToolCallComponent(toolCall: BaseToolCallData) {
-  if (isAgentExecutionToolCall(toolCall)) {
-    return AgentToolCall;
-  }
-
-  const normalizedKind = toolCall.kind.toLowerCase();
-
-  switch (normalizedKind) {
-    case 'read':
-    case 'read_file':
-    case 'read_many_files':
-    case 'readmanyfiles':
-    case 'list_directory':
-    case 'listfiles':
-      return ReadToolCall;
-    case 'write':
-      return WriteToolCall;
-    case 'edit':
-      return EditToolCall;
-    case 'execute':
-    case 'bash':
-    case 'command':
-      return ShellToolCall;
-    case 'updated_plan':
-    case 'updatedplan':
-    case 'todo_write':
-    case 'update_todos':
-    case 'todowrite':
-      return UpdatedPlanToolCall;
-    case 'search':
-    case 'grep':
-    case 'glob':
-    case 'find':
-      return SearchToolCall;
-    case 'think':
-    case 'thinking':
-      return ThinkToolCall;
-    case 'fetch':
-    case 'web_fetch':
-    case 'webfetch':
-    case 'web_search': // compatibility alias for legacy persisted tool-call records
-      return WebFetchToolCall;
-    default:
-      return GenericToolCall;
-  }
 }
 
 /**
@@ -231,12 +186,26 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
       autoScroll = true,
       theme = 'auto',
       showEmptyIcon = true,
+      showExpandControl = false,
     },
     ref,
   ) => {
     const scrollContainerRef = useRef<HTMLDivElement>(null);
     const scrollAnchorRef = useRef<HTMLDivElement>(null);
     const prevMessageCountRef = useRef(0);
+
+    // Global expand/collapse state broadcast to collapsible sections.
+    // `signal` is bumped on every command so consumers can distinguish a
+    // fresh global command from ordinary re-renders.
+    const [expandControl, setExpandControl] =
+      useState<ExpandControlContextValue>({ signal: 0, expanded: false });
+
+    const issueExpandControl = (expanded: boolean) => {
+      setExpandControl((current) => ({
+        signal: current.signal + 1,
+        expanded,
+      }));
+    };
 
     // Sort messages by timestamp and filter out system messages and hidden tool calls
     const sortedMessages = useMemo(
@@ -334,7 +303,8 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
         );
       }
 
-      const content = extractContent(msg.message);
+      const content =
+        getUserTranscriptDisplayText(msg) ?? extractContent(msg.message);
       const timestamp = parseTimestamp(msg.timestamp);
 
       // Skip empty messages (but not tool calls)
@@ -391,34 +361,67 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
       .filter(Boolean)
       .join(' ');
 
+    const showExpandToolbar = showExpandControl && sortedMessages.length > 0;
+
+    const messagesRegion = (
+      <div
+        ref={scrollContainerRef}
+        className="chat-viewer-messages chat-messages"
+      >
+        {sortedMessages.length === 0 ? (
+          <div className="chat-viewer-empty">
+            {showEmptyIcon && (
+              <div className="chat-viewer-empty-icon" aria-hidden="true">
+                💬
+              </div>
+            )}
+            <div className="chat-viewer-empty-text">{emptyMessage}</div>
+          </div>
+        ) : (
+          <>
+            {sortedMessages.map((msg, index) =>
+              renderMessage(msg, index, sortedMessages),
+            )}
+            {/* Scroll anchor for auto-scroll functionality */}
+            <div ref={scrollAnchorRef} className="chat-viewer-scroll-anchor" />
+          </>
+        )}
+      </div>
+    );
+
     return (
       <div className={containerClasses}>
-        <div
-          ref={scrollContainerRef}
-          className="chat-viewer-messages chat-messages"
-        >
-          {sortedMessages.length === 0 ? (
-            <div className="chat-viewer-empty">
-              {showEmptyIcon && (
-                <div className="chat-viewer-empty-icon" aria-hidden="true">
-                  💬
-                </div>
-              )}
-              <div className="chat-viewer-empty-text">{emptyMessage}</div>
-            </div>
-          ) : (
-            <>
-              {sortedMessages.map((msg, index) =>
-                renderMessage(msg, index, sortedMessages),
-              )}
-              {/* Scroll anchor for auto-scroll functionality */}
-              <div
-                ref={scrollAnchorRef}
-                className="chat-viewer-scroll-anchor"
-              />
-            </>
-          )}
-        </div>
+        {showExpandToolbar && (
+          <div
+            className="chat-viewer-expand-control"
+            role="toolbar"
+            aria-label="Expand or collapse all sections"
+          >
+            <button
+              type="button"
+              className="chat-viewer-expand-control-button"
+              aria-label="Expand all sections"
+              onClick={() => issueExpandControl(true)}
+            >
+              Expand all
+            </button>
+            <button
+              type="button"
+              className="chat-viewer-expand-control-button"
+              aria-label="Collapse all sections"
+              onClick={() => issueExpandControl(false)}
+            >
+              Collapse all
+            </button>
+          </div>
+        )}
+        {showExpandControl ? (
+          <ExpandControlContext.Provider value={expandControl}>
+            {messagesRegion}
+          </ExpandControlContext.Provider>
+        ) : (
+          messagesRegion
+        )}
       </div>
     );
   },

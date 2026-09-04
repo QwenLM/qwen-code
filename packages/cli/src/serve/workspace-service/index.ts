@@ -1,0 +1,1492 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * DaemonWorkspaceService facade factory.
+ *
+ * Public entry point exposing workspace-scoped methods: status queries,
+ * tool toggle, init, and MCP server restart. Status/mutation work is
+ * delegated to the ACP child through injected callbacks so the facade
+ * takes no direct reference to the bridge.
+ */
+
+import { randomUUID } from 'node:crypto';
+import { promises as fs, constants as fsConstants } from 'node:fs';
+import * as path from 'node:path';
+
+import {
+  SERVE_STATUS_EXT_METHODS,
+  SERVE_CONTROL_EXT_METHODS,
+  BridgeChannelClosedError,
+  STATUS_SCHEMA_VERSION,
+  createIdleWorkspaceMcpStatus,
+  createIdleWorkspaceSkillsStatus,
+  createIdleWorkspaceProvidersStatus,
+  createIdleWorkspaceExtensionsStatus,
+  createIdleWorkspaceHooksStatus,
+  createIdleEnvStatus,
+  createIdleAcpPreflightCells,
+  mapDomainErrorToErrorKind,
+  type ServeWorkspacePreflightStatus,
+  type ServeWorkspaceSkillsRefreshResult,
+  type ServeWorkspaceSkillsStatus,
+} from '@qwen-code/acp-bridge/status';
+
+import {
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
+  WorkspaceInitConflictError,
+  WorkspaceInitRaceError,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
+  SessionNotFoundError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
+
+import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
+
+import { loadSettings } from '../../config/settings.js';
+import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
+import { buildPermissionSettings } from '../../config/permission-settings.js';
+import {
+  buildWorkspaceVoiceSettingsWrites,
+  buildWorkspaceVoiceStatus,
+  validateWorkspaceVoiceState,
+  voiceSettingsScopeToWire,
+  WorkspaceVoiceError,
+  type WorkspaceVoiceSettingsWrite,
+} from '../../services/voice-service.js';
+import {
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
+import {
+  deleteWorkspaceSkill,
+  installWorkspaceSkill,
+  WorkspaceSkillManagementError,
+} from '../workspace-skill-management.js';
+
+import {
+  WorkspacePermissionRulesSessionRequiredError,
+  WorkspaceSkillNotFoundError,
+  WorkspaceSettingsPartialPersistError,
+} from './types.js';
+import type {
+  DaemonWorkspaceService,
+  DaemonWorkspaceServiceDeps,
+  WorkspaceRequestContext,
+  RestartMcpServerResult,
+  WorkspaceTrustChangeRequest,
+  WorkspacePermissionRulesUpdate,
+  WorkspaceVoiceSettingsUpdate,
+  WorkspaceAcpPreheatResult,
+  WorkspaceAcpStatusResult,
+  WorkspaceSkillBatchToggleResult,
+  WorkspaceSkillToggleResult,
+  WorkspaceSkillToggleActivation,
+  PersistDisabledSkillsBatchResult,
+  WorkspaceSkillInstallRequest,
+  WorkspaceSkillMutationResult,
+  WorkspaceSkillScope,
+} from './types.js';
+
+// Re-export types for consumers.
+export type {
+  DaemonWorkspaceService,
+  DaemonWorkspaceServiceDeps,
+  WorkspaceRequestContext,
+  RestartMcpServerResult,
+  WorkspaceTrustChangeRequest,
+  WorkspaceTrustChangeResult,
+  WorkspaceTrustDesiredState,
+  WorkspacePermissionRulesUpdate,
+  WorkspaceVoiceSettingsUpdate,
+  WorkspaceAcpPreheatResult,
+  WorkspaceAcpStatusResult,
+  WorkspaceSkillBatchToggleResult,
+  WorkspaceSkillBatchToggleItem,
+  WorkspaceSkillToggleError,
+  WorkspaceSkillToggleErrorCode,
+  WorkspaceSkillToggleResult,
+  WorkspaceSkillToggleActivation,
+  EnvReloadResult,
+  ReloadResponse,
+} from './types.js';
+
+export {
+  WorkspacePermissionRulesSessionRequiredError,
+  WorkspaceSkillNotFoundError,
+  mapWorkspaceSkillToggleError,
+} from './types.js';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const WORKSPACE_SKILLS_SNAPSHOT_TTL_MS = 5_000;
+
+function createSkillToggleMutation(input: {
+  skills: ReadonlyArray<{ name: string; enabled: boolean }>;
+  activation: WorkspaceSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}) {
+  return {
+    id: randomUUID(),
+    kind: 'skill_toggle' as const,
+    skills: input.skills.map((skill) => ({
+      name: skill.name,
+      enabled: skill.enabled,
+    })),
+    activation: input.activation,
+    sessionsRefreshed: input.sessionsRefreshed,
+    sessionsFailed: input.sessionsFailed,
+  };
+}
+
+/**
+ * Walk up from `inputPath` until we find an ancestor that exists on disk,
+ * then `realpath` it. Used by `initWorkspace` to canonicalize the parent
+ * chain before writing, so a symlinked intermediate directory can't
+ * redirect the write outside the workspace.
+ */
+async function canonicalizeExistingAncestor(
+  inputPath: string,
+): Promise<string> {
+  let current = inputPath;
+  while (true) {
+    try {
+      return await fs.realpath(current);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | null | undefined)?.code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR' && code !== 'ELOOP') {
+        throw err;
+      }
+      const parent = path.dirname(current);
+      if (parent === current) throw err;
+      current = parent;
+    }
+  }
+}
+
+/**
+ * Post-open parent re-verification. After a successful `fs.open(..., 'wx')`
+ * or `O_NOFOLLOW` open, re-canonicalize the parent directory and verify it
+ * still resolves within the workspace. Closes the TOCTOU window between
+ * the pre-open canonicalize and the open. On failure, closes the fd
+ * (for creates) and throws `WorkspaceInitSymlinkError`.
+ */
+async function verifyParentPostOpen(
+  target: string,
+  wsCanonical: string,
+  _fh: import('node:fs/promises').FileHandle,
+): Promise<void> {
+  const parentCanonical = await canonicalizeExistingAncestor(
+    path.dirname(target),
+  );
+  const within =
+    parentCanonical === wsCanonical ||
+    parentCanonical.startsWith(wsCanonical + path.sep);
+  if (within) return;
+  // Do NOT close fh here — the caller's `finally` block handles it.
+  // Closing here would cause a double-close on Node 22+ (ERR_INVALID_STATE).
+  throw new WorkspaceInitSymlinkError(
+    target,
+    'parent',
+    `Workspace context file ${JSON.stringify(target)}'s parent moved ` +
+      `outside the workspace between the pre-open canonicalize and ` +
+      `the post-open verify (parent canonicalizes to ${JSON.stringify(parentCanonical)}, ` +
+      `workspace canonicalizes to ${JSON.stringify(wsCanonical)}). ` +
+      `Refusing to write — investigate the concurrent writer or the ` +
+      `parent-directory permissions.`,
+  );
+}
+
+class TimeoutError extends Error {}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new TimeoutError(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timeout);
+        reject(err);
+      },
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Factory
+// ---------------------------------------------------------------------------
+
+export function createDaemonWorkspaceService(
+  deps: DaemonWorkspaceServiceDeps,
+): DaemonWorkspaceService {
+  const {
+    boundWorkspace,
+    isWorkspaceTrusted,
+    assertGenerationOpen,
+    contextFilename,
+    statusProvider,
+    workspaceProvidersStatusProvider,
+    workspaceSkillsStatusProvider,
+    isChannelLive,
+    persistDisabledTools,
+    persistDisabledSkills,
+    persistDisabledSkillsBatch,
+    persistSetting,
+    persistSettings,
+    skillInstallEnv,
+    voiceEnv,
+    voiceSettingsScope,
+    preheatAcpChild: preheatAcpChildOnBridge,
+    queryWorkspaceStatus,
+    invokeWorkspaceCommand,
+    refreshExtensionsForAllSessions: refreshExtensionsForAllSessionsOnBridge,
+    publishWorkspaceEvent,
+  } = deps;
+
+  const loadBoundSettings = (skipLoadEnvironment = false) => {
+    const workspaceTrusted = isWorkspaceTrusted();
+    return loadSettings(boundWorkspace, {
+      skipLoadEnvironment: skipLoadEnvironment || !workspaceTrusted,
+      skipWorkspaceSettings: !workspaceTrusted,
+      workspaceTrusted,
+    });
+  };
+  const assertActiveGeneration = () => assertGenerationOpen?.();
+  const loggedPreheatFailures = new WeakSet<object>();
+  const logPreheatFailure = (err: unknown) => {
+    if (typeof err === 'object' && err !== null) {
+      if (loggedPreheatFailures.has(err)) return;
+      loggedPreheatFailures.add(err);
+    }
+    writeStderrLineSafe(
+      `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  };
+
+  // Last skills status answered by a live ACP child, retained so
+  // skill-backed slash commands (e.g. `/review`) keep autocompleting after
+  // the child channel has been reaped. See `getWorkspaceSkillsStatus`.
+  let lastWorkspaceSkillsStatus: ServeWorkspaceSkillsStatus | undefined;
+  let lastWorkspaceSkillsStatusAt = 0;
+  let workspaceSkillsGeneration = 0;
+  let inFlightWorkspaceSkillsStatus:
+    | {
+        generation: number;
+        promise: Promise<ServeWorkspaceSkillsStatus>;
+      }
+    | undefined;
+
+  const invalidateWorkspaceSkillsSnapshot = () => {
+    workspaceSkillsGeneration += 1;
+    lastWorkspaceSkillsStatus = undefined;
+    lastWorkspaceSkillsStatusAt = 0;
+    workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
+  };
+
+  const readWorkspaceSkillsStatus = async (
+    generation: number,
+  ): Promise<ServeWorkspaceSkillsStatus> => {
+    let status: ServeWorkspaceSkillsStatus;
+    try {
+      status = await queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceSkills,
+        () => createIdleWorkspaceSkillsStatus(boundWorkspace),
+      );
+    } catch (err) {
+      // The channel can die mid-RPC (`liveChannelInfo()` was valid at the
+      // check but the child exited before the call completed). Treat that
+      // like "no live child" and fall back to the cache / daemon-local
+      // enumeration below instead of failing the request — matching
+      // getWorkspaceEnvStatus / getWorkspacePreflightStatus.
+      writeStderrLine(
+        `qwen serve: getWorkspaceSkillsStatus query failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      status = createIdleWorkspaceSkillsStatus(boundWorkspace);
+    }
+    if (status.initialized && generation === workspaceSkillsGeneration) {
+      lastWorkspaceSkillsStatus = status;
+      lastWorkspaceSkillsStatusAt = Date.now();
+      return status;
+    }
+    // Live child unavailable. Prefer the last answer it produced (keeps the
+    // full, extension-aware list available across a reap)...
+    if (lastWorkspaceSkillsStatus) {
+      // Only extend the freshness window when this read still owns the current
+      // generation. A read that started before an invalidation must not push out
+      // the TTL of the snapshot some later read committed — that would let a
+      // post-mutation snapshot go unrevalidated for longer than the window.
+      if (generation === workspaceSkillsGeneration) {
+        lastWorkspaceSkillsStatusAt = Date.now();
+      }
+      return lastWorkspaceSkillsStatus;
+    }
+    // ...then fall back to daemon-local enumeration, so a child that has not
+    // answered even once (e.g. a preheat that times out under `npm run dev`)
+    // still yields the on-disk skills — `/review` included. The provider
+    // handles its own errors, but it is injected, so guard the call too and
+    // degrade to the idle placeholder rather than failing the request —
+    // matching getWorkspaceEnvStatus / getWorkspacePreflightStatus.
+    if (workspaceSkillsStatusProvider) {
+      try {
+        const localStatus = await workspaceSkillsStatusProvider(boundWorkspace);
+        if (
+          localStatus.initialized &&
+          generation === workspaceSkillsGeneration
+        ) {
+          lastWorkspaceSkillsStatus = localStatus;
+          lastWorkspaceSkillsStatusAt = Date.now();
+        }
+        return localStatus;
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: getWorkspaceSkillsStatus local provider failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return status;
+  };
+
+  const getWorkspaceSkillsStatus = (): Promise<ServeWorkspaceSkillsStatus> => {
+    const cacheAgeMs = Date.now() - lastWorkspaceSkillsStatusAt;
+    if (
+      lastWorkspaceSkillsStatus &&
+      cacheAgeMs >= 0 &&
+      cacheAgeMs < WORKSPACE_SKILLS_SNAPSHOT_TTL_MS
+    ) {
+      return Promise.resolve(lastWorkspaceSkillsStatus);
+    }
+
+    const generation = workspaceSkillsGeneration;
+    if (inFlightWorkspaceSkillsStatus?.generation === generation) {
+      return inFlightWorkspaceSkillsStatus.promise;
+    }
+
+    const promise = readWorkspaceSkillsStatus(generation);
+    inFlightWorkspaceSkillsStatus = { generation, promise };
+    const clearInFlight = () => {
+      if (inFlightWorkspaceSkillsStatus?.promise === promise) {
+        inFlightWorkspaceSkillsStatus = undefined;
+      }
+    };
+    void promise.then(clearInFlight, clearInFlight);
+    return promise;
+  };
+
+  const refreshWorkspaceSkillsAfterMutation = async (): Promise<void> => {
+    invalidateWorkspaceSkillsSnapshot();
+    if (!(isChannelLive?.() ?? false)) return;
+    try {
+      const refreshed =
+        await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
+          SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+          { cwd: boundWorkspace, reason: 'content' },
+        );
+      // `content` is the only reason that refreshes skill caches, so this is
+      // the one path where a non-zero count is meaningful. The mutation itself
+      // still succeeded; surface the partial refresh rather than dropping it.
+      if ((refreshed.configsFailed ?? 0) > 0) {
+        writeStderrLine(
+          `qwen serve: ${refreshed.configsFailed} skill cache refresh(es) failed after mutation`,
+        );
+      }
+    } catch (err) {
+      if (
+        !(err instanceof SessionNotFoundError) &&
+        !(err instanceof BridgeChannelClosedError)
+      ) {
+        writeStderrLine(
+          `qwen serve: workspace skill refresh after mutation failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    } finally {
+      invalidateWorkspaceSkillsSnapshot();
+    }
+  };
+
+  // -- Facade --
+  return {
+    // -- Status queries (delegate to ACP child via queryWorkspaceStatus) --
+
+    async getWorkspaceMcpStatus(_ctx: WorkspaceRequestContext) {
+      return queryWorkspaceStatus(SERVE_STATUS_EXT_METHODS.workspaceMcp, () =>
+        createIdleWorkspaceMcpStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceSkillsStatus(_ctx: WorkspaceRequestContext) {
+      // Skills are enumerated by the ACP child, which owns the live
+      // SkillManager (including extension-provided skills). `queryWorkspaceStatus`
+      // returns the idle placeholder (`initialized: false`, empty `skills`)
+      // whenever no child channel is live — before the first session, after
+      // the default immediate reap or a configured idle timeout stops it, and
+      // when a cold-start preheat times out before the child ever answers. In
+      // those windows the Web Shell's
+      // pre-first-prompt slash-command list would otherwise drop every skill,
+      // so `/rev` stops autocompleting `/review`. `initialized` cleanly
+      // separates a real child answer (always `true`) from the placeholder.
+      return getWorkspaceSkillsStatus();
+    },
+
+    async getWorkspaceProvidersStatus(_ctx: WorkspaceRequestContext) {
+      if (workspaceProvidersStatusProvider) {
+        return workspaceProvidersStatusProvider(
+          boundWorkspace,
+          isChannelLive?.() ?? false,
+        );
+      }
+      return queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceProviders,
+        () => createIdleWorkspaceProvidersStatus(boundWorkspace),
+      );
+    },
+
+    async preheatAcpChild(
+      _ctx: WorkspaceRequestContext,
+      opts?: { timeoutMs?: number },
+    ): Promise<WorkspaceAcpPreheatResult> {
+      assertActiveGeneration();
+      const startedAt = performance.now();
+      const channelLive = () => isChannelLive?.() ?? false;
+      const finish = (
+        result: Omit<WorkspaceAcpPreheatResult, 'durationMs'>,
+      ): WorkspaceAcpPreheatResult => ({
+        ...result,
+        durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      });
+
+      if (!preheatAcpChildOnBridge) {
+        if (channelLive()) {
+          return finish({ ready: true, channelLive: true });
+        }
+        return finish({
+          ready: false,
+          channelLive: false,
+          reason: 'error',
+          error: 'ACP preheat is unavailable',
+        });
+      }
+
+      const preheat = Promise.resolve().then(() => preheatAcpChildOnBridge());
+      void preheat.catch(logPreheatFailure);
+      try {
+        await withTimeout(preheat, opts?.timeoutMs ?? 5_000, 'ACP preheat');
+      } catch (err) {
+        if (err instanceof TimeoutError) {
+          writeStderrLineSafe(
+            `qwen serve: ACP preheat timed out after ${opts?.timeoutMs ?? 5_000}ms`,
+          );
+        }
+        const live = channelLive();
+        if (live) {
+          return finish({ ready: true, channelLive: true });
+        }
+        return finish({
+          ready: false,
+          channelLive: false,
+          reason: err instanceof TimeoutError ? 'timeout' : 'error',
+          error:
+            err instanceof TimeoutError
+              ? 'ACP preheat did not complete before the timeout'
+              : 'ACP preheat failed',
+        });
+      }
+
+      const live = channelLive();
+      if (!live) {
+        writeStderrLineSafe(
+          'qwen serve: ACP preheat resolved without a live channel',
+        );
+      }
+      return live
+        ? finish({ ready: true, channelLive: true })
+        : finish({
+            ready: false,
+            channelLive: false,
+            reason: 'error',
+            error: 'ACP preheat did not produce a live channel',
+          });
+    },
+
+    async getWorkspaceAcpStatus(
+      _ctx: WorkspaceRequestContext,
+    ): Promise<WorkspaceAcpStatusResult> {
+      return { channelLive: isChannelLive?.() ?? false };
+    },
+
+    async getWorkspaceEnvStatus(_ctx: WorkspaceRequestContext) {
+      // Env status is answered daemon-locally from process state — no ACP
+      // query needed. The old bridge used statusProvider.getEnvStatus()
+      // directly; replicate that behavior here.
+      const acpChannelLive = isChannelLive?.() ?? false;
+      if (!statusProvider) {
+        return createIdleEnvStatus(boundWorkspace, acpChannelLive);
+      }
+      try {
+        return await statusProvider.getEnvStatus(
+          boundWorkspace,
+          acpChannelLive,
+        );
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: getEnvStatus failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return createIdleEnvStatus(boundWorkspace, acpChannelLive);
+      }
+    },
+
+    async getWorkspacePreflightStatus(_ctx: WorkspaceRequestContext) {
+      // Preflight stitches two halves:
+      // 1. Daemon cells from statusProvider.getDaemonPreflightCells() — always local
+      // 2. ACP cells from queryWorkspaceStatus (live ACP child) or idle placeholders
+      const acpChannelLive = isChannelLive?.() ?? false;
+      const idleCells = createIdleAcpPreflightCells();
+
+      // Get daemon cells (local, no ACP query).
+      let daemonCells: ServeWorkspacePreflightStatus['cells'] = [];
+      if (statusProvider) {
+        try {
+          daemonCells =
+            await statusProvider.getDaemonPreflightCells(boundWorkspace);
+        } catch (err) {
+          // Daemon cells failing is non-fatal; proceed with empty.
+          writeStderrLine(
+            `qwen serve: getDaemonPreflightCells failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
+      // Get ACP cells — either from live child or idle placeholders.
+      let acpCells: ServeWorkspacePreflightStatus['cells'] = idleCells;
+      let errors: ServeWorkspacePreflightStatus['errors'] | undefined;
+
+      if (acpChannelLive) {
+        try {
+          const acpResult = await queryWorkspaceStatus(
+            SERVE_STATUS_EXT_METHODS.workspacePreflight,
+            () => ({ cells: idleCells }),
+          );
+          // The ACP response may contain only ACP-locality cells.
+          if (acpResult && 'cells' in acpResult) {
+            const result = acpResult as {
+              cells: ServeWorkspacePreflightStatus['cells'];
+              errors?: ServeWorkspacePreflightStatus['errors'];
+            };
+            // Filter to only ACP cells from the ACP response (daemon cells come from our provider).
+            acpCells = result.cells.filter((c) => c.locality !== 'daemon');
+            errors = result.errors;
+          }
+        } catch (err) {
+          // ACP query failed — fall back to idle placeholders and report error.
+          acpCells = idleCells;
+          const errorKind = mapDomainErrorToErrorKind(err);
+          errors = [
+            {
+              kind: 'preflight',
+              status: 'error',
+              error: err instanceof Error ? err.message : String(err),
+              ...(errorKind ? { errorKind } : {}),
+            },
+          ];
+        }
+      }
+
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: boundWorkspace,
+        initialized: true,
+        acpChannelLive,
+        cells: [...daemonCells, ...acpCells],
+        ...(errors && errors.length > 0 ? { errors } : {}),
+      } as ServeWorkspacePreflightStatus;
+    },
+
+    async getWorkspaceHooksStatus(_ctx: WorkspaceRequestContext) {
+      return queryWorkspaceStatus(SERVE_STATUS_EXT_METHODS.workspaceHooks, () =>
+        createIdleWorkspaceHooksStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceExtensionsStatus(_ctx: WorkspaceRequestContext) {
+      return queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceExtensions,
+        () => createIdleWorkspaceExtensionsStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceTrustStatus(_ctx: WorkspaceRequestContext) {
+      return getWorkspaceTrustStatus(
+        loadBoundSettings(true).merged,
+        boundWorkspace,
+      );
+    },
+
+    async getWorkspacePermissionsStatus(_ctx: WorkspaceRequestContext) {
+      return buildPermissionSettings(loadBoundSettings());
+    },
+
+    async getWorkspaceVoiceStatus(_ctx: WorkspaceRequestContext) {
+      return buildWorkspaceVoiceStatus(
+        boundWorkspace,
+        loadBoundSettings(Boolean(voiceEnv)),
+      );
+    },
+
+    // -- Mutations --
+
+    async requestWorkspaceTrustChange(
+      ctx: WorkspaceRequestContext,
+      request: WorkspaceTrustChangeRequest,
+    ) {
+      assertActiveGeneration();
+      publishWorkspaceEvent({
+        type: 'trust_change_requested',
+        data: {
+          workspaceCwd: boundWorkspace,
+          desiredState: request.desiredState,
+          ...(request.reason !== undefined ? { reason: request.reason } : {}),
+        },
+        originatorClientId: ctx.originatorClientId,
+      });
+      return {
+        accepted: false,
+        desiredState: request.desiredState,
+        requiresOperatorAction: true,
+      };
+    },
+
+    async setWorkspacePermissionRules(
+      ctx: WorkspaceRequestContext,
+      request: WorkspacePermissionRulesUpdate,
+    ) {
+      assertActiveGeneration();
+      const key = `permissions.${request.ruleType}`;
+      try {
+        const result = await invokeWorkspaceCommand(
+          'qwen/permissions/setRules',
+          {
+            cwd: boundWorkspace,
+            scope: request.scope,
+            ruleType: request.ruleType,
+            rules: request.rules,
+          },
+        );
+        assertActiveGeneration();
+        publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: { key, value: request.rules, scope: request.scope },
+          originatorClientId: ctx.originatorClientId,
+        });
+        return result as ReturnType<typeof buildPermissionSettings>;
+      } catch (err) {
+        if (!(err instanceof SessionNotFoundError)) {
+          throw err;
+        }
+        throw new WorkspacePermissionRulesSessionRequiredError();
+      }
+    },
+
+    async setWorkspaceVoiceSettings(
+      ctx: WorkspaceRequestContext,
+      request: WorkspaceVoiceSettingsUpdate,
+    ) {
+      assertActiveGeneration();
+      if (!persistSettings && !persistSetting) {
+        throw new WorkspaceVoiceError(
+          501,
+          'not_implemented',
+          'Workspace voice settings persistence is not available',
+        );
+      }
+
+      const settings = loadBoundSettings(Boolean(voiceEnv));
+      validateWorkspaceVoiceState(settings, request, { env: voiceEnv });
+      const writes = buildWorkspaceVoiceSettingsWrites(settings, request, {
+        workspaceTrusted: isWorkspaceTrusted(),
+        ...(voiceSettingsScope ? { scopeOverride: voiceSettingsScope } : {}),
+      });
+
+      const publishWrite = (write: WorkspaceVoiceSettingsWrite) => {
+        publishWorkspaceEvent({
+          type: 'settings_changed',
+          data: {
+            key: write.key,
+            value: write.value,
+            scope: voiceSettingsScopeToWire(write.scope),
+          },
+          originatorClientId: ctx.originatorClientId,
+        });
+      };
+
+      if (persistSettings) {
+        try {
+          await persistSettings(boundWorkspace, writes, assertGenerationOpen);
+        } catch (err) {
+          if (err instanceof WorkspaceSettingsPartialPersistError) {
+            assertActiveGeneration();
+            for (const write of err.committedWrites) {
+              publishWrite(write);
+            }
+          }
+          throw err;
+        }
+        assertActiveGeneration();
+        for (const write of writes) {
+          publishWrite(write);
+        }
+      } else {
+        const committed: WorkspaceVoiceSettingsWrite[] = [];
+        for (const write of writes) {
+          try {
+            await persistSetting!(
+              boundWorkspace,
+              write.scope,
+              write.key,
+              write.value,
+              assertGenerationOpen,
+            );
+          } catch (err) {
+            assertActiveGeneration();
+            writeStderrLine(
+              `qwen serve: workspace voice partial persist error (workspace=${boundWorkspace}, committed=${committed.length}/${writes.length}, failedKey=${write.key}, failedScope=${voiceSettingsScopeToWire(write.scope)}): ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+            for (const committedWrite of committed) {
+              publishWrite(committedWrite);
+            }
+            throw new WorkspaceSettingsPartialPersistError(
+              `Voice settings partial persist failed: committed=${committed.length}/${writes.length}`,
+              committed,
+              err,
+            );
+          }
+          assertActiveGeneration();
+          committed.push(write);
+        }
+        assertActiveGeneration();
+        for (const write of committed) {
+          publishWrite(write);
+        }
+      }
+
+      return buildWorkspaceVoiceStatus(
+        boundWorkspace,
+        loadBoundSettings(Boolean(voiceEnv)),
+      );
+    },
+
+    async setWorkspaceToolEnabled(
+      ctx: WorkspaceRequestContext,
+      toolName: string,
+      enabled: boolean,
+    ) {
+      assertActiveGeneration();
+      await persistDisabledTools(
+        boundWorkspace,
+        toolName,
+        enabled,
+        assertGenerationOpen,
+      );
+      assertActiveGeneration();
+      publishWorkspaceEvent({
+        type: 'tool_toggled',
+        data: { toolName, enabled },
+        originatorClientId: ctx.originatorClientId,
+      });
+      return { toolName, enabled };
+    },
+
+    async setWorkspaceSkillEnabled(
+      ctx: WorkspaceRequestContext,
+      requestedSkillName: string,
+      enabled: boolean,
+    ): Promise<WorkspaceSkillToggleResult> {
+      assertActiveGeneration();
+      const skillName = requestedSkillName.trim();
+      const persisted = await persistDisabledSkills(
+        boundWorkspace,
+        skillName,
+        enabled,
+        assertGenerationOpen,
+      );
+      assertActiveGeneration();
+      const channelLive = isChannelLive?.() ?? false;
+      let activation: WorkspaceSkillToggleResult['activation'] = channelLive
+        ? 'applied'
+        : 'deferred';
+      let sessionsRefreshed = 0;
+      let sessionsFailed = 0;
+
+      if (persisted.changed) {
+        invalidateWorkspaceSkillsSnapshot();
+        if (channelLive) {
+          try {
+            const refreshed =
+              await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
+                SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+                { cwd: boundWorkspace, reason: 'settings' },
+              );
+            assertActiveGeneration();
+            sessionsRefreshed = refreshed.sessionsRefreshed;
+            // `reason: 'settings'` never touches skill caches, so
+            // `configsFailed` is structurally 0 here — folding it in would only
+            // conflate two different failures behind one count.
+            sessionsFailed = refreshed.sessionsFailed;
+            if (sessionsFailed > 0) activation = 'partial';
+          } catch (err) {
+            if (
+              err instanceof SessionNotFoundError ||
+              err instanceof BridgeChannelClosedError
+            ) {
+              activation = 'deferred';
+            } else {
+              activation = 'partial';
+              sessionsFailed = 1;
+              writeStderrLine(
+                `qwen serve: workspace skill refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+          invalidateWorkspaceSkillsSnapshot();
+        }
+
+        assertActiveGeneration();
+        const settingsChanges = persisted.settingsChanges ?? [
+          {
+            key: 'skills.disabled' as const,
+            value:
+              persisted.disabled.length > 0 ? persisted.disabled : undefined,
+          },
+        ];
+        const mutation = createSkillToggleMutation({
+          skills: [{ name: skillName, enabled }],
+          activation,
+          sessionsRefreshed,
+          sessionsFailed,
+        });
+        for (const change of settingsChanges) {
+          publishWorkspaceEvent({
+            type: 'settings_changed',
+            data: {
+              key: change.key,
+              value: change.value,
+              scope: 'workspace',
+              mutation,
+            },
+            originatorClientId: ctx.originatorClientId,
+          });
+        }
+      }
+
+      return {
+        skillName,
+        enabled,
+        changed: persisted.changed,
+        activation,
+        sessionsRefreshed,
+        sessionsFailed,
+      };
+    },
+
+    async setWorkspaceSkillsEnabled(
+      ctx: WorkspaceRequestContext,
+      requestedSkillNames: readonly string[],
+      enabled: boolean,
+    ): Promise<WorkspaceSkillBatchToggleResult> {
+      assertActiveGeneration();
+      const skillNames = requestedSkillNames.map((name) => name.trim());
+      const persisted: PersistDisabledSkillsBatchResult =
+        skillNames.length > 0
+          ? await persistDisabledSkillsBatch(
+              boundWorkspace,
+              skillNames,
+              enabled,
+              assertGenerationOpen,
+            )
+          : { outcomes: [], settingsChanges: [] };
+      assertActiveGeneration();
+      const persistedByName = new Map(
+        persisted.outcomes.map((outcome) => [
+          outcome.skillName.trim().toLowerCase(),
+          outcome,
+        ]),
+      );
+      const results: WorkspaceSkillBatchToggleResult['results'] = [];
+      for (const skillName of skillNames) {
+        const outcome = persistedByName.get(skillName.toLowerCase());
+        if (!outcome) {
+          throw new Error(
+            `Missing persisted Skill batch outcome: ${skillName}`,
+          );
+        }
+        results.push({
+          skillName: outcome.skillName,
+          enabled,
+          changed: outcome.changed,
+        });
+      }
+
+      const changed = results.some((result) => result.changed);
+      const channelLive = isChannelLive?.() ?? false;
+      let activation: WorkspaceSkillBatchToggleResult['activation'] =
+        channelLive ? 'applied' : 'deferred';
+      let sessionsRefreshed = 0;
+      let sessionsFailed = 0;
+      if (changed) {
+        invalidateWorkspaceSkillsSnapshot();
+        if (channelLive) {
+          try {
+            const refreshed =
+              await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
+                SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+                { cwd: boundWorkspace, reason: 'settings' },
+              );
+            assertActiveGeneration();
+            sessionsRefreshed = refreshed.sessionsRefreshed;
+            // `reason: 'settings'` never touches skill caches, so
+            // `configsFailed` is structurally 0 here — folding it in would only
+            // conflate two different failures behind one count.
+            sessionsFailed = refreshed.sessionsFailed;
+            if (sessionsFailed > 0) activation = 'partial';
+          } catch (err) {
+            if (
+              err instanceof SessionNotFoundError ||
+              err instanceof BridgeChannelClosedError
+            ) {
+              activation = 'deferred';
+            } else {
+              activation = 'partial';
+              sessionsFailed = 1;
+              writeStderrLine(
+                `qwen serve: workspace skill refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+          invalidateWorkspaceSkillsSnapshot();
+        }
+        assertActiveGeneration();
+        const mutation = createSkillToggleMutation({
+          skills: results
+            .filter((result) => result.changed)
+            .map((result) => ({
+              name: result.skillName,
+              enabled: result.enabled,
+            })),
+          activation,
+          sessionsRefreshed,
+          sessionsFailed,
+        });
+        for (const change of persisted.settingsChanges) {
+          publishWorkspaceEvent({
+            type: 'settings_changed',
+            data: { ...change, scope: 'workspace', mutation },
+            originatorClientId: ctx.originatorClientId,
+          });
+        }
+      }
+
+      return {
+        enabled,
+        activation,
+        sessionsRefreshed,
+        sessionsFailed,
+        results,
+        errors: [],
+      };
+    },
+
+    async installWorkspaceSkill(
+      _ctx: WorkspaceRequestContext,
+      request: WorkspaceSkillInstallRequest,
+    ): Promise<WorkspaceSkillMutationResult> {
+      assertActiveGeneration();
+      const result = await installWorkspaceSkill(
+        boundWorkspace,
+        request,
+        skillInstallEnv?.['GH_TOKEN'] ?? skillInstallEnv?.['GITHUB_TOKEN'],
+        assertGenerationOpen,
+      );
+      assertActiveGeneration();
+      await refreshWorkspaceSkillsAfterMutation();
+      assertActiveGeneration();
+      return result;
+    },
+
+    async deleteWorkspaceSkill(
+      _ctx: WorkspaceRequestContext,
+      requestedSkillName: string,
+      scope: WorkspaceSkillScope,
+    ): Promise<WorkspaceSkillMutationResult> {
+      assertActiveGeneration();
+      const normalizedName = requestedSkillName.trim().toLowerCase();
+      const status = await getWorkspaceSkillsStatus();
+      const skill = status.skills.find(
+        (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
+      );
+      if (!skill) throw new WorkspaceSkillNotFoundError(requestedSkillName);
+      const expectedLevel = scope === 'workspace' ? 'project' : 'user';
+      if (skill.level !== expectedLevel || !skill.installedPath) {
+        throw new WorkspaceSkillManagementError(
+          'skill_not_managed',
+          'Skill is not managed in the requested scope',
+          409,
+        );
+      }
+      const result = await deleteWorkspaceSkill(
+        boundWorkspace,
+        scope,
+        skill.name,
+        skill.installedPath,
+        assertGenerationOpen,
+      );
+      assertActiveGeneration();
+      await refreshWorkspaceSkillsAfterMutation();
+      assertActiveGeneration();
+      return result;
+    },
+
+    async initWorkspace(
+      ctx: WorkspaceRequestContext,
+      opts: { force?: boolean },
+    ) {
+      assertActiveGeneration();
+      // Resolve the context filename against the workspace root.
+      const filename = contextFilename;
+      const target = path.resolve(boundWorkspace, filename);
+
+      // Textual boundary check: reject paths that escape the workspace.
+      const withinWorkspace =
+        target === boundWorkspace ||
+        target.startsWith(boundWorkspace + path.sep);
+      if (!withinWorkspace) {
+        throw new WorkspaceInitPathEscapeError(filename, boundWorkspace);
+      }
+
+      // Symlink check on parent path: canonicalize and verify.
+      const wsCanonical = await fs.realpath(boundWorkspace);
+      const parentCanonical = await canonicalizeExistingAncestor(
+        path.dirname(target),
+      );
+      const parentWithinWorkspace =
+        parentCanonical === wsCanonical ||
+        parentCanonical.startsWith(wsCanonical + path.sep);
+      if (!parentWithinWorkspace) {
+        throw new WorkspaceInitSymlinkError(
+          target,
+          'parent',
+          `Configured workspace context filename ${JSON.stringify(filename)} ` +
+            `has a parent path that resolves outside the bound workspace ` +
+            `(parent canonicalizes to ${JSON.stringify(parentCanonical)}, ` +
+            `workspace canonicalizes to ${JSON.stringify(wsCanonical)}). ` +
+            `Refusing to write — replace any symlinked parent directory ` +
+            `with a real directory before re-running init.`,
+        );
+      }
+
+      // Symlink check on the target itself.
+      try {
+        const lst = await fs.lstat(target);
+        if (lst.isSymbolicLink()) {
+          throw new WorkspaceInitSymlinkError(
+            target,
+            'target',
+            `Workspace context file ${JSON.stringify(target)} is a symlink. ` +
+              `Refusing to follow it for write — replace the symlink with a ` +
+              `regular file (or remove it) before re-running init.`,
+          );
+        }
+        if (!lst.isFile()) {
+          throw new WorkspaceInitSymlinkError(
+            target,
+            'target',
+            `Workspace context file ${JSON.stringify(target)} is not a regular file ` +
+              `(mode=${lst.mode.toString(8)}). Refusing to proceed — ` +
+              `FIFOs, sockets, and device nodes can block or misbehave on read/write.`,
+          );
+        }
+      } catch (err) {
+        if (err instanceof WorkspaceInitSymlinkError) throw err;
+        const code = (err as { code?: unknown } | null | undefined)?.code;
+        if (code !== 'ENOENT') throw err;
+        // ENOENT — target doesn't exist; fresh create is fine.
+      }
+
+      // Determine action based on existing file state.
+      let action: 'created' | 'overwrote' | 'noop' = 'created';
+      try {
+        const existing = await fs.readFile(target, 'utf8');
+        if (existing.trim().length > 0) {
+          const existingSize = Buffer.byteLength(existing, 'utf8');
+          if (opts.force !== true) {
+            throw new WorkspaceInitConflictError(target, existingSize);
+          }
+          action = 'overwrote';
+        } else {
+          // Whitespace-only file: treat as noop.
+          action = 'noop';
+        }
+      } catch (err) {
+        if (err instanceof WorkspaceInitConflictError) throw err;
+        const code = (err as { code?: unknown } | null | undefined)?.code;
+        if (code !== 'ENOENT') throw err;
+        // ENOENT — fall through to create.
+      }
+
+      // Write the file.
+      if (action === 'created') {
+        // Atomic exclusive create to close TOCTOU window.
+        let fh: import('node:fs/promises').FileHandle;
+        try {
+          assertActiveGeneration();
+          fh = await fs.open(target, 'wx');
+        } catch (err) {
+          const code = (err as { code?: unknown } | null | undefined)?.code;
+          if (code === 'EEXIST') {
+            throw new WorkspaceInitRaceError(
+              target,
+              'eexist',
+              `Workspace context file ${JSON.stringify(target)} appeared ` +
+                `between our absence check and the create — refusing to ` +
+                `proceed (a regular file or symlink was just placed at the ` +
+                `target path, and following it could escape the workspace).`,
+            );
+          }
+          throw err;
+        }
+        try {
+          // Post-open parent re-verification narrows the parent-symlink
+          // TOCTOU window between `canonicalizeExistingAncestor` and
+          // `fs.open`. Must verify before writing content.
+          await verifyParentPostOpen(target, wsCanonical, fh);
+          assertActiveGeneration();
+          await fh.writeFile('', 'utf8');
+        } finally {
+          await fh.close();
+        }
+      } else if (action === 'overwrote') {
+        // Use O_WRONLY | O_NOFOLLOW to avoid following symlinks that
+        // may have been swapped in between our lstat check and this open.
+        let overwriteFh: import('node:fs/promises').FileHandle;
+        try {
+          assertActiveGeneration();
+          overwriteFh = await fs.open(
+            target,
+            fsConstants.O_WRONLY | (fsConstants.O_NOFOLLOW ?? 0),
+          );
+        } catch (err) {
+          const code = (err as { code?: unknown } | null | undefined)?.code;
+          if (code === 'ELOOP') {
+            throw new WorkspaceInitSymlinkError(
+              target,
+              'target',
+              `Workspace context file ${JSON.stringify(target)} could not ` +
+                `be opened with O_NOFOLLOW (ELOOP); the path may have been ` +
+                `swapped to a symlink between the content check and the ` +
+                `overwrite. Refusing to follow it.`,
+            );
+          }
+          if (code === 'ENOENT') {
+            throw new WorkspaceInitRaceError(
+              target,
+              'enoent',
+              `Workspace context file ${JSON.stringify(target)} was deleted ` +
+                `between the content check and the overwrite (likely a ` +
+                `concurrent writer). Refusing to recreate blindly; rerun init.`,
+            );
+          }
+          throw err;
+        }
+        try {
+          // Post-open parent re-verification (same as create path).
+          await verifyParentPostOpen(target, wsCanonical, overwriteFh);
+          // Truncate AFTER verify, using the fd we already hold.
+          assertActiveGeneration();
+          await overwriteFh.truncate(0);
+        } finally {
+          await overwriteFh.close();
+        }
+      }
+      // action === 'noop' — no write needed.
+
+      assertActiveGeneration();
+      publishWorkspaceEvent({
+        type: 'workspace_initialized',
+        data: { path: target, action },
+        originatorClientId: ctx.originatorClientId,
+      });
+
+      return { path: target, action };
+    },
+
+    async restartMcpServer(
+      ctx: WorkspaceRequestContext,
+      serverName: string,
+      opts?: { entryIndex?: number },
+    ) {
+      assertActiveGeneration();
+      const params: Record<string, unknown> = { serverName };
+      if (opts?.entryIndex !== undefined) {
+        params['entryIndex'] = opts.entryIndex;
+      }
+
+      let result: RestartMcpServerResult;
+      try {
+        result = await invokeWorkspaceCommand<RestartMcpServerResult>(
+          SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+          params,
+          { timeoutMs: MCP_RESTART_SERVER_DEADLINE_MS },
+        );
+      } catch (err) {
+        const data = (err as { data?: unknown })?.data;
+        if (data && typeof data === 'object') {
+          const kind = (data as { errorKind?: unknown }).errorKind;
+          const sn = (data as { serverName?: unknown }).serverName;
+          if (kind === 'mcp_server_not_found' && typeof sn === 'string') {
+            throw new McpServerNotFoundError(sn);
+          }
+          if (kind === 'mcp_restart_failed' && typeof sn === 'string') {
+            const status = (data as { mcpStatus?: unknown }).mcpStatus;
+            throw new McpServerRestartFailedError(
+              sn,
+              typeof status === 'string' ? status : 'unknown',
+            );
+          }
+        }
+        throw err;
+      }
+
+      assertActiveGeneration();
+      // Pool-mode: fan out per-entry events.
+      if ('entries' in result) {
+        const entries = Array.isArray(result.entries) ? result.entries : [];
+        if (!Array.isArray(result.entries)) {
+          writeStderrLine(
+            `qwen serve: pool restart response carried 'entries' field ` +
+              `but it is not an array (server=${serverName}); ` +
+              `treating as empty.`,
+          );
+        }
+        for (const entry of entries) {
+          if (
+            typeof entry !== 'object' ||
+            entry === null ||
+            typeof (entry as { entryIndex?: unknown }).entryIndex !== 'number'
+          ) {
+            writeStderrLine(
+              `qwen serve: skipping malformed pool restart entry ` +
+                `(server=${serverName}): ${JSON.stringify(entry)}`,
+            );
+            continue;
+          }
+          if (entry.restarted) {
+            publishWorkspaceEvent({
+              type: 'mcp_server_restarted',
+              data: {
+                serverName: result.serverName,
+                durationMs: entry.durationMs ?? 0,
+                entryIndex: entry.entryIndex,
+              },
+              originatorClientId: ctx.originatorClientId,
+            });
+          } else {
+            publishWorkspaceEvent({
+              type: 'mcp_server_restart_refused',
+              data: {
+                serverName: result.serverName,
+                reason: 'restart_failed',
+                entryIndex: entry.entryIndex,
+                ...(entry.reason ? { details: entry.reason } : {}),
+              },
+              originatorClientId: ctx.originatorClientId,
+            });
+          }
+        }
+      } else if (result.restarted === true) {
+        publishWorkspaceEvent({
+          type: 'mcp_server_restarted',
+          data: {
+            serverName: result.serverName,
+            durationMs: result.durationMs,
+          },
+          originatorClientId: ctx.originatorClientId,
+        });
+      } else {
+        publishWorkspaceEvent({
+          type: 'mcp_server_restart_refused',
+          data: {
+            serverName: result.serverName,
+            reason: (result as { reason?: string }).reason,
+          },
+          originatorClientId: ctx.originatorClientId,
+        });
+      }
+
+      return result;
+    },
+
+    async reload(ctx: WorkspaceRequestContext) {
+      assertActiveGeneration();
+      let runtimeEnvironmentApplied: boolean | undefined;
+      if (deps.reloadDaemonEnv) {
+        try {
+          const result = await deps.reloadDaemonEnv(
+            boundWorkspace,
+            assertGenerationOpen,
+          );
+          runtimeEnvironmentApplied = result.runtimeEnvironmentApplied;
+        } catch (err) {
+          runtimeEnvironmentApplied = false;
+          writeStderrLine(
+            `qwen serve: daemon reload failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      assertActiveGeneration();
+
+      let childReloaded = false;
+      let env: { updatedKeys: string[]; removedKeys: string[] } = {
+        updatedKeys: [],
+        removedKeys: [],
+      };
+      let changedKeys: string[] = [];
+      let sessionsRefreshed: string[] | undefined;
+      let sessionsSkipped: string[] | undefined;
+      let childError: string | undefined;
+      try {
+        const childResult = await invokeWorkspaceCommand<{
+          env: { updatedKeys: string[]; removedKeys: string[] };
+          changedKeys: string[];
+          sessionsRefreshed: string[];
+          sessionsSkipped: string[];
+        }>(
+          SERVE_CONTROL_EXT_METHODS.workspaceReload,
+          { cwd: boundWorkspace },
+          { timeoutMs: 30_000 },
+        );
+        childReloaded = true;
+        env = childResult.env;
+        changedKeys = childResult.changedKeys;
+        sessionsRefreshed = childResult.sessionsRefreshed;
+        sessionsSkipped = childResult.sessionsSkipped;
+      } catch (err) {
+        if (err instanceof SessionNotFoundError) {
+          childError = 'ACP child not running';
+        } else {
+          childError = err instanceof Error ? err.message : String(err);
+          writeStderrLine(`qwen serve: reload failed: ${childError}`);
+        }
+      }
+
+      assertActiveGeneration();
+      publishWorkspaceEvent({
+        type: 'settings_reloaded',
+        data: {
+          env,
+          changedKeys,
+          childReloaded,
+          sessionsRefreshed,
+          sessionsSkipped,
+          childError,
+          ...(runtimeEnvironmentApplied === undefined
+            ? {}
+            : { runtimeEnvironmentApplied }),
+        },
+        originatorClientId: ctx.originatorClientId,
+      });
+
+      return {
+        env,
+        changedKeys,
+        childReloaded,
+        sessionsRefreshed,
+        sessionsSkipped,
+        childError,
+        ...(runtimeEnvironmentApplied === undefined
+          ? {}
+          : { runtimeEnvironmentApplied }),
+      };
+    },
+
+    async reloadModelProviders(_ctx: WorkspaceRequestContext) {
+      assertActiveGeneration();
+      let failed = false;
+      const reloadModelProvidersDaemonEnv =
+        deps.reloadModelProvidersDaemonEnv ?? deps.reloadDaemonEnv;
+      if (reloadModelProvidersDaemonEnv) {
+        try {
+          const result = await reloadModelProvidersDaemonEnv(
+            boundWorkspace,
+            assertGenerationOpen,
+          );
+          failed = result.runtimeEnvironmentApplied === false;
+        } catch {
+          assertActiveGeneration();
+          failed = true;
+          writeStderrLine(
+            'qwen serve: model-provider parent environment sync failed',
+          );
+        }
+      }
+      assertActiveGeneration();
+
+      try {
+        const child = await invokeWorkspaceCommand<{
+          configsFailed?: number;
+        }>(
+          SERVE_CONTROL_EXT_METHODS.workspaceModelProvidersReload,
+          { cwd: boundWorkspace },
+          { timeoutMs: 30_000 },
+        );
+        if ((child.configsFailed ?? 0) > 0) failed = true;
+        return { status: failed ? 'failed' : 'applied' };
+      } catch (err) {
+        assertActiveGeneration();
+        if (
+          err instanceof SessionNotFoundError ||
+          err instanceof BridgeChannelClosedError
+        ) {
+          return { status: failed ? 'failed' : 'deferred' };
+        }
+        writeStderrLine('qwen serve: model-provider ACP child sync failed');
+        return { status: 'failed' };
+      }
+    },
+
+    invalidateWorkspaceSkillsStatus() {
+      invalidateWorkspaceSkillsSnapshot();
+    },
+
+    async refreshExtensionsForAllSessions() {
+      assertActiveGeneration();
+      try {
+        if (!refreshExtensionsForAllSessionsOnBridge) {
+          throw new Error('refreshExtensionsForAllSessions is not wired');
+        }
+        return await refreshExtensionsForAllSessionsOnBridge();
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: refreshExtensionsForAllSessions failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return { refreshed: 0, failed: 1 };
+      } finally {
+        invalidateWorkspaceSkillsSnapshot();
+      }
+    },
+  };
+}

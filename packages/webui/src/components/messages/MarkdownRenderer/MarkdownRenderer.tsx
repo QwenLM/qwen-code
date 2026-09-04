@@ -33,6 +33,29 @@ const FILE_PATH_WITH_LINES_REGEX =
 const KNOWN_FILE_EXTENSIONS =
   /\.(tsx?|jsx?|css|scss|json|md|py|java|go|rs|c|cpp|h|hpp|sh|ya?ml|toml|xml|html|vue|svelte)$/i;
 
+const FILE_URI_PATTERN = /^file:\/\//i;
+const FILE_URI_TEXT_PATTERN = /file:\/\//i;
+const EXTERNAL_LINK_PATTERN = /^(?:https?|mailto|ftp|data):/i;
+
+const splitLineFragment = (
+  raw: string,
+): { filePath: string; line?: number } => {
+  const hashIndex = raw.indexOf('#');
+  if (hashIndex < 0) {
+    return { filePath: raw };
+  }
+
+  const fragment = raw.slice(hashIndex + 1);
+  const lineMatch = fragment.match(/^L?(\d+)(?:-\d+)?$/i);
+  return {
+    filePath: raw.slice(0, hashIndex),
+    line: lineMatch ? parseInt(lineMatch[1], 10) : undefined,
+  };
+};
+
+const appendLineNumber = (filePath: string, line?: number): string =>
+  line === undefined ? filePath : filePath + ':' + line;
+
 const safeDecodePath = (value: string): string => {
   try {
     return decodeURIComponent(value);
@@ -41,36 +64,69 @@ const safeDecodePath = (value: string): string => {
   }
 };
 
+type ParsedLocalFileUri = {
+  filePath: string;
+  line?: number;
+};
+
+const parseAllowedLocalFileUri = (
+  raw: string,
+): ParsedLocalFileUri | undefined => {
+  if (!FILE_URI_PATTERN.test(raw)) {
+    return undefined;
+  }
+
+  const { filePath: rawUri, line } = splitLineFragment(raw);
+  let uri: URL;
+  try {
+    uri = new URL(rawUri);
+  } catch {
+    return undefined;
+  }
+
+  if (uri.protocol.toLowerCase() !== 'file:') {
+    return undefined;
+  }
+
+  const hostname = uri.hostname.toLowerCase();
+  if (hostname !== '' && hostname !== 'localhost') {
+    return undefined;
+  }
+
+  const decodedPath = safeDecodePath(uri.pathname).replace(/\\/g, '/');
+  const encodedNetworkPath = uri.pathname
+    .replace(/%2f/gi, '/')
+    .replace(/%5c/gi, '\\')
+    .replace(/\\/g, '/');
+
+  // An empty authority can still carry a UNC-like pathname (file:////server).
+  if (decodedPath.startsWith('//') || encodedNetworkPath.startsWith('//')) {
+    return undefined;
+  }
+
+  const filePath =
+    decodedPath.length > 1 && /^[a-zA-Z]:\//.test(decodedPath.slice(1))
+      ? decodedPath.slice(1)
+      : decodedPath;
+
+  return { filePath, line };
+};
+
+const isAllowedLocalFileUri = (url: string): boolean =>
+  parseAllowedLocalFileUri(url) !== undefined;
+
+const shouldSkipFilePathUpgrade = (href: string): boolean =>
+  EXTERNAL_LINK_PATTERN.test(href) || FILE_URI_PATTERN.test(href);
+
 const normalizeExplicitFileLink = (raw: string): string => {
-  const decoded = safeDecodePath(raw).replace(/\\/g, '/');
-
-  // file:// URIs (e.g. from vscode.Uri.file().toString()) encode special
-  // characters like # as %23 in the path component. After decoding the
-  // full URI we can strip the scheme and return the filesystem path
-  // directly — no fragment splitting needed, because any # in the
-  // decoded result is a literal filename character, not an anchor.
-  if (/^file:\/\//i.test(decoded)) {
-    let filePath = decoded.replace(/^file:\/\/\//i, '');
-    // On Unix the path should start with /
-    if (!/^[a-zA-Z]:/.test(filePath) && !filePath.startsWith('/')) {
-      filePath = '/' + filePath;
-    }
-    return filePath;
+  const parsed = parseAllowedLocalFileUri(raw);
+  if (parsed) {
+    return appendLineNumber(parsed.filePath, parsed.line);
   }
 
-  const hashIndex = decoded.indexOf('#');
-  if (hashIndex < 0) {
-    return decoded;
-  }
-
-  const base = decoded.slice(0, hashIndex);
-  const fragment = decoded.slice(hashIndex + 1);
-  const lineMatch = fragment.match(/^L?(\d+)(?:-\d+)?$/i);
-  if (lineMatch) {
-    return `${base}:${parseInt(lineMatch[1], 10)}`;
-  }
-
-  return base;
+  const { filePath: rawPath, line } = splitLineFragment(raw);
+  const decodedPath = safeDecodePath(rawPath).replace(/\\/g, '/');
+  return appendLineNumber(decodedPath, line);
 };
 
 /**
@@ -87,14 +143,23 @@ const escapeHtml = (unsafe: string): string =>
 /**
  * Create a cached MarkdownIt instance
  */
-const createMarkdownInstance = (): MarkdownIt =>
-  new MarkdownIt({
+const createMarkdownInstance = (): MarkdownIt => {
+  const md = new MarkdownIt({
     html: false, // Disable HTML for security
     xhtmlOut: false,
     breaks: true,
     linkify: true,
     typographer: true,
   } as MarkdownItOptions);
+
+  const defaultValidateLink = md.validateLink;
+  md.validateLink = (url: string): boolean =>
+    FILE_URI_PATTERN.test(url)
+      ? isAllowedLocalFileUri(url)
+      : defaultValidateLink(url);
+
+  return md;
+};
 
 /**
  * MarkdownRenderer component - renders markdown content with enhanced features
@@ -141,19 +206,11 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     const normalizePathAndLine = (
       raw: string,
     ): { displayText: string; dataPath: string } => {
-      const displayText = raw;
-      let base = raw;
-      const hashIndex = raw.indexOf('#');
-      if (hashIndex >= 0) {
-        const frag = raw.slice(hashIndex + 1);
-        const m = frag.match(/^L?(\d+)(?:-\d+)?$/i);
-        if (m) {
-          const line = parseInt(m[1], 10);
-          base = raw.slice(0, hashIndex);
-          return { displayText, dataPath: `${base}:${line}` };
-        }
-      }
-      return { displayText, dataPath: base };
+      const { filePath, line } = splitLineFragment(raw);
+      return {
+        displayText: raw,
+        dataPath: line === undefined ? raw : appendLineNumber(filePath, line),
+      };
     };
 
     const makeLink = (text: string) => {
@@ -217,7 +274,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         }
       }
 
-      if (/^(https?|mailto|ftp|data):/i.test(href)) {
+      if (shouldSkipFilePathUpgrade(href)) {
         return;
       }
 
@@ -265,6 +322,15 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         const next = child.nextSibling;
         if (child.nodeType === Node.TEXT_NODE) {
           const text = child.nodeValue || '';
+
+          // MarkdownIt emits rejected file URIs as text. Keep them inert so
+          // path linkification cannot turn a later slash segment into a
+          // file-path-link.
+          if (FILE_URI_TEXT_PATTERN.test(text)) {
+            child = next;
+            continue;
+          }
+
           union.lastIndex = 0;
           const hasMatch = union.test(text);
           union.lastIndex = 0;
@@ -311,12 +377,30 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
     return container.innerHTML;
   };
 
+  const removeFileUriImages = (html: string): string => {
+    if (
+      typeof document === 'undefined' ||
+      !html.toLowerCase().includes('file:')
+    ) {
+      return html;
+    }
+
+    const container = document.createElement('div');
+    container.innerHTML = html;
+    for (const image of Array.from(container.querySelectorAll('img'))) {
+      if (FILE_URI_PATTERN.test(image.getAttribute('src') || '')) {
+        image.replaceWith(document.createTextNode(image.alt));
+      }
+    }
+    return container.innerHTML;
+  };
+
   /**
    * Render markdown content to HTML (memoized)
    */
   const renderedHtml = useMemo(() => {
     try {
-      let html = md.render(content);
+      let html = removeFileUriImages(md.render(content));
 
       if (enableFileLinks) {
         html = processFilePaths(html);
@@ -352,7 +436,7 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       }
 
       // Handle explicit markdown links (file:// URIs and normal file-path hrefs).
-      // file:// URIs come from trusted system-generated content (e.g. /export).
+      // Every file:// link is intercepted so the browser never navigates to it.
       // Normal file-path links (absolute or with known extensions) are also
       // supported so that intentional markdown links remain clickable even
       // when enableFileLinks is false.
@@ -364,17 +448,18 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
 
       const href = anyAnchor.getAttribute('href') || '';
 
-      // Handle file:// URI links (e.g. from /export success messages).
-      if (/^file:\/\//i.test(href) && onFileClick) {
-        const candidate = normalizeExplicitFileLink(href);
+      // Only local file:/// URIs may reach the host file-open handler.
+      if (FILE_URI_PATTERN.test(href)) {
         e.preventDefault();
         e.stopPropagation();
-        onFileClick(candidate);
+        if (isAllowedLocalFileUri(href)) {
+          onFileClick?.(normalizeExplicitFileLink(href));
+        }
         return;
       }
 
       // Skip external links — let browser handle them normally
-      if (/^(https?|mailto|ftp|data):/i.test(href)) {
+      if (shouldSkipFilePathUpgrade(href)) {
         return;
       }
 

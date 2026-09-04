@@ -3,6 +3,8 @@ import logoSvg from './favicon.svg';
 import { TempFileModal } from './components/TempFileModal.js';
 import { usePlatformContext } from './components/hooks.js';
 import { MetadataSidebar } from './components/MetadataSidebar.js';
+import { ThemeToggle } from './components/ThemeToggle.js';
+import { useExportTheme } from './components/useExportTheme.js';
 import { parseChatData, isChatViewerMessage } from './components/utils.js';
 
 declare global {
@@ -20,6 +22,7 @@ declare const QwenCodeWebUI: {
     messages: unknown[];
     autoScroll: boolean;
     theme: string;
+    showExpandControl?: boolean;
   }) => React.ReactNode;
   PlatformProvider: (props: {
     value: unknown;
@@ -50,6 +53,7 @@ const App = () => {
     .filter((record) => record.type !== 'system');
   const metadata = chatData.metadata;
   const { platformContext, modalState, closeModal } = usePlatformContext();
+  const { theme, toggleTheme } = useExportTheme();
 
   return (
     <div className="page-wrapper">
@@ -66,11 +70,19 @@ const App = () => {
             </div>
           </div>
         </div>
+        <div className="header-right">
+          <ThemeToggle theme={theme} onToggle={toggleTheme} />
+        </div>
       </header>
       <div className="content-wrapper">
         <div className="chat-container">
           <PlatformProvider value={platformContext}>
-            <ChatViewer messages={messages} autoScroll={false} theme="dark" />
+            <ChatViewer
+              messages={messages}
+              autoScroll={false}
+              theme={theme}
+              showExpandControl
+            />
           </PlatformProvider>
         </div>
         {metadata && <MetadataSidebar metadata={metadata} />}

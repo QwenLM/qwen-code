@@ -3,6 +3,7 @@
  * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 /// <reference types="vitest/globals" />
 
@@ -47,7 +48,7 @@ describe('TrustDialog', () => {
 
   beforeEach(() => {
     mockUpdateTrustLevel = vi.fn();
-    mockCommitTrustLevelChange = vi.fn();
+    mockCommitTrustLevelChange = vi.fn(() => true);
     vi.mocked(useTrustModify).mockReturnValue({
       cwd: '/test/dir',
       currentTrustLevel: TrustLevel.DO_NOT_TRUST,
@@ -93,7 +94,7 @@ describe('TrustDialog', () => {
 
     await waitFor(() => {
       expect(lastFrame()).toContain(
-        'Note: This folder behaves as a trusted folder because one of the parent folders is trusted.',
+        'currently inherits trust from a parent folder',
       );
     });
   });
@@ -166,6 +167,40 @@ describe('TrustDialog', () => {
       expect(mockRelaunchApp).toHaveBeenCalled();
       expect(onExit).toHaveBeenCalled();
     });
+
+    mockRelaunchApp.mockRestore();
+  });
+
+  it('should not restart or exit when committing the trust change fails', async () => {
+    const mockRelaunchApp = vi
+      .spyOn(processUtils, 'relaunchApp')
+      .mockResolvedValue(undefined);
+    mockCommitTrustLevelChange.mockReturnValue(false);
+    vi.mocked(useTrustModify).mockReturnValue({
+      cwd: '/test/dir',
+      currentTrustLevel: TrustLevel.DO_NOT_TRUST,
+      isInheritedTrustFromParent: false,
+      isInheritedTrustFromIde: false,
+      needsRestart: true,
+      updateTrustLevel: mockUpdateTrustLevel,
+      commitTrustLevelChange: mockCommitTrustLevelChange,
+      isFolderTrustEnabled: true,
+    });
+
+    const onExit = vi.fn();
+    const { stdin, lastFrame } = renderWithProviders(
+      <TrustDialog onExit={onExit} addItem={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(lastFrame()).not.toContain('Loading...'));
+
+    act(() => stdin.write('r'));
+
+    await waitFor(() => {
+      expect(mockCommitTrustLevelChange).toHaveBeenCalled();
+    });
+    expect(mockRelaunchApp).not.toHaveBeenCalled();
+    expect(onExit).not.toHaveBeenCalled();
 
     mockRelaunchApp.mockRestore();
   });

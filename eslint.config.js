@@ -14,6 +14,27 @@ import vitest from '@vitest/eslint-plugin';
 import globals from 'globals';
 // For more info, see https://github.com/storybookjs/eslint-plugin-storybook#configuration-flat-config-format
 import storybook from 'eslint-plugin-storybook';
+import checkFile from 'eslint-plugin-check-file';
+import noCoreRootBarrelImport from './eslint-rules/no-core-root-barrel-import.js';
+import noUtilsUpwardImport from './eslint-rules/no-utils-upward-import.js';
+import noCoreUtilsUpwardImport from './eslint-rules/no-core-utils-upward-import.js';
+import { legacyFilenames } from './eslint.legacy-filenames.mjs';
+import noConfigObjectCreate from './eslint-rules/no-config-object-create.js';
+
+// General syntax restrictions applied to every TS/TSX source file. Hoisted so
+// surface-specific overrides (flat config keeps only the last
+// no-restricted-syntax setting per file) can repeat them without drift.
+const generalRestrictedSyntaxSelectors = [
+  {
+    selector: 'CallExpression[callee.name="require"]',
+    message: 'Avoid using require(). Use ES6 imports instead.',
+  },
+  {
+    selector: 'ThrowStatement > Literal:not([value=/^\\w+Error:/])',
+    message:
+      'Do not throw string literals or non-Error objects. Throw new Error("...") instead.',
+  },
+];
 
 export default tseslint.config(
   {
@@ -21,14 +42,22 @@ export default tseslint.config(
     ignores: [
       'node_modules/*',
       'packages/**/dist/**',
+      'integrations/**/dist/**',
       'bundle/**',
       'package/bundle/**',
       '.integration-tests/**',
       'packages/**/.integration-test/**',
       'dist/**',
+      'demo/**/dist/**',
       'docs-site/.next/**',
       'docs-site/out/**',
       '.qwen/**',
+      'scripts/codemod/fixtures/**', // codemod test data; intentionally non-idiomatic ink input/output
+      'packages/desktop-shell/runtime/**',
+      'packages/desktop-shell/src-tauri/target/**',
+      'packages/live-host/**', // standalone Electron app with its own Node test conventions
+      'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
+      'packages/mobile-mcp/**', // vendored mobile-next/mobile-mcp; has own eslint config
     ],
   },
   eslint.configs.recommended,
@@ -64,8 +93,48 @@ export default tseslint.config(
     },
   },
   {
+    // ACP integration and the daemon are separate runtime surfaces that happen
+    // to share a package directory. ACP may consume neutral contracts under
+    // `runtime/`, but never `serve/` implementation modules — see #8084.
+    files: ['packages/cli/src/acp-integration/**/*.{ts,tsx,js}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/serve', '**/serve/**'],
+              message:
+                'acp-integration must not import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // `utils/` is the leaf layer that every other directory imports, so it
+    // must not import back up into a domain directory. Type-only imports are
+    // exempt: they are erased at compile time and cannot create a runtime
+    // cycle. See #9146.
+    files: ['packages/cli/src/utils/**/*.{ts,tsx}'],
+    plugins: {
+      architecture: {
+        rules: {
+          'no-utils-upward-import': noUtilsUpwardImport,
+        },
+      },
+    },
+    rules: {
+      'architecture/no-utils-upward-import': 'error',
+    },
+  },
+  {
     // General overrides and rules for the project (TS/TSX files)
-    files: ['packages/**/src/**/*.{ts,tsx}'], // Target TS/TSX in all packages (including nested)
+    files: [
+      'packages/**/src/**/*.{ts,tsx}',
+      'integrations/**/src/**/*.{ts,tsx}',
+    ],
     plugins: {
       import: importPlugin,
     },
@@ -121,6 +190,7 @@ export default tseslint.config(
             'react-dom/test-utils',
             'react-dom/client',
             'memfs/lib/volume.js',
+            'mime/lite',
             'yargs/**',
             'msw/node',
             '**/generated/**',
@@ -134,18 +204,7 @@ export default tseslint.config(
       'no-cond-assign': 'error',
       'no-debugger': 'error',
       'no-duplicate-case': 'error',
-      'no-restricted-syntax': [
-        'error',
-        {
-          selector: 'CallExpression[callee.name="require"]',
-          message: 'Avoid using require(). Use ES6 imports instead.',
-        },
-        {
-          selector: 'ThrowStatement > Literal:not([value=/^\\w+Error:/])',
-          message:
-            'Do not throw string literals or non-Error objects. Throw new Error("...") instead.',
-        },
-      ],
+      'no-restricted-syntax': ['error', ...generalRestrictedSyntaxSelectors],
       'no-unsafe-finally': 'error',
       'no-console': 'error',
       'no-unused-expressions': 'off', // Disable base rule
@@ -164,7 +223,171 @@ export default tseslint.config(
     },
   },
   {
-    files: ['packages/*/src/**/*.test.{ts,tsx}', 'packages/**/test/**/*.test.{ts,tsx}'],
+    // The rule itself exempts tests, __tests__, and fixtures; repeating that
+    // here would give the exemption two sources of truth. The utils-upward
+    // rule self-scopes to packages/core/src/utils production files, so it can
+    // share this block without redefining the architecture plugin.
+    files: ['packages/core/src/**/*.{ts,tsx}'],
+    plugins: {
+      architecture: {
+        rules: {
+          'no-core-root-barrel-import': noCoreRootBarrelImport,
+          'no-core-utils-upward-import': noCoreUtilsUpwardImport,
+        },
+      },
+    },
+    rules: {
+      'architecture/no-core-root-barrel-import': 'error',
+      'architecture/no-core-utils-upward-import': 'error',
+    },
+  },
+  {
+    // no-restricted-imports only sees static import/export declarations, so a
+    // dynamic `await import('../serve/...')` would slip past the #8084 guard
+    // above. Kept after the general TS block because flat config applies only
+    // the last no-restricted-syntax setting per file, hence the repeated
+    // general selectors.
+    files: ['packages/cli/src/acp-integration/**/*.{ts,tsx,js}'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        ...generalRestrictedSyntaxSelectors,
+        {
+          // \x2f is '/' — esquery selector regexes cannot contain a literal '/'.
+          selector: "ImportExpression[source.value=/(^|\\x2f)serve(\\x2f|$)/i]",
+          message:
+            'acp-integration must not dynamically import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
+        },
+      ],
+    },
+  },
+  {
+    files: [
+      'packages/web-shell/client/**/*.{ts,tsx}',
+      'packages/web-shell/*.config.ts',
+    ],
+    plugins: {
+      import: importPlugin,
+    },
+    settings: {
+      'import/resolver': {
+        node: true,
+      },
+    },
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.es2021,
+        ...globals.node,
+      },
+    },
+    rules: {
+      'react/prop-types': 'off',
+      '@typescript-eslint/consistent-type-imports': [
+        'error',
+        { disallowTypeAnnotations: false },
+      ],
+      '@typescript-eslint/no-explicit-any': 'error',
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
+      'no-console': ['error', { allow: ['warn', 'error'] }],
+      'no-debugger': 'error',
+      'object-shorthand': 'error',
+      'prefer-const': ['error', { destructuring: 'all' }],
+    },
+  },
+  {
+    files: ['packages/web-shell/client/daemon/**/*.{ts,tsx}'],
+    rules: {
+      'no-console': ['error', { allow: ['debug', 'warn', 'error'] }],
+    },
+  },
+  {
+    files: [
+      'packages/web-shell/client/**/*.test.{ts,tsx}',
+      'packages/web-shell/client/test/**/*.{ts,tsx}',
+    ],
+    plugins: {
+      vitest,
+    },
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.es2021,
+        ...globals.vitest,
+      },
+    },
+    rules: {
+      ...vitest.configs.recommended.rules,
+      'vitest/expect-expect': 'off',
+      'vitest/no-commented-out-tests': 'off',
+      'no-console': 'off',
+    },
+  },
+  {
+    files: ['packages/web-shell/client/e2e/**/*.{ts,tsx}'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+        ...globals.es2021,
+        ...globals.node,
+      },
+    },
+    rules: {
+      'no-console': 'off',
+    },
+  },
+  {
+    files: ['packages/core/src/**/*.ts'],
+    ignores: [
+      'packages/core/src/config/config.ts',
+      '**/*.test.ts',
+      '**/*.spec.ts',
+      '**/__tests__/**',
+      '**/generated/**',
+      '**/*.generated.ts',
+    ],
+    plugins: {
+      'qwen-code': {
+        rules: {
+          'no-config-object-create': noConfigObjectCreate,
+        },
+      },
+    },
+    rules: {
+      'qwen-code/no-config-object-create': 'error',
+    },
+  },
+  {
+    // Enforce kebab-case filenames
+    files: ['packages/core/src/**/*.ts', 'packages/cli/src/**/*.ts'],
+    ignores: legacyFilenames.flatMap((name) => [
+      `**/${name}.ts`,
+      `**/${name}.*.ts`,
+    ]),
+    plugins: {
+      'check-file': checkFile,
+    },
+    rules: {
+      'check-file/filename-naming-convention': [
+        'error',
+        { '**/*.ts': 'KEBAB_CASE' },
+        { ignoreMiddleExtensions: true },
+      ],
+    },
+  },
+  {
+    files: [
+      'packages/*/src/**/*.test.{ts,tsx}',
+      'packages/**/test/**/*.test.{ts,tsx}',
+      'integrations/**/src/**/*.test.{ts,tsx}',
+    ],
     plugins: {
       vitest,
     },
@@ -190,10 +413,24 @@ export default tseslint.config(
   },
   // extra settings for scripts that we run directly with node
   {
-    files: ['./scripts/**/*.js', 'esbuild.config.js', 'packages/*/scripts/**/*.js'],
+    files: [
+      './scripts/**/*.js',
+      './scripts/**/*.mjs',
+      'esbuild.config.js',
+      'packages/*/scripts/**/*.js',
+      'packages/*/scripts/**/*.mjs',
+      'packages/*/build.mjs',
+      // Verification reproducer scripts under docs/ also run with `node`.
+      'docs/**/*.mjs',
+      // Plan C CDP-tunnel acceptance harness (issue #5626) runs with `node`.
+      'packages/cli/src/serve/cdp-tunnel/acceptance/**/*.mjs',
+      // Desktop-shell skill helper scripts also run with `node`.
+      'packages/desktop-shell/.agents/skills/**/scripts/**/*.mjs',
+    ],
     languageOptions: {
       globals: {
         ...globals.node,
+        ...globals.browser,
         process: 'readonly',
         console: 'readonly',
       },
@@ -224,6 +461,43 @@ export default tseslint.config(
       'no-undef': 'off',
     },
   },
+  {
+    files: ['.github/scripts/**/*.{js,mjs,cjs}'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
+  {
+    files: ['packages/desktop-shell/bootstrap/**/*.js'],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+      },
+    },
+  },
+
+  // The VS Code companion renders through @qwen-code/web-shell; the legacy
+  // @qwen-code/webui surface must not re-enter the extension bundle.
+  {
+    files: ['packages/vscode-ide-companion/src/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@qwen-code/webui', '@qwen-code/webui/*'],
+              message:
+                'vscode-ide-companion must render through @qwen-code/web-shell; do not re-introduce @qwen-code/webui.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // ==================== no-console allowlist ====================
   // The following files/packages are allowed to use console.*
 
@@ -235,6 +509,13 @@ export default tseslint.config(
   // WebUI package - UI component library with Storybook
   {
     files: ['packages/webui/**/*.ts', 'packages/webui/**/*.tsx', 'packages/webui/**/*.js'],
+    rules: { 'no-console': 'off' },
+  },
+  // Chrome extension (chrome-extension) - the MV3 background service
+  // worker and content scripts run in the browser with no stdio; console is
+  // the only logging / debugging channel available there.
+  {
+    files: ['packages/chrome-extension/**/*.ts', 'packages/chrome-extension/**/*.tsx'],
     rules: { 'no-console': 'off' },
   },
   // Specific CLI files that intentionally wrap console usage

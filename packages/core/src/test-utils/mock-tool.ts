@@ -27,7 +27,13 @@ interface MockToolOptions {
   kind?: Kind;
   canUpdateOutput?: boolean;
   isOutputMarkdown?: boolean;
+  shouldDefer?: boolean;
+  alwaysLoad?: boolean;
+  searchHint?: string;
+  maxOutputChars?: number;
+  truncateKeep?: 'head' | 'tail' | 'both';
   getDefaultPermission?: () => Promise<PermissionDecision>;
+  requiresUserInteraction?: () => boolean;
   getConfirmationDetails?: (
     signal: AbortSignal,
   ) => Promise<ToolCallConfirmationDetails>;
@@ -65,6 +71,10 @@ class MockToolInvocation extends BaseToolInvocation<
     return this.tool.getDefaultPermission();
   }
 
+  override requiresUserInteraction(): boolean {
+    return this.tool.requiresUserInteraction();
+  }
+
   override getConfirmationDetails(
     abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
@@ -84,6 +94,7 @@ export class MockTool extends BaseDeclarativeTool<
   ToolResult
 > {
   getDefaultPermission: () => Promise<PermissionDecision>;
+  requiresUserInteraction: () => boolean;
   getConfirmationDetails: (
     signal: AbortSignal,
   ) => Promise<ToolCallConfirmationDetails>;
@@ -92,6 +103,17 @@ export class MockTool extends BaseDeclarativeTool<
     signal?: AbortSignal,
     updateOutput?: (output: string) => void,
   ) => Promise<ToolResult>;
+
+  private readonly _maxOutputChars?: number;
+  private readonly _truncateKeep: 'head' | 'tail' | 'both';
+
+  override get maxOutputChars(): number | undefined {
+    return this._maxOutputChars;
+  }
+
+  override get truncateKeep(): 'head' | 'tail' | 'both' {
+    return this._truncateKeep;
+  }
 
   constructor(options: MockToolOptions) {
     super(
@@ -102,7 +124,13 @@ export class MockTool extends BaseDeclarativeTool<
       options.params,
       options.isOutputMarkdown ?? false,
       options.canUpdateOutput ?? false,
+      options.shouldDefer ?? false,
+      options.alwaysLoad ?? false,
+      options.searchHint,
     );
+
+    this._maxOutputChars = options.maxOutputChars;
+    this._truncateKeep = options.truncateKeep ?? 'both';
 
     if (options.getDefaultPermission) {
       this.getDefaultPermission = options.getDefaultPermission;
@@ -110,6 +138,9 @@ export class MockTool extends BaseDeclarativeTool<
       this.getDefaultPermission = () =>
         Promise.resolve('allow' as PermissionDecision);
     }
+
+    this.requiresUserInteraction =
+      options.requiresUserInteraction ?? (() => false);
 
     if (options.getConfirmationDetails) {
       this.getConfirmationDetails = options.getConfirmationDetails;
@@ -204,7 +235,7 @@ export class MockModifiableTool
   extends BaseDeclarativeTool<Record<string, unknown>, ToolResult>
   implements ModifiableDeclarativeTool<Record<string, unknown>>
 {
-  // Should be overrided in test file. Functionality will be updated in follow
+  // Should be overridden in test file. Functionality will be updated in follow
   // up PR which has MockModifiableTool expect MockTool
   executeFn: (params: Record<string, unknown>) => ToolResult | undefined = () =>
     undefined;

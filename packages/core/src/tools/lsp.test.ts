@@ -247,7 +247,25 @@ describe('LspTool', () => {
           filePath: 'src/app.ts',
           limit: 0,
         } as LspToolParams);
-        expect(result).toBe('limit must be a positive number.');
+        expect(result).toBe('params/limit must be >= 1');
+      });
+
+      it('rejects negative integer limit', () => {
+        const result = tool.validateToolParams({
+          operation: 'documentSymbol',
+          filePath: 'src/app.ts',
+          limit: -1,
+        } as LspToolParams);
+        expect(result).toBe('params/limit must be >= 1');
+      });
+
+      it('rejects fractional limit', () => {
+        const result = tool.validateToolParams({
+          operation: 'documentSymbol',
+          filePath: 'src/app.ts',
+          limit: 1.5,
+        } as LspToolParams);
+        expect(result).toBe('params/limit must be integer');
       });
     });
 
@@ -277,6 +295,21 @@ describe('LspTool', () => {
         } as LspToolParams);
         expect(result).toBe('query is required for workspaceSymbol.');
       });
+
+      it.skipIf(process.platform === 'win32')(
+        'should unescape shell-escaped filePath',
+        () => {
+          const params: LspToolParams = {
+            operation: 'goToDefinition',
+            filePath: 'src/app\\ file.ts',
+            line: 10,
+            character: 5,
+          };
+          const result = tool.validateToolParams(params);
+          expect(result).toBeNull();
+          expect(params.filePath).toBe('src/app file.ts');
+        },
+      );
     });
   });
 
@@ -1035,6 +1068,17 @@ describe('LspTool', () => {
       };
       expect(schema.properties?.line?.type).toBe('number');
       expect(schema.properties?.character?.type).toBe('number');
+    });
+
+    it('limit extension property has integer type', () => {
+      const tool = createTool();
+      const schema = tool.schema.parametersJsonSchema as {
+        properties?: {
+          limit?: { type?: string; minimum?: number };
+        };
+      };
+      expect(schema.properties?.limit?.type).toBe('integer');
+      expect(schema.properties?.limit?.minimum).toBe(1);
     });
 
     it('includeDeclaration property has correct type', () => {

@@ -32,21 +32,44 @@ describe('PlanEmitter', () => {
         { id: '3', content: 'Third task', status: 'completed' },
       ];
 
-      await emitter.emitPlan(todos);
+      await emitter.emitPlan(
+        { planId: 'plan-1', sessionWorkflow: true, todos },
+        'call-1',
+      );
 
       expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'plan',
         entries: [
-          { content: 'First task', priority: 'medium', status: 'pending' },
-          { content: 'Second task', priority: 'medium', status: 'in_progress' },
-          { content: 'Third task', priority: 'medium', status: 'completed' },
+          {
+            content: 'First task',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: '1' } },
+          },
+          {
+            content: 'Second task',
+            priority: 'medium',
+            status: 'in_progress',
+            _meta: { qwenTodo: { id: '2' } },
+          },
+          {
+            content: 'Third task',
+            priority: 'medium',
+            status: 'completed',
+            _meta: { qwenTodo: { id: '3' } },
+          },
         ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'call-1' },
+        },
       });
     });
 
     it('should handle empty todos array', async () => {
-      await emitter.emitPlan([]);
+      await emitter.emitPlan({ todos: [] });
 
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'plan',
@@ -54,35 +77,82 @@ describe('PlanEmitter', () => {
       });
     });
 
+    it('omits _meta.stats when the context has no cumulative usage', async () => {
+      await emitter.emitPlan({
+        todos: [{ id: '1', content: 'Task', status: 'pending' }],
+      });
+
+      const update = sendUpdateSpy.mock.calls[0][0];
+      expect(update['_meta']).toBeUndefined();
+    });
+
+    it('stamps a copy of the cumulative usage on _meta.stats when present', async () => {
+      const cumulativeUsage = {
+        promptTokens: 100,
+        cachedTokens: 10,
+        candidateTokens: 20,
+        apiTimeMs: 500,
+      };
+      const ctx: SessionContext = {
+        sessionId: 'test-session-id',
+        config: {} as Config,
+        sendUpdate: sendUpdateSpy,
+        cumulativeUsage,
+      };
+      await new PlanEmitter(ctx).emitPlan({
+        todos: [{ id: '1', content: 'Task', status: 'completed' }],
+      });
+
+      const update = sendUpdateSpy.mock.calls[0][0];
+      expect(update['_meta']).toEqual({ stats: { ...cumulativeUsage } });
+      // Snapshot is a copy: later accumulation must not mutate what was sent.
+      cumulativeUsage.promptTokens = 999;
+      expect(update['_meta'].stats.promptTokens).toBe(100);
+    });
+
     it('should set default priority to medium for all entries', async () => {
       const todos: TodoItem[] = [
         { id: '1', content: 'Task', status: 'pending' },
       ];
 
-      await emitter.emitPlan(todos);
+      await emitter.emitPlan({ todos });
 
       const call = sendUpdateSpy.mock.calls[0][0];
       expect(call.entries[0].priority).toBe('medium');
     });
   });
 
-  describe('extractTodos', () => {
+  describe('extractPlan', () => {
     describe('from resultDisplay object', () => {
       it('should extract todos from valid todo_list object', () => {
         const resultDisplay = {
           type: 'todo_list',
+          planId: 'plan-1',
           todos: [
-            { id: '1', content: 'Task 1', status: 'pending' as const },
+            {
+              id: '1',
+              content: 'Task 1',
+              status: 'pending' as const,
+              blockedBy: [],
+            },
             { id: '2', content: 'Task 2', status: 'completed' as const },
           ],
         };
 
-        const result = emitter.extractTodos(resultDisplay);
+        const result = emitter.extractPlan(resultDisplay);
 
-        expect(result).toEqual([
-          { id: '1', content: 'Task 1', status: 'pending' },
-          { id: '2', content: 'Task 2', status: 'completed' },
-        ]);
+        expect(result).toEqual({
+          planId: 'plan-1',
+          todos: [
+            {
+              id: '1',
+              content: 'Task 1',
+              status: 'pending',
+              blockedBy: [],
+            },
+            { id: '2', content: 'Task 2', status: 'completed' },
+          ],
+        });
       });
 
       it('should return null for object without type todo_list', () => {
@@ -91,7 +161,7 @@ describe('PlanEmitter', () => {
           todos: [],
         };
 
-        const result = emitter.extractTodos(resultDisplay);
+        const result = emitter.extractPlan(resultDisplay);
 
         expect(result).toBeNull();
       });
@@ -102,7 +172,7 @@ describe('PlanEmitter', () => {
           items: [], // wrong key
         };
 
-        const result = emitter.extractTodos(resultDisplay);
+        const result = emitter.extractPlan(resultDisplay);
 
         expect(result).toBeNull();
       });
@@ -115,17 +185,17 @@ describe('PlanEmitter', () => {
           todos: [{ id: '1', content: 'Task', status: 'pending' }],
         });
 
-        const result = emitter.extractTodos(resultDisplay);
+        const result = emitter.extractPlan(resultDisplay);
 
-        expect(result).toEqual([
-          { id: '1', content: 'Task', status: 'pending' },
-        ]);
+        expect(result).toEqual({
+          todos: [{ id: '1', content: 'Task', status: 'pending' }],
+        });
       });
 
       it('should return null for invalid JSON string', () => {
         const resultDisplay = 'not valid json';
 
-        const result = emitter.extractTodos(resultDisplay);
+        const result = emitter.extractPlan(resultDisplay);
 
         expect(result).toBeNull();
       });
@@ -136,7 +206,7 @@ describe('PlanEmitter', () => {
           data: {},
         });
 
-        const result = emitter.extractTodos(resultDisplay);
+        const result = emitter.extractPlan(resultDisplay);
 
         expect(result).toBeNull();
       });
@@ -148,11 +218,11 @@ describe('PlanEmitter', () => {
           todos: [{ id: '1', content: 'From args', status: 'pending' }],
         };
 
-        const result = emitter.extractTodos(null, args);
+        const result = emitter.extractPlan(null, args);
 
-        expect(result).toEqual([
-          { id: '1', content: 'From args', status: 'pending' },
-        ]);
+        expect(result).toEqual({
+          todos: [{ id: '1', content: 'From args', status: 'pending' }],
+        });
       });
 
       it('should extract todos from args when resultDisplay is undefined', () => {
@@ -160,11 +230,11 @@ describe('PlanEmitter', () => {
           todos: [{ id: '1', content: 'From args', status: 'pending' }],
         };
 
-        const result = emitter.extractTodos(undefined, args);
+        const result = emitter.extractPlan(undefined, args);
 
-        expect(result).toEqual([
-          { id: '1', content: 'From args', status: 'pending' },
-        ]);
+        expect(result).toEqual({
+          todos: [{ id: '1', content: 'From args', status: 'pending' }],
+        });
       });
 
       it('should prefer resultDisplay over args', () => {
@@ -176,17 +246,25 @@ describe('PlanEmitter', () => {
           todos: [{ id: '2', content: 'From args', status: 'pending' }],
         };
 
-        const result = emitter.extractTodos(resultDisplay, args);
+        const result = emitter.extractPlan(resultDisplay, args);
 
-        expect(result).toEqual([
-          { id: '1', content: 'From display', status: 'completed' },
-        ]);
+        expect(result).toEqual({
+          todos: [{ id: '1', content: 'From display', status: 'completed' }],
+        });
+      });
+
+      it('should not fall back to args when resultDisplay reports an error', () => {
+        const result = emitter.extractPlan('Error writing todos: invalid DAG', {
+          todos: [{ id: '1', content: 'From args', status: 'pending' }],
+        });
+
+        expect(result).toBeNull();
       });
 
       it('should return null when args has no todos array', () => {
         const args = { other: 'value' };
 
-        const result = emitter.extractTodos(null, args);
+        const result = emitter.extractPlan(null, args);
 
         expect(result).toBeNull();
       });
@@ -194,7 +272,7 @@ describe('PlanEmitter', () => {
       it('should return null when args.todos is not an array', () => {
         const args = { todos: 'not an array' };
 
-        const result = emitter.extractTodos(null, args);
+        const result = emitter.extractPlan(null, args);
 
         expect(result).toBeNull();
       });
@@ -202,13 +280,13 @@ describe('PlanEmitter', () => {
 
     describe('edge cases', () => {
       it('should return null when both resultDisplay and args are undefined', () => {
-        const result = emitter.extractTodos(undefined, undefined);
+        const result = emitter.extractPlan(undefined, undefined);
 
         expect(result).toBeNull();
       });
 
       it('should return null when resultDisplay is empty object', () => {
-        const result = emitter.extractTodos({});
+        const result = emitter.extractPlan({});
 
         expect(result).toBeNull();
       });
@@ -219,7 +297,7 @@ describe('PlanEmitter', () => {
           todos: [{ id: '1', content: 'Task', status: 'pending' }],
         };
 
-        const result = emitter.extractTodos(resultDisplay);
+        const result = emitter.extractPlan(resultDisplay);
 
         expect(result).toBeNull();
       });

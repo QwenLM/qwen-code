@@ -14,9 +14,11 @@
 
 import type { Config } from '../config/config.js';
 import {
+  createContentGenerator,
   type AuthType,
   type ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
 import {
   AUTH_ENV_MAPPINGS,
   MODEL_GENERATION_CONFIG_FIELDS,
@@ -48,8 +50,17 @@ export function buildAgentContentGeneratorConfig(
   const sameProvider = authOverrides.authType === parentConfig.authType;
   const modelsConfig = base.getModelsConfig();
   const resolvedModel = modelId
-    ? modelsConfig.getResolvedModel(authOverrides.authType as AuthType, modelId)
+    ? modelsConfig.getResolvedModel(
+        authOverrides.authType as AuthType,
+        modelId,
+        authOverrides.baseUrl,
+      )
     : undefined;
+  if (resolvedModel?.imageOnly) {
+    throw new Error(
+      `Image-only model '${resolvedModel.id}' cannot be used for content generation`,
+    );
+  }
 
   const nextConfig: ContentGeneratorConfig = {
     ...parentConfig,
@@ -76,6 +87,10 @@ export function buildAgentContentGeneratorConfig(
     return nextConfig;
   }
 
+  if (modelId && modelId !== parentConfig.model) {
+    nextConfig.thinkingMandatory = undefined;
+  }
+
   nextConfig.apiKey = resolveCredentialField(
     authOverrides.apiKey,
     sameProvider ? parentConfig.apiKey : undefined,
@@ -95,6 +110,34 @@ export function buildAgentContentGeneratorConfig(
     : undefined;
 
   return nextConfig;
+}
+
+/**
+ * Compose `buildAgentContentGeneratorConfig` + `createContentGenerator` into
+ * a single {@link RuntimeContentGeneratorView}. Both InProcessBackend and
+ * SubagentManager need the same three-step recipe; this helper centralizes
+ * it so the two paths can't drift.
+ *
+ * `contentGeneratorOwner` is the Config instance the new ContentGenerator
+ * should bind to for cwd / workspace / telemetry purposes — typically the
+ * per-agent override Config when one exists, or the parent Config otherwise.
+ */
+export async function createRuntimeContentGeneratorView(
+  base: Config,
+  contentGeneratorOwner: Config,
+  modelId: string | undefined,
+  authOverrides: AuthOverrides,
+): Promise<RuntimeContentGeneratorView> {
+  const contentGeneratorConfig = buildAgentContentGeneratorConfig(
+    base,
+    modelId,
+    authOverrides,
+  );
+  const contentGenerator = await createContentGenerator(
+    contentGeneratorConfig,
+    contentGeneratorOwner,
+  );
+  return { contentGenerator, contentGeneratorConfig };
 }
 
 function applyResolvedModelConfig(
@@ -129,12 +172,12 @@ function applyResolvedModelConfig(
       : undefined;
   }
 
-  // Apply registry-defined generation config fields. Cross-provider
-  // clearing is already handled by buildAgentContentGeneratorConfig,
-  // so here we only overwrite when the registry provides a value.
+  // Cross-provider fields are cleared by buildAgentContentGeneratorConfig.
+  // Same-provider fields inherit unless the registry overrides them, except
+  // model capabilities such as thinkingMandatory, which must not leak.
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
     const registryValue = resolvedModel.generationConfig[field];
-    if (registryValue !== undefined) {
+    if (registryValue !== undefined || field === 'thinkingMandatory') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (targetConfig as any)[field] = registryValue;
     }

@@ -5,10 +5,22 @@
  */
 
 import type { HistoryItemCompression } from '../types.js';
+import { isCompressionFailureStatus } from '@qwen-code/qwen-code-core';
 import { MessageType } from '../types.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import {
+  formatCompressionTokenCount,
+  getCompressionFailureStatusText,
+} from '../utils/compression-text.js';
+
+// Cap user-supplied compression instructions. The compression side-query has
+// no input-truncation retry today, so an unbounded instruction string would
+// inflate the side-query prompt and risk a PTL the compaction path can't
+// recover from. 2000 chars is generous for human-typed focus directives
+// without exposing that failure mode.
+const MAX_COMPRESS_INSTRUCTIONS_CHARS = 2000;
 
 export const compressCommand: SlashCommand = {
   name: 'compress',
@@ -45,8 +57,8 @@ export const compressCommand: SlashCommand = {
     };
 
     const config = context.services.config;
-    const geminiClient = config?.getGeminiClient();
-    if (!config || !geminiClient) {
+    const llmClient = config?.getLlmClient();
+    if (!config || !llmClient) {
       return {
         type: 'message',
         messageType: 'error',
@@ -54,29 +66,64 @@ export const compressCommand: SlashCommand = {
       };
     }
 
+    const rawArgs = context.invocation?.args?.trim() ?? '';
+    const wasTruncated = rawArgs.length > MAX_COMPRESS_INSTRUCTIONS_CHARS;
+    const customInstructions = rawArgs
+      ? rawArgs.slice(0, MAX_COMPRESS_INSTRUCTIONS_CHARS)
+      : undefined;
+    // Surface the silent cap so a user pasting an over-long focus directive
+    // knows their instructions were clipped mid-text rather than silently
+    // changing the summary's behaviour.
+    const truncationNotice = wasTruncated
+      ? t('Compression instructions were truncated to {{max}} characters.', {
+          max: String(MAX_COMPRESS_INSTRUCTIONS_CHARS),
+        })
+      : undefined;
+
     const doCompress = async () => {
       const promptId = `compress-${Date.now()}`;
-      return await geminiClient.tryCompressChat(promptId, true);
+      return await llmClient.tryCompressChat(
+        promptId,
+        true,
+        abortSignal,
+        customInstructions,
+      );
     };
 
     if (executionMode === 'acp') {
       const messages = async function* () {
         try {
+          if (truncationNotice) {
+            yield {
+              messageType: 'info' as const,
+              content: truncationNotice,
+            };
+          }
           yield {
             messageType: 'info' as const,
             content: 'Compressing context...',
           };
           const compressed = await doCompress();
-          if (!compressed) {
+          if (
+            !compressed ||
+            isCompressionFailureStatus(compressed.compressionStatus)
+          ) {
             yield {
               messageType: 'error' as const,
-              content: t('Failed to compress chat history.'),
+              content: compressed
+                ? getCompressionFailureStatusText({
+                    compressionStatus: compressed.compressionStatus,
+                    originalTokenCount: compressed.originalTokenCount,
+                  })
+                : t('Failed to compress chat history.'),
             };
             return;
           }
           yield {
             messageType: 'info' as const,
-            content: `Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).`,
+            content:
+              `Context compressed (${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
+              (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
           };
         } catch (e) {
           yield {
@@ -93,6 +140,12 @@ export const compressCommand: SlashCommand = {
 
     try {
       if (executionMode === 'interactive') {
+        if (truncationNotice) {
+          ui.addItem(
+            { type: MessageType.INFO, text: truncationNotice },
+            Date.now(),
+          );
+        }
         ui.setPendingItem(pendingMessage);
       }
 
@@ -102,7 +155,11 @@ export const compressCommand: SlashCommand = {
         return;
       }
 
-      if (!compressed) {
+      if (
+        !compressed ||
+        (executionMode !== 'interactive' &&
+          isCompressionFailureStatus(compressed.compressionStatus))
+      ) {
         if (executionMode === 'interactive') {
           ui.addItem(
             {
@@ -117,7 +174,12 @@ export const compressCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'error',
-          content: t('Failed to compress chat history.'),
+          content: compressed
+            ? getCompressionFailureStatusText({
+                compressionStatus: compressed.compressionStatus,
+                originalTokenCount: compressed.originalTokenCount,
+              })
+            : t('Failed to compress chat history.'),
         };
       }
 
@@ -130,17 +192,29 @@ export const compressCommand: SlashCommand = {
               originalTokenCount: compressed.originalTokenCount,
               newTokenCount: compressed.newTokenCount,
               compressionStatus: compressed.compressionStatus,
+              compressionKind: 'summarize',
+              originalTokenCountIsEstimated:
+                compressed.originalTokenCountIsEstimated,
+              newTokenCountIsEstimated: compressed.newTokenCountIsEstimated,
             },
           } as HistoryItemCompression,
           Date.now(),
         );
+        if (compressed.warning) {
+          ui.addItem(
+            { type: MessageType.INFO, text: `⚠️ ${compressed.warning}` },
+            Date.now(),
+          );
+        }
         return;
       }
 
       return {
         type: 'message',
         messageType: 'info',
-        content: `Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).`,
+        content:
+          `${truncationNotice ? `${truncationNotice} ` : ''}Context compressed (${formatCompressionTokenCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} -> ${formatCompressionTokenCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)}).` +
+          (compressed.warning ? `\n⚠️ ${compressed.warning}` : ''),
       };
     } catch (e) {
       // If cancelled via ESC, don't show error — cancelSlashCommand already handled UI

@@ -7,9 +7,10 @@
 import { useState, useCallback } from 'react';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
 import type { LoadedSettings, SettingScope } from '../../config/settings.js'; // Import LoadedSettings, AppSettings, MergedSetting
-import { type HistoryItem, MessageType } from '../types.js';
+import { type HistoryItemWithoutId, MessageType } from '../types.js';
 import process from 'node:process';
 import { t } from '../../i18n/index.js';
+import type { Config } from '@qwen-code/qwen-code-core';
 
 interface UseThemeCommandReturn {
   isThemeDialogOpen: boolean;
@@ -24,8 +25,9 @@ interface UseThemeCommandReturn {
 export const useThemeCommand = (
   loadedSettings: LoadedSettings,
   setThemeError: (error: string | null) => void,
-  addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+  addItem: (item: HistoryItemWithoutId, timestamp: number) => void,
   initialThemeError: string | null,
+  config?: Config,
 ): UseThemeCommandReturn => {
   const [isThemeDialogOpen, setIsThemeDialogOpen] =
     useState(!!initialThemeError);
@@ -35,22 +37,25 @@ export const useThemeCommand = (
 
   const openThemeDialog = useCallback(() => {
     if (process.env['NO_COLOR']) {
-      addItem(
-        {
-          type: MessageType.INFO,
-          text: t(
-            'Theme configuration unavailable due to NO_COLOR env variable.',
-          ),
-        },
-        Date.now(),
-      );
+      const feedbackItem: HistoryItemWithoutId & Record<string, unknown> = {
+        type: MessageType.INFO,
+        text: t(
+          'Theme configuration unavailable due to NO_COLOR env variable.',
+        ),
+      };
+      addItem(feedbackItem, Date.now());
+      config?.getChatRecordingService?.()?.recordSlashCommand({
+        phase: 'result',
+        rawCommand: '/theme',
+        outputHistoryItems: [feedbackItem],
+      });
       return;
     }
     // The theme may temporarily change while navigating the list; keep the
     // original value to restore it if user cancels with Esc/Ctrl+C.
     setThemeBeforeDialogOpen(themeManager.getActiveTheme().name);
     setIsThemeDialogOpen(true);
-  }, [addItem]);
+  }, [addItem, config]);
 
   const applyTheme = useCallback(
     (themeName: string | undefined) => {

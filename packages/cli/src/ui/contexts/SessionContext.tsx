@@ -15,12 +15,22 @@ import {
 } from 'react';
 
 import type {
+  GenerationMetrics,
   SessionMetrics,
   ModelMetrics,
   ModelMetricsCore,
   ToolCallStats,
+  SkillCallStats,
+  SkillMetrics,
 } from '@qwen-code/qwen-code-core';
 import { uiTelemetryService } from '@qwen-code/qwen-code-core';
+
+const EMPTY_SKILL_METRICS: SkillMetrics = {
+  totalCalls: 0,
+  totalSuccess: 0,
+  totalFail: 0,
+  byName: {},
+};
 
 export enum ToolCallDecision {
   ACCEPT = 'accept',
@@ -45,8 +55,7 @@ function areModelMetricsCoreEqual(
     a.tokens.candidates !== b.tokens.candidates ||
     a.tokens.total !== b.tokens.total ||
     a.tokens.cached !== b.tokens.cached ||
-    a.tokens.thoughts !== b.tokens.thoughts ||
-    a.tokens.tool !== b.tokens.tool
+    a.tokens.thoughts !== b.tokens.thoughts
   ) {
     return false;
   }
@@ -94,9 +103,66 @@ function areToolCallStatsEqual(a: ToolCallStats, b: ToolCallStats): boolean {
   return true;
 }
 
+function areSkillCallStatsEqual(a: SkillCallStats, b: SkillCallStats): boolean {
+  return a.count === b.count && a.success === b.success && a.fail === b.fail;
+}
+
+function areSkillMetricsEqual(a: SkillMetrics, b: SkillMetrics): boolean {
+  if (
+    a.totalCalls !== b.totalCalls ||
+    a.totalSuccess !== b.totalSuccess ||
+    a.totalFail !== b.totalFail
+  ) {
+    return false;
+  }
+
+  const aKeys = Object.keys(a.byName);
+  const bKeys = Object.keys(b.byName);
+  if (aKeys.length !== bKeys.length) return false;
+
+  for (const key of aKeys) {
+    const skillA = a.byName[key];
+    const skillB = b.byName[key];
+    if (!skillB || !areSkillCallStatsEqual(skillA, skillB)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function areGenerationMetricsEqual(
+  a: GenerationMetrics | undefined,
+  b: GenerationMetrics | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (
+    a.timedRequests !== b.timedRequests ||
+    a.totalTtftMs !== b.totalTtftMs ||
+    a.totalGenerationDurationMs !== b.totalGenerationDurationMs ||
+    a.totalThroughputOutputTokens !== b.totalThroughputOutputTokens
+  ) {
+    return false;
+  }
+
+  if (a.last === b.last) return true;
+  if (!a.last || !b.last) return false;
+  return (
+    a.last.model === b.last.model &&
+    a.last.ttftMs === b.last.ttftMs &&
+    a.last.generationDurationMs === b.last.generationDurationMs &&
+    a.last.outputTokens === b.last.outputTokens
+  );
+}
+
 function areMetricsEqual(a: SessionMetrics, b: SessionMetrics): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
+
+  if (!areGenerationMetricsEqual(a.generation, b.generation)) {
+    return false;
+  }
 
   // Compare files
   if (
@@ -143,6 +209,15 @@ function areMetricsEqual(a: SessionMetrics, b: SessionMetrics): boolean {
     if (!toolB || !areToolCallStatsEqual(toolA, toolB)) {
       return false;
     }
+  }
+
+  if (
+    !areSkillMetricsEqual(
+      a.skills ?? EMPTY_SKILL_METRICS,
+      b.skills ?? EMPTY_SKILL_METRICS,
+    )
+  ) {
+    return false;
   }
 
   // Compare models
@@ -192,6 +267,95 @@ interface SessionStatsContextValue {
   startNewSession: (sessionId: string) => void;
   startNewPrompt: () => void;
   getPromptCount: () => number;
+  seedPromptCount: (count: number) => void;
+}
+
+function cloneSessionMetrics(metrics: SessionMetrics): SessionMetrics {
+  return {
+    models: Object.fromEntries(
+      Object.entries(metrics.models).map(([name, model]) => [
+        name,
+        {
+          api: { ...model.api },
+          tokens: { ...model.tokens },
+          bySource: Object.fromEntries(
+            Object.entries(model.bySource).map(([source, sourceMetrics]) => [
+              source,
+              {
+                api: { ...sourceMetrics.api },
+                tokens: { ...sourceMetrics.tokens },
+              },
+            ]),
+          ),
+        },
+      ]),
+    ),
+    ...(metrics.generation
+      ? {
+          generation: {
+            timedRequests: metrics.generation.timedRequests,
+            totalTtftMs: metrics.generation.totalTtftMs,
+            totalGenerationDurationMs:
+              metrics.generation.totalGenerationDurationMs,
+            totalThroughputOutputTokens:
+              metrics.generation.totalThroughputOutputTokens,
+            ...(metrics.generation.last
+              ? { last: { ...metrics.generation.last } }
+              : {}),
+          },
+        }
+      : {}),
+    tools: {
+      totalCalls: metrics.tools.totalCalls,
+      totalSuccess: metrics.tools.totalSuccess,
+      totalFail: metrics.tools.totalFail,
+      totalDurationMs: metrics.tools.totalDurationMs,
+      totalDecisions: { ...metrics.tools.totalDecisions },
+      byName: Object.fromEntries(
+        Object.entries(metrics.tools.byName).map(([name, stats]) => [
+          name,
+          {
+            count: stats.count,
+            success: stats.success,
+            fail: stats.fail,
+            durationMs: stats.durationMs,
+            decisions: { ...stats.decisions },
+          },
+        ]),
+      ),
+    },
+    files: {
+      totalLinesAdded: metrics.files.totalLinesAdded,
+      totalLinesRemoved: metrics.files.totalLinesRemoved,
+    },
+    ...(metrics.skills
+      ? {
+          skills: {
+            totalCalls: metrics.skills.totalCalls,
+            totalSuccess: metrics.skills.totalSuccess,
+            totalFail: metrics.skills.totalFail,
+            byName: Object.fromEntries(
+              Object.entries(metrics.skills.byName).map(([name, stats]) => [
+                name,
+                {
+                  count: stats.count,
+                  success: stats.success,
+                  fail: stats.fail,
+                },
+              ]),
+            ),
+          },
+        }
+      : {}),
+  };
+}
+
+function getMetricsForDisplay(sessionId: string): SessionMetrics {
+  return cloneSessionMetrics(
+    sessionId
+      ? uiTelemetryService.getMetricsForSession(sessionId)
+      : uiTelemetryService.getMetrics(),
+  );
 }
 
 // --- Context Definition ---
@@ -203,7 +367,7 @@ const SessionStatsContext = createContext<SessionStatsContextValue | undefined>(
 const createDefaultStats = (sessionId: string = ''): SessionStatsState => ({
   sessionId,
   sessionStartTime: new Date(),
-  metrics: uiTelemetryService.getMetrics(),
+  metrics: getMetricsForDisplay(sessionId),
   lastPromptTokenCount: 0,
   promptCount: 0,
 });
@@ -227,15 +391,18 @@ export const SessionStatsProvider: React.FC<{
       lastPromptTokenCount: number;
     }) => {
       setStats((prevState) => {
+        const nextMetrics = prevState.sessionId
+          ? getMetricsForDisplay(prevState.sessionId)
+          : cloneSessionMetrics(metrics);
         if (
           prevState.lastPromptTokenCount === lastPromptTokenCount &&
-          areMetricsEqual(prevState.metrics, metrics)
+          areMetricsEqual(prevState.metrics, nextMetrics)
         ) {
           return prevState;
         }
         return {
           ...prevState,
-          metrics,
+          metrics: nextMetrics,
           lastPromptTokenCount,
         };
       });
@@ -272,14 +439,22 @@ export const SessionStatsProvider: React.FC<{
     [stats.promptCount],
   );
 
+  const seedPromptCount = useCallback((count: number) => {
+    setStats((prevState) => ({
+      ...prevState,
+      promptCount: Math.max(prevState.promptCount, count),
+    }));
+  }, []);
+
   const value = useMemo(
     () => ({
       stats,
       startNewSession,
       startNewPrompt,
       getPromptCount,
+      seedPromptCount,
     }),
-    [stats, startNewSession, startNewPrompt, getPromptCount],
+    [stats, startNewSession, startNewPrompt, getPromptCount, seedPromptCount],
   );
 
   return (

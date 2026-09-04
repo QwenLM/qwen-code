@@ -4,10 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 
-import type { Suggestion } from '../components/SuggestionsDisplay.js';
+import type {
+  Suggestion,
+  SuggestionCategory,
+} from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
+
+/** Fixed display order of category tabs. */
+const CATEGORY_ORDER: SuggestionCategory[] = [
+  'file',
+  'session',
+  'mcp',
+  'extension',
+];
+
+export interface UseCompletionOptions {
+  /** When the completion query changes, the dismissed flag is cleared
+   *  (unless dismissCompletion was just called). */
+  query?: string | null;
+}
 
 export interface UseCompletionReturn {
   suggestions: Suggestion[];
@@ -16,19 +33,38 @@ export interface UseCompletionReturn {
   showSuggestions: boolean;
   isLoadingSuggestions: boolean;
   isPerfectMatch: boolean;
+  dismissed: boolean;
   setSuggestions: React.Dispatch<React.SetStateAction<Suggestion[]>>;
   setActiveSuggestionIndex: React.Dispatch<React.SetStateAction<number>>;
   setVisibleStartIndex: React.Dispatch<React.SetStateAction<number>>;
   setIsLoadingSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
   setIsPerfectMatch: React.Dispatch<React.SetStateAction<boolean>>;
   setShowSuggestions: React.Dispatch<React.SetStateAction<boolean>>;
+  /** Dismisses the completion dropdown and prevents re-open until query changes. */
+  dismissCompletion: () => void;
   resetCompletionState: () => void;
   navigateUp: () => void;
   navigateDown: () => void;
+  /** Active category tab for the `@` completion UI ('all' shows everything). */
+  activeCategory: SuggestionCategory | 'all';
+  /** Tabs available for the current suggestion set (always includes 'all'). */
+  availableCategories: Array<SuggestionCategory | 'all'>;
+  /** Select an exact category tab; a category change resets active/scroll index. */
+  selectCategory: (category: SuggestionCategory | 'all') => void;
+  /** Cycle the active category tab; resets active/scroll index. */
+  switchCategory: (direction: 1 | -1) => void;
 }
 
-export function useCompletion(): UseCompletionReturn {
-  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+export function useCompletion(
+  options: UseCompletionOptions = {},
+): UseCompletionReturn {
+  // Raw, unfiltered suggestions as provided by producers. The publicly exposed
+  // `suggestions` below is this list filtered to the active category tab, so
+  // navigation/accept/display all operate on the same visible set.
+  const [rawSuggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [activeCategory, setActiveCategory] = useState<
+    SuggestionCategory | 'all'
+  >('all');
   const [activeSuggestionIndex, setActiveSuggestionIndex] =
     useState<number>(-1);
   const [visibleStartIndex, setVisibleStartIndex] = useState<number>(0);
@@ -36,15 +72,123 @@ export function useCompletion(): UseCompletionReturn {
   const [isLoadingSuggestions, setIsLoadingSuggestions] =
     useState<boolean>(false);
   const [isPerfectMatch, setIsPerfectMatch] = useState<boolean>(false);
+  const [dismissed, setDismissed] = useState<boolean>(false);
+  // Skip the next clearDismissed call when the query changes due to an
+  // accepted suggestion (dismissCompletion).  Accepting a suggestion also
+  // mutates the buffer → changes the query, but we don't want to reset
+  // dismissed in that case.
+  const skipNextClearRef = useRef<boolean>(false);
+
+  // Tabs present in the current suggestion set. Only becomes multi-entry when
+  // more than one category is present (e.g. files + sessions in `@` mode);
+  // slash/file-only completion keeps a single 'all' entry so the UI hides the
+  // tab bar and behavior is unchanged.
+  const availableCategories = useMemo<Array<SuggestionCategory | 'all'>>(() => {
+    const present = new Set(rawSuggestions.map((s) => s.category ?? 'file'));
+    const ordered = CATEGORY_ORDER.filter((c) => present.has(c));
+    return ordered.length > 1 ? ['all', ...ordered] : ['all'];
+  }, [rawSuggestions]);
+
+  // The visible suggestion set: the raw list filtered to the active tab.
+  const suggestions = useMemo<Suggestion[]>(
+    () =>
+      activeCategory === 'all'
+        ? rawSuggestions
+        : rawSuggestions.filter(
+            (s) => (s.category ?? 'file') === activeCategory,
+          ),
+    [rawSuggestions, activeCategory],
+  );
+
+  const changeCategory = useCallback(
+    (nextCategory: React.SetStateAction<SuggestionCategory | 'all'>): void => {
+      setActiveCategory(nextCategory);
+      setActiveSuggestionIndex(0);
+      setVisibleStartIndex(0);
+    },
+    [],
+  );
+
+  // If the active tab disappears (suggestion set changed), fall back to 'all'.
+  useEffect(() => {
+    if (!availableCategories.includes(activeCategory)) {
+      changeCategory('all');
+    }
+  }, [availableCategories, activeCategory, changeCategory]);
+
+  // Clamp the active index when the filtered suggestion list shrinks within
+  // a still-existing category (e.g. async search returns fewer items).
+  useEffect(() => {
+    setActiveSuggestionIndex((prev) =>
+      prev >= suggestions.length && suggestions.length > 0
+        ? suggestions.length - 1
+        : prev,
+    );
+    setVisibleStartIndex((prev) =>
+      prev >= suggestions.length
+        ? Math.max(0, suggestions.length - MAX_SUGGESTIONS_TO_SHOW)
+        : prev,
+    );
+  }, [suggestions.length]);
+
+  const selectCategory = useCallback(
+    (category: SuggestionCategory | 'all') => {
+      if (
+        category === activeCategory ||
+        !availableCategories.includes(category)
+      ) {
+        return;
+      }
+      changeCategory(category);
+    },
+    [activeCategory, availableCategories, changeCategory],
+  );
+
+  const switchCategory = useCallback(
+    (direction: 1 | -1) => {
+      changeCategory((cur) => {
+        const idx = availableCategories.indexOf(cur);
+        if (idx === -1) return 'all';
+        const next =
+          (idx + direction + availableCategories.length) %
+          availableCategories.length;
+        return availableCategories[next];
+      });
+    },
+    [availableCategories, changeCategory],
+  );
 
   const resetCompletionState = useCallback(() => {
     setSuggestions([]);
+    setActiveCategory('all');
     setActiveSuggestionIndex(-1);
     setVisibleStartIndex(0);
     setShowSuggestions(false);
     setIsLoadingSuggestions(false);
     setIsPerfectMatch(false);
+    setDismissed(false);
   }, []);
+
+  const dismissCompletion = useCallback(() => {
+    resetCompletionState();
+    setDismissed(true);
+    skipNextClearRef.current = true;
+  }, [resetCompletionState]);
+
+  // Clear dismissed flag when the completion query changes (user typed more).
+  // Skip the clear on the render immediately following a dismiss, since
+  // accepting a suggestion also changes the query.
+  const prevQueryRef = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (options.query !== prevQueryRef.current) {
+      if (skipNextClearRef.current) {
+        skipNextClearRef.current = false;
+      } else {
+        setDismissed(false);
+      }
+      prevQueryRef.current = options.query;
+    }
+  }, [options.query]);
 
   const navigateUp = useCallback(() => {
     if (suggestions.length === 0) return;
@@ -104,6 +248,7 @@ export function useCompletion(): UseCompletionReturn {
       return newActiveIndex;
     });
   }, [suggestions.length]);
+
   return {
     suggestions,
     activeSuggestionIndex,
@@ -111,6 +256,7 @@ export function useCompletion(): UseCompletionReturn {
     showSuggestions,
     isLoadingSuggestions,
     isPerfectMatch,
+    dismissed,
 
     setSuggestions,
     setShowSuggestions,
@@ -120,7 +266,12 @@ export function useCompletion(): UseCompletionReturn {
     setIsPerfectMatch,
 
     resetCompletionState,
+    dismissCompletion,
     navigateUp,
     navigateDown,
+    activeCategory,
+    availableCategories,
+    selectCategory,
+    switchCategory,
   };
 }

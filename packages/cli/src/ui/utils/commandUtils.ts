@@ -7,7 +7,33 @@
 import type { SpawnOptions } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  isStackedSkillCompletableCommand,
+  isValidStackedSkillPrefix,
+  parseSlashCommand,
+} from '../commands/commands.js';
 import type { SlashCommand } from '../commands/types.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
+import { MessageType } from '../types.js';
+import { isWaylandSession, writeOsc52 } from './clipboardUtils.js';
+import { toCodePoints } from './textUtils.js';
+
+/** Shared prefix for the context-files announcement INFO item.
+ * Used by both the emission site and the rewind re-arm matcher so the
+ * pairing is enforced by construction, not by exact-spelling coupling. */
+export const CONTEXT_FILES_ANNOUNCEMENT_PREFIX = 'Read context files:';
+
+/** Whether a history item is the context-files announcement. */
+export function isContextFilesAnnouncement(item: {
+  type: string;
+  text?: string;
+}): boolean {
+  return (
+    item.type === MessageType.INFO &&
+    typeof item.text === 'string' &&
+    item.text.startsWith(CONTEXT_FILES_ANNOUNCEMENT_PREFIX)
+  );
+}
 
 /**
  * Common Windows console code pages (CP) used for encoding conversions.
@@ -38,9 +64,35 @@ export const isAtCommand = (query: string): boolean =>
   // Check if starts with @ OR has a space, then @
   query.startsWith('@') || /\s@/.test(query);
 
+const SLASH_PATH_SEPARATOR_RE = /[/\\]/;
+
+export const SLASH_COMMANDS_SKIP_RECORDING: ReadonlySet<string> = new Set([
+  'quit',
+  'exit',
+  'clear',
+  'reset',
+  'new',
+  'resume',
+  'delete',
+  'branch',
+  'btw',
+  'history',
+]);
+
+export const getSlashCommandFirstToken = (query: string): string =>
+  query.slice(1).trimStart().split(/\s+/u)[0] ?? '';
+
+export const hasSlashCommandPathSeparator = (query: string): boolean =>
+  SLASH_PATH_SEPARATOR_RE.test(getSlashCommandFirstToken(query));
+
 /**
  * Checks if a query string potentially represents an '/' command.
- * It triggers if the query starts with '/' but excludes code comments like '//' and '/*'.
+ * It triggers if the query starts with '/' but excludes code comments like '//'
+ * and '/*', and file paths where the first token contains a path separator.
+ *
+ * WARNING: This lexical classifier is also used as the legacy fallback for
+ * UI history items that do not have explicit sentToModel metadata. Coordinate
+ * changes here with isRealUserTurn in historyMapping.ts.
  *
  * @param query The input query string.
  * @returns True if the query looks like an '/' command, false otherwise.
@@ -60,6 +112,10 @@ export const isSlashCommand = (query: string): boolean => {
     return false;
   }
 
+  if (hasSlashCommandPathSeparator(query)) {
+    return false;
+  }
+
   return true;
 };
 
@@ -74,10 +130,68 @@ export const isBtwCommand = (query: string): boolean => {
   return trimmed.length > 0 && BTW_COMMAND_RE.test(trimmed);
 };
 
+/**
+ * Whether a submission consumes the one-shot context-file announcement.
+ * Heuristically mirrors the downstream input classification so the latch
+ * is consumed by the submission most likely to start the first main model
+ * turn: blank input is dropped by the queue, /btw side-questions are
+ * deliberately exempt (they fork via runForkedAgent without advancing the
+ * main conversation — note ?btw is NOT exempt: it is not a slash command
+ * and goes to the main model as a plain query), shell-mode input is
+ * intercepted, and
+ * local slash commands resolve without a model turn — but model-invocable
+ * slash commands (skills) are expanded into a submit_prompt and routed
+ * before the shell-mode intercept, so they consume it even
+ * while shell mode is active. This is a prediction, not an admission
+ * guarantee; rare post-admission aborts and built-in submit_prompt
+ * commands without the modelInvocable flag are out of scope here.
+ */
+export function consumesContextAnnouncementLatch(
+  trimmedPrompt: string,
+  options: {
+    shellModeActive: boolean;
+    slashCommands: readonly SlashCommand[];
+  },
+): boolean {
+  if (trimmedPrompt.length === 0) {
+    return false;
+  }
+  // Only /btw forks (runForkedAgent, no main turn); ?btw is not a slash
+  // command and reaches the main model as a plain query, so it must
+  // consume the latch like any other prompt.
+  if (/^\/btw(?:\s|$)/.test(trimmedPrompt)) {
+    return false;
+  }
+  if (isSlashCommand(trimmedPrompt)) {
+    // Slash commands are routed before the shell-mode intercept, so shell
+    // mode does not exclude them; only the model-invocable ones (expanded
+    // into a submit_prompt) reach the model — user-invoked skills with
+    // disableModelInvocation and description-less extension commands also
+    // expand to submit_prompt but are deliberately exempt.
+    return (
+      parseSlashCommand(trimmedPrompt, options.slashCommands).commandToExecute
+        ?.modelInvocable === true
+    );
+  }
+  if (options.shellModeActive) {
+    return false;
+  }
+  return true;
+}
+
 const debugLogger = createDebugLogger('COMMAND_UTILS');
+
+const formatCommandFailure = (error: unknown, command: string): string =>
+  error instanceof Error && (error as NodeJS.ErrnoException).code === 'ENOENT'
+    ? `${command} not found`
+    : error instanceof Error
+      ? error.message
+      : String(error);
 
 // Copies a string snippet to the clipboard for different platforms
 export const copyToClipboard = async (text: string): Promise<void> => {
+  let wlCopyError: unknown;
+
   const run = (cmd: string, args: string[], options?: SpawnOptions) =>
     new Promise<void>((resolve, reject) => {
       const child = options ? spawn(cmd, args, options) : spawn(cmd, args);
@@ -116,6 +230,25 @@ export const copyToClipboard = async (text: string): Promise<void> => {
     case 'darwin':
       return run('pbcopy', []);
     case 'linux':
+      if (isWaylandSession()) {
+        try {
+          // Prefer the native Wayland clipboard. X11 tools may be installed
+          // under XWayland but still be unable to access the active clipboard.
+          // Ignore stderr because wl-copy's clipboard-owning daemon inherits it;
+          // a pipe would prevent Node's close event from firing.
+          await run('wl-copy', ['-t', 'text/plain'], {
+            stdio: ['pipe', 'inherit', 'ignore'],
+          });
+          return;
+        } catch (error) {
+          wlCopyError = error;
+          debugLogger.debug(
+            'wl-copy failed; falling back to other clipboard methods:',
+            error,
+          );
+          // Fall through to the existing X11 and OSC 52 fallbacks.
+        }
+      }
       try {
         await run('xclip', ['-selection', 'clipboard'], linuxOptions);
       } catch (primaryError) {
@@ -129,29 +262,29 @@ export const copyToClipboard = async (text: string): Promise<void> => {
           const xselNotFound =
             fallbackError instanceof Error &&
             (fallbackError as NodeJS.ErrnoException).code === 'ENOENT';
+          const wlCopyFailure =
+            wlCopyError === undefined
+              ? ''
+              : `wl-copy failed ("${formatCommandFailure(wlCopyError, 'wl-copy')}"); `;
           if (xclipNotFound && xselNotFound) {
-            throw new Error(
-              'Please ensure xclip or xsel is installed and configured.',
-            );
+            // Neither xclip nor xsel available — try OSC 52 escape sequence
+            // (works over SSH without X11 display server).
+            if (!writeOsc52(text)) {
+              throw new Error(
+                `Clipboard unavailable: ${wlCopyFailure}xclip/xsel not found and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
+              );
+            }
+            return;
           }
 
-          let primaryMsg =
-            primaryError instanceof Error
-              ? primaryError.message
-              : String(primaryError);
-          if (xclipNotFound) {
-            primaryMsg = `xclip not found`;
-          }
-          let fallbackMsg =
-            fallbackError instanceof Error
-              ? fallbackError.message
-              : String(fallbackError);
-          if (xselNotFound) {
-            fallbackMsg = `xsel not found`;
-          }
+          const primaryMsg = formatCommandFailure(primaryError, 'xclip');
+          const fallbackMsg = formatCommandFailure(fallbackError, 'xsel');
+
+          // Tools exist but failed — try OSC 52 before giving up
+          if (writeOsc52(text)) return;
 
           throw new Error(
-            `All copy commands failed. "${primaryMsg}", "${fallbackMsg}". `,
+            `Clipboard unavailable: ${wlCopyFailure}xclip/xsel failed ("${primaryMsg}", "${fallbackMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
           );
         }
       }
@@ -199,30 +332,48 @@ export type MidInputSlashCommand = {
 };
 
 /**
+ * A slash command is completable mid-input (not at the start of the line) only
+ * when it is model-invocable and not hidden: built-in commands typed in the
+ * middle of text won't be executed, and hidden commands shouldn't surface.
+ * Shared so the dropdown filter, ghost-text fallback, and exact-match suppressor
+ * all agree on which commands qualify.
+ */
+export function isMidInputCompletableCommand(cmd: SlashCommand): boolean {
+  return cmd.modelInvocable === true && !cmd.hidden;
+}
+
+/**
  * Finds a slash command token that appears mid-input (not at position 0).
  * Only triggers when the "/" is preceded by whitespace and the cursor is
  * right at or within the partial command (no text between cursor and slash).
  *
- * Returns null when input starts with "/" (handled by start-of-line completion).
+ * A buffer may start with a slash command and still contain a later mid-input
+ * slash token (for example, "/review /skill" or "/review\n/skill"). The
+ * whitespace-before-slash anchor below excludes only the slash at position 0.
+ *
+ * `cursorOffset` and all returned positions are code-point offsets, so non-BMP
+ * characters before the token (e.g. "please 👍 /sto") don't skew the result.
  */
 export function findMidInputSlashCommand(
   input: string,
   cursorOffset: number,
 ): MidInputSlashCommand | null {
-  // Start-of-line slash handled by existing dropdown completion
-  if (input.startsWith('/')) return null;
-
-  const beforeCursor = input.slice(0, cursorOffset);
+  // Work in code points. The slash and command chars are always BMP, so once we
+  // anchor on the slash, lengths map 1:1 to UTF-16 — only the prefix can drift.
+  const codePoints = toCodePoints(input);
+  const beforeCursor = codePoints.slice(0, cursorOffset).join('');
 
   // Match: whitespace then "/" then optional command chars, anchored at end
   // Capture whitespace instead of lookbehind to avoid JSC JIT regression
   const match = beforeCursor.match(/\s\/([a-zA-Z0-9_:-]*)$/);
-  if (!match || match.index === undefined) return null;
+  if (!match) return null;
 
-  const slashPos = match.index + 1; // +1 to skip the captured whitespace char
-  const textAfterSlash = input.slice(slashPos + 1);
+  // Command chars before the cursor; slash sits one code point ahead of them.
+  const partialCommand = match[1];
+  const slashPos = cursorOffset - 1 - partialCommand.length;
 
   // Extend to next space (or end of input) to find the full command name
+  const textAfterSlash = codePoints.slice(slashPos + 1).join('');
   const commandMatch = textAfterSlash.match(/^[a-zA-Z0-9_:-]*/);
   const fullCommand = commandMatch ? commandMatch[0] : '';
 
@@ -233,7 +384,7 @@ export function findMidInputSlashCommand(
   return {
     token: '/' + fullCommand,
     startPos: slashPos,
-    partialCommand: input.slice(slashPos + 1, cursorOffset),
+    partialCommand,
   };
 }
 
@@ -246,21 +397,122 @@ export function findMidInputSlashCommand(
 export function getBestSlashCommandMatch(
   partialCommand: string,
   commands: readonly SlashCommand[],
-): { suffix: string; fullCommand: string } | null {
+  recentCommands?: RecentSlashCommands,
+): {
+  suffix: string;
+  fullCommand: string;
+  command: SlashCommand;
+  argumentHint?: string;
+} | null {
   if (!partialCommand) return null;
   const query = partialCommand.toLowerCase();
-  let best: { suffix: string; fullCommand: string } | null = null;
+
+  const matches = commands
+    .filter((cmd) => {
+      if (!isMidInputCompletableCommand(cmd)) return false;
+      const name = cmd.name.toLowerCase();
+      return name.startsWith(query) && (name !== query || !!cmd.argumentHint);
+    })
+    .sort((left, right) => {
+      const leftRecent = recentCommands?.get(left.name);
+      const rightRecent = recentCommands?.get(right.name);
+      const recentOrder =
+        (rightRecent?.usedAt ?? 0) - (leftRecent?.usedAt ?? 0);
+      return (
+        (right.completionPriority ?? 0) - (left.completionPriority ?? 0) ||
+        recentOrder ||
+        left.name.localeCompare(right.name)
+      );
+    });
+
+  const best = matches[0];
+  if (!best) return null;
+  return {
+    suffix: best.name.slice(partialCommand.length),
+    fullCommand: best.name,
+    command: best,
+    argumentHint: best.argumentHint,
+  };
+}
+
+/**
+ * Represents a slash command token found in input text (potentially mid-input).
+ */
+export type SlashCommandToken = {
+  /** Start index (character position) of the token in the text */
+  start: number;
+  /** End index (exclusive) of the token in the text */
+  end: number;
+  /** The matched command name (without the leading slash) */
+  commandName: string;
+  /**
+   * Whether the token corresponds to a known command.
+   * Line-start tokens are valid for all interactive commands. Mid-input tokens
+   * are valid when they match a model-invocable command, or when they are
+   * stackable skills following an existing stacked-skill prefix.
+   */
+  valid: boolean;
+};
+
+const SLASH_TOKEN_RE = /(?:^|(?<=\s))\/([a-zA-Z][a-zA-Z0-9:_-]*)/g;
+
+/**
+ * Finds slash command tokens in input text and marks them as valid/invalid
+ * based on the provided command list.
+ *
+ * - Tokens at position 0 are valid if they match any command.
+ * - Mid-input tokens (preceded by whitespace) are valid only if they match a
+ *   `modelInvocable` command, since built-in commands typed mid-text won't be
+ *   executed, or if they continue a valid stacked-skill prefix.
+ */
+export function findSlashCommandTokens(
+  text: string,
+  commands: readonly SlashCommand[],
+): SlashCommandToken[] {
+  if (!text) return [];
+
+  const commandMapEntries: Array<[string, SlashCommand]> = [];
   for (const cmd of commands) {
-    // Only suggest model-invocable commands for mid-input completion,
-    // since built-in commands typed in the middle of text won't be executed.
-    if (!cmd.modelInvocable) continue;
-    const name = cmd.name.toLowerCase();
-    if (name.startsWith(query) && name !== query) {
-      const suffix = cmd.name.slice(partialCommand.length);
-      if (!best || cmd.name < best.fullCommand) {
-        best = { suffix, fullCommand: cmd.name };
-      }
+    commandMapEntries.push([cmd.name.toLowerCase(), cmd]);
+    for (const altName of cmd.altNames ?? []) {
+      commandMapEntries.push([altName.toLowerCase(), cmd]);
     }
   }
-  return best;
+  const commandMap = new Map<string, SlashCommand>(commandMapEntries);
+
+  const tokens: SlashCommandToken[] = [];
+  let match: RegExpExecArray | null;
+  SLASH_TOKEN_RE.lastIndex = 0;
+
+  while ((match = SLASH_TOKEN_RE.exec(text)) !== null) {
+    const fullMatch = match[0];
+    const commandName = match[1];
+    const start = match.index;
+    const end = start + fullMatch.length;
+
+    // Determine if this is a line-start token (position 0 or preceded by newline)
+    const precedingChar = start > 0 ? text[start - 1] : null;
+    const isLineStart = start === 0 || precedingChar === '\n';
+
+    const cmd = commandMap.get(commandName.toLowerCase());
+    let valid = false;
+    if (cmd) {
+      if (isLineStart) {
+        // Line-start: valid if command is user-invocable (interactive)
+        valid = cmd.userInvocable !== false && !cmd.hidden;
+      } else {
+        // Mid-input: valid if model-invocable, or if this token continues a
+        // valid stacked skill invocation.
+        const prefix = text.slice(0, start);
+        valid =
+          cmd.modelInvocable === true ||
+          (isStackedSkillCompletableCommand(cmd) &&
+            isValidStackedSkillPrefix(prefix, commands));
+      }
+    }
+
+    tokens.push({ start, end, commandName, valid });
+  }
+
+  return tokens;
 }

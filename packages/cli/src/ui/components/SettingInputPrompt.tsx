@@ -10,7 +10,7 @@ import { theme } from '../semantic-colors.js';
 import { TextInput } from './shared/TextInput.js';
 import { t } from '../../i18n/index.js';
 import { useKeypress, type Key } from '../hooks/useKeypress.js';
-import chalk from 'chalk';
+import { renderSoftwareCursor } from '../utils/software-cursor.js';
 
 type SettingInputPromptProps = {
   settingName: string;
@@ -19,6 +19,11 @@ type SettingInputPromptProps = {
   onSubmit: (value: string) => void;
   onCancel: () => void;
   terminalWidth: number;
+};
+
+const isPrintableAscii = (character: string) => {
+  const charCode = character.charCodeAt(0);
+  return charCode >= 32 && charCode <= 126;
 };
 
 /**
@@ -37,6 +42,17 @@ const PasswordInput = ({
 }) => {
   useKeypress(
     (key: Key) => {
+      if (key.paste) {
+        const pastedValue = key.sequence
+          .split('')
+          .filter(isPrintableAscii)
+          .join('');
+        if (pastedValue) {
+          onChange(value + pastedValue);
+        }
+        return;
+      }
+
       // Handle submit
       if (key.name === 'return') {
         onSubmit();
@@ -57,9 +73,7 @@ const PasswordInput = ({
 
       // Handle printable characters
       if (key.sequence && !key.ctrl && !key.meta && key.sequence.length === 1) {
-        const charCode = key.sequence.charCodeAt(0);
-        // Only accept printable ASCII characters (32-126)
-        if (charCode >= 32 && charCode <= 126) {
+        if (isPrintableAscii(key.sequence)) {
           onChange(value + key.sequence);
         }
       }
@@ -69,7 +83,7 @@ const PasswordInput = ({
 
   const maskedValue = '*'.repeat(value.length);
   const displayValue = maskedValue || '';
-  const cursorChar = chalk.inverse(' ');
+  const cursorChar = renderSoftwareCursor(' ');
 
   return (
     <Box>

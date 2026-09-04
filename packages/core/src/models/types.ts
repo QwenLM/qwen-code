@@ -17,6 +17,8 @@ import type { ConfigSources } from '../utils/configResolver.js';
 export interface ModelCapabilities {
   /** Supports image/vision inputs */
   vision?: boolean;
+  /** Can run the normal agent tool loop, not only transcription requests. */
+  agent?: boolean;
 }
 
 /**
@@ -29,15 +31,24 @@ export type ModelGenerationConfig = Pick<
   ContentGeneratorConfig,
   | 'samplingParams'
   | 'timeout'
+  | 'streamIdleTimeoutMs'
   | 'maxRetries'
+  | 'retryInitialDelayMs'
+  | 'retryMaxDelayMs'
   | 'retryErrorCodes'
   | 'enableCacheControl'
+  | 'forceGlobalCacheScope'
+  | 'cacheRetention'
+  | 'cacheRetentionByBlock'
   | 'schemaCompliance'
   | 'reasoning'
   | 'customHeaders'
   | 'extra_body'
+  | 'thinkingMandatory'
   | 'contextWindowSize'
   | 'modalities'
+  | 'splitToolMedia'
+  | 'toolResultContentFormat'
 >;
 
 /**
@@ -54,17 +65,43 @@ export interface ModelConfig {
   envKey?: string;
   /** API endpoint override */
   baseUrl?: string;
-  /** Model capabilities, reserve for future use. Now we do not read this to determine multi-modal support or other capabilities. */
+  /** Explicit model capabilities used for safe feature routing. */
   capabilities?: ModelCapabilities;
   /** Generation configuration (sampling parameters) */
   generationConfig?: ModelGenerationConfig;
+  /** When true, this model only appears in the fast model selector, not the main model list */
+  fastOnly?: boolean;
+  /** When true, this model only appears in the voice model selector, not the main model list */
+  voiceOnly?: boolean;
+  /** When true, this model only appears in the vision model selector, not the main model list */
+  visionOnly?: boolean;
+  /** Whether this route can be used by the built-in image_gen tool */
+  supportsImageGeneration?: boolean;
+  /** When true, this model only appears in the image generation model selector */
+  imageOnly?: boolean;
 }
 
 /**
- * Model providers configuration grouped by authType
+ * Model providers configuration grouped by provider id.
+ *
+ * The key is a provider identity. For built-in providers it equals an
+ * {@link AuthType} value (e.g. `openai`, `gemini`); custom providers may use any
+ * id (e.g. `idealab`) as long as a {@link ProviderProtocolConfig} entry maps it
+ * to an SDK protocol.
  */
 export type ModelProvidersConfig = {
-  [authType: string]: ModelConfig[];
+  [providerId: string]: ModelConfig[];
+};
+
+/**
+ * Maps a `modelProviders` provider id to the SDK protocol that should route its
+ * requests. The value is an {@link AuthType} string (e.g. `openai`, `gemini`,
+ * `anthropic`). Lets a custom provider id (e.g. `idealab`) declare which built-in
+ * protocol it speaks, decoupling provider identity from SDK routing without
+ * changing the `modelProviders` array shape (so older versions stay compatible).
+ */
+export type ProviderProtocolConfig = {
+  [providerId: string]: string;
 };
 
 /**
@@ -79,6 +116,8 @@ export interface ResolvedModelConfig extends ModelConfig {
   envKey?: string;
   /** API base URL (always present, has default per authType) */
   baseUrl: string;
+  /** Exact optional baseUrl used in the registry key, before defaults. */
+  registryBaseUrl?: string;
   /** Generation config (always present, merged with defaults) */
   generationConfig: ModelGenerationConfig;
   /** Capabilities (always present, defaults to {}) */
@@ -98,7 +137,20 @@ export interface AvailableModel {
   contextWindowSize?: number;
   modalities?: InputModalities;
   baseUrl?: string;
+  /** Exact optional baseUrl used in the model registry key, before defaults. */
+  registryBaseUrl?: string;
   envKey?: string;
+
+  /** When true, this model only appears in the fast model selector */
+  fastOnly?: boolean;
+  /** When true, this model only appears in the voice model selector */
+  voiceOnly?: boolean;
+  /** When true, this model only appears in the vision model selector */
+  visionOnly?: boolean;
+  /** Whether this route can be used by the built-in image_gen tool */
+  supportsImageGeneration?: boolean;
+  /** When true, this model only appears in the image generation model selector */
+  imageOnly?: boolean;
 
   /** Whether this is a runtime model (not from modelProviders) */
   isRuntimeModel?: boolean;

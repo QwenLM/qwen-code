@@ -33,3 +33,6 @@ Add to `settings.json`:
 ```
 
 `timeoutMs` sets the per-rewrite LLM call timeout in milliseconds. Defaults to 30000.
+If `promptFile` is missing or cannot be read, rewriting falls back to the
+built-in default prompt. Set `QWEN_DEBUG_LOG_FILE` to capture the fallback
+warning.

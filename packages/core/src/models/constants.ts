@@ -21,15 +21,24 @@ type ContentGeneratorConfig =
 export const MODEL_GENERATION_CONFIG_FIELDS = [
   'samplingParams',
   'timeout',
+  'streamIdleTimeoutMs',
   'maxRetries',
+  'retryInitialDelayMs',
+  'retryMaxDelayMs',
   'retryErrorCodes',
   'enableCacheControl',
+  'forceGlobalCacheScope',
+  'cacheRetention',
+  'cacheRetentionByBlock',
   'schemaCompliance',
   'reasoning',
   'contextWindowSize',
   'customHeaders',
   'extra_body',
+  'thinkingMandatory',
   'modalities',
+  'splitToolMedia',
+  'toolResultContentFormat',
 ] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;
 
 /**
@@ -103,7 +112,7 @@ export const QWEN_OAUTH_MODELS: ModelConfig[] = [
     id: 'coder-model',
     name: 'coder-model',
     description:
-      'Qwen 3.6 Plus — efficient hybrid model with leading coding performance',
+      'Qwen 3.7 Max — efficient hybrid model with leading coding performance',
     capabilities: { vision: true },
   },
 ];

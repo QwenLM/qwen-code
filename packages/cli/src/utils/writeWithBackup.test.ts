@@ -37,7 +37,7 @@ describe('writeWithBackup', () => {
       expect(fs.readFileSync(targetPath, 'utf-8')).toBe(content);
     });
 
-    it('should backup existing file before writing', () => {
+    it('should not leave a backup file behind after a successful overwrite', () => {
       const targetPath = path.join(tempDir, 'test-file.txt');
       const originalContent = 'Original content';
       const newContent = 'New content';
@@ -45,21 +45,33 @@ describe('writeWithBackup', () => {
       fs.writeFileSync(targetPath, originalContent);
       writeWithBackupSync(targetPath, newContent);
 
+      // Target has the new content; the .orig safety net is cleaned up on
+      // success so it does not pollute the directory.
       expect(fs.readFileSync(targetPath, 'utf-8')).toBe(newContent);
-      expect(fs.existsSync(`${targetPath}.orig`)).toBe(true);
-      expect(fs.readFileSync(`${targetPath}.orig`, 'utf-8')).toBe(
-        originalContent,
-      );
+      expect(fs.existsSync(`${targetPath}.orig`)).toBe(false);
     });
 
-    it('should use custom backup suffix', () => {
+    it('should not accumulate backups across repeated writes', () => {
       const targetPath = path.join(tempDir, 'test-file.txt');
-      const originalContent = 'Original';
 
-      fs.writeFileSync(targetPath, originalContent);
+      fs.writeFileSync(targetPath, 'v0');
+      writeWithBackupSync(targetPath, 'v1');
+      writeWithBackupSync(targetPath, 'v2');
+      writeWithBackupSync(targetPath, 'v3');
+
+      expect(fs.readFileSync(targetPath, 'utf-8')).toBe('v3');
+      // Only the target remains in the directory.
+      expect(fs.readdirSync(tempDir)).toEqual(['test-file.txt']);
+    });
+
+    it('should clean up the backup honoring a custom suffix', () => {
+      const targetPath = path.join(tempDir, 'test-file.txt');
+
+      fs.writeFileSync(targetPath, 'Original');
       writeWithBackupSync(targetPath, 'New', { backupSuffix: '.bak' });
 
-      expect(fs.existsSync(`${targetPath}.bak`)).toBe(true);
+      expect(fs.readFileSync(targetPath, 'utf-8')).toBe('New');
+      expect(fs.existsSync(`${targetPath}.bak`)).toBe(false);
       expect(fs.existsSync(`${targetPath}.orig`)).toBe(false);
     });
 
@@ -97,31 +109,18 @@ describe('writeWithBackup', () => {
       fs.rmdirSync(tempPath);
     });
 
-    it('should restore original file from backup when rename fails', () => {
+    it('should remove the backup once the target is updated', () => {
       const targetPath = path.join(tempDir, 'test-file.txt');
       const backupPath = `${targetPath}.orig`;
       const originalContent = 'Original content';
       const newContent = 'New content';
 
-      // Create original file
       fs.writeFileSync(targetPath, originalContent);
-
-      // Write new content successfully first
       writeWithBackupSync(targetPath, newContent);
 
-      // Verify backup exists with original content
-      expect(fs.existsSync(backupPath)).toBe(true);
-      expect(fs.readFileSync(backupPath, 'utf-8')).toBe(originalContent);
-
-      // Verify target has new content
+      // The backup was only an in-flight safety net; it is gone on success.
+      expect(fs.existsSync(backupPath)).toBe(false);
       expect(fs.readFileSync(targetPath, 'utf-8')).toBe(newContent);
-
-      // Now simulate a failure scenario: delete target and try to restore from backup
-      fs.unlinkSync(targetPath);
-
-      // Restore from backup manually to verify backup integrity
-      fs.copyFileSync(backupPath, targetPath);
-      expect(fs.readFileSync(targetPath, 'utf-8')).toBe(originalContent);
     });
 
     it('should include recovery information in error message', () => {
@@ -205,7 +204,7 @@ describe('writeWithBackup', () => {
       expect(fs.readFileSync(targetPath, 'utf-8')).toBe(content);
     });
 
-    it('should backup existing file before writing', async () => {
+    it('should overwrite without leaving a backup behind', async () => {
       const targetPath = path.join(tempDir, 'test-file.txt');
       const originalContent = 'Original content';
       const newContent = 'New content';
@@ -214,10 +213,7 @@ describe('writeWithBackup', () => {
       await writeWithBackup(targetPath, newContent);
 
       expect(fs.readFileSync(targetPath, 'utf-8')).toBe(newContent);
-      expect(fs.existsSync(`${targetPath}.orig`)).toBe(true);
-      expect(fs.readFileSync(`${targetPath}.orig`, 'utf-8')).toBe(
-        originalContent,
-      );
+      expect(fs.existsSync(`${targetPath}.orig`)).toBe(false);
     });
 
     it('should use custom encoding', async () => {

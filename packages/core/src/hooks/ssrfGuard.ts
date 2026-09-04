@@ -60,6 +60,34 @@ export function isBlockedAddress(address: string): boolean {
   return false;
 }
 
+/**
+ * Cloud metadata endpoint IPs that must remain blocked in EVERY
+ * configuration — including when `security.allowPrivateNetworkHooks`
+ * relaxes the general private/CGNAT range checks.
+ *   169.254.169.254  AWS / GCP / Azure / most clouds
+ *   100.100.100.200  Alibaba Cloud (lives inside the CGNAT range)
+ */
+const METADATA_IPS = new Set(['169.254.169.254', '100.100.100.200']);
+
+/**
+ * Returns true if the address is a cloud metadata endpoint IP, in any
+ * serialized form — plain IPv4, or IPv4-mapped IPv6 such as
+ * `::ffff:169.254.169.254` / `::ffff:a9fe:a9fe`. Unlike
+ * `isBlockedAddress`, this check is never relaxed by opt-in settings.
+ */
+export function isMetadataAddress(address: string): boolean {
+  const v = isIP(address);
+  if (v === 4) {
+    return METADATA_IPS.has(address);
+  }
+  if (v === 6) {
+    const mappedV4 = extractMappedIPv4(address.toLowerCase());
+    return mappedV4 !== null && METADATA_IPS.has(mappedV4);
+  }
+  // Not a valid IP literal
+  return false;
+}
+
 function isBlockedV4(address: string): boolean {
   const parts = address.split('.').map(Number);
   const [a, b] = parts;

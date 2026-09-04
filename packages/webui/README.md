@@ -170,6 +170,80 @@ function App() {
 }
 ```
 
+### Dual-mode usage (chat + terminal share one session)
+
+Wrap both views with a **single** `<DaemonSessionProvider>`. Both panels share one SSE connection and one transcript store.
+
+```tsx
+<DaemonWorkspaceProvider baseUrl={baseUrl} token={token}>
+  <DaemonSessionProvider autoReconnect>
+    <ChatPanel />
+    <TerminalPanel />
+  </DaemonSessionProvider>
+</DaemonWorkspaceProvider>
+```
+
+Do NOT nest multiple `<DaemonSessionProvider>` for the same session — that creates two SSE connections and potential state divergence.
+
+### Session hooks
+
+| Hook                           | Returns                                                                                                                                                                                         |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `useTranscriptBlocks()`        | `readonly DaemonTranscriptBlock[]` (raw blocks)                                                                                                                                                 |
+| `useTranscriptState()`         | Full `DaemonTranscriptState` (blocks + metadata)                                                                                                                                                |
+| `useActions()`                 | `{ sendPrompt, cancel, setModel, setApprovalMode, respondToPermission, loadSession, newSession, ... }`                                                                                          |
+| `useConnection()`              | `{ status, sessionId, clientId, workspaceCwd, currentModel, currentMode, capabilities, commands, skills, models, tokenCount, tokenUsage, contextWindow, loadingTranscript, missingSession, … }` |
+| `useDaemonSessionOwnerGuard()` | Captures the current attachment identity so stale async UI continuations can be ignored                                                                                                         |
+| `useStreamingState()`          | `'idle' \| 'waiting' \| 'responding' \| 'thinking'`                                                                                                                                             |
+| `usePromptStatus()`            | `'idle' \| 'waiting' \| 'streaming'`                                                                                                                                                            |
+| `usePendingPermissions()`      | Unresolved permission blocks                                                                                                                                                                    |
+| `useActiveTodoList()`          | Latest todo list, only when it still has active items                                                                                                                                           |
+
+### Workspace hooks
+
+Require an ancestor `<DaemonWorkspaceProvider>`:
+
+| Hook                    | Description                                                              |
+| ----------------------- | ------------------------------------------------------------------------ |
+| `useMcp(options?)`      | MCP server list + restart + tools                                        |
+| `useSkills(options?)`   | Available skills (read-only)                                             |
+| `useTools(options?)`    | Workspace tools + enable/disable                                         |
+| `useMemory(options?)`   | Memory files + read/write                                                |
+| `useAgents(options?)`   | Agent CRUD                                                               |
+| `useSessions(options?)` | Session list (switch/new/release require nested `DaemonSessionProvider`) |
+| `useFiles()`            | File operations: glob, read, write, edit, stat                           |
+| `useGlob()`             | `globWorkspace(pattern, opts)`                                           |
+| `useWorkspace()`        | Full workspace context value                                             |
+| `useWorkspaceActions()` | All workspace-level actions                                              |
+
+All resource hooks accept `{ autoLoad?: boolean, enabled?: boolean }` and return `{ data, loading, error, reload }`. When nested under an active `DaemonSessionProvider`, resource hooks also refresh from daemon workspace events that are already broadcast on the session stream (`memory_changed`, `agent_changed`, `tool_toggled`, MCP restart events, and workspace init events). Without an active session, hooks remain pull-based.
+
+### Props
+
+**`DaemonSessionProviderProps`:**
+
+| Prop                  | Type      | Default   | Description                                                                                              |
+| --------------------- | --------- | --------- | -------------------------------------------------------------------------------------------------------- |
+| `baseUrl`             | `string?` | inherited | Daemon HTTP base URL (inherited from `DaemonWorkspaceProvider` when nested; required in standalone mode) |
+| `token`               | `string?` | inherited | Bearer token (inherited from `DaemonWorkspaceProvider` when nested)                                      |
+| `workspaceCwd`        | `string?` | —         | Override workspace path (uses capabilities if omitted)                                                   |
+| `sessionId`           | `string?` | —         | Restore a specific session and control later session switches                                            |
+| `clientId`            | `string?` | —         | Override stable client ID (auto-generated if omitted)                                                    |
+| `autoConnect`         | `boolean` | `true`    | Connect on mount                                                                                         |
+| `autoReconnect`       | `boolean` | `true`    | Auto-reconnect on disconnect                                                                             |
+| `reconnectDelayMs`    | `number`  | `1000`    | Initial reconnect backoff                                                                                |
+| `maxReconnectDelayMs` | `number`  | `10000`   | Max reconnect backoff                                                                                    |
+| `suppressOwnUserEcho` | `boolean` | `true`    | Suppress own user message echoes                                                                         |
+
+**`DaemonWorkspaceProviderProps`:**
+
+| Prop           | Type      | Default  | Description                             |
+| -------------- | --------- | -------- | --------------------------------------- |
+| `baseUrl`      | `string`  | required | Daemon HTTP base URL                    |
+| `token`        | `string?` | —        | Bearer token                            |
+| `workspaceCwd` | `string?` | —        | Override workspace path                 |
+| `autoConnect`  | `boolean` | `true`   | Connect and fetch capabilities on mount |
+
 ## Components
 
 ### UI Components

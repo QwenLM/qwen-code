@@ -11,6 +11,7 @@ import { SchemaValidator } from '../utils/schemaValidator.js';
 import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -24,6 +25,9 @@ export interface ToolInvocation<
    * The validated parameters for this specific invocation.
    */
   params: TParams;
+
+  /** Historical names accepted only when evaluating persisted permissions. */
+  readonly permissionAliases?: readonly string[];
 
   /**
    * Gets a pre-execution description of the tool operation.
@@ -50,6 +54,13 @@ export interface ToolInvocation<
    * overridden by PermissionManager rules at L4.
    */
   getDefaultPermission(): Promise<PermissionDecision>;
+
+  /**
+   * Whether this invocation must be approved through an explicit host/user
+   * interaction. Permission rules and automatic approval modes cannot satisfy
+   * this requirement.
+   */
+  requiresUserInteraction?(): boolean;
 
   /**
    * Constructs the confirmation dialog details for this invocation.
@@ -98,6 +109,10 @@ export abstract class BaseToolInvocation<
    */
   getDefaultPermission(): Promise<PermissionDecision> {
     return Promise.resolve('allow');
+  }
+
+  requiresUserInteraction(): boolean {
+    return false;
   }
 
   /**
@@ -204,6 +219,25 @@ export abstract class DeclarativeTool<
     readonly parameterSchema: unknown,
     readonly isOutputMarkdown: boolean = true,
     readonly canUpdateOutput: boolean = false,
+    /**
+     * When true, this tool is hidden from the initial function-declaration list
+     * sent to the model to save tokens. The model discovers it on-demand via the
+     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
+     * subsequent API requests. Mirrors the `shouldDefer` field described in
+     * Claude Code's tool framework.
+     */
+    readonly shouldDefer: boolean = false,
+    /**
+     * When true, this tool is always included in the function-declaration list
+     * even in contexts where deferral is the default. Used for meta tools like
+     * ToolSearch itself.
+     */
+    readonly alwaysLoad: boolean = false,
+    /**
+     * Optional space-separated keywords used by ToolSearch's keyword-match
+     * scoring. Complements the tool's name and description.
+     */
+    readonly searchHint?: string,
   ) {}
 
   get schema(): FunctionDeclaration {
@@ -212,6 +246,58 @@ export abstract class DeclarativeTool<
       description: this.description,
       parametersJsonSchema: this.parameterSchema,
     };
+  }
+
+  /**
+   * Max model-facing characters for this tool's output before the scheduler
+   * spills it to disk (mirrors Claude Code's per-tool `maxResultSizeChars`).
+   *   - `undefined` → use the global truncation threshold.
+   *   - `Infinity`  → self-managed (the tool does its own size control, e.g.
+   *     ReadFile's line-based paging), exempt from scheduler char truncation.
+   * Override in subclasses to opt into a per-tool budget.
+   */
+  get maxOutputChars(): number | undefined {
+    return undefined;
+  }
+
+  /**
+   * Direction kept when this tool's oversized output is truncated: `'head'`
+   * (beginning, e.g. shell), `'tail'` (end, e.g. background agents), or
+   * `'both'` (first + last, the default).
+   */
+  get truncateKeep(): 'head' | 'tail' | 'both' {
+    return 'both';
+  }
+
+  /**
+   * Projects tool params for the AUTO approval mode classifier.
+   *
+   * Tools with security-relevant parameters (file paths, shell commands,
+   * URLs) should override this to redact voluminous or sensitive fields
+   * (full content, secrets) while exposing enough for the classifier to
+   * judge safety.
+   *
+   * Returns:
+   *   - object: projected params to send to the classifier
+   *   - empty string: signals "no security relevance" — the classifier
+   *     transcript will record only the tool name
+   *   - undefined: fall back to raw params (only safe when the tool is
+   *     known to have no sensitive params)
+   *
+   * Default is the empty-string sentinel — fail-closed: a tool that has
+   * not opted in does not leak its raw parameters (potentially containing
+   * API keys, tokens, file contents) into the classifier LLM prompt.
+   * Tools that want their args inspected by the classifier for safety
+   * judgement should override this and return an object with only the
+   * security-relevant fields. Note that `DiscoveredMCPTool` overrides
+   * this and forwards a bounded projection of every MCP call's arguments
+   * by default (see `mcp-classifier-input.ts`; opt out with
+   * `permissions.autoMode.mcp.forwardArguments: false`).
+   */
+  toAutoClassifierInput(
+    _params: TParams,
+  ): Record<string, unknown> | string | undefined {
+    return '';
   }
 
   /**
@@ -357,19 +443,44 @@ export abstract class BaseDeclarativeTool<
  */
 export type AnyDeclarativeTool = DeclarativeTool<object, ToolResult>;
 
-/**
- * Type guard to check if an object is a Tool.
- * @param obj The object to check.
- * @returns True if the object is a Tool, false otherwise.
- */
-export function isTool(obj: unknown): obj is AnyDeclarativeTool {
-  return (
-    typeof obj === 'object' &&
-    obj !== null &&
-    'name' in obj &&
-    'build' in obj &&
-    typeof (obj as AnyDeclarativeTool).build === 'function'
-  );
+export { isTool } from '../utils/is-tool.js';
+
+export type ToolArtifactKind =
+  | 'file'
+  | 'link'
+  | 'html'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'notebook'
+  | 'document'
+  | 'other';
+
+export type ToolResultArtifactState = 'undecided' | 'none' | 'reusable';
+
+export interface ToolResultBoundaryArtifact {
+  state: ToolResultArtifactState;
+  kinds: Array<ToolArtifactKind | 'unknown'>;
+}
+
+export type ToolArtifactStorage =
+  | 'workspace'
+  | 'external_url'
+  | 'managed'
+  | 'published';
+
+export interface ToolArtifact {
+  kind?: ToolArtifactKind;
+  storage?: ToolArtifactStorage;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
 }
 
 export interface ToolResult {
@@ -380,6 +491,18 @@ export interface ToolResult {
   llmContent: PartListUnion;
 
   /**
+   * Internal runtime metadata recording the producer persistence decision
+   * before final aggregation.
+   * `undefined` means no decision was made; `[]` means a decision was made but
+   * no reusable artifact exists; a non-empty array lists reusable producer
+   * artifact paths. Downstream finalization treats any defined value as a
+   * completed decision for this producer output and does not persist it again.
+   * Other artifact channels remain independent and may still be aggregated
+   * later.
+   */
+  persistedOutputFiles?: string[];
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be
@@ -387,6 +510,19 @@ export interface ToolResult {
    * For now, we keep it as the core logic in ReadFileTool currently produces it.
    */
   returnDisplay: ToolResultDisplay;
+
+  /**
+   * Concrete filesystem paths discovered or touched during successful execution.
+   * Scheduler-side path activation consumes these in addition to input fields.
+   */
+  resultFilePaths?: string[];
+
+  /**
+   * Structured artifacts produced by this tool call. Daemon/session surfaces
+   * consume this as metadata only; the producer remains responsible for the
+   * underlying file, URL, or managed resource lifecycle.
+   */
+  artifacts?: ToolArtifact[];
 
   /**
    * If this property is present, the tool call is considered a failure.
@@ -402,6 +538,12 @@ export interface ToolResult {
    * turns within the same agentic loop.
    */
   modelOverride?: string;
+
+  /**
+   * End the current Goal turn after recording this successful result. Only
+   * honored when the tool batch carries a Goal context; ignored otherwise.
+   */
+  terminateTurn?: boolean;
 }
 
 /**
@@ -495,10 +637,12 @@ export interface AgentResultDisplay {
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
+  executionMode?: 'foreground' | 'background';
   status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
+  skills?: string[];
   /** Real-time output-token count during execution, accumulated across subagent rounds. */
   tokenCount?: number;
 
@@ -515,6 +659,7 @@ export interface AgentResultDisplay {
     result?: string;
     resultDisplay?: string;
     responseParts?: Part[];
+    boundaryArtifact?: ToolResultBoundaryArtifact;
     description?: string;
   }>;
 }
@@ -540,14 +685,134 @@ export interface McpToolProgressData {
   message?: string;
 }
 
+export interface McpAppResourceCsp {
+  connectDomains?: string[];
+  resourceDomains?: string[];
+  frameDomains?: string[];
+  baseUriDomains?: string[];
+}
+
+export interface McpAppResourcePermissions {
+  camera?: Record<string, never>;
+  microphone?: Record<string, never>;
+  geolocation?: Record<string, never>;
+  clipboardWrite?: Record<string, never>;
+}
+
+export interface McpAppToolResult {
+  content?: Array<{
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+    [key: string]: unknown;
+  }>;
+  isError?: boolean;
+  structuredContent?: unknown;
+  [key: string]: unknown;
+}
+
+/** A completed MCP tool call with an interactive MCP Apps resource. */
+export interface McpAppResultDisplay {
+  type: 'mcp_app';
+  serverName: string;
+  resourceUri: string;
+  html: string;
+  toolResult: McpAppToolResult;
+  toolArguments: Record<string, unknown>;
+  fallbackText: string;
+  csp?: McpAppResourceCsp;
+  permissions?: McpAppResourcePermissions;
+}
+
+/**
+ * Structured heartbeat for silent foreground shell commands, emitted through
+ * the updateOutput channel while no display update has fired for
+ * `tools.shell.heartbeatIntervalMs` (default 10s). Carries liveness stats
+ * only — never command output — and never enters model context. Consumers
+ * that render live output (TUI, subagent views) ignore it; the ACP session
+ * and stream-json adapters forward it so headless gateways can distinguish
+ * "still running" from a dead execution chain.
+ */
+export interface ShellProgressData {
+  type: 'shell_progress';
+  /** Monotonic elapsed time since the process spawned (post-PTY-init), in ms. */
+  elapsedMs: number;
+  /** Monotonic age of the last output chunk, in ms; absent = no output yet. */
+  lastOutputAgeMs?: number;
+  /** Cumulative output stats; only present on the PTY/AnsiOutput path. */
+  totalLines?: number;
+  totalBytes?: number;
+  /** Effective timeout governing this command (including the 120s default); absent when disabled. */
+  timeoutMs?: number;
+}
+
+export function isShellProgressData(
+  display: unknown,
+): display is ShellProgressData {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    (display as ShellProgressData).type === 'shell_progress'
+  );
+}
+
+export const MAX_TERMINAL_IMAGE_BYTES = 8 * 1024 * 1024;
+
+export interface TerminalImageDisplay {
+  type: 'terminal_image';
+  filePath: string;
+  mimeType: 'image/png';
+}
+
+export function isTerminalImageDisplay(
+  display: unknown,
+): display is TerminalImageDisplay {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    display.type === 'terminal_image' &&
+    'filePath' in display &&
+    typeof display.filePath === 'string' &&
+    'mimeType' in display &&
+    display.mimeType === 'image/png'
+  );
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
   | AgentResultDisplay
+  | TeamResultDisplay
+  | TaskListResultDisplay
+  | FindingsResultDisplay
   | AnsiOutputDisplay
-  | McpToolProgressData;
+  | McpToolProgressData
+  | McpAppResultDisplay
+  | VisionBridgeNoticeDisplay
+  | ShellProgressData
+  | TerminalImageDisplay;
+
+export interface TeamResultDisplay {
+  type: 'team_result';
+  teamName: string;
+  action: 'created' | 'deleted';
+  memberCount?: number;
+}
+
+export interface TaskListResultDisplay {
+  type: 'task_list';
+  tasks: Array<{
+    id: string;
+    subject: string;
+    status: string;
+    owner?: string;
+  }>;
+}
 
 export interface FileDiff {
   fileDiff: string;
@@ -555,6 +820,13 @@ export interface FileDiff {
   originalContent: string | null;
   newContent: string;
   diffStat?: DiffStat;
+  truncatedForSession?: boolean;
+  fileDiffLength?: number;
+  originalContentLength?: number;
+  newContentLength?: number;
+  fileDiffTruncated?: boolean;
+  originalContentTruncated?: boolean;
+  newContentTruncated?: boolean;
 }
 
 export interface DiffStat {
@@ -568,13 +840,66 @@ export interface DiffStat {
   user_removed_chars: number;
 }
 
+/**
+ * One review finding as the `report_findings` tool hands it to clients.
+ *
+ * Field names and enum spellings deliberately match the `qwen review
+ * findings` artifact (`packages/cli/src/commands/review/findings.ts`) so the model
+ * copies values straight out of the artifact instead of translating them —
+ * a translation layer between two spellings of the same list is where
+ * severities have historically drifted.
+ */
+export interface ReportedFinding {
+  /** The findings artifact's id (`R<round>-<n>` / `D<round>-<n>`), when one exists. */
+  id?: string;
+  severity: 'Critical' | 'Suggestion' | 'Nice to have';
+  /** Verification confidence. Absent on an unverified (low-effort) pass. */
+  confidence?: 'high' | 'low';
+  /** Where the finding came from. */
+  source?: 'review' | 'build' | 'test' | 'probe' | 'lint';
+  file: string;
+  line?: number;
+  /** One sentence stating the defect. */
+  summary: string;
+  /** `summary` compressed to <= 60 characters, for a compact list UI. */
+  shortSummary: string;
+  /** The concrete trigger and wrong outcome. */
+  failureScenario: string;
+  /** Free-form kebab-case tag (`correctness`, `security`, …). */
+  category?: string;
+  /** Which way a Critical fails — see `FINDING_DIRECTIONS`. */
+  direction?: 'certifies-falsely' | 'fails-closed';
+  /** What a Critical is measured against — see `FINDING_BASELINES`. */
+  baseline?: 'regression' | 'new-surface';
+  /** Set only on a re-report after fixes were applied. */
+  outcome?: 'fixed' | 'skipped' | 'no_change_needed';
+  /** The fixer's reason — mainly for `skipped`. */
+  outcomeNote?: string;
+}
+
+export interface FindingsResultDisplay {
+  type: 'findings_list';
+  /** The review effort the findings came from. */
+  level?: 'low' | 'medium' | 'high';
+  findings: ReportedFinding[];
+  /**
+   * Set by history/recording compaction when the retained-display budget
+   * evicted the least severe tail of a larger list: how many findings were
+   * removed. The retained prefix keeps the most severe entries.
+   */
+  omittedFindings?: number;
+}
+
 export interface TodoResultDisplay {
   type: 'todo_list';
+  planId?: string;
   todos: Array<{
     id: string;
     content: string;
     status: 'pending' | 'in_progress' | 'completed';
+    blockedBy?: string[];
   }>;
+  unchanged?: boolean;
 }
 
 export interface PlanResultDisplay {
@@ -593,8 +918,8 @@ export interface ToolEditConfirmationDetails {
   ) => Promise<void>;
   /**
    * When true, the UI should not show "Always allow" options (ProceedAlwaysProject/User).
-   * Set by coreToolScheduler when PM has an explicit 'ask' rule that would override
-   * any 'allow' rule the user might add.
+   * Set when an explicit interaction or PM 'ask' rule cannot be replaced by
+   * a persisted allow rule.
    */
   hideAlwaysAllow?: boolean;
   fileName: string;
@@ -603,6 +928,12 @@ export interface ToolEditConfirmationDetails {
   originalContent: string | null;
   newContent: string;
   isModifying?: boolean;
+  /** Hide UI affordances that let the user edit the proposed content. */
+  hideModify?: boolean;
+  /** Skip opening or resolving an IDE diff for this confirmation. */
+  skipIdeDiff?: boolean;
+  /** Informational warnings to render alongside the proposed diff. */
+  warnings?: string[];
 }
 
 export interface ToolConfirmationPayload {
@@ -617,6 +948,15 @@ export interface ToolConfirmationPayload {
   permissionRules?: string[];
   // used to pass user answers from ask_user_question tool
   answers?: Record<string, string>;
+  // Replacement tool args from the host's permission policy
+  // (Anthropic stream-json `can_use_tool` returns this as
+  // `updatedInput` when sanitising a tool call before allowing
+  // it). When present and the outcome is allow, the scheduler
+  // overrides the tool's args with this object before scheduling.
+  // Cross-process callers (teammates) rely on this because they
+  // can't reach into the leader's local WaitingToolCall to mutate
+  // args directly the way the leader's same-process path does.
+  updatedInput?: Record<string, unknown>;
 }
 
 export interface ToolExecuteConfirmationDetails {
@@ -632,6 +972,14 @@ export interface ToolExecuteConfirmationDetails {
   rootCommand: string;
   /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
   permissionRules?: string[];
+  /**
+   * Optional informational warnings to surface in the confirmation dialog,
+   * one short string per warning. Currently used to flag commands that
+   * contain shell command substitution (`$(...)`, backticks, `<(...)`,
+   * `>(...)`) so the user can review them before approving. Renderers
+   * should display these alongside the command, not as errors.
+   */
+  warnings?: string[];
 }
 
 export interface ToolMcpConfirmationDetails {
@@ -660,18 +1008,29 @@ export interface ToolInfoConfirmationDetails {
   /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
   hideAlwaysAllow?: boolean;
   prompt: string;
+  /** Display the prompt literally instead of interpreting inline Markdown. */
+  renderPromptAsPlainText?: boolean;
   urls?: string[];
   /** Permission rules for persistence, e.g. 'WebFetch(example.com)'. */
   permissionRules?: string[];
 }
 
-export type ToolCallConfirmationDetails =
+export interface AutoModeFallbackConfirmation {
+  reason: 'classifier_unavailable';
+  message: string;
+}
+
+export type ToolCallConfirmationDetails = (
   | ToolEditConfirmationDetails
   | ToolExecuteConfirmationDetails
   | ToolMcpConfirmationDetails
   | ToolInfoConfirmationDetails
   | ToolPlanConfirmationDetails
-  | ToolAskUserQuestionConfirmationDetails;
+  | ToolAskUserQuestionConfirmationDetails
+) & {
+  /** Explains why an AUTO-mode call was routed to manual confirmation. */
+  autoModeFallback?: AutoModeFallbackConfirmation;
+};
 
 export interface ToolPlanConfirmationDetails {
   type: 'plan';
@@ -697,7 +1056,7 @@ export interface ToolAskUserQuestionConfirmationDetails {
       label: string;
       description: string;
     }>;
-    multiSelect: boolean;
+    multiSelect?: boolean;
   }>;
   metadata?: {
     source?: string;
@@ -715,6 +1074,8 @@ export interface ToolAskUserQuestionConfirmationDetails {
  */
 export enum ToolConfirmationOutcome {
   ProceedOnce = 'proceed_once',
+  /** Approve this call once and change the runtime session to Default mode. */
+  ProceedOnceAndSwitchToDefault = 'proceed_once_and_switch_to_default',
   ProceedAlways = 'proceed_always',
   /** @deprecated Use ProceedAlwaysProject or ProceedAlwaysUser instead. */
   ProceedAlwaysServer = 'proceed_always_server',
@@ -739,6 +1100,7 @@ export enum Kind {
   Execute = 'execute',
   Think = 'think',
   Fetch = 'fetch',
+  Agent = 'agent',
   Other = 'other',
 }
 

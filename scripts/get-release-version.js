@@ -8,33 +8,23 @@
 
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readFileSync } from 'node:fs';
 import semver from 'semver';
-
-function readJson(filePath) {
-  return JSON.parse(readFileSync(filePath, 'utf-8'));
-}
-
-function getArgs() {
-  const args = {};
-  process.argv.slice(2).forEach((arg) => {
-    if (arg.startsWith('--')) {
-      const [key, value] = arg.substring(2).split('=');
-      args[key] = value === undefined ? true : value;
-    }
-  });
-  return args;
-}
+import {
+  getArgs,
+  isExpectedMissingGitHubRelease,
+  readJson,
+  validateVersion,
+} from './lib/release-helpers.js';
 
 function getVersionFromNPM(distTag) {
   const command = `npm view @qwen-code/qwen-code version --tag=${distTag}`;
   try {
     return execSync(command).toString().trim();
   } catch (error) {
-    console.error(
-      `Failed to get NPM version for dist-tag "${distTag}": ${error.message}`,
-    );
-    return '';
+    if (error.message?.includes('E404')) {
+      return '';
+    }
+    throw error;
   }
 }
 
@@ -44,8 +34,10 @@ function getAllVersionsFromNPM() {
     const versionsJson = execSync(command).toString().trim();
     return JSON.parse(versionsJson);
   } catch (error) {
-    console.error(`Failed to get all NPM versions: ${error.message}`);
-    return [];
+    if (error.message?.includes('E404')) {
+      return [];
+    }
+    throw error;
   }
 }
 
@@ -66,10 +58,66 @@ function isVersionDeprecated(version) {
 function detectRollbackAndGetBaseline(npmDistTag) {
   // Get the current dist-tag version
   const distTagVersion = getVersionFromNPM(npmDistTag);
-  if (!distTagVersion) return { baseline: '', isRollback: false };
 
   // Get all published versions
-  const allVersions = getAllVersionsFromNPM();
+  let allVersions;
+  try {
+    allVersions = getAllVersionsFromNPM();
+  } catch (error) {
+    if (distTagVersion) {
+      console.error(
+        `Could not fetch versions list, proceeding with dist-tag: ${error.message}`,
+      );
+      return { baseline: distTagVersion, isRollback: false };
+    }
+    throw error;
+  }
+
+  if (!distTagVersion) {
+    // Dist-tag is missing — try to derive baseline from published versions
+    if (allVersions.length === 0) return { baseline: '', isRollback: false };
+
+    let matchingVersions;
+    if (npmDistTag === 'latest') {
+      matchingVersions = allVersions.filter(
+        (v) => semver.valid(v) && !semver.prerelease(v),
+      );
+    } else if (npmDistTag === 'preview') {
+      matchingVersions = allVersions.filter(
+        (v) => semver.valid(v) && v.includes('-preview'),
+      );
+    } else if (npmDistTag === 'nightly') {
+      matchingVersions = allVersions.filter(
+        (v) => semver.valid(v) && v.includes('-nightly'),
+      );
+    } else {
+      return { baseline: '', isRollback: false };
+    }
+
+    if (matchingVersions.length === 0)
+      return { baseline: '', isRollback: false };
+
+    matchingVersions.sort((a, b) => semver.rcompare(a, b));
+
+    let highestExistingVersion = '';
+    for (const version of matchingVersions) {
+      if (!isVersionDeprecated(version)) {
+        highestExistingVersion = version;
+        break;
+      } else {
+        console.error(`Ignoring deprecated version: ${version}`);
+      }
+    }
+
+    if (!highestExistingVersion) return { baseline: '', isRollback: false };
+
+    return {
+      baseline: highestExistingVersion,
+      isRollback: false,
+      highestExistingVersion,
+    };
+  }
+
   if (allVersions.length === 0)
     return { baseline: distTagVersion, isRollback: false };
 
@@ -128,21 +176,82 @@ function detectRollbackAndGetBaseline(npmDistTag) {
   };
 }
 
-function doesVersionExist(version) {
-  // Check NPM
-  try {
-    const command = `npm view @qwen-code/qwen-code@${version} version 2>/dev/null`;
-    const output = execSync(command).toString().trim();
-    if (output === version) {
-      console.error(`Version ${version} already exists on NPM.`);
-      return true;
+/**
+ * All packages that share the same release version. A version is considered
+ * "taken" if it exists on *any* of them — not just the main package.
+ */
+export const PUBLISHED_PACKAGES = [
+  '@qwen-code/qwen-code',
+  '@qwen-code/external-context-mem0',
+  '@qwen-code/audio-capture',
+  '@qwen-code/channel-base',
+  '@qwen-code/channel-dingtalk',
+  '@qwen-code/channel-dws',
+  '@qwen-code/channel-feishu',
+  '@qwen-code/channel-github',
+  '@qwen-code/channel-qqbot',
+  '@qwen-code/channel-telegram',
+  '@qwen-code/channel-wecom',
+  '@qwen-code/channel-weixin',
+];
+
+function doesVersionExist(version, { strict = false, shippedTo } = {}) {
+  // Check NPM across all published packages
+  const shippedPackages = [];
+  for (const pkg of PUBLISHED_PACKAGES) {
+    try {
+      // The best-effort path silences npm's expected E404 noise; strict
+      // mode needs that stderr to tell "absent" from a failed probe.
+      const command = strict
+        ? `npm view ${pkg}@${version} version`
+        : `npm view ${pkg}@${version} version 2>/dev/null`;
+      const output = execSync(command).toString().trim();
+      if (output === version) {
+        if (!strict) {
+          console.error(`Version ${version} already exists on NPM (${pkg}).`);
+          return true;
+        }
+        shippedPackages.push(pkg);
+      }
+    } catch (error) {
+      // E404 means the version is absent from this package. Strict mode
+      // guards the force push, so any other probe failure is "cannot
+      // verify" and must throw instead of passing — but once a package
+      // has shipped the refusal is decided, and a throw would mask its
+      // recovery guidance with a probe-failure exit.
+      if (
+        strict &&
+        shippedPackages.length === 0 &&
+        !error.message?.includes('E404')
+      ) {
+        throw new Error(
+          `Failed to verify ${pkg}@${version} on npm: ${error.message}`,
+        );
+      }
     }
-  } catch (_error) {
-    // This is expected if the version doesn't exist.
+  }
+  // Strict mode scans every package instead of stopping at the first hit
+  // so a partial publish's refusal can name everything that shipped. A hit
+  // ends the check: the remaining probes can no longer change the outcome,
+  // and a failed one would mask the refusal's recovery guidance.
+  if (shippedPackages.length > 0) {
+    console.error(
+      `Version ${version} already exists on NPM (${shippedPackages.join(', ')}).`,
+    );
+    shippedTo?.push(...shippedPackages);
+    return true;
   }
 
-  // Check Git tags
+  // Check Git tags. Push-time callers pass strict: the checkout at job
+  // start can only know tags that existed when the job began, and the
+  // version may ship between that fetch and this push — check origin.
   try {
+    if (strict) {
+      execSync(`git ls-remote --exit-code origin "refs/tags/v${version}"`);
+      console.error(`Git tag v${version} already exists on origin.`);
+      shippedTo?.push(`origin tag v${version}`);
+      return true;
+    }
     const command = `git tag -l 'v${version}'`;
     const tagOutput = execSync(command).toString().trim();
     if (tagOutput === `v${version}`) {
@@ -150,24 +259,36 @@ function doesVersionExist(version) {
       return true;
     }
   } catch (error) {
-    console.error(`Failed to check git tags for conflicts: ${error.message}`);
+    if (strict) {
+      // ls-remote exits 2 when no ref matches; that is "tag absent". Any
+      // other failure means the check could not run — fail the push
+      // instead of reading a failed check as "unreleased".
+      if (error.status !== 2) {
+        throw new Error(
+          `Failed to verify tag v${version} on origin: ${error.message}`,
+        );
+      }
+    } else {
+      console.error(`Failed to check git tags for conflicts: ${error.message}`);
+    }
   }
 
   // Check GitHub releases
   try {
-    const command = `gh release view "v${version}" --json tagName --jq .tagName 2>/dev/null`;
+    const command = `gh release view "v${version}" --json tagName --jq .tagName`;
     const output = execSync(command).toString().trim();
     if (output === `v${version}`) {
       console.error(`GitHub release v${version} already exists.`);
+      shippedTo?.push(`GitHub release v${version}`);
       return true;
     }
   } catch (error) {
-    const isExpectedNotFound =
-      error.message.includes('release not found') ||
-      error.message.includes('Not Found') ||
-      error.message.includes('not found') ||
-      error.status === 1;
-    if (!isExpectedNotFound) {
+    if (!isExpectedMissingGitHubRelease(error)) {
+      if (strict) {
+        throw new Error(
+          `Failed to verify release v${version} on GitHub: ${error.message}`,
+        );
+      }
       console.error(
         `Failed to check GitHub releases for conflicts: ${error.message}`,
       );
@@ -177,13 +298,38 @@ function doesVersionExist(version) {
   return false;
 }
 
+/**
+ * Push-time re-validation of prepare's doesVersionExist invariant, for the
+ * release branch force push. Throws when the version has shipped anywhere
+ * (an error coded VERSION_SHIPPED, naming where it was found), or when a
+ * probe cannot run — a failed probe must not read as "unreleased".
+ */
+export function assertVersionUnreleased(version) {
+  if (typeof version !== 'string' || version.length === 0) {
+    throw new Error(
+      'assert-unreleased requires a version, e.g. --assert-unreleased=1.2.3',
+    );
+  }
+  const shippedTo = [];
+  if (doesVersionExist(version, { strict: true, shippedTo })) {
+    const error = new Error(
+      `Version ${version} has already shipped; refusing to force-push the release branch over it. Found on: ${shippedTo.join(', ')}. If a previous attempt published only part of the release, complete the remaining artifacts manually — re-running this job will keep failing here while the version stays published.`,
+    );
+    error.code = 'VERSION_SHIPPED';
+    throw error;
+  }
+}
+
 function getAndVerifyTags(npmDistTag, _gitTagPattern) {
   // Detect rollback scenarios and get the correct baseline
   const rollbackInfo = detectRollbackAndGetBaseline(npmDistTag);
   const baselineVersion = rollbackInfo.baseline;
 
   if (!baselineVersion) {
-    throw new Error(`Unable to determine baseline version for ${npmDistTag}`);
+    console.error(
+      `No baseline version found for dist-tag "${npmDistTag}" — returning null`,
+    );
+    return null;
   }
 
   if (rollbackInfo.isRollback) {
@@ -201,10 +347,41 @@ function getAndVerifyTags(npmDistTag, _gitTagPattern) {
   };
 }
 
+function listExistingStableTags() {
+  const output = execSync(`git tag -l 'v*'`).toString();
+  return output
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((tag) => /^v\d+\.\d+\.\d+$/.test(tag) && semver.valid(tag))
+    .sort(semver.rcompare);
+}
+
 function getLatestStableReleaseTag() {
   try {
-    const { latestTag } = getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]');
-    return latestTag;
+    const result = getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]');
+    if (!result) return '';
+    const npmDerivedTag = result.latestTag;
+    let existingTags;
+    try {
+      existingTags = listExistingStableTags();
+    } catch (gitError) {
+      // Without a tag listing we cannot verify; keep the npm-derived tag as
+      // before rather than dropping the release-notes anchor entirely.
+      console.error(
+        `Could not list git tags to verify ${npmDerivedTag} (${gitError.message}); using the npm-derived tag as-is.`,
+      );
+      return npmDerivedTag;
+    }
+    if (existingTags.includes(npmDerivedTag)) return npmDerivedTag;
+    // A half-shipped release can leave the npm baseline ahead of any git tag
+    // (npm publish succeeded, tag creation failed). Anchoring the release
+    // notes at a tag that does not exist makes GitHub fall back to the entire
+    // branch history, so anchor at the latest stable tag that does exist.
+    const fallbackTag = existingTags[0] ?? '';
+    console.error(
+      `npm-derived previous tag ${npmDerivedTag} does not exist in git; falling back to ${fallbackTag || '<none>'}.`,
+    );
+    return fallbackTag;
   } catch (error) {
     console.error(
       `Failed to determine latest stable release tag: ${error.message}`,
@@ -214,8 +391,13 @@ function getLatestStableReleaseTag() {
 }
 
 function promoteNightlyVersion() {
-  const { latestVersion } = getAndVerifyTags('nightly', 'v*-nightly*');
-  const baseVersion = latestVersion.split('-')[0];
+  const result = getAndVerifyTags('nightly', 'v*-nightly*');
+  if (!result) {
+    throw new Error(
+      'Unable to determine baseline version for nightly (required for promote-nightly)',
+    );
+  }
+  const baseVersion = result.latestVersion.split('-')[0];
   const versionParts = baseVersion.split('.');
   const major = versionParts[0];
   const minor = versionParts[1] ? parseInt(versionParts[1]) : 0;
@@ -240,31 +422,30 @@ function getNightlyVersion() {
   };
 }
 
-function validateVersion(version, format, name) {
-  const versionRegex = {
-    'X.Y.Z': /^\d+\.\d+\.\d+$/,
-    'X.Y.Z-preview.N': /^\d+\.\d+\.\d+-preview\.\d+$/,
-  };
-
-  if (!versionRegex[format] || !versionRegex[format].test(version)) {
-    throw new Error(
-      `Invalid ${name}: ${version}. Must be in ${format} format.`,
-    );
-  }
-}
-
 function getStableVersion(args) {
-  const { latestVersion: latestPreviewVersion } = getAndVerifyTags(
-    'preview',
-    'v*-preview*',
-  );
+  const tagResult = getAndVerifyTags('preview', 'v*-preview*');
   let releaseVersion;
   if (args.stable_version_override) {
     const overrideVersion = args.stable_version_override.replace(/^v/, '');
     validateVersion(overrideVersion, 'X.Y.Z', 'stable_version_override');
     releaseVersion = overrideVersion;
+  } else if (tagResult) {
+    releaseVersion = tagResult.latestVersion.replace(/-preview.*/, '');
+    validateVersion(releaseVersion, 'X.Y.Z', 'derived from preview dist-tag');
+    const latestStable = getVersionFromNPM('latest');
+    if (
+      latestStable &&
+      semver.valid(latestStable) &&
+      semver.gt(latestStable, releaseVersion)
+    ) {
+      throw new Error(
+        `Derived stable version ${releaseVersion} is lower than published latest ${latestStable}. Refusing retrograde baseline.`,
+      );
+    }
   } else {
-    releaseVersion = latestPreviewVersion.replace(/-preview.*/, '');
+    const packageJson = readJson('package.json');
+    releaseVersion = packageJson.version.split('-')[0];
+    validateVersion(releaseVersion, 'X.Y.Z', 'package.json version');
   }
 
   return {
@@ -274,10 +455,7 @@ function getStableVersion(args) {
 }
 
 function getPreviewVersion(args) {
-  const { latestVersion: latestNightlyVersion } = getAndVerifyTags(
-    'nightly',
-    'v*-nightly*',
-  );
+  const tagResult = getAndVerifyTags('nightly', 'v*-nightly*');
   let releaseVersion;
   if (args.preview_version_override) {
     const overrideVersion = args.preview_version_override.replace(/^v/, '');
@@ -287,9 +465,39 @@ function getPreviewVersion(args) {
       'preview_version_override',
     );
     releaseVersion = overrideVersion;
+  } else if (tagResult) {
+    let baseVersion = tagResult.latestVersion.replace(/-nightly.*/, '');
+    // When the nightly base is already published as stable, the preview must
+    // target the next patch — otherwise the scheduled Tuesday release derives
+    // a version whose channel packages already exist on npm (E403).
+    // Use the rollback-aware lookup so a rolled-back dist-tag doesn't produce
+    // a retrograde preview base.
+    const latestTagResult = getAndVerifyTags('latest', 'v[0-9].[0-9].[0-9]');
+    const latestStable = latestTagResult?.latestVersion ?? '';
+    if (
+      latestStable &&
+      semver.valid(latestStable) &&
+      semver.valid(baseVersion)
+    ) {
+      if (semver.gte(latestStable, baseVersion)) {
+        const bumped = semver.inc(latestStable, 'patch');
+        console.error(
+          `Nightly base ${baseVersion} is at or below published latest ${latestStable}; bumping preview base to ${bumped}.`,
+        );
+        baseVersion = bumped;
+      }
+    }
+    releaseVersion = baseVersion + '-preview.0';
+    validateVersion(
+      releaseVersion,
+      'X.Y.Z-preview.N',
+      'derived from nightly dist-tag',
+    );
   } else {
-    releaseVersion =
-      latestNightlyVersion.replace(/-nightly.*/, '') + '-preview.0';
+    const packageJson = readJson('package.json');
+    const baseVersion = packageJson.version.split('-')[0];
+    releaseVersion = baseVersion + '-preview.0';
+    validateVersion(baseVersion, 'X.Y.Z', 'package.json version');
   }
 
   return {
@@ -306,7 +514,13 @@ function getPatchVersion(patchFrom) {
   }
   const distTag = patchFrom === 'stable' ? 'latest' : 'preview';
   const pattern = distTag === 'latest' ? 'v[0-9].[0-9].[0-9]' : 'v*-preview*';
-  const { latestVersion } = getAndVerifyTags(distTag, pattern);
+  const tagResult = getAndVerifyTags(distTag, pattern);
+  if (!tagResult) {
+    throw new Error(
+      `Unable to determine baseline version for ${distTag} (required for patch)`,
+    );
+  }
+  const { latestVersion } = tagResult;
 
   if (patchFrom === 'stable') {
     // For stable versions, increment the patch number: 0.5.4 -> 0.5.5
@@ -406,6 +620,34 @@ export function getVersion(options = {}) {
   return result;
 }
 
+/**
+ * CLI dispatch, exported for tests: `--assert-unreleased=<version>` runs
+ * the push-time guard; anything else prints the version JSON. Returns the
+ * exit code. Guard codes: 0 = unreleased, 3 = already shipped (a decisive,
+ * benign refusal the workflow marks to skip the release-failed
+ * notification), 2 = probe or usage failure. 1 is never returned on
+ * purpose: node exits 1 on uncaught errors, and those must stay on the
+ * real-failure path.
+ */
+export function runCli(args) {
+  if (args['assert-unreleased'] !== undefined) {
+    try {
+      assertVersionUnreleased(args['assert-unreleased']);
+    } catch (error) {
+      // stdout, not stderr: the runner parses workflow commands from
+      // stdout only, so ::error:: on stderr would never annotate.
+      console.log(`::error::${error.message}`);
+      return error.code === 'VERSION_SHIPPED' ? 3 : 2;
+    }
+    return 0;
+  }
+  console.log(JSON.stringify(getVersion(args), null, 2));
+  return 0;
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  console.log(JSON.stringify(getVersion(getArgs()), null, 2));
+  const exitCode = runCli(getArgs());
+  if (exitCode !== 0) {
+    process.exit(exitCode);
+  }
 }

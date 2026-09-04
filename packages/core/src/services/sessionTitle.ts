@@ -4,9 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { stripTrailingUserPromptSubmitContextPart } from '../hooks/user-prompt-submit-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getStartupContextLength,
+  stripSystemReminderBlocks,
+} from '../core/environmentContext.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
 import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
 
@@ -15,6 +21,20 @@ const debugLogger = createDebugLogger('SESSION_TITLE');
 const MAX_CONVERSATION_CHARS = 1000;
 const RECENT_MESSAGE_WINDOW = 20;
 
+// The "Good examples" shown to the model in TITLE_SYSTEM_PROMPT, and the
+// echo-guard set: when the recent conversation carries little topical signal
+// (boilerplate-heavy channel/hook context), the model takes the cheapest
+// schema-valid answer and parrots one of these back verbatim (#9706). A
+// canned example says nothing about the session, so matches are rejected
+// like empty results. The prompt's "Good examples" block is rendered from
+// this array, so the two cannot drift apart.
+const TITLE_PROMPT_EXAMPLE_TITLES = [
+  'Fix login button on mobile',
+  'Add OAuth authentication flow',
+  'Debug failing CI pipeline tests',
+  '重构用户鉴权中间件',
+];
+
 const TITLE_SYSTEM_PROMPT = `Generate a concise, sentence-case title (3-7 words) that captures what this programming-assistant session is about. Think of it as a git commit subject for the session.
 
 Rules:
@@ -22,14 +42,12 @@ Rules:
 - Sentence case: capitalize only the first word and proper nouns. NOT Title Case.
 - No trailing punctuation.
 - No quotes, backticks, or markdown.
-- Match the dominant language of the conversation (English or Chinese). For Chinese, treat as roughly 12-20 characters total; still no trailing punctuation.
 - Be specific about the user's actual goal — name the feature, bug, or subject area. Avoid vague "Code changes", "Help request", "Conversation".
 
 Good examples:
-{"title": "Fix login button on mobile"}
-{"title": "Add OAuth authentication flow"}
-{"title": "Debug failing CI pipeline tests"}
-{"title": "重构用户鉴权中间件"}
+${TITLE_PROMPT_EXAMPLE_TITLES.map(
+  (title) => `{"title": ${JSON.stringify(title)}}`,
+).join('\n')}
 
 Bad (too vague): {"title": "Code changes"}
 Bad (too long): {"title": "Investigate and fix the session title generation issue in the chat recording service"}
@@ -69,15 +87,16 @@ const TRAILING_PAIRED_BRACKETS_RE =
  * command) can surface actionable messages instead of a generic "could not
  * generate".
  *
- * - `no_fast_model`: config.getFastModel() returned undefined. User needs to
- *   configure one via `/model --fast <name>`.
- * - `no_client`: BaseLlmClient or GeminiClient not yet initialized. Rare,
+ * - `no_fast_model`: config.getFastModel() returned undefined.
+ *   User needs to configure one via `/model --fast <name>`.
+ * - `no_client`: BaseLlmClient or LlmClient not yet initialized. Rare,
  *   usually means the session hasn't authenticated yet.
  * - `empty_history`: the conversation has fewer than 2 turns of usable text.
  *   User should send at least one message before asking for a title.
- * - `empty_result`: the model returned nothing parseable into a title. Often
- *   means the model is too small or the conversation text is meaningless
- *   (e.g., only tool calls).
+ * - `empty_result`: the model returned nothing parseable into a title, or
+ *   only parroted back one of the prompt's own example titles (#9706).
+ *   Often means the model is too small or the conversation text is
+ *   meaningless (e.g., only tool calls).
  * - `aborted`: AbortSignal fired (user pressed Ctrl-C / new session / switch).
  * - `model_error`: the LLM call threw — rate limit, auth, network, etc.
  */
@@ -104,18 +123,26 @@ export type SessionTitleOutcome =
 export async function tryGenerateSessionTitle(
   config: Config,
   abortSignal: AbortSignal,
+  userDisplayTexts: ReadonlyArray<string | undefined> = [],
 ): Promise<SessionTitleOutcome> {
   try {
     const model = config.getFastModel();
     if (!model) return { ok: false, reason: 'no_fast_model' };
 
-    const geminiClient = config.getGeminiClient();
-    if (!geminiClient) return { ok: false, reason: 'no_client' };
+    const llmClient = config.getLlmClient();
+    if (!llmClient) return { ok: false, reason: 'no_client' };
 
-    const fullHistory = geminiClient.getChat().getHistory();
+    const fullHistory = llmClient.getHistoryShallow();
     if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
 
-    const dialog = filterToDialog(fullHistory);
+    const hasDisplayProjection = userDisplayTexts.some(
+      (displayText) => displayText !== undefined,
+    );
+    const dialog = hasDisplayProjection
+      ? userDisplayTexts.flatMap((displayText): Content[] =>
+          displayText ? [{ role: 'user', parts: [{ text: displayText }] }] : [],
+        )
+      : filterToDialog(fullHistory);
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
     if (recentHistory.length === 0) {
       return { ok: false, reason: 'empty_history' };
@@ -127,11 +154,8 @@ export async function tryGenerateSessionTitle(
     );
     if (!conversationText.trim()) return { ok: false, reason: 'empty_history' };
 
-    const baseLlmClient = config.getBaseLlmClient();
-    if (!baseLlmClient) return { ok: false, reason: 'no_client' };
-
-    const result = await baseLlmClient.generateJson({
-      model,
+    const result = await runSideQuery<{ title?: string }>(config, {
+      purpose: 'session-title',
       systemInstruction: TITLE_SYSTEM_PROMPT,
       schema: TITLE_SCHEMA as unknown as Record<string, unknown>,
       contents: [
@@ -149,7 +173,6 @@ export async function tryGenerateSessionTitle(
         maxOutputTokens: 100,
       },
       abortSignal,
-      promptId: 'session_title',
       // Titles are best-effort cosmetic metadata — one shot only, no long retry loop.
       maxAttempts: 1,
     });
@@ -159,7 +182,14 @@ export async function tryGenerateSessionTitle(
     const rawTitle =
       typeof result?.['title'] === 'string' ? (result['title'] as string) : '';
     const title = sanitizeTitle(rawTitle);
-    if (!title) return { ok: false, reason: 'empty_result' };
+    if (!title || isPromptExampleEcho(title)) {
+      // Pre-#9706 an echo produced a visible bad title; post-guard the
+      // failure mode is a silent absence, so leave a trace for oncall.
+      debugLogger.warn(
+        `Session title rejected (${title ? 'prompt-example echo' : 'empty'}): ${JSON.stringify(rawTitle)}`,
+      );
+      return { ok: false, reason: 'empty_result' };
+    }
 
     return { ok: true, title, modelUsed: model };
   } catch (err) {
@@ -203,21 +233,63 @@ export function sanitizeTitle(s: string): string {
 }
 
 /**
+ * Detect a sanitized title that is just the model echoing one of the
+ * prompt's own "Good examples" back (#9706). Exact, case-insensitive match
+ * after sanitization — deliberately not fuzzy, so a genuinely topical title
+ * that merely resembles an example still passes. Also catches the prompt's
+ * "Bad (wrong case)" variant of the first example.
+ *
+ * Both sides of the comparison go through `normalizeForEchoCompare`, so an
+ * example carrying edge punctuation (e.g. "Fix CI!") cannot slip past the
+ * guard just because `sanitizeTitle` strips that punctuation off the
+ * candidate (#9772).
+ */
+function isPromptExampleEcho(title: string): boolean {
+  const normalized = normalizeForEchoCompare(title);
+  return TITLE_PROMPT_EXAMPLE_TITLES.some(
+    (example) => normalizeForEchoCompare(example) === normalized,
+  );
+}
+
+/**
+ * Normal form for echo comparison: trimmed, lowercased, with leading/trailing
+ * runs of non-letter/non-digit characters stripped. The strip is Unicode-aware
+ * so no wrapper family — `(...)`, `["..."]`, `<...>`, `«...»` — can bypass it
+ * by falling outside an enumerated character class. Comparison-only: the title
+ * shown to the user is never rewritten by it. Exported for unit tests.
+ */
+export function normalizeForEchoCompare(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .replace(/[^\p{L}\p{N}]+$/u, '');
+}
+
+/**
  * Strip tool calls, tool responses, and hidden reasoning from history; keep
  * only user prompts and the model's user-visible text. A single tool response
  * can be a 10K-token file dump that swamps the title-LLM with irrelevant detail.
  */
 function filterToDialog(history: Content[]): Content[] {
   const out: Content[] = [];
-  for (const msg of history) {
+  for (const msg of history.slice(getStartupContextLength(history))) {
     if (msg.role !== 'user' && msg.role !== 'model') continue;
-    const textParts = (msg.parts ?? []).filter(
-      (part) =>
-        typeof part?.text === 'string' &&
-        part.text.trim() !== '' &&
-        !part.thought &&
-        !part.thoughtSignature,
-    );
+    const textParts: Part[] = [];
+    const parts = stripTrailingUserPromptSubmitContextPart(msg.parts ?? []);
+    for (const part of parts) {
+      if (
+        typeof part?.text !== 'string' ||
+        part.text.trim() === '' ||
+        part.thought ||
+        part.thoughtSignature
+      ) {
+        continue;
+      }
+      const text = stripSystemReminderBlocks(part.text);
+      if (text.trim() === '') continue;
+      textParts.push({ ...part, text });
+    }
     if (textParts.length === 0) continue;
     out.push({ role: msg.role, parts: textParts });
   }

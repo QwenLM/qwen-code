@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  interpolateColor,
   isValidColor,
   resolveColor,
   CSS_NAME_TO_HEX_MAP,
@@ -216,6 +217,41 @@ describe('Color Utils', () => {
         expect(isValidColor(color)).toBe(false);
         expect(resolveColor(color)).toBeUndefined();
       }
+    });
+  });
+
+  describe('interpolateColor', () => {
+    it('returns color1 when factor <= 0', () => {
+      expect(interpolateColor('#000000', '#ffffff', 0)).toBe('#000000');
+      expect(interpolateColor('#000000', '#ffffff', -1)).toBe('#000000');
+    });
+
+    it('returns color2 when factor >= 1', () => {
+      expect(interpolateColor('#000000', '#ffffff', 1)).toBe('#ffffff');
+      expect(interpolateColor('#000000', '#ffffff', 2)).toBe('#ffffff');
+    });
+
+    it('blends two hex colors at 50%', () => {
+      expect(interpolateColor('#000000', '#ffffff', 0.5)).toBe('#808080');
+    });
+
+    it('blends with a small factor', () => {
+      const result = interpolateColor('#000000', '#ffffff', 0.06);
+      expect(result).toMatch(/^#[0-9a-f]{6}$/);
+      expect(result).not.toBe('#000000');
+    });
+
+    it('handles 3-digit hex shorthand', () => {
+      expect(interpolateColor('#000', '#fff', 0.5)).toBe('#808080');
+    });
+
+    it('handles Ink color names', () => {
+      expect(interpolateColor('black', 'white', 0.5)).toBe('#808080');
+    });
+
+    it('returns empty string for unparseable input', () => {
+      expect(interpolateColor('notacolor', '#ffffff', 0.5)).toBe('');
+      expect(interpolateColor('#ffffff', 'notacolor', 0.5)).toBe('');
     });
   });
 });

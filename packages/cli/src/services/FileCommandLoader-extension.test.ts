@@ -70,6 +70,8 @@ describe('FileCommandLoader - Extension Commands Support', () => {
     expect(commands).toHaveLength(1);
     expect(commands[0].name).toBe('test');
     expect(commands[0].extensionName).toBe('test-ext');
+    expect(commands[0].sourceLabel).toBe('Extension: test-ext');
+    expect(commands[0].sourceDetail).toBe('extension');
     expect(commands[0].description).toBe(
       '[test-ext] Test command from extension',
     );

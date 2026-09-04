@@ -10,14 +10,18 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   SessionMetrics,
-  ServerGeminiStreamEvent,
+  ServerLlmStreamEvent,
   AgentResultDisplay,
   McpToolProgressData,
+  ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
-  GeminiEventType,
+  formatVisionBridgeNoticeDisplay,
+  LlmEventType,
+  isVisionBridgeNoticeDisplay,
   ToolErrorType,
   parseAndFormatApiError,
+  toolResultBoundaryArtifact,
 } from '@qwen-code/qwen-code-core';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type {
@@ -31,13 +35,16 @@ import type {
   ContentBlock,
   ControlMessage,
   ExtendedUsage,
+  PermissionSuggestion,
   TextBlock,
   ThinkingBlock,
   ToolResultBlock,
   ToolUseBlock,
   Usage,
 } from '../types.js';
-import { functionResponsePartsToString } from '../../utils/nonInteractiveHelpers.js';
+import { functionResponsePartsToString } from '../nonInteractiveHelpers.js';
+import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
+import { observeHeadlessToolResultProjection } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * Internal state for managing a single message context (main agent or subagent).
@@ -66,6 +73,12 @@ export interface ResultOptions {
   readonly stats?: SessionMetrics;
   readonly summary?: string;
   readonly subtype?: string;
+  /**
+   * Payload that the model submitted via the synthetic `structured_output`
+   * tool. When set, `result` is forced to the JSON-stringified form and a
+   * top-level `structured_result` field is added to the result message.
+   */
+  readonly structuredResult?: unknown;
 }
 
 /**
@@ -90,11 +103,11 @@ export interface MessageEmitter {
    * In non-streaming mode, this is a no-op.
    *
    * @param request - Tool call request info
-   * @param progress - Structured MCP progress data
+   * @param progress - Structured MCP progress data or shell liveness heartbeat
    */
   emitToolProgress(
     request: ToolCallRequestInfo,
-    progress: McpToolProgressData,
+    progress: McpToolProgressData | ShellProgressData,
   ): void;
 }
 
@@ -105,7 +118,7 @@ export interface MessageEmitter {
  */
 export interface JsonOutputAdapterInterface extends MessageEmitter {
   startAssistantMessage(): void;
-  processEvent(event: ServerGeminiStreamEvent): void;
+  processEvent(event: ServerLlmStreamEvent): void;
   finalizeAssistantMessage(): CLIAssistantMessage;
   emitResult(options: ResultOptions): void;
 
@@ -188,7 +201,7 @@ export abstract class BaseJsonOutputAdapter {
   /**
    * Creates a Usage object from metadata.
    *
-   * @param metadata - Optional usage metadata from Gemini API
+   * @param metadata - Optional LLM usage metadata
    * @returns Usage object
    */
   protected createUsage(
@@ -592,27 +605,27 @@ export abstract class BaseJsonOutputAdapter {
   }
 
   /**
-   * Processes a stream event from the Gemini API.
+   * Processes an LLM stream event.
    * This is a shared implementation used by both streaming and non-streaming adapters.
    *
-   * @param event - Stream event from Gemini API
+   * @param event - LLM stream event
    */
-  processEvent(event: ServerGeminiStreamEvent): void {
+  processEvent(event: ServerLlmStreamEvent): void {
     const state = this.mainAgentMessageState;
     if (state.finalized) {
       return;
     }
 
     switch (event.type) {
-      case GeminiEventType.Content:
+      case LlmEventType.Content:
         this.appendText(state, event.value, null);
         break;
-      case GeminiEventType.Citation:
+      case LlmEventType.Citation:
         if (typeof event.value === 'string') {
           this.appendText(state, `\n${event.value}`, null);
         }
         break;
-      case GeminiEventType.Thought:
+      case LlmEventType.Thought:
         this.appendThinking(
           state,
           event.value.subject,
@@ -620,16 +633,16 @@ export abstract class BaseJsonOutputAdapter {
           null,
         );
         break;
-      case GeminiEventType.ToolCallRequest:
+      case LlmEventType.ToolCallRequest:
         this.appendToolUse(state, event.value, null);
         break;
-      case GeminiEventType.Finished:
+      case LlmEventType.Finished:
         if (event.value?.usageMetadata) {
           state.usage = this.createUsage(event.value.usageMetadata);
         }
         this.finalizePendingBlocks(state, null);
         break;
-      case GeminiEventType.Error: {
+      case LlmEventType.Error: {
         // Format the error message using parseAndFormatApiError for consistency
         // with interactive mode error display
         const errorText = parseAndFormatApiError(
@@ -639,6 +652,17 @@ export abstract class BaseJsonOutputAdapter {
         this.appendText(state, errorText, null);
         break;
       }
+      case LlmEventType.ModelFallback:
+        // Surface model fallback transitions so non-interactive consumers
+        // (CI pipelines, SDK clients) can observe capacity-driven model
+        // switches without parsing assistant content.
+        this.emitSystemMessage('model_fallback', {
+          fromModel: event.fromModel,
+          toModel: event.toModel,
+          statusCode: event.statusCode,
+          fallbackIndex: event.fallbackIndex,
+        });
+        break;
       default:
         break;
     }
@@ -1037,8 +1061,10 @@ export abstract class BaseJsonOutputAdapter {
       is_error: hasError,
     };
     const content = toolResultContent(response);
+    let projectedContent: string | undefined;
     if (content !== undefined) {
-      block.content = content;
+      projectedContent = projectHeadlessToolResultContent(content);
+      block.content = projectedContent;
     }
 
     const message: CLIUserMessage = {
@@ -1051,6 +1077,19 @@ export abstract class BaseJsonOutputAdapter {
         content: [block],
       },
     };
+    if (content !== undefined && projectedContent !== undefined) {
+      observeHeadlessToolResultProjection(
+        message,
+        content,
+        projectedContent,
+        request.callId,
+        response.boundaryArtifact ??
+          toolResultBoundaryArtifact(
+            response.persistedOutputFiles,
+            response.artifacts,
+          ),
+      );
+    }
     this.emitMessageImpl(message);
   }
 
@@ -1081,6 +1120,7 @@ export abstract class BaseJsonOutputAdapter {
     toolUseId: string,
     input: unknown,
     blockedPath: string | null = null,
+    permissionSuggestions: PermissionSuggestion[] | null = null,
   ): void {
     const message: ControlMessage = {
       type: 'control_request',
@@ -1090,7 +1130,7 @@ export abstract class BaseJsonOutputAdapter {
         tool_name: toolName,
         tool_use_id: toolUseId,
         input,
-        permission_suggestions: null,
+        permission_suggestions: permissionSuggestions,
         blocked_path: blockedPath,
       },
     };
@@ -1138,11 +1178,11 @@ export abstract class BaseJsonOutputAdapter {
    * to emit stream events when includePartialMessages is enabled.
    *
    * @param _request - Tool call request info
-   * @param _progress - Structured MCP progress data
+   * @param _progress - Structured MCP progress data or shell liveness heartbeat
    */
   emitToolProgress(
     _request: ToolCallRequestInfo,
-    _progress: McpToolProgressData,
+    _progress: McpToolProgressData | ShellProgressData,
   ): void {
     // No-op in base class. Only StreamJsonOutputAdapter emits tool progress
     // as stream events when includePartialMessages is enabled.
@@ -1188,7 +1228,28 @@ export abstract class BaseJsonOutputAdapter {
         error: { message: errorMessage },
       };
     } else {
-      const success: CLIResultMessageSuccess & { stats?: SessionMetrics } = {
+      // Track presence by property existence — `runNonInteractive` may
+      // legitimately pass `structuredResult: undefined` (e.g. the model
+      // called structured_output with no args under an empty schema).
+      // A `!== undefined` sentinel would silently fall back to the
+      // free-text `resultText` path and drop the `structured_result`
+      // field, breaking the structured-output contract.
+      //
+      // Normalize an `undefined` submission to `null` so both
+      // `JSON.stringify` (for `result`) and the top-level
+      // `structured_result` field render as a JSON-safe `null` instead
+      // of being silently omitted.
+      const hasStructured = 'structuredResult' in options;
+      const normalizedStructured = hasStructured
+        ? (options.structuredResult ?? null)
+        : undefined;
+      const finalResult = hasStructured
+        ? JSON.stringify(normalizedStructured)
+        : resultText;
+      const success: CLIResultMessageSuccess & {
+        stats?: SessionMetrics;
+        structured_result?: unknown;
+      } = {
         type: 'result',
         subtype:
           (options.subtype as CLIResultMessageSuccess['subtype']) ?? 'success',
@@ -1198,13 +1259,16 @@ export abstract class BaseJsonOutputAdapter {
         duration_ms: options.durationMs,
         duration_api_ms: options.apiDurationMs,
         num_turns: options.numTurns,
-        result: resultText,
+        result: finalResult,
         usage,
         permission_denials: [...this.permissionDenials],
       };
 
       if (options.stats) {
         success.stats = options.stats;
+      }
+      if (hasStructured) {
+        success.structured_result = normalizedStructured;
       }
 
       return success;
@@ -1356,16 +1420,60 @@ function checkResponsePartsForError(
  * @param response - Tool call response
  * @returns String content or undefined
  */
+function mcpAppFallbackText(display: unknown): string | undefined {
+  if (
+    !display ||
+    typeof display !== 'object' ||
+    !('type' in display) ||
+    display.type !== 'mcp_app' ||
+    !('fallbackText' in display) ||
+    typeof display.fallbackText !== 'string'
+  ) {
+    return undefined;
+  }
+  const text = display.fallbackText.trim();
+  return text.length > 0 ? display.fallbackText : undefined;
+}
+
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
-  if (response.error) {
-    return response.error.message;
+  if (response.visionBridgeNotice) {
+    const content = toolResultContent({
+      ...response,
+      visionBridgeNotice: undefined,
+    });
+    return content
+      ? `${response.visionBridgeNotice}\n${content}`
+      : response.visionBridgeNotice;
   }
-  // Check for errors in responseParts (e.g., cancelled responses)
+  if (isVisionBridgeNoticeDisplay(response.resultDisplay)) {
+    const notice = formatVisionBridgeNoticeDisplay(response.resultDisplay);
+    if (response.error) {
+      return `${notice}\n${response.error.message}`;
+    }
+    const responsePartsError = checkResponsePartsForError(
+      response.responseParts,
+    );
+    if (responsePartsError) {
+      return `${notice}\n${responsePartsError}`;
+    }
+    if (response.responseParts && response.responseParts.length > 0) {
+      return `${notice}\n${functionResponsePartsToString(response.responseParts)}`;
+    }
+    return notice;
+  }
+  // Prefer model-facing detail over the short operational error summary.
   const responsePartsError = checkResponsePartsForError(response.responseParts);
   if (responsePartsError) {
     return responsePartsError;
+  }
+  if (response.error) {
+    return response.error.message;
+  }
+  const mcpAppFallback = mcpAppFallbackText(response.resultDisplay);
+  if (mcpAppFallback) {
+    return mcpAppFallback;
   }
   if (
     typeof response.resultDisplay === 'string' &&

@@ -238,6 +238,40 @@ describe('performVariableReplacement', () => {
     expect(result).not.toContain('${CLAUDE_PLUGIN_ROOT}');
   });
 
+  it('should edit a staging directory using a separate installed path', () => {
+    const stagingDir = path.join(testDir, 'staging');
+    const installedDir = path.join(testDir, 'installed');
+    fs.mkdirSync(stagingDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stagingDir, 'README.md'),
+      '${CLAUDE_PLUGIN_ROOT}/config.json',
+      'utf-8',
+    );
+
+    performVariableReplacement(stagingDir, installedDir);
+
+    expect(fs.readFileSync(path.join(stagingDir, 'README.md'), 'utf-8')).toBe(
+      `${installedDir}/config.json`,
+    );
+  });
+
+  it('should preserve replacement metacharacters in the installed path', () => {
+    const stagingDir = path.join(testDir, 'staging');
+    const installedDir = path.join(testDir, "installed-$&-$`-$'");
+    fs.mkdirSync(stagingDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(stagingDir, 'README.md'),
+      '${CLAUDE_PLUGIN_ROOT}/config.json',
+      'utf-8',
+    );
+
+    performVariableReplacement(stagingDir, installedDir);
+
+    expect(fs.readFileSync(path.join(stagingDir, 'README.md'), 'utf-8')).toBe(
+      `${installedDir}/config.json`,
+    );
+  });
+
   it('should convert ```! syntax to !{} in markdown files', () => {
     const extDir = path.join(testDir, 'ext');
     fs.mkdirSync(extDir, { recursive: true });

@@ -12,19 +12,24 @@ import {
   HookType,
 } from '@qwen-code/qwen-code-core';
 import { HookDetailStep } from './HookDetailStep.js';
-import type { HookEventDisplayInfo } from './types.js';
+import type { HookConfigDisplayInfo, HookEventDisplayInfo } from './types.js';
 
-// Mock i18n module
 vi.mock('../../../i18n/index.js', () => ({
-  t: vi.fn((key: string) => key),
+  t: vi.fn((key: string, options?: { count?: string }) => {
+    if (key === '{{count}} hook' && options?.count) {
+      return `${options.count} hook`;
+    }
+    if (key === '{{count}} hooks' && options?.count) {
+      return `${options.count} hooks`;
+    }
+    return key;
+  }),
 }));
 
-// Mock useTerminalSize
 vi.mock('../../hooks/useTerminalSize.js', () => ({
   useTerminalSize: vi.fn(() => ({ columns: 100, rows: 24 })),
 }));
 
-// Mock semantic-colors
 vi.mock('../../semantic-colors.js', () => ({
   theme: {
     text: {
@@ -39,190 +44,282 @@ vi.mock('../../semantic-colors.js', () => ({
   },
 }));
 
-describe('HookDetailStep', () => {
-  const createMockHookInfo = (
-    event: HookEventName,
-    configCount = 0,
-    hasDescription = true,
-  ): HookEventDisplayInfo => ({
-    event,
-    shortDescription: `Short description for ${event}`,
-    description: hasDescription ? `Detailed description for ${event}` : '',
-    exitCodes: [
+function makeConfig(
+  command: string,
+  source: HooksConfigSource = HooksConfigSource.User,
+  matcher = '*',
+): HookConfigDisplayInfo {
+  return {
+    config: { command, type: HookType.Command },
+    source,
+    sourceDisplay:
+      source === HooksConfigSource.User ? 'User Settings' : 'Local Settings',
+    matcher,
+    enabled: true,
+  };
+}
+
+function makeHookInfo(
+  groups: Array<{
+    matcher: string;
+    configs: HookConfigDisplayInfo[];
+    sequential?: boolean;
+  }>,
+  opts: {
+    event?: HookEventName;
+    description?: string;
+    exitCodes?: HookEventDisplayInfo['exitCodes'];
+    flatConfigs?: HookConfigDisplayInfo[];
+  } = {},
+): HookEventDisplayInfo {
+  const matcherGroups = opts.flatConfigs
+    ? [{ matcher: '*', configs: opts.flatConfigs, sequential: false }]
+    : groups;
+  return {
+    event: opts.event ?? HookEventName.PreToolUse,
+    shortDescription: 'short',
+    description: opts.description ?? '',
+    exitCodes: opts.exitCodes ?? [
       { code: 0, description: 'Success' },
       { code: 2, description: 'Block' },
     ],
-    configs: Array(configCount)
-      .fill(null)
-      .map((_, i) => ({
-        config: { command: `hook-command-${i}`, type: HookType.Command },
-        source:
-          i % 2 === 0 ? HooksConfigSource.User : HooksConfigSource.Project,
-        sourceDisplay: i % 2 === 0 ? 'User Settings' : 'Local Settings',
-        enabled: true,
-      })),
-  });
+    matcherGroups,
+  };
+}
 
+describe('HookDetailStep', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
-  it('should render hook event name as title', () => {
-    const hook = createMockHookInfo(HookEventName.PreToolUse);
+  it('renders the "Event - Matchers" title', () => {
+    const hook = makeHookInfo([
+      { matcher: '*', configs: [makeConfig('/x.sh')] },
+    ]);
 
     const { lastFrame } = render(
       <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
-    expect(lastFrame()).toContain(HookEventName.PreToolUse);
+    expect(lastFrame()).toContain(`${HookEventName.PreToolUse} - Matchers`);
   });
 
-  it('should render description when present', () => {
-    const hook = createMockHookInfo(HookEventName.PreToolUse, 0, true);
+  it('renders event description when present', () => {
+    const hook = makeHookInfo(
+      [{ matcher: '*', configs: [makeConfig('/x.sh')] }],
+      { description: 'desc-for-event' },
+    );
 
     const { lastFrame } = render(
       <HookDetailStep hook={hook} selectedIndex={0} />,
     );
 
-    expect(lastFrame()).toContain('Detailed description for PreToolUse');
+    expect(lastFrame()).toContain('desc-for-event');
   });
 
-  it('should not render description section when empty', () => {
-    const hook = createMockHookInfo(HookEventName.Stop, 0, false);
+  it('renders inline exit code descriptions', () => {
+    const hook = makeHookInfo([
+      { matcher: '*', configs: [makeConfig('/x.sh')] },
+    ]);
 
-    const { lastFrame } = render(
-      <HookDetailStep hook={hook} selectedIndex={0} />,
+    const out =
+      render(<HookDetailStep hook={hook} selectedIndex={0} />).lastFrame() ??
+      '';
+    expect(out).toContain('Exit code');
+    expect(out).toContain('Success');
+    expect(out).toContain('Block');
+    const hook2 = makeHookInfo(
+      [{ matcher: '*', configs: [makeConfig('/x.sh')] }],
+      {
+        exitCodes: [{ code: 'Other', description: 'other-desc' }],
+      },
     );
-
-    // Stop event has empty description
-    const output = lastFrame();
-    expect(output).toContain(HookEventName.Stop);
+    const out2 =
+      render(<HookDetailStep hook={hook2} selectedIndex={0} />).lastFrame() ??
+      '';
+    expect(out2).toContain('Other exit codes');
+    expect(out2).toContain('other-desc');
   });
 
-  it('should render exit codes', () => {
-    const hook = createMockHookInfo(HookEventName.PreToolUse);
+  it('shows empty state when no matcher groups', () => {
+    const hook = makeHookInfo([]);
 
-    const { lastFrame } = render(
-      <HookDetailStep hook={hook} selectedIndex={0} />,
-    );
-
-    const output = lastFrame();
-    expect(output).toContain('Exit codes');
-    expect(output).toContain('0');
-    expect(output).toContain('Success');
-    expect(output).toContain('2');
-    expect(output).toContain('Block');
+    const out =
+      render(<HookDetailStep hook={hook} selectedIndex={0} />).lastFrame() ??
+      '';
+    expect(out).toContain('No hooks configured for this event');
+    expect(out).toContain('Esc to go back');
   });
 
-  it('should show empty state when no configs', () => {
-    const hook = createMockHookInfo(HookEventName.PreToolUse, 0);
+  it('renders matcher rows with [Source] label and matcher', () => {
+    const hook = makeHookInfo([
+      {
+        matcher: '*',
+        configs: [makeConfig('/star.sh', HooksConfigSource.User, '*')],
+      },
+      {
+        matcher: 'Bash',
+        configs: [makeConfig('/bash.sh', HooksConfigSource.User, 'Bash')],
+      },
+    ]);
 
-    const { lastFrame } = render(
-      <HookDetailStep hook={hook} selectedIndex={0} />,
-    );
-
-    const output = lastFrame();
-    expect(output).toContain('No hooks configured for this event');
-    expect(output).toContain('To add hooks, edit settings.json');
+    const out =
+      render(<HookDetailStep hook={hook} selectedIndex={0} />).lastFrame() ??
+      '';
+    expect(out).toContain('[User] *');
+    expect(out).toContain('[User] Bash');
   });
 
-  it('should show configured hooks list when configs exist', () => {
-    const hook = createMockHookInfo(HookEventName.PreToolUse, 2);
+  it('uses Project label for workspace-source matcher groups', () => {
+    const hook = makeHookInfo([
+      {
+        matcher: 'Bash',
+        configs: [makeConfig('/bash.sh', HooksConfigSource.Project, 'Bash')],
+      },
+    ]);
 
-    const { lastFrame } = render(
-      <HookDetailStep hook={hook} selectedIndex={0} />,
-    );
-
-    const output = lastFrame();
-    expect(output).toContain('Configured hooks');
-    expect(output).toContain('[command]');
-    expect(output).toContain('hook-command-0');
-    expect(output).toContain('hook-command-1');
+    const out =
+      render(<HookDetailStep hook={hook} selectedIndex={0} />).lastFrame() ??
+      '';
+    expect(out).toContain('[Project] Bash');
   });
 
-  it('should show source display for each config', () => {
-    const hook = createMockHookInfo(HookEventName.PreToolUse, 2);
+  it('renders all unique source labels for mixed-source matcher groups', () => {
+    const hook = makeHookInfo([
+      {
+        matcher: 'Bash',
+        configs: [
+          makeConfig('/user.sh', HooksConfigSource.User, 'Bash'),
+          makeConfig('/project.sh', HooksConfigSource.Project, 'Bash'),
+          makeConfig('/user-two.sh', HooksConfigSource.User, 'Bash'),
+        ],
+      },
+    ]);
 
-    const { lastFrame } = render(
-      <HookDetailStep hook={hook} selectedIndex={0} />,
-    );
-
-    const output = lastFrame();
-    expect(output).toContain('User Settings');
-    expect(output).toContain('Local Settings');
+    const out =
+      render(<HookDetailStep hook={hook} selectedIndex={0} />).lastFrame() ??
+      '';
+    expect(out).toContain('[User, Project] Bash');
   });
 
-  it('should show selection indicator for first config', () => {
-    const hook = createMockHookInfo(HookEventName.PreToolUse, 3);
+  it('renders singular "1 hook" and plural "N hooks"', () => {
+    const hook = makeHookInfo([
+      {
+        matcher: '*',
+        configs: [makeConfig('/a.sh', HooksConfigSource.User, '*')],
+      },
+      {
+        matcher: 'Bash',
+        configs: [
+          makeConfig('/b.sh', HooksConfigSource.User, 'Bash'),
+          makeConfig('/c.sh', HooksConfigSource.User, 'Bash'),
+        ],
+      },
+    ]);
 
-    const { lastFrame } = render(
-      <HookDetailStep hook={hook} selectedIndex={0} />,
-    );
-
-    const output = lastFrame();
-    expect(output).toContain('❯');
+    const out =
+      render(<HookDetailStep hook={hook} selectedIndex={0} />).lastFrame() ??
+      '';
+    expect(out).toContain('1 hook');
+    expect(out).toContain('2 hooks');
   });
 
-  it('should show keyboard hint for going back', () => {
-    const hook = createMockHookInfo(HookEventName.PreToolUse);
+  it('does not render specific command text on the matcher list page', () => {
+    const hook = makeHookInfo([
+      {
+        matcher: 'Bash',
+        configs: [
+          makeConfig(
+            '/very-specific-command.sh',
+            HooksConfigSource.User,
+            'Bash',
+          ),
+        ],
+      },
+    ]);
 
-    const { lastFrame } = render(
-      <HookDetailStep hook={hook} selectedIndex={0} />,
-    );
-
-    expect(lastFrame()).toContain('Esc to go back');
+    const out =
+      render(<HookDetailStep hook={hook} selectedIndex={0} />).lastFrame() ??
+      '';
+    expect(out).not.toContain('/very-specific-command.sh');
   });
 
-  it('should render with multiple configs', () => {
-    const hook = createMockHookInfo(HookEventName.PostToolUse, 5);
+  it('places the selection arrow on the selected matcher row', () => {
+    const hook = makeHookInfo([
+      {
+        matcher: '*',
+        configs: [makeConfig('/a.sh', HooksConfigSource.User, '*')],
+      },
+      {
+        matcher: 'Bash',
+        configs: [makeConfig('/b.sh', HooksConfigSource.User, 'Bash')],
+      },
+    ]);
 
-    const { lastFrame } = render(
-      <HookDetailStep hook={hook} selectedIndex={0} />,
-    );
-
-    const output = lastFrame();
-    expect(output).toContain('1.');
-    expect(output).toContain('2.');
-    expect(output).toContain('3.');
-    expect(output).toContain('4.');
-    expect(output).toContain('5.');
+    const out =
+      render(<HookDetailStep hook={hook} selectedIndex={1} />).lastFrame() ??
+      '';
+    const arrowLine = out.split('\n').find((line) => line.includes('❯'));
+    expect(arrowLine).toBeDefined();
+    expect(arrowLine).toContain('Bash');
   });
 
-  it('should handle hook with no exit codes', () => {
-    const hook: HookEventDisplayInfo = {
-      event: HookEventName.PreToolUse,
-      shortDescription: 'Test',
-      description: 'Test description',
-      exitCodes: [],
-      configs: [],
-    };
+  it('renders the Enter/Esc footer hint', () => {
+    const hook = makeHookInfo([
+      { matcher: '*', configs: [makeConfig('/x.sh')] },
+    ]);
 
-    const { lastFrame } = render(
-      <HookDetailStep hook={hook} selectedIndex={0} />,
-    );
-
-    const output = lastFrame();
-    expect(output).not.toContain('Exit codes');
+    const out =
+      render(<HookDetailStep hook={hook} selectedIndex={0} />).lastFrame() ??
+      '';
+    expect(out).toContain('Enter to select');
+    expect(out).toContain('Esc to go back');
   });
 
-  it('should handle different hook event types', () => {
-    const events = [
-      HookEventName.Stop,
-      HookEventName.PreToolUse,
-      HookEventName.PostToolUse,
-      HookEventName.UserPromptSubmit,
-      HookEventName.SessionStart,
-      HookEventName.SessionEnd,
-    ];
+  describe('non-matcher events (e.g. Stop)', () => {
+    it('does not append " - Matchers" to the title', () => {
+      const hook = makeHookInfo([], {
+        event: HookEventName.Stop,
+        flatConfigs: [makeConfig('/stop.sh', HooksConfigSource.User, '*')],
+      });
 
-    for (const event of events) {
-      const hook = createMockHookInfo(event, 1);
+      const out =
+        render(<HookDetailStep hook={hook} selectedIndex={0} />).lastFrame() ??
+        '';
+      expect(out).toContain(HookEventName.Stop);
+      expect(out).not.toContain('- Matchers');
+    });
 
-      const { lastFrame } = render(
-        <HookDetailStep hook={hook} selectedIndex={0} />,
-      );
+    it('renders the handler list directly (with command and source)', () => {
+      const hook = makeHookInfo([], {
+        event: HookEventName.Stop,
+        flatConfigs: [
+          makeConfig('/stop-one.sh', HooksConfigSource.User, '*'),
+          makeConfig('/stop-two.sh', HooksConfigSource.Project, '*'),
+        ],
+      });
 
-      expect(lastFrame()).toContain(event);
-    }
+      const out =
+        render(<HookDetailStep hook={hook} selectedIndex={0} />).lastFrame() ??
+        '';
+      expect(out).toContain('[command]');
+      expect(out).toContain('/stop-one.sh');
+      expect(out).toContain('/stop-two.sh');
+      expect(out).toContain('User Settings');
+      expect(out).toContain('Local Settings');
+      expect(out).toContain('Enter to select');
+    });
+
+    it('shows empty state when a non-matcher event has no handlers', () => {
+      const hook = makeHookInfo([], {
+        event: HookEventName.Stop,
+        flatConfigs: [],
+      });
+
+      const out =
+        render(<HookDetailStep hook={hook} selectedIndex={0} />).lastFrame() ??
+        '';
+      expect(out).toContain('No hooks configured for this event');
+    });
   });
 });

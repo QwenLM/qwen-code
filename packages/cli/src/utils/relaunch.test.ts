@@ -14,15 +14,22 @@ import {
   type MockInstance,
 } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { RELAUNCH_EXIT_CODE } from './processUtils.js';
+import {
+  RELAUNCH_EXIT_CODE,
+  UPDATE_ON_EXIT_MESSAGE,
+  UPDATE_RELAUNCH_EXIT_CODE,
+} from './processUtils.js';
 import type { ChildProcess } from 'node:child_process';
 import { spawn } from 'node:child_process';
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
+  const mockSpawn = vi.fn();
+  // Named re-exports must be spelled out for vitest ESM mocking to rebind them.
   return {
     ...actual,
-    spawn: vi.fn(),
+    default: { ...actual, spawn: mockSpawn },
+    spawn: mockSpawn,
   };
 });
 
@@ -76,6 +83,31 @@ describe('relaunchOnExitCode', () => {
 
     expect(runner).toHaveBeenCalledTimes(3);
     expect(processExitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('should update after the child exits', async () => {
+    const onUpdateRelaunch = vi.fn().mockResolvedValue(0);
+    const runner = vi.fn().mockResolvedValue(UPDATE_RELAUNCH_EXIT_CODE);
+
+    await expect(
+      relaunchOnExitCode(runner, { onUpdateRelaunch }),
+    ).rejects.toThrow('PROCESS_EXIT_CALLED');
+
+    expect(onUpdateRelaunch).toHaveBeenCalledWith(true);
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(processExitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('should exit with the updated CLI result', async () => {
+    const runner = vi.fn().mockResolvedValue(UPDATE_RELAUNCH_EXIT_CODE);
+    const onUpdateRelaunch = vi.fn().mockResolvedValue(7);
+
+    await expect(
+      relaunchOnExitCode(runner, { onUpdateRelaunch }),
+    ).rejects.toThrow('PROCESS_EXIT_CALLED');
+
+    expect(processExitSpy).toHaveBeenCalledWith(7);
+    expect(runner).toHaveBeenCalledTimes(1);
   });
 
   it('should handle runner errors', async () => {
@@ -274,6 +306,143 @@ describe('relaunchAppInChildProcess', () => {
 
     // Note: Additional integration tests for spawn behavior are complex due to module mocking
     // limitations with ES modules. The core logic is tested in relaunchOnExitCode tests.
+
+    it('should invoke afterSpawn immediately after spawn, before waiting for child exit', async () => {
+      process.argv = ['/usr/bin/node', '/app/cli.js'];
+
+      const afterSpawn = vi.fn();
+      let spawned = false;
+
+      const mockChild = createMockChildProcess(0, false);
+      mockedSpawn.mockImplementation(() => {
+        spawned = true;
+        return mockChild;
+      });
+
+      const promise = relaunchAppInChildProcess([], [], { afterSpawn });
+
+      // Wait until spawn has been called
+      await vi.waitFor(() => {
+        expect(spawned).toBe(true);
+      });
+
+      // afterSpawn must have been called before child exits
+      expect(afterSpawn).toHaveBeenCalledTimes(1);
+
+      // Close the child so the promise resolves
+      mockChild.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+
+      // afterSpawn should still be called only once (first spawn)
+      expect(afterSpawn).toHaveBeenCalledTimes(1);
+    });
+
+    it('passes child-only environment without restoring it on the parent', async () => {
+      process.argv = ['/usr/bin/node', '/app/cli.js'];
+      delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
+      const mockChild = createMockChildProcess(0, false);
+      mockedSpawn.mockReturnValue(mockChild);
+
+      const promise = relaunchAppInChildProcess([], [], {
+        childEnv: {
+          QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+        },
+      });
+
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+      expect(mockedSpawn.mock.calls[0]?.[2]?.env).toMatchObject({
+        QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+        QWEN_CODE_NO_RELAUNCH: 'true',
+      });
+      expect(process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
+
+      mockChild.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+    });
+
+    it('installs a requested automatic update only after a clean child exit', async () => {
+      process.argv = ['/usr/bin/node', '/app/cli.js'];
+
+      const onUpdateRelaunch = vi.fn().mockResolvedValue(44);
+      const mockChild = createMockChildProcess(0, false);
+      mockedSpawn.mockReturnValue(mockChild);
+
+      const promise = relaunchAppInChildProcess([], [], {
+        onUpdateRelaunch,
+      });
+
+      mockChild.emit('message', { type: UPDATE_ON_EXIT_MESSAGE });
+      expect(onUpdateRelaunch).not.toHaveBeenCalled();
+
+      mockChild.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+
+      expect(onUpdateRelaunch).toHaveBeenCalledWith(false);
+      expect(processExitSpy).toHaveBeenCalledWith(44);
+    });
+
+    it('does not carry an update request across relaunches', async () => {
+      process.argv = ['/usr/bin/node', '/app/cli.js'];
+
+      const onUpdateRelaunch = vi.fn().mockResolvedValue(44);
+      const firstChild = createMockChildProcess(0, false);
+      const secondChild = createMockChildProcess(0, false);
+      mockedSpawn
+        .mockReturnValueOnce(firstChild)
+        .mockReturnValueOnce(secondChild);
+
+      const promise = relaunchAppInChildProcess([], [], {
+        onUpdateRelaunch,
+      });
+
+      firstChild.emit('message', { type: UPDATE_ON_EXIT_MESSAGE });
+      firstChild.emit('close', RELAUNCH_EXIT_CODE);
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledTimes(2));
+
+      secondChild.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+
+      expect(onUpdateRelaunch).not.toHaveBeenCalled();
+      expect(processExitSpy).toHaveBeenCalledWith(0);
+    });
+
+    it.each([
+      ['managed ACP', '1', '1'],
+      ['ordinary', undefined, undefined],
+    ])(
+      'handles Electron Node mode for every %s relaunch',
+      async (_name, marker, expectedElectron) => {
+        process.argv = ['/usr/bin/node', '/app/cli.js'];
+        if (marker) {
+          process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] = marker;
+        } else {
+          delete process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
+        }
+        delete process.env['ELECTRON_RUN_AS_NODE'];
+
+        const firstChild = createMockChildProcess(0, false);
+        const secondChild = createMockChildProcess(0, false);
+        mockedSpawn
+          .mockReturnValueOnce(firstChild)
+          .mockReturnValueOnce(secondChild);
+
+        const promise = relaunchAppInChildProcess([], []);
+
+        firstChild.emit('close', RELAUNCH_EXIT_CODE);
+        await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledTimes(2));
+
+        for (const call of mockedSpawn.mock.calls) {
+          const env = call[2]?.env;
+          expect(env?.['ELECTRON_RUN_AS_NODE']).toBe(expectedElectron);
+          expect(env?.['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE']).toBe(marker);
+          expect(env?.['QWEN_CODE_NO_RELAUNCH']).toBe('true');
+        }
+        expect(process.env['ELECTRON_RUN_AS_NODE']).toBeUndefined();
+
+        secondChild.emit('close', 0);
+        await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+      },
+    );
 
     it('should handle null exit code from child process', async () => {
       process.argv = ['/usr/bin/node', '/app/cli.js'];

@@ -26,11 +26,21 @@ import type {
   LspLocation,
   LspRange,
   LspReference,
+  LspStatusSnapshot,
   LspSymbolInformation,
   LspWorkspaceEdit,
+  LspServerStatusInfo,
+  LspServiceReinitializeResult,
 } from './types.js';
 
 import type { NativeLspService } from './NativeLspService.js';
+
+function getErrorMessage(error: unknown): string | undefined {
+  if (error === undefined || error === null) {
+    return undefined;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
 
 /**
  * Adapter class that implements LspClient by delegating to NativeLspService.
@@ -50,6 +60,31 @@ export class NativeLspClient implements LspClient {
    * @param service - The NativeLspService instance to delegate calls to
    */
   constructor(private readonly service: NativeLspService) {}
+
+  /**
+   * Get the status of all configured LSP servers.
+   */
+  getServerStatus(): LspServerStatusInfo[] {
+    const handles = this.service.getServerHandles();
+    const result: LspServerStatusInfo[] = [];
+
+    for (const [name, handle] of handles) {
+      const error = getErrorMessage(handle.error);
+      result.push({
+        name,
+        status: handle.status,
+        command: handle.config.command,
+        languages: handle.config.languages ?? [],
+        ...(error !== undefined ? { error } : {}),
+      });
+    }
+
+    return result;
+  }
+
+  reinitialize(): Promise<LspServiceReinitializeResult> {
+    return this.service.reinitialize();
+  }
 
   /**
    * Search for symbols across the workspace.
@@ -255,5 +290,12 @@ export class NativeLspClient implements LspClient {
     serverName?: string,
   ): Promise<boolean> {
     return this.service.applyWorkspaceEdit(edit, serverName);
+  }
+
+  /**
+   * Get a point-in-time status snapshot for UI and debug logging.
+   */
+  getStatusSnapshot(): LspStatusSnapshot {
+    return this.service.getStatusSnapshot();
   }
 }

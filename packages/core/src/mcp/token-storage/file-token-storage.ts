@@ -9,16 +9,27 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { BaseTokenStorage } from './base-token-storage.js';
-import type { OAuthCredentials } from './types.js';
+import type { OAuthCredentials, SecretStorage } from './types.js';
+import { Storage } from '../../config/storage.js';
+import { atomicWriteFile } from '../../utils/atomicFileWrite.js';
 
-export class FileTokenStorage extends BaseTokenStorage {
+// Secrets are keyed by service name so a single encrypted file can hold secrets
+// for many callers, mirroring how the keychain backend namespaces by service.
+type SecretFileContents = Record<string, Record<string, string>>;
+
+export class FileTokenStorage
+  extends BaseTokenStorage
+  implements SecretStorage
+{
   private readonly tokenFilePath: string;
+  private readonly secretFilePath: string;
   private readonly encryptionKey: Buffer;
 
   constructor(serviceName: string) {
     super(serviceName);
-    const configDir = path.join(os.homedir(), '.qwen');
+    const configDir = Storage.getGlobalQwenDir();
     this.tokenFilePath = path.join(configDir, 'mcp-oauth-tokens-v2.json');
+    this.secretFilePath = path.join(configDir, 'extension-secrets-v1.json');
     this.encryptionKey = this.deriveEncryptionKey();
   }
 
@@ -67,7 +78,9 @@ export class FileTokenStorage extends BaseTokenStorage {
     await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   }
 
-  private async loadTokens(): Promise<Map<string, OAuthCredentials>> {
+  private async loadTokens(
+    allowMissing = false,
+  ): Promise<Map<string, OAuthCredentials>> {
     try {
       const data = await fs.readFile(this.tokenFilePath, 'utf-8');
       const decrypted = this.decrypt(data);
@@ -76,6 +89,9 @@ export class FileTokenStorage extends BaseTokenStorage {
     } catch (error: unknown) {
       const err = error as NodeJS.ErrnoException & { message?: string };
       if (err.code === 'ENOENT') {
+        if (allowMissing) {
+          return new Map();
+        }
         throw new Error('Token file does not exist');
       }
       if (
@@ -99,7 +115,11 @@ export class FileTokenStorage extends BaseTokenStorage {
     const json = JSON.stringify(data, null, 2);
     const encrypted = this.encrypt(json);
 
-    await fs.writeFile(this.tokenFilePath, encrypted, { mode: 0o600 });
+    await atomicWriteFile(this.tokenFilePath, encrypted, {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
   }
 
   async getCredentials(serverName: string): Promise<OAuthCredentials | null> {
@@ -120,7 +140,7 @@ export class FileTokenStorage extends BaseTokenStorage {
   async setCredentials(credentials: OAuthCredentials): Promise<void> {
     this.validateCredentials(credentials);
 
-    const tokens = await this.loadTokens();
+    const tokens = await this.loadTokens(true);
     const updatedCredentials: OAuthCredentials = {
       ...credentials,
       updatedAt: Date.now(),
@@ -180,5 +200,64 @@ export class FileTokenStorage extends BaseTokenStorage {
         throw error;
       }
     }
+  }
+
+  private async loadSecrets(): Promise<SecretFileContents> {
+    try {
+      const data = await fs.readFile(this.secretFilePath, 'utf-8');
+      return JSON.parse(this.decrypt(data)) as SecretFileContents;
+    } catch (error: unknown) {
+      const err = error as NodeJS.ErrnoException;
+      if (err.code === 'ENOENT') {
+        return {};
+      }
+      throw error;
+    }
+  }
+
+  private async saveSecrets(secrets: SecretFileContents): Promise<void> {
+    await this.ensureDirectoryExists();
+    const encrypted = this.encrypt(JSON.stringify(secrets));
+    await atomicWriteFile(this.secretFilePath, encrypted, {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+  }
+
+  // The encrypted file is always usable, so the file backend is always available.
+  async isAvailable(): Promise<boolean> {
+    return true;
+  }
+
+  async setSecret(key: string, value: string): Promise<void> {
+    const secrets = await this.loadSecrets();
+    (secrets[this.serviceName] ??= {})[key] = value;
+    await this.saveSecrets(secrets);
+  }
+
+  async getSecret(key: string): Promise<string | null> {
+    const secrets = await this.loadSecrets();
+    return secrets[this.serviceName]?.[key] ?? null;
+  }
+
+  // Idempotent: deleting a missing secret is a no-op (the keychain backend
+  // throws, but extension-settings callers do not depend on that signal).
+  async deleteSecret(key: string): Promise<void> {
+    const secrets = await this.loadSecrets();
+    const bucket = secrets[this.serviceName];
+    if (!bucket || !(key in bucket)) {
+      return;
+    }
+    delete bucket[key];
+    if (Object.keys(bucket).length === 0) {
+      delete secrets[this.serviceName];
+    }
+    await this.saveSecrets(secrets);
+  }
+
+  async listSecrets(): Promise<string[]> {
+    const secrets = await this.loadSecrets();
+    return Object.keys(secrets[this.serviceName] ?? {});
   }
 }

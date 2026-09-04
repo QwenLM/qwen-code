@@ -1,0 +1,72 @@
+appId: 'com.alibaba.qwen-code.live-host'
+productName: 'Qwen Live Host'
+copyright: 'Copyright © 2026 Alibaba Group.'
+electronVersion: '39.2.7'
+npmRebuild: false
+
+directories:
+  output: 'release'
+  buildResources: 'resources'
+
+files:
+  - 'dist/main.cjs'
+  - 'dist/preload.cjs'
+  - 'dist/renderer/**/*'
+  - 'package.json'
+
+extraMetadata:
+  main: 'dist/main.cjs'
+
+asar: true
+
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  onlyLoadAppFromAsar: true
+  enableEmbeddedAsarIntegrityValidation: true
+
+afterPack: 'scripts/after-pack.cjs'
+
+mac:
+  category: 'public.app-category.utilities'
+  icon: 'dist/icon.icns'
+  minimumSystemVersion: '12.0.0'
+  extendInfo:
+    LSUIElement: true
+    QwenLiveProtocolVersion: 6
+    NSMicrophoneUsageDescription: 'Qwen Live Host uses the microphone for live voice conversations with Qwen Code.'
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: 'build/entitlements.mac.plist'
+  entitlementsInherit: 'build/entitlements.mac.plist'
+  extraResources:
+    - from: 'dist/icon.png'
+      to: 'live-host-icon.png'
+    - from: 'dist/native/qwen-live-appshot.node'
+      to: 'native/qwen-live-appshot.node'
+  target:
+    - target: 'dmg'
+      arch:
+        - 'arm64'
+        - 'x64'
+    - target: 'zip'
+      arch:
+        - 'arm64'
+        - 'x64'
+  artifactName: 'Qwen-Live-Host-${arch}.${ext}'
+
+dmg:
+  artifactName: 'Qwen-Live-Host-${arch}.dmg'
+  title: 'Qwen Live Host'
+  icon: 'dist/icon.icns'
+  contents:
+    - x: 130
+      y: 200
+    - x: 410
+      y: 200
+      type: 'link'
+      path: '/Applications'
+  window:
+    width: 540
+    height: 380

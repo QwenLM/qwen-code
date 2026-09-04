@@ -38,12 +38,18 @@ import { LspServerManager } from './LspServerManager.js';
 import type {
   LspConnectionInterface,
   LspServerHandle,
+  LspServerConfig,
+  LspServiceReinitializeResult,
+  LspSkippedServer,
   LspServerStatus,
+  LspStatusSnapshot,
   NativeLspServiceOptions,
 } from './types.js';
 import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import * as fs from 'node:fs';
+import { promises as fsp } from 'node:fs';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { globSync } from 'glob';
 
@@ -83,6 +89,9 @@ export class NativeLspService {
   private normalizer: LspResponseNormalizer;
   private openedDocuments = new Map<string, Set<string>>();
   private lastConnections = new Map<string, LspConnectionInterface>();
+  private reinitializeQueue: Promise<unknown> = Promise.resolve();
+  private reinitializeAbortController: AbortController | undefined;
+  private stopping = false;
 
   constructor(
     config: CoreConfig,
@@ -138,7 +147,204 @@ export class NativeLspService {
       extensionConfigs,
       userConfigs,
     );
-    this.serverManager.setServerConfigs(serverConfigs);
+    const { admitted, skipped } = this.filterServerConfigs(
+      serverConfigs,
+      workspaceTrusted,
+    );
+    debugLogger.info(
+      `Discovered ${admitted.length} LSP server config(s): ${formatServerNames(
+        admitted.map((config) => config.name),
+      )}, skipped=${formatServerNames(skipped.map((server) => server.name))}`,
+    );
+    this.serverManager.setServerConfigs(admitted);
+  }
+
+  async reinitialize(): Promise<LspServiceReinitializeResult> {
+    if (this.stopping) {
+      throw new Error('LSP reinitialize cancelled');
+    }
+    const controller = new AbortController();
+    const run = async () => {
+      this.throwIfReinitializeAborted(controller.signal);
+      this.reinitializeAbortController = controller;
+      try {
+        return await this.doReinitialize(controller.signal);
+      } finally {
+        if (this.reinitializeAbortController === controller) {
+          this.reinitializeAbortController = undefined;
+        }
+      }
+    };
+    const next = this.reinitializeQueue.then(run, run);
+    this.reinitializeQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  private throwIfReinitializeAborted(signal: AbortSignal): void {
+    if (this.stopping || signal.aborted) {
+      throw new Error('LSP reinitialize cancelled');
+    }
+  }
+
+  private async doReinitialize(
+    signal: AbortSignal,
+  ): Promise<LspServiceReinitializeResult> {
+    this.throwIfReinitializeAborted(signal);
+    const workspaceTrusted = this.config.isTrustedFolder();
+    debugLogger.info(
+      `Reinitializing LSP servers: workspaceRoot=${this.workspaceRoot}, trusted=${workspaceTrusted}`,
+    );
+    if (this.requireTrustedWorkspace && !workspaceTrusted) {
+      this.throwIfReinitializeAborted(signal);
+      const removed = Array.from(this.serverManager.getHandles().keys());
+      await this.serverManager.stopAll();
+      this.throwIfReinitializeAborted(signal);
+      this.clearDocumentTrackingForServers(removed);
+      const result = {
+        reconcile: {
+          added: [],
+          removed,
+          restarted: [],
+          unchanged: [],
+          failed: [],
+        },
+        skipped: [],
+      };
+      debugLogger.info(
+        `LSP reinitialize result: added=<none>, removed=${formatServerNames(
+          removed,
+        )}, restarted=<none>, unchanged=<none>, failed=<none>, skipped=<none>`,
+      );
+      return result;
+    }
+
+    this.throwIfReinitializeAborted(signal);
+    const userConfigs = await this.configLoader.loadUserConfigsStrict();
+    this.throwIfReinitializeAborted(signal);
+    if (!userConfigs.ok) {
+      throw userConfigs.error;
+    }
+
+    const extensionConfigs = await this.configLoader.loadExtensionConfigs(
+      this.getActiveExtensions(),
+    );
+    this.throwIfReinitializeAborted(signal);
+    const serverConfigs = this.configLoader.mergeConfigs(
+      [],
+      extensionConfigs,
+      userConfigs.configs,
+    );
+    const { admitted, skipped } = this.filterServerConfigs(
+      serverConfigs,
+      workspaceTrusted,
+    );
+    this.throwIfReinitializeAborted(signal);
+    const reconcile = await this.serverManager.reconcileServerConfigs(admitted);
+    this.throwIfReinitializeAborted(signal);
+    const restartedOpenDocuments = this.snapshotOpenDocuments(
+      reconcile.restarted,
+    );
+    this.clearDocumentTrackingForServers([
+      ...reconcile.removed,
+      ...reconcile.restarted,
+    ]);
+    await this.replayOpenDocuments(
+      reconcile.restarted,
+      restartedOpenDocuments,
+      signal,
+    );
+    this.throwIfReinitializeAborted(signal);
+    debugLogger.info(
+      `LSP reinitialize result: added=${formatServerNames(
+        reconcile.added,
+      )}, removed=${formatServerNames(
+        reconcile.removed,
+      )}, restarted=${formatServerNames(
+        reconcile.restarted,
+      )}, unchanged=${formatServerNames(
+        reconcile.unchanged,
+      )}, failed=${formatServerNames(
+        reconcile.failed,
+      )}, skipped=${formatServerNames(skipped.map((server) => server.name))}`,
+    );
+    return { reconcile, skipped };
+  }
+
+  private filterServerConfigs(
+    configs: LspServerConfig[],
+    workspaceTrusted: boolean,
+  ): { admitted: LspServerConfig[]; skipped: LspSkippedServer[] } {
+    const admitted: LspServerConfig[] = [];
+    const skipped: LspSkippedServer[] = [];
+    for (const config of configs) {
+      if (!workspaceTrusted && config.trustRequired) {
+        debugLogger.warn(
+          `LSP server ${config.name} requires trusted workspace, skipping`,
+        );
+        skipped.push({ name: config.name, reason: 'server_trust_required' });
+        continue;
+      }
+      admitted.push(config);
+    }
+    return { admitted, skipped };
+  }
+
+  private clearDocumentTrackingForServers(serverNames: string[]): void {
+    for (const name of serverNames) {
+      this.openedDocuments.delete(name);
+      this.lastConnections.delete(name);
+    }
+  }
+
+  private snapshotOpenDocuments(
+    serverNames: string[],
+  ): Map<string, Set<string>> {
+    const snapshots = new Map<string, Set<string>>();
+    for (const name of serverNames) {
+      const documents = this.openedDocuments.get(name);
+      if (documents) {
+        snapshots.set(name, new Set(documents));
+      }
+    }
+    return snapshots;
+  }
+
+  private async replayOpenDocuments(
+    serverNames: string[],
+    snapshots: Map<string, Set<string>>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    this.throwIfReinitializeAborted(signal);
+    if (
+      serverNames.length === 0 ||
+      !serverNames.some((name) => snapshots.has(name))
+    ) {
+      return;
+    }
+    const readyHandles = new Map(this.getReadyHandles());
+    for (const name of serverNames) {
+      this.throwIfReinitializeAborted(signal);
+      const handle = readyHandles.get(name);
+      const documents = snapshots.get(name);
+      if (!handle || !documents) {
+        continue;
+      }
+      let openedAny = false;
+      for (const uri of documents) {
+        this.throwIfReinitializeAborted(signal);
+        try {
+          openedAny = this.sendDocumentOpen(name, handle, uri) || openedAny;
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to replay document ${uri} for LSP server ${name}:`,
+            error,
+          );
+        }
+      }
+      if (openedAny) {
+        await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS, signal);
+      }
+    }
   }
 
   private getActiveExtensions(): Extension[] {
@@ -161,7 +367,11 @@ export class NativeLspService {
    * Stop all LSP servers
    */
   async stop(): Promise<void> {
+    this.stopping = true;
+    this.reinitializeAbortController?.abort();
     await this.serverManager.stopAll();
+    this.openedDocuments.clear();
+    this.lastConnections.clear();
   }
 
   /**
@@ -169,6 +379,75 @@ export class NativeLspService {
    */
   getStatus(): Map<string, LspServerStatus> {
     return this.serverManager.getStatus();
+  }
+
+  /**
+   * Get all server handles for status reporting.
+   */
+  getServerHandles(): ReadonlyMap<string, LspServerHandle> {
+    return this.serverManager.getHandles();
+  }
+
+  /**
+   * Get detailed LSP server status for UI and debug logging.
+   */
+  getStatusSnapshot(): LspStatusSnapshot {
+    const servers = Array.from(this.serverManager.getHandles().entries()).map(
+      ([name, handle]) => {
+        const error =
+          handle.error instanceof Error
+            ? handle.error.message
+            : handle.error
+              ? String(handle.error)
+              : undefined;
+
+        return {
+          name,
+          status: handle.status,
+          languages: handle.config.languages,
+          transport: handle.config.transport,
+          ...(handle.config.command ? { command: handle.config.command } : {}),
+          ...(handle.config.args ? { args: handle.config.args } : {}),
+          ...(handle.config.rootUri ? { rootUri: handle.config.rootUri } : {}),
+          ...(handle.config.workspaceFolder
+            ? { workspaceFolder: handle.config.workspaceFolder }
+            : {}),
+          ...(handle.process?.pid ? { pid: handle.process.pid } : {}),
+          ...(handle.warmedUp !== undefined
+            ? { warmedUp: handle.warmedUp }
+            : {}),
+          ...(handle.restartAttempts !== undefined
+            ? { restartAttempts: handle.restartAttempts }
+            : {}),
+          ...(handle.processDiagnostics?.stderrTail
+            ? { stderrTail: handle.processDiagnostics.stderrTail }
+            : {}),
+          ...(handle.processDiagnostics?.exitCode !== undefined
+            ? { exitCode: handle.processDiagnostics.exitCode }
+            : {}),
+          ...(handle.processDiagnostics?.exitSignal !== undefined
+            ? { exitSignal: handle.processDiagnostics.exitSignal }
+            : {}),
+          ...(error ? { error } : {}),
+        };
+      },
+    );
+
+    return {
+      enabled: true,
+      configuredServers: servers.length,
+      readyServers: servers.filter((server) => server.status === 'READY')
+        .length,
+      failedServers: servers.filter((server) => server.status === 'FAILED')
+        .length,
+      inProgressServers: servers.filter(
+        (server) => server.status === 'IN_PROGRESS',
+      ).length,
+      notStartedServers: servers.filter(
+        (server) => server.status === 'NOT_STARTED',
+      ).length,
+      servers,
+    };
   }
 
   /**
@@ -214,11 +493,28 @@ export class NativeLspService {
     if (lastConnection && lastConnection !== handle.connection) {
       this.openedDocuments.delete(serverName);
     }
-    this.lastConnections.set(serverName, handle.connection);
 
+    if (!this.sendDocumentOpen(serverName, handle, uri)) {
+      return false;
+    }
+
+    // Wait for the LSP server to process the newly opened document.
+    // Without this delay, requests sent immediately after didOpen may return
+    // empty results because the server hasn't finished analyzing the file.
+    await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
+
+    return true;
+  }
+
+  private sendDocumentOpen(
+    serverName: string,
+    handle: LspServerHandle & { connection: LspConnectionInterface },
+    uri: string,
+  ): boolean {
     if (!uri.startsWith('file://')) {
       return false;
     }
+
     const openedForServer = this.openedDocuments.get(serverName);
     if (openedForServer?.has(uri)) {
       return false;
@@ -258,14 +554,10 @@ export class NativeLspService {
       },
     });
 
+    this.lastConnections.set(serverName, handle.connection);
     const nextOpened = openedForServer ?? new Set<string>();
     nextOpened.add(uri);
     this.openedDocuments.set(serverName, nextOpened);
-
-    // Wait for the LSP server to process the newly opened document.
-    // Without this delay, requests sent immediately after didOpen may return
-    // empty results because the server hasn't finished analyzing the file.
-    await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
 
     return true;
   }
@@ -448,8 +740,24 @@ export class NativeLspService {
     return justOpened && !this.serverManager.isTypescriptServer(handle);
   }
 
-  private async delay(ms: number): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, ms));
+  private async delay(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return;
+    }
+    this.throwIfReinitializeAborted(signal);
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        reject(new Error('LSP reinitialize cancelled'));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   /**
@@ -1236,12 +1544,26 @@ export class NativeLspService {
       throw new Error(`Refusing to apply edits outside workspace: ${filePath}`);
     }
 
-    // Read the current file content
+    // Concurrency: this is an async read-modify-write (readFile → splice →
+    // access(W_OK) → atomicWriteFile) with await points between read and
+    // write. atomicWriteFile keeps the file from being torn, but does NOT
+    // serialize writers — two overlapping applyTextEdits calls for the SAME
+    // path can both read the same base content and the second rename clobbers
+    // the first (lost update). Latent today: applyWorkspaceEdit has no
+    // production caller and no workspace/applyEdit handler is wired. Before
+    // wiring one, serialize per resolved filePath (see jsonl-utils getFileLock).
+
+    // Read the current file content. Only treat ENOENT as "new file"; any
+    // other read failure (EACCES on a read-protected file, EISDIR, etc.)
+    // must propagate — otherwise the atomic rename below would silently
+    // replace the unreadable target with edits applied to an empty buffer.
     let content: string;
     try {
-      content = fs.readFileSync(filePath, 'utf-8');
-    } catch {
-      // File doesn't exist, treat as empty
+      content = await fsp.readFile(filePath, 'utf-8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        throw err;
+      }
       content = '';
     }
 
@@ -1277,8 +1599,22 @@ export class NativeLspService {
       lines.splice(startLine, endLine - startLine + 1, ...newLines);
     }
 
-    // Write back to file
-    fs.writeFileSync(filePath, lines.join('\n'), 'utf-8');
+    // Honor file-level write permissions. Atomic rename (tmp + rename)
+    // would otherwise bypass a chmod 0444 lock because rename only needs
+    // parent-directory write access. ENOENT is fine — LSP may be creating
+    // the file via edits.
+    try {
+      await fsp.access(filePath, fs.constants.W_OK);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        throw err;
+      }
+    }
+
+    // Atomic write so a crash mid-edit can't leave the user file half-written.
+    // Async variant avoids blocking the event loop on the LSP edit hot path
+    // (sync renameWithRetry can stall up to 350ms under Atomics.wait backoff).
+    await atomicWriteFile(filePath, lines.join('\n'), { encoding: 'utf-8' });
   }
 
   /**
@@ -1307,4 +1643,8 @@ export class NativeLspService {
           : '';
     return message.includes('No Project');
   }
+}
+
+function formatServerNames(names: readonly string[]): string {
+  return names.length === 0 ? '<none>' : names.join(',');
 }

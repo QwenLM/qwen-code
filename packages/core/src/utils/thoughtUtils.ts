@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { GenerateContentResponse } from '@google/genai';
+import type { GenerateContentResponse, Part } from '@google/genai';
 
 export type ThoughtSummary = {
   subject: string;
@@ -13,6 +13,29 @@ export type ThoughtSummary = {
 
 const START_DELIMITER = '**';
 const END_DELIMITER = '**';
+const OPENAI_REASONING_THOUGHT_MARKER = Symbol('openaiReasoningThought');
+
+type OpenAIReasoningThoughtPart = Part & {
+  [OPENAI_REASONING_THOUGHT_MARKER]?: true;
+};
+
+export function createOpenAIReasoningThoughtPart(text: string): Part {
+  const part: OpenAIReasoningThoughtPart = { text, thought: true };
+  Object.defineProperty(part, OPENAI_REASONING_THOUGHT_MARKER, {
+    value: true,
+  });
+  return part;
+}
+
+/**
+ * @remarks The marker is stored on the original Part object and does not
+ * survive cloning, spreading, or JSON serialization.
+ */
+export function isOpenAIReasoningThoughtPart(part: Part): boolean {
+  return Boolean(
+    (part as OpenAIReasoningThoughtPart)[OPENAI_REASONING_THOUGHT_MARKER],
+  );
+}
 
 /**
  * Parses a raw thought string into a structured ThoughtSummary object.
@@ -55,9 +78,9 @@ export function parseThought(rawText: string): ThoughtSummary {
   return { subject, description };
 }
 
-export function getThoughtText(
+export function getThoughtSummary(
   response: GenerateContentResponse,
-): string | null {
+): ThoughtSummary | null {
   if (response.candidates && response.candidates.length > 0) {
     const candidate = response.candidates[0];
 
@@ -66,10 +89,23 @@ export function getThoughtText(
       candidate.content.parts &&
       candidate.content.parts.length > 0
     ) {
-      return candidate.content.parts
-        .filter((part) => part.thought)
-        .map((part) => part.text ?? '')
-        .join('');
+      const thoughtParts = candidate.content.parts.filter(
+        (part) => part.thought,
+      );
+      if (thoughtParts.length === 0) {
+        return null;
+      }
+
+      const thoughtText = thoughtParts.map((part) => part.text ?? '').join('');
+      if (!thoughtText) {
+        return null;
+      }
+
+      if (thoughtParts.some(isOpenAIReasoningThoughtPart)) {
+        return { subject: '', description: thoughtText };
+      }
+
+      return parseThought(thoughtText);
     }
   }
   return null;

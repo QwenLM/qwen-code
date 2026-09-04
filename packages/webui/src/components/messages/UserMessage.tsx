@@ -6,6 +6,8 @@
 
 import { type FC, memo } from 'react';
 import { CollapsibleFileContent } from './CollapsibleFileContent.js';
+import { EditPencilIcon } from '../icons/EditIcons.js';
+import { MessageMeta } from './MessageMeta.js';
 
 export interface FileContext {
   fileName: string;
@@ -19,13 +21,17 @@ export interface UserMessageProps {
   timestamp: number;
   onFileClick?: (path: string) => void;
   fileContext?: FileContext;
+  onEdit?: () => void;
+  editDisabled?: boolean;
 }
 
 const UserMessageBase: FC<UserMessageProps> = ({
   content,
-  timestamp: _timestamp,
+  timestamp,
   onFileClick,
   fileContext,
+  onEdit,
+  editDisabled = false,
 }) => {
   const getFileContextDisplay = () => {
     if (!fileContext) {
@@ -45,7 +51,7 @@ const UserMessageBase: FC<UserMessageProps> = ({
 
   return (
     <div
-      className="qwen-message user-message-container flex gap-0 my-1 items-start text-left flex-col relative"
+      className="qwen-message user-message-container group flex gap-0 my-1 items-start text-left flex-col relative"
       style={{ position: 'relative' }}
     >
       <div
@@ -64,6 +70,14 @@ const UserMessageBase: FC<UserMessageProps> = ({
           enableFileLinks={false}
         />
       </div>
+
+      <MessageMeta
+        timestamp={timestamp}
+        copyText={content}
+        onEdit={onEdit}
+        editDisabled={editDisabled}
+        editIcon={<EditPencilIcon size={14} />}
+      />
 
       {fileContextDisplay && (
         <div className="mt-1">

@@ -2,14 +2,72 @@ import OpenAI from 'openai';
 import type { GenerateContentConfig } from '@google/genai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import { DEFAULT_MAX_RETRIES, resolveRequestTimeout } from '../constants.js';
 import type { OpenAICompatibleProvider } from './types.js';
+import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import {
   tokenLimit,
-  CAPPED_DEFAULT_MAX_TOKENS,
   hasExplicitOutputLimit,
+  defaultOutputCeiling,
+  parsePositiveIntegerEnvValue,
 } from '../../tokenLimits.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import {
+  REASONING_EFFORT_TIERS,
+  clampReasoningEffort,
+} from '../../reasoning-effort.js';
+import { createDebugLogger } from '../../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
+
+/**
+ * Tiers a generic OpenAI-compatible endpoint accepts. `max` is a vendor
+ * extension rather than part of the shared contract: DeepSeek, GLM-5.2+ and
+ * newer Anthropic models take it natively, but a generic endpoint's ladder
+ * stops at `xhigh` and 400s on anything above it. Matches the OpenAI column
+ * of the effort ladder in
+ * docs/design/2026-06-30-unified-reasoning-effort-cli.md. Subclasses whose
+ * endpoint does accept `max` override `supportedReasoningEfforts`.
+ */
+const OPENAI_COMPATIBLE_EFFORTS: readonly ReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+];
+
+type AssistantMessageWithReasoningFields =
+  OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+    reasoning_content?: string | null;
+    reasoning?: string | null;
+  };
+
+function isQwen3Model(model: string): boolean {
+  return model.toLowerCase().includes('qwen3');
+}
+
+function mirrorReasoningContentToReasoning(
+  message: OpenAI.Chat.ChatCompletionMessageParam,
+): OpenAI.Chat.ChatCompletionMessageParam {
+  if (message.role !== 'assistant') {
+    return message;
+  }
+
+  const assistant = message as AssistantMessageWithReasoningFields;
+  if (
+    typeof assistant.reasoning_content !== 'string' ||
+    assistant.reasoning_content.length === 0 ||
+    typeof assistant.reasoning === 'string'
+  ) {
+    return message;
+  }
+
+  return {
+    ...assistant,
+    reasoning: assistant.reasoning_content,
+  } as OpenAI.Chat.ChatCompletionMessageParam;
+}
 
 /**
  * Default provider for standard OpenAI-compatible APIs
@@ -19,6 +77,12 @@ export class DefaultOpenAICompatibleProvider
 {
   protected contentGeneratorConfig: ContentGeneratorConfig;
   protected cliConfig: Config;
+  /**
+   * Latch so an effort-clamp warning fires once per provider lifetime. Shared
+   * with subclasses that clamp on their own wire shape (see DashScope) so one
+   * provider instance never repeats the notice.
+   */
+  protected effortClampWarned = false;
 
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
@@ -45,12 +109,13 @@ export class DefaultOpenAICompatibleProvider
     const {
       apiKey,
       baseUrl,
-      timeout = DEFAULT_TIMEOUT,
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
+    const timeout = resolveRequestTimeout(this.contentGeneratorConfig.timeout);
     const defaultHeaders = this.buildHeaders();
-    // Configure fetch options to ensure user-configured timeout works as expected
-    // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
+    // Configure fetch options for proxy support and timeout handling.
+    // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
+    // request; without proxy, no custom dispatcher is installed.
     const runtimeOptions = buildRuntimeFetchOptions(
       'openai',
       this.cliConfig.getProxy(),
@@ -65,6 +130,70 @@ export class DefaultOpenAICompatibleProvider
     });
   }
 
+  /**
+   * Effort tiers this endpoint accepts for `model`. Takes the wire model
+   * rather than reading the configured one, because a request may override it
+   * (`pipeline.ts` resolves `request.model || contentGeneratorConfig.model`),
+   * and a capability answered for the wrong model is how an unaccepted tier
+   * reaches the wire. Override in a subclass whose endpoint takes `max`; the
+   * clamp calls it through `this`, so a subclass answer applies even on the
+   * `super.buildRequest` path.
+   */
+  protected supportedReasoningEffortsFor(
+    _model: string | undefined,
+  ): readonly ReasoningEffort[] {
+    return OPENAI_COMPATIBLE_EFFORTS;
+  }
+
+  /**
+   * Cap the pipeline-injected `reasoning.effort` at what this endpoint accepts.
+   * The tier is configured once (`/effort`) and persisted, so an unaccepted
+   * value is not a one-off rejection: it 400s every later request in the
+   * session too.
+   *
+   * Only the pipeline-injected tier is capped. A `reasoning` object the user
+   * put in `samplingParams` ships verbatim (the pipeline hands those keys
+   * straight to the wire and skips the injection entirely), and `extra_body`
+   * merges after this, so both explicit overrides survive unchanged.
+   */
+  protected clampConfiguredReasoningEffort<T extends object>(request: T): T {
+    if (
+      this.contentGeneratorConfig.samplingParams?.['reasoning'] !== undefined
+    ) {
+      return request;
+    }
+    const loose = request as unknown as Record<string, unknown>;
+    const reasoning = loose['reasoning'] as { effort?: unknown } | undefined;
+    const effort = reasoning?.effort;
+    if (
+      typeof effort !== 'string' ||
+      !REASONING_EFFORT_TIERS.includes(effort as ReasoningEffort)
+    ) {
+      return request;
+    }
+    const clamped = clampReasoningEffort(
+      effort as ReasoningEffort,
+      this.supportedReasoningEffortsFor(
+        (loose['model'] as string | undefined) ??
+          this.contentGeneratorConfig.model,
+      ),
+    );
+    if (clamped === effort) {
+      return request;
+    }
+    if (!this.effortClampWarned) {
+      debugLogger.warn(
+        `reasoning.effort='${effort}' is not accepted by this ` +
+          `OpenAI-compatible endpoint; using '${clamped}'.`,
+      );
+      this.effortClampWarned = true;
+    }
+    return {
+      ...loose,
+      reasoning: { ...reasoning, effort: clamped },
+    } as unknown as T;
+  }
+
   buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     _userPromptId: string,
@@ -73,16 +202,34 @@ export class DefaultOpenAICompatibleProvider
 
     // Apply output token limits to ensure max_tokens is set appropriately
     // This prevents occupying too much context window with output reservation
-    const requestWithTokenLimits = this.applyOutputTokenLimit(request);
+    const requestWithTokenLimits = this.clampConfiguredReasoningEffort(
+      this.applyOutputTokenLimit(request),
+    );
+    const messages = isQwen3Model(request.model)
+      ? requestWithTokenLimits.messages.map(mirrorReasoningContentToReasoning)
+      : requestWithTokenLimits.messages;
 
     return {
       ...requestWithTokenLimits,
+      messages,
       ...(extraBody ? extraBody : {}),
     };
   }
 
   getDefaultGenerationConfig(): GenerateContentConfig {
     return {};
+  }
+
+  getResponseParsingOptions(model?: string): OpenAIResponseParsingOptions {
+    // Hybrid-thinking models occasionally bypass the reasoning channel and
+    // emit their thinking as literal <think>/<thinking> tags inside content
+    // (observed in production on qwen3-class models, issue #6666).
+    return {
+      contentOnlyThinkingTagLeaks: true,
+      ...(model && isQwen3Model(model)
+        ? { taggedThinkingTagsAfterReasoning: true }
+        : {}),
+    };
   }
 
   /**
@@ -102,16 +249,16 @@ export class DefaultOpenAICompatibleProvider
    *      configured value entirely (backend may support larger limits)
    * 2. If user didn't configure max_tokens:
    *    - Check QWEN_CODE_MAX_OUTPUT_TOKENS env var first
-   *    - Otherwise use min(modelLimit, CAPPED_DEFAULT_MAX_TOKENS=8K)
-   *    - Requests hitting the 8K cap get one clean retry at 64K (geminiChat.ts)
+   *    - Otherwise use the model's output limit, clipped to
+   *      OUTPUT_TOKEN_CEILING (64K)
    * 3. If model has no specific limit (tokenLimit returns default):
-   *    - Still apply CAPPED_DEFAULT_MAX_TOKENS as safeguard
+   *    - Use DEFAULT_OUTPUT_TOKEN_LIMIT
    *
    * Examples:
    * - User sets 4K, known model limit 64K → uses 4K (respects user preference)
    * - User sets 100K, known model limit 64K → uses 64K (capped to avoid API error)
    * - User sets 100K, unknown model → uses 100K (respects user, backend may support it)
-   * - User not set, model limit 64K → uses 8K (capped default for slot optimization)
+   * - User not set, model limit 64K → uses 64K
    * - User not set, model limit 4K → uses 4K (model limit is lower)
    * - User not set, env QWEN_CODE_MAX_OUTPUT_TOKENS=16000 -> uses 16K
    *
@@ -147,17 +294,19 @@ export class DefaultOpenAICompatibleProvider
         effectiveMaxTokens = userMaxTokens;
       }
     } else {
-      // No explicit user config — check env var, then use capped default.
-      // Capped default (8K) reduces GPU slot over-reservation by ~4×.
-      // Requests hitting the cap get one clean retry at 64K (geminiChat.ts).
-      const envVal = process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
-      const envMaxTokens = envVal ? parseInt(envVal, 10) : NaN;
-      if (!isNaN(envMaxTokens) && envMaxTokens > 0) {
+      // No explicit user config — check env var, then use the model limit
+      // clipped to the flat output ceiling (models advertising huge output
+      // limits must not request the whole window; users who need more set
+      // max_tokens explicitly).
+      const envMaxTokens = parsePositiveIntegerEnvValue(
+        process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+      );
+      if (envMaxTokens !== undefined) {
         effectiveMaxTokens = isKnownModel
           ? Math.min(envMaxTokens, modelLimit)
           : envMaxTokens;
       } else {
-        effectiveMaxTokens = Math.min(modelLimit, CAPPED_DEFAULT_MAX_TOKENS);
+        effectiveMaxTokens = defaultOutputCeiling(request.model);
       }
     }
 

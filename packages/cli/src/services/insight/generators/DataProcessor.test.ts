@@ -6,11 +6,20 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DataProcessor } from './DataProcessor.js';
+import { dayKey } from '../dates.js';
 import type { Config, ChatRecord } from '@qwen-code/qwen-code-core';
 import type {
   InsightData,
   SessionFacets,
 } from '../types/StaticInsightTypes.js';
+
+const mockLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  error: vi.fn(),
+  warn: vi.fn(),
+  debug: vi.fn(),
+}));
+const mockRunSideQuery = vi.hoisted(() => vi.fn());
 
 // Mock dependencies
 vi.mock('@qwen-code/qwen-code-core', async () => {
@@ -20,12 +29,8 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
   return {
     ...actual,
     read: vi.fn(),
-    createDebugLogger: vi.fn(() => ({
-      info: vi.fn(),
-      error: vi.fn(),
-      warn: vi.fn(),
-      debug: vi.fn(),
-    })),
+    createDebugLogger: vi.fn(() => mockLogger),
+    runSideQuery: mockRunSideQuery,
   };
 });
 
@@ -53,6 +58,9 @@ describe('DataProcessor', () => {
     vi.clearAllMocks();
 
     mockGenerateJson = vi.fn();
+    mockRunSideQuery.mockImplementation((_config, request) =>
+      mockGenerateJson(request),
+    );
     mockConfig = {
       getBaseLlmClient: vi.fn(() => ({
         generateJson: mockGenerateJson,
@@ -65,26 +73,6 @@ describe('DataProcessor', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-  });
-
-  describe('formatDate', () => {
-    it('should format date as YYYY-MM-DD', () => {
-      const date = new Date('2025-01-15T10:30:00Z');
-      // Access private method through any cast for testing
-      const result = (
-        dataProcessor as unknown as { formatDate(date: Date): string }
-      ).formatDate(date);
-      expect(result).toBe('2025-01-15');
-    });
-
-    it('should handle different timezones correctly', () => {
-      const date = new Date('2025-12-31T23:59:59Z');
-      const result = (
-        dataProcessor as unknown as { formatDate(date: Date): string }
-      ).formatDate(date);
-      // Result depends on local timezone, but should be a valid date string
-      expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    });
   });
 
   describe('formatRecordsForAnalysis', () => {
@@ -122,6 +110,108 @@ describe('DataProcessor', () => {
       ).formatRecordsForAnalysis(records);
       expect(result).toContain('Session: test-session');
       expect(result).toContain('[User]: Hello, world!');
+    });
+
+    it('should analyze clean user display text instead of hook context', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'expanded model prompt' },
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              },
+            ],
+          },
+          systemPayload: {
+            displayText: 'raw @file prompt',
+            hookContext: 'hook-only context',
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: raw @file prompt');
+      expect(result).not.toContain('hook-only context');
+    });
+
+    it('should keep notification model text instead of its display label', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          subtype: 'notification',
+          message: {
+            role: 'user',
+            parts: [{ text: 'notification model text' }],
+          },
+          systemPayload: { displayText: 'Background agent completed' },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: notification model text');
+      expect(result).not.toContain('Background agent completed');
+    });
+
+    it('should strip a complete final tag-only context part without metadata', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'user prompt' },
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              },
+            ],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: user prompt');
+      expect(result).not.toContain('hook-only context');
     });
 
     it('should format assistant text messages correctly', () => {
@@ -240,7 +330,7 @@ describe('DataProcessor', () => {
       expect(result.dates).toEqual([]);
     });
 
-    it('should calculate streak of 1 for single date', () => {
+    it('reports a historical single date as longest 1 with no current streak', () => {
       const result = (
         dataProcessor as unknown as {
           calculateStreaks(dates: string[]): {
@@ -250,11 +340,13 @@ describe('DataProcessor', () => {
           };
         }
       ).calculateStreaks(['2025-01-15']);
-      expect(result.currentStreak).toBe(1);
+      // #6835: `currentStreak` means "the streak ending today or
+      // yesterday" — a months-old date is not a current streak.
+      expect(result.currentStreak).toBe(0);
       expect(result.longestStreak).toBe(1);
     });
 
-    it('should calculate consecutive day streak', () => {
+    it('keeps longestStreak for a historical run but zeroes currentStreak', () => {
       const dates = ['2025-01-15', '2025-01-16', '2025-01-17'];
       const result = (
         dataProcessor as unknown as {
@@ -265,7 +357,60 @@ describe('DataProcessor', () => {
           };
         }
       ).calculateStreaks(dates);
+      expect(result.currentStreak).toBe(0);
+      expect(result.longestStreak).toBe(3);
+    });
+
+    it('reports the trailing run as current when it ends today', () => {
+      const relKey = (daysAgo: number) => {
+        const d = new Date();
+        d.setDate(d.getDate() - daysAgo);
+        return dayKey(d);
+      };
+      const result = (
+        dataProcessor as unknown as {
+          calculateStreaks(dates: string[]): {
+            currentStreak: number;
+            longestStreak: number;
+          };
+        }
+      ).calculateStreaks([relKey(2), relKey(1), relKey(0)]);
       expect(result.currentStreak).toBe(3);
+      expect(result.longestStreak).toBe(3);
+    });
+
+    it('still counts a streak ending yesterday as current', () => {
+      const relKey = (daysAgo: number) => {
+        const d = new Date();
+        d.setDate(d.getDate() - daysAgo);
+        return dayKey(d);
+      };
+      const result = (
+        dataProcessor as unknown as {
+          calculateStreaks(dates: string[]): {
+            currentStreak: number;
+            longestStreak: number;
+          };
+        }
+      ).calculateStreaks([relKey(3), relKey(2), relKey(1)]);
+      expect(result.currentStreak).toBe(3);
+    });
+
+    it('zeroes currentStreak once the trailing run ended two days ago', () => {
+      const relKey = (daysAgo: number) => {
+        const d = new Date();
+        d.setDate(d.getDate() - daysAgo);
+        return dayKey(d);
+      };
+      const result = (
+        dataProcessor as unknown as {
+          calculateStreaks(dates: string[]): {
+            currentStreak: number;
+            longestStreak: number;
+          };
+        }
+      ).calculateStreaks([relKey(4), relKey(3), relKey(2)]);
+      expect(result.currentStreak).toBe(0);
       expect(result.longestStreak).toBe(3);
     });
 
@@ -372,6 +517,76 @@ describe('DataProcessor', () => {
         satisfied: 3,
         neutral: 1,
         frustrated: 2,
+      });
+    });
+
+    it('should ignore zero and non-finite count values', () => {
+      const facets = [
+        {
+          session_id: 's1',
+          underlying_goal: 'test',
+          goal_categories: { coding: 0, debugging: Number.NaN, testing: 2 },
+          outcome: 'fully_achieved',
+          user_satisfaction_counts: { satisfied: 0, happy: 1 },
+          Qwen_helpfulness: 'very_helpful',
+          session_type: 'single_task',
+          friction_counts: { slow_response: Number.POSITIVE_INFINITY },
+          friction_detail: '',
+          primary_success: 'none',
+          brief_summary: 'Test summary',
+        },
+      ] as unknown as SessionFacets[];
+
+      const result = (
+        dataProcessor as unknown as {
+          aggregateFacetsData(facets: SessionFacets[]): {
+            satisfactionAgg: Record<string, number>;
+            frictionAgg: Record<string, number>;
+            goalsAgg: Record<string, number>;
+          };
+        }
+      ).aggregateFacetsData(facets);
+
+      expect(result.satisfactionAgg).toEqual({ happy: 1 });
+      expect(result.frictionAgg).toEqual({});
+      expect(result.goalsAgg).toEqual({ testing: 2 });
+    });
+
+    it('should ignore malformed count objects when aggregating facets', () => {
+      const facets = [
+        {
+          session_id: 's1',
+          underlying_goal: 'test',
+          goal_categories: null,
+          outcome: null,
+          user_satisfaction_counts: null,
+          Qwen_helpfulness: 'very_helpful',
+          session_type: 'single_task',
+          friction_counts: null,
+          friction_detail: '',
+          primary_success: null,
+          brief_summary: 'Test summary',
+        },
+      ] as unknown as SessionFacets[];
+
+      const result = (
+        dataProcessor as unknown as {
+          aggregateFacetsData(facets: SessionFacets[]): {
+            satisfactionAgg: Record<string, number>;
+            frictionAgg: Record<string, number>;
+            primarySuccessAgg: Record<string, number>;
+            outcomesAgg: Record<string, number>;
+            goalsAgg: Record<string, number>;
+          };
+        }
+      ).aggregateFacetsData(facets);
+
+      expect(result.satisfactionAgg).toEqual({});
+      expect(result.frictionAgg).toEqual({});
+      expect(result.primarySuccessAgg).toEqual({});
+      expect(result.goalsAgg).toEqual({});
+      expect(result.outcomesAgg).toEqual({
+        unclear_from_transcript: 1,
       });
     });
 
@@ -631,6 +846,111 @@ describe('DataProcessor', () => {
       );
     });
 
+    it('should normalize malformed LLM facet fields', async () => {
+      mockGenerateJson.mockResolvedValue({
+        underlying_goal: ' Test goal ',
+        goal_categories: { coding: 1 },
+        outcome: null,
+        user_satisfaction_counts: null,
+        Qwen_helpfulness: 'invalid',
+        session_type: null,
+        friction_counts: null,
+        friction_detail: null,
+        primary_success: null,
+        brief_summary: ' Test summary ',
+      });
+
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Help me with code' }],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      const result = await (
+        dataProcessor as unknown as {
+          analyzeSession(records: ChatRecord[]): Promise<SessionFacets | null>;
+        }
+      ).analyzeSession(records);
+
+      expect(result).toEqual({
+        session_id: 'test-session',
+        underlying_goal: 'Test goal',
+        goal_categories: { coding: 1 },
+        outcome: 'unclear_from_transcript',
+        user_satisfaction_counts: {},
+        Qwen_helpfulness: 'moderately_helpful',
+        session_type: 'single_task',
+        friction_counts: {},
+        friction_detail: '',
+        primary_success: 'none',
+        brief_summary: 'Test summary',
+      });
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'Normalized unknown insight enum value "invalid" to fallback "moderately_helpful"',
+      );
+    });
+
+    it('should normalize case-variant LLM facet fields to canonical values', async () => {
+      mockGenerateJson.mockResolvedValue({
+        underlying_goal: 'Test goal',
+        goal_categories: { coding: 1 },
+        outcome: 'FULLY_ACHIEVED',
+        user_satisfaction_counts: null,
+        Qwen_helpfulness: 'Very_Helpful',
+        session_type: 'Multi_Task',
+        friction_counts: null,
+        friction_detail: null,
+        primary_success: null,
+        brief_summary: 'Test summary',
+      });
+
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Help me with code' }],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      const result = await (
+        dataProcessor as unknown as {
+          analyzeSession(records: ChatRecord[]): Promise<SessionFacets | null>;
+        }
+      ).analyzeSession(records);
+
+      expect(result).toEqual({
+        session_id: 'test-session',
+        underlying_goal: 'Test goal',
+        goal_categories: { coding: 1 },
+        outcome: 'fully_achieved',
+        user_satisfaction_counts: {},
+        Qwen_helpfulness: 'very_helpful',
+        session_type: 'multi_task',
+        friction_counts: {},
+        friction_detail: '',
+        primary_success: 'none',
+        brief_summary: 'Test summary',
+      });
+    });
+
     it('should return null when LLM returns empty result', async () => {
       mockGenerateJson.mockResolvedValue({});
 
@@ -761,6 +1081,57 @@ describe('DataProcessor', () => {
       expect(paths.some((p) => p.includes('chat1.jsonl'))).toBe(true);
       expect(paths.some((p) => p.includes('chat2.jsonl'))).toBe(true);
       expect(paths.some((p) => p.includes('chat3.jsonl'))).toBe(true);
+    });
+
+    it('should skip prompt terminal ledger sidecars when scanning chat files', async () => {
+      mockedFs.readdir.mockResolvedValueOnce(['project1'] as unknown as Awaited<
+        ReturnType<typeof fs.readdir>
+      >);
+
+      mockedFs.stat.mockImplementation((path) => {
+        const pathStr = String(path);
+        if (pathStr.includes('project1') && !pathStr.includes('chats')) {
+          return Promise.resolve({
+            isDirectory: () => true,
+            mtimeMs: 1234567890,
+          } as Awaited<ReturnType<typeof fs.stat>>);
+        }
+        if (pathStr.endsWith('.jsonl')) {
+          return Promise.resolve({
+            isDirectory: () => false,
+            mtimeMs: 1234567890,
+          } as Awaited<ReturnType<typeof fs.stat>>);
+        }
+        throw new Error('Unexpected path: ' + pathStr);
+      });
+
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      mockedFs.readdir.mockImplementation((path) => {
+        const pathStr = String(path);
+        if (pathStr.endsWith('chats')) {
+          return Promise.resolve([
+            `${sessionId}.jsonl`,
+            `${sessionId}.ledger.jsonl`,
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+
+      const result = await (
+        dataProcessor as unknown as {
+          scanChatFiles(
+            baseDir: string,
+          ): Promise<Array<{ path: string; mtime: number }>>;
+        }
+      ).scanChatFiles('/base');
+
+      // The ledger sidecar is not a transcript: only the real session
+      // JSONL may be selected.
+      expect(result).toHaveLength(1);
+      expect(result[0].path).toContain(`${sessionId}.jsonl`);
+      expect(result[0].path).not.toContain('.ledger.jsonl');
     });
 
     it('should skip projects without chats directory', async () => {
@@ -926,6 +1297,61 @@ describe('DataProcessor', () => {
         activeHours: expect.any(Object),
         topTools: expect.any(Array),
       });
+    });
+
+    it('reports the wall-clock time of the most recent user interaction', async () => {
+      const early = '2025-01-15T09:12:00Z';
+      const late = '2025-01-16T14:37:00Z';
+      const mockRecords: ChatRecord[] = [
+        {
+          sessionId: 'session1',
+          timestamp: late,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'later' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'session1',
+          timestamp: early,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'earlier' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      mockedReadJsonlFile.mockResolvedValue(mockRecords);
+
+      const files = [{ path: '/test/chat.jsonl', mtime: 1234567890 }];
+      const result = (await (
+        dataProcessor as unknown as {
+          generateMetrics(
+            files: Array<{ path: string; mtime: number }>,
+          ): Promise<{ latestActiveTime: string | null }>;
+        }
+      ).generateMetrics(files)) as { latestActiveTime: string | null };
+
+      // Reflects the real latest timestamp's wall-clock time (in local tz),
+      // regardless of input order.
+      const expected = new Date(late).toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      expect(result.latestActiveTime).toBe(expected);
+
+      // Regression: the old code derived the time from date-only heatmap keys,
+      // so `new Date(key)` was UTC midnight and the time was a constant — never
+      // the real activity time.
+      const buggyConstant = new Date('2025-01-16').toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      expect(result.latestActiveTime).not.toBe(buggyConstant);
     });
 
     it('should track tool usage correctly', async () => {
@@ -1170,13 +1596,32 @@ describe('DataProcessor', () => {
     ];
 
     it('should return partial qualitative data when some LLM calls fail', async () => {
+      // Schema validation rejects partial objects, so build a fully-populated
+      // response — only the explicitly-rejected calls should land as undefined.
       let callIndex = 0;
       mockGenerateJson.mockImplementation(() => {
         callIndex++;
         if (callIndex % 2 === 0) {
           return Promise.reject(new Error('LLM timeout'));
         }
-        return Promise.resolve({ intro: 'test', areas: [], opportunities: [] });
+        return Promise.resolve({
+          intro: 'test',
+          impressive_workflows: [],
+          areas: [],
+          opportunities: [],
+          friction_points: [],
+          memorable_moments: [],
+          improvements: [],
+          interaction_style: {
+            archetype: 'collaborative',
+            description: 'test',
+            traits: [],
+          },
+          at_a_glance: {
+            top_strengths: [],
+            common_pitfalls: [],
+          },
+        });
       });
 
       const result = await (
@@ -1212,6 +1657,25 @@ describe('DataProcessor', () => {
       ).generateQualitativeInsights(mockMetrics, []);
 
       expect(result).toBeUndefined();
+    });
+
+    it('should return undefined when all qualitative sections are empty', async () => {
+      mockGenerateJson.mockResolvedValue({});
+
+      const result = await (
+        dataProcessor as unknown as {
+          generateQualitativeInsights(
+            metrics: Omit<InsightData, 'facets' | 'qualitative'>,
+            facets: SessionFacets[],
+          ): Promise<
+            | import('../types/QualitativeInsightTypes.js').QualitativeInsights
+            | undefined
+          >;
+        }
+      ).generateQualitativeInsights(mockMetrics, mockFacets);
+
+      expect(result).toBeUndefined();
+      expect(mockGenerateJson).toHaveBeenCalledTimes(8);
     });
 
     it('should return full qualitative data when all LLM calls succeed', async () => {
@@ -1309,6 +1773,139 @@ describe('DataProcessor', () => {
       expect(mockGenerateJson).toHaveBeenCalledTimes(1);
       expect(result).toHaveLength(1);
       expect(result[0].session_id).toBe('conversational');
+    });
+
+    it('should normalize cached facets before reusing them', async () => {
+      const conversationalRecords: ChatRecord[] = [
+        {
+          sessionId: 'cached-session',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'cached-session',
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'Hi' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+
+      mockedReadJsonlFile.mockResolvedValue(conversationalRecords);
+      mockedFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          underlying_goal: ' Cached goal ',
+          goal_categories: null,
+          outcome: null,
+          user_satisfaction_counts: null,
+          Qwen_helpfulness: 'very_helpful',
+          session_type: 'single_task',
+          friction_counts: null,
+          friction_detail: null,
+          primary_success: null,
+          brief_summary: ' Cached summary ',
+        }),
+      );
+
+      const files = [{ path: '/test/cached-session.jsonl', mtime: 1000 }];
+
+      const result = await (
+        dataProcessor as unknown as {
+          generateFacets(
+            files: Array<{ path: string; mtime: number }>,
+            facetsOutputDir?: string,
+          ): Promise<SessionFacets[]>;
+        }
+      ).generateFacets(files, '/facets');
+
+      expect(mockGenerateJson).not.toHaveBeenCalled();
+      expect(result).toEqual([
+        {
+          session_id: 'cached-session',
+          underlying_goal: 'Cached goal',
+          goal_categories: {},
+          outcome: 'unclear_from_transcript',
+          user_satisfaction_counts: {},
+          Qwen_helpfulness: 'very_helpful',
+          session_type: 'single_task',
+          friction_counts: {},
+          friction_detail: '',
+          primary_success: 'none',
+          brief_summary: 'Cached summary',
+        },
+      ]);
+      expect(mockedFs.writeFile).toHaveBeenCalledWith(
+        expect.stringMatching(/[\\/]facets[\\/]cached-session\.json$/),
+        JSON.stringify(result[0], null, 2),
+        'utf-8',
+      );
+    });
+
+    it('should reuse normalized cached facets when writeback fails', async () => {
+      const conversationalRecords: ChatRecord[] = [
+        {
+          sessionId: 'cached-session',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'cached-session',
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'Hi' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const writeError = new Error('disk full');
+
+      mockedReadJsonlFile.mockResolvedValue(conversationalRecords);
+      mockedFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          underlying_goal: 'Cached goal',
+          brief_summary: 'Cached summary',
+        }),
+      );
+      mockedFs.writeFile.mockRejectedValueOnce(writeError);
+
+      const files = [{ path: '/test/cached-session.jsonl', mtime: 1000 }];
+
+      const result = await (
+        dataProcessor as unknown as {
+          generateFacets(
+            files: Array<{ path: string; mtime: number }>,
+            facetsOutputDir?: string,
+          ): Promise<SessionFacets[]>;
+        }
+      ).generateFacets(files, '/facets');
+
+      expect(mockGenerateJson).not.toHaveBeenCalled();
+      expect(result).toEqual([
+        expect.objectContaining({
+          session_id: 'cached-session',
+          underlying_goal: 'Cached goal',
+          brief_summary: 'Cached summary',
+        }),
+      ]);
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        'Failed to write back normalized facet for cached-session:',
+        writeError,
+      );
     });
   });
 });

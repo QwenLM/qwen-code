@@ -5,7 +5,8 @@
  */
 
 import type { ModelInfo } from '@agentclientprotocol/sdk';
-import { knownTokenLimit } from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
+import { knownTokenLimit } from '@qwen-code/qwen-code-core';
+import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 
 type AcpMeta = Record<string, unknown>;
@@ -114,16 +115,9 @@ export interface SessionModeState {
   }>;
 }
 
-const APPROVAL_MODE_VALUES: ApprovalModeValue[] = [
-  'plan',
-  'default',
-  'auto-edit',
-  'yolo',
-];
-
 const isApprovalModeValue = (value: unknown): value is ApprovalModeValue =>
   typeof value === 'string' &&
-  APPROVAL_MODE_VALUES.includes(value as ApprovalModeValue);
+  DAEMON_APPROVAL_MODES.includes(value as ApprovalModeValue);
 
 /**
  * Extract complete model state from ACP `session/new` result.

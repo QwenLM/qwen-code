@@ -14,6 +14,7 @@ export {
   LocationsList,
 } from './LayoutComponents.js';
 export type { ToolCallContainerProps } from './LayoutComponents.js';
+export { CollapsibleOutput } from './CollapsibleOutput.js';
 
 // Copy utilities
 export { handleCopyToClipboard, CopyButton } from './copyUtils.js';

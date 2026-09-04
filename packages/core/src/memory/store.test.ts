@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getAutoMemoryConsolidationLockPath,
   getAutoMemoryExtractCursorPath,
@@ -15,25 +15,82 @@ import {
   getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
   getAutoMemoryTopicPath,
+  clearAutoMemoryRootCache,
 } from './paths.js';
 import {
   createDefaultAutoMemoryIndex,
   createDefaultAutoMemoryMetadata,
   ensureAutoMemoryScaffold,
   readAutoMemoryIndex,
+  readAutoMemoryIndexWithStats,
 } from './store.js';
+import { Storage } from '../config/storage.js';
+import { sanitizeCwd } from '../utils/paths.js';
+
+const originalMemoryLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+const originalMemoryProjectScope =
+  process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 
 describe('auto-memory storage scaffold', () => {
   let tempDir: string;
   let projectRoot: string;
 
   beforeEach(async () => {
+    clearAutoMemoryRootCache();
+    Storage.setRuntimeBaseDir(null);
+    if (originalMemoryLocal === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = originalMemoryLocal;
+    }
+    if (originalMemoryBaseDir === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+    }
+    if (originalMemoryProjectScope === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] =
+        originalMemoryProjectScope;
+    }
+    if (originalRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
+    }
+
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'auto-memory-'));
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
   });
 
   afterEach(async () => {
+    clearAutoMemoryRootCache();
+    Storage.setRuntimeBaseDir(null);
+    if (originalMemoryLocal === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = originalMemoryLocal;
+    }
+    if (originalMemoryBaseDir === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+    }
+    if (originalMemoryProjectScope === undefined) {
+      delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+    } else {
+      process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] =
+        originalMemoryProjectScope;
+    }
+    if (originalRuntimeDir === undefined) {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    } else {
+      process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
+    }
     await fs.rm(tempDir, {
       recursive: true,
       force: true,
@@ -60,6 +117,219 @@ describe('auto-memory storage scaffold', () => {
     );
     expect(getAutoMemoryTopicPath(projectRoot, 'feedback')).toBe(
       path.join(projectRoot, '.qwen', 'memory', 'feedback.md'),
+    );
+  });
+
+  it('uses the runtime output directory for managed auto-memory', () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    Storage.setRuntimeBaseDir(runtimeDir);
+    clearAutoMemoryRootCache();
+
+    expect(getAutoMemoryRoot(projectRoot)).toBe(
+      path.join(
+        runtimeDir,
+        'projects',
+        sanitizeCwd(path.resolve(projectRoot)),
+        'memory',
+      ),
+    );
+  });
+
+  it('shares managed auto-memory across nested directories in the same git checkout by default', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    Storage.setRuntimeBaseDir(runtimeDir);
+
+    const repo = path.join(tempDir, 'repo');
+    const workspaceA = path.join(repo, 'workspaces', 'agent');
+    const workspaceB = path.join(repo, 'workspaces', 'nambz');
+    await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+    await fs.mkdir(workspaceA, { recursive: true });
+    await fs.mkdir(workspaceB, { recursive: true });
+
+    expect(getAutoMemoryRoot(workspaceA)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(repo), 'memory'),
+    );
+    expect(getAutoMemoryRoot(workspaceB)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(repo), 'memory'),
+    );
+  });
+
+  it('isolates managed auto-memory by exact workspace when workspace scope is enabled', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'workspace';
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    Storage.setRuntimeBaseDir(runtimeDir);
+
+    const repo = path.join(tempDir, 'repo');
+    const workspaceA = path.join(repo, 'workspaces', 'agent');
+    const workspaceB = path.join(repo, 'workspaces', 'nambz');
+    await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+    await fs.mkdir(workspaceA, { recursive: true });
+    await fs.mkdir(workspaceB, { recursive: true });
+
+    expect(getAutoMemoryRoot(workspaceA)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(workspaceA), 'memory'),
+    );
+    expect(getAutoMemoryRoot(workspaceB)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(workspaceB), 'memory'),
+    );
+  });
+
+  it('normalizes the memory project scope value case-insensitively', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = '  Workspace  ';
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    Storage.setRuntimeBaseDir(runtimeDir);
+
+    const repo = path.join(tempDir, 'repo');
+    const workspaceA = path.join(repo, 'workspaces', 'agent');
+    await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+    await fs.mkdir(workspaceA, { recursive: true });
+
+    expect(getAutoMemoryRoot(workspaceA)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(workspaceA), 'memory'),
+    );
+  });
+
+  it('falls back to git-root scope and warns once on an unrecognized scope value', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = 'exact';
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    Storage.setRuntimeBaseDir(runtimeDir);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      const repo = path.join(tempDir, 'repo');
+      const workspaceA = path.join(repo, 'workspaces', 'agent');
+      await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+      await fs.mkdir(workspaceA, { recursive: true });
+
+      expect(getAutoMemoryRoot(workspaceA)).toBe(
+        path.join(runtimeDir, 'projects', sanitizeCwd(repo), 'memory'),
+      );
+      expect(getAutoMemoryRoot(workspaceA)).toBe(
+        path.join(runtimeDir, 'projects', sanitizeCwd(repo), 'memory'),
+      );
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(String(warnSpy.mock.calls[0]?.[0])).toContain(
+        'QWEN_CODE_MEMORY_PROJECT_SCOPE',
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('gives a linked git worktree its own memory root, separate from the main checkout', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    Storage.setRuntimeBaseDir(runtimeDir);
+    clearAutoMemoryRootCache();
+
+    const main = path.join(tempDir, 'main-repo');
+    const worktree = path.join(tempDir, 'wt');
+    const worktreeGitDir = path.join(main, '.git', 'worktrees', 'wt');
+    await fs.mkdir(worktreeGitDir, { recursive: true });
+    await fs.mkdir(worktree, { recursive: true });
+    await fs.writeFile(
+      path.join(worktree, '.git'),
+      `gitdir: ${worktreeGitDir}`,
+    );
+    await fs.writeFile(path.join(worktreeGitDir, 'commondir'), '../..');
+    await fs.writeFile(
+      path.join(worktreeGitDir, 'gitdir'),
+      path.join(worktree, '.git'),
+    );
+
+    expect(getAutoMemoryRoot(worktree)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(worktree), 'memory'),
+    );
+    expect(getAutoMemoryRoot(worktree)).not.toBe(getAutoMemoryRoot(main));
+  });
+
+  it('uses QWEN_RUNTIME_DIR for managed auto-memory', () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const envRuntimeDir = path.join(tempDir, 'env-runtime-output');
+    process.env['QWEN_RUNTIME_DIR'] = envRuntimeDir;
+    Storage.setRuntimeBaseDir(path.join(tempDir, 'settings-runtime-output'));
+    clearAutoMemoryRootCache();
+
+    expect(getAutoMemoryRoot(projectRoot)).toBe(
+      path.join(
+        envRuntimeDir,
+        'projects',
+        sanitizeCwd(path.resolve(projectRoot)),
+        'memory',
+      ),
+    );
+  });
+
+  it('does not reuse cached roots across runtime output dirs', () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const runtimeA = path.join(tempDir, 'runtime-a');
+    const runtimeB = path.join(tempDir, 'runtime-b');
+
+    const rootA = Storage.runWithRuntimeBaseDir(runtimeA, undefined, () =>
+      getAutoMemoryRoot(projectRoot),
+    );
+    const rootB = Storage.runWithRuntimeBaseDir(runtimeB, undefined, () =>
+      getAutoMemoryRoot(projectRoot),
+    );
+
+    expect(rootA).toBe(
+      path.join(
+        runtimeA,
+        'projects',
+        sanitizeCwd(path.resolve(projectRoot)),
+        'memory',
+      ),
+    );
+    expect(rootB).toBe(
+      path.join(
+        runtimeB,
+        'projects',
+        sanitizeCwd(path.resolve(projectRoot)),
+        'memory',
+      ),
+    );
+  });
+
+  it('keeps QWEN_CODE_MEMORY_BASE_DIR ahead of the runtime output directory', () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const memoryBaseDir = path.join(tempDir, 'memory-base');
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBaseDir;
+    Storage.setRuntimeBaseDir(runtimeDir);
+    clearAutoMemoryRootCache();
+
+    expect(getAutoMemoryRoot(projectRoot)).toBe(
+      path.join(
+        memoryBaseDir,
+        'projects',
+        sanitizeCwd(path.resolve(projectRoot)),
+        'memory',
+      ),
+    );
+  });
+
+  it('resolves QWEN_CODE_MEMORY_BASE_DIR before using it', () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const memoryBaseDir = path.join(tempDir, 'relative-memory-base');
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.relative(
+      process.cwd(),
+      memoryBaseDir,
+    );
+    clearAutoMemoryRootCache();
+
+    expect(getAutoMemoryRoot(projectRoot)).toBe(
+      path.join(
+        memoryBaseDir,
+        'projects',
+        sanitizeCwd(path.resolve(projectRoot)),
+        'memory',
+      ),
     );
   });
 
@@ -122,5 +392,25 @@ describe('auto-memory storage scaffold', () => {
   it('reads the managed auto-memory index after scaffold creation', async () => {
     await ensureAutoMemoryScaffold(projectRoot);
     await expect(readAutoMemoryIndex(projectRoot)).resolves.toBe('');
+  });
+
+  it('returns content and stats for an existing auto-memory index', async () => {
+    await ensureAutoMemoryScaffold(projectRoot);
+    const indexContent = '# Existing Index\n\n- keep me\n';
+    await fs.writeFile(
+      getAutoMemoryIndexPath(projectRoot),
+      indexContent,
+      'utf-8',
+    );
+
+    const result = await readAutoMemoryIndexWithStats(projectRoot);
+
+    expect(result?.content).toBe(indexContent);
+    expect(result?.stats.size).toBe(Buffer.byteLength(indexContent));
+    expect(result?.stats.mtimeMs).toBeGreaterThan(0);
+  });
+
+  it('returns null when reading auto-memory index with stats before creation', async () => {
+    await expect(readAutoMemoryIndexWithStats(projectRoot)).resolves.toBeNull();
   });
 });

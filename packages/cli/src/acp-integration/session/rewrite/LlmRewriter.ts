@@ -7,7 +7,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger, runSideQuery } from '@qwen-code/qwen-code-core';
 import type { TurnContent, MessageRewriteConfig } from './types.js';
 
 const debugLogger = createDebugLogger('MESSAGE_REWRITER');
@@ -57,16 +57,29 @@ export class LlmRewriter {
     // promptFile takes precedence over inline prompt
     if (rewriteConfig.promptFile) {
       const filePath = resolve(rewriteConfig.promptFile);
-      if (existsSync(filePath)) {
-        this.prompt = readFileSync(filePath, 'utf-8').trim();
-        debugLogger.info(
-          `Loaded rewrite prompt from file: ${filePath} (${this.prompt.length} chars)`,
-        );
-      } else {
+      if (!existsSync(filePath)) {
         debugLogger.warn(
           `Rewrite prompt file not found: ${filePath}, using default`,
         );
         this.prompt = DEFAULT_REWRITE_PROMPT;
+      } else {
+        // existsSync passes for directories and says nothing about
+        // readability, so the read itself can still fail (EISDIR, EACCES,
+        // ...). Degrade like the missing-file case instead of throwing,
+        // which would crash ACP session startup (#9752).
+        try {
+          this.prompt = readFileSync(filePath, 'utf-8').trim();
+          debugLogger.info(
+            `Loaded rewrite prompt from file: ${filePath} (${this.prompt.length} chars)`,
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `Rewrite prompt file could not be read: ${filePath} (${
+              error instanceof Error ? error.message : String(error)
+            }), using default`,
+          );
+          this.prompt = DEFAULT_REWRITE_PROMPT;
+        }
       }
     } else {
       this.prompt = rewriteConfig.prompt || DEFAULT_REWRITE_PROMPT;
@@ -112,60 +125,56 @@ export class LlmRewriter {
     );
 
     try {
-      const contentGenerator = this.config.getContentGenerator();
-      if (!contentGenerator) {
-        debugLogger.warn('No content generator available for rewriting');
-        return null;
-      }
-
       const model = this.rewriteModel || this.config.getModel();
 
-      const result = await contentGenerator.generateContent(
-        {
-          model,
-          config: {
-            systemInstruction: this.prompt,
-            abortSignal: signal,
-            temperature: 0.3,
-            maxOutputTokens: 1024,
-            // Disable thinking to avoid thinking leaking into output
-            thinkingConfig: { includeThoughts: false },
-          },
-          contents: [
-            {
-              role: 'user',
-              parts: [{ text: inputText }],
-            },
-          ],
+      const result = await runSideQuery(this.config, {
+        purpose: 'acp-rewrite',
+        model,
+        // Best-effort: failure path returns null gracefully, so don't burn
+        // 7 retries on transient outages the user will never see.
+        maxAttempts: 1,
+        systemInstruction: this.prompt,
+        config: {
+          temperature: 0.3,
+          maxOutputTokens: 1024,
         },
-        `rewrite-turn`,
-      );
+        abortSignal: signal ?? new AbortController().signal,
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: inputText }],
+          },
+        ],
+      });
 
-      // Extract only non-thought text parts
-      const rewritten =
-        result.candidates?.[0]?.content?.parts
-          ?.filter((p) => !p.thought)
-          .map((p) => p.text)
-          .filter(Boolean)
-          .join('') ?? '';
+      const rewritten = result.text;
 
       // If LLM returns empty or very short, skip
-      if (!rewritten.trim() || rewritten.trim().length < 5) {
+      if (!rewritten || rewritten.length < 5) {
         debugLogger.info(`[REWRITE OUTPUT] empty or too short, skipping`);
         return null;
       }
 
-      const trimmed = rewritten.trim();
-
       debugLogger.info(
-        `[REWRITE OUTPUT] len=${trimmed.length}\n` +
-          `--- OUTPUT ---\n${trimmed}\n---`,
+        `[REWRITE OUTPUT] len=${rewritten.length}\n` +
+          `--- OUTPUT ---\n${rewritten}\n---`,
       );
 
-      // Update context for next turn
-      this.outputHistory.push(trimmed);
+      // Update context for next turn. Only the last `contextTurns` outputs are
+      // ever read (see the context slice above), so keep at most that many to
+      // avoid unbounded growth over a long session. Infinity ('all') keeps
+      // everything; 0 means the history is never read, so store nothing.
+      if (this.contextTurns > 0) {
+        this.outputHistory.push(rewritten);
+        if (
+          Number.isFinite(this.contextTurns) &&
+          this.outputHistory.length > this.contextTurns
+        ) {
+          this.outputHistory = this.outputHistory.slice(-this.contextTurns);
+        }
+      }
 
-      return trimmed;
+      return rewritten;
     } catch (error) {
       debugLogger.warn(
         `LLM rewrite failed, skipping: ${error instanceof Error ? error.message : String(error)}`,

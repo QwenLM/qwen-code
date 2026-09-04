@@ -97,7 +97,9 @@ export function getAvailableModelsForAuthType(
   // Use config's model registry when available
   if (config) {
     try {
-      const models = config.getAvailableModelsForAuthType(authType);
+      const models = config
+        .getAvailableModelsForAuthType(authType)
+        .filter((model) => !model.imageOnly);
       if (models.length > 0) {
         return models.map(convertCoreModelToCliModel);
       }

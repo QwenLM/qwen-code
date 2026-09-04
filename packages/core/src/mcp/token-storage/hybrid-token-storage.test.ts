@@ -41,6 +41,10 @@ interface MockStorage {
   listServers: ReturnType<typeof vi.fn>;
   getAllCredentials: ReturnType<typeof vi.fn>;
   clearAll: ReturnType<typeof vi.fn>;
+  setSecret?: ReturnType<typeof vi.fn>;
+  getSecret?: ReturnType<typeof vi.fn>;
+  deleteSecret?: ReturnType<typeof vi.fn>;
+  listSecrets?: ReturnType<typeof vi.fn>;
 }
 
 describe('HybridTokenStorage', () => {
@@ -62,15 +66,24 @@ describe('HybridTokenStorage', () => {
       listServers: vi.fn(),
       getAllCredentials: vi.fn(),
       clearAll: vi.fn(),
+      setSecret: vi.fn(),
+      getSecret: vi.fn(),
+      deleteSecret: vi.fn(),
+      listSecrets: vi.fn(),
     };
 
     mockFileStorage = {
+      isAvailable: vi.fn(),
       getCredentials: vi.fn(),
       setCredentials: vi.fn(),
       deleteCredentials: vi.fn(),
       listServers: vi.fn(),
       getAllCredentials: vi.fn(),
       clearAll: vi.fn(),
+      setSecret: vi.fn(),
+      getSecret: vi.fn(),
+      deleteSecret: vi.fn(),
+      listSecrets: vi.fn(),
     };
 
     (
@@ -269,6 +282,43 @@ describe('HybridTokenStorage', () => {
       await storage.clearAll();
 
       expect(mockKeychainStorage.clearAll).toHaveBeenCalled();
+    });
+  });
+
+  describe('secret storage', () => {
+    it('delegates secrets to the keychain when available', async () => {
+      mockKeychainStorage.isAvailable!.mockResolvedValue(true);
+      mockKeychainStorage.getSecret!.mockResolvedValue('sk-keychain');
+
+      await expect(storage.getSecret('API_KEY')).resolves.toBe('sk-keychain');
+      expect(mockKeychainStorage.getSecret).toHaveBeenCalledWith('API_KEY');
+      expect(mockFileStorage.getSecret).not.toHaveBeenCalled();
+      await expect(storage.isAvailable()).resolves.toBe(true);
+    });
+
+    it('falls back to encrypted-file secrets when keychain is unavailable', async () => {
+      mockKeychainStorage.isAvailable!.mockResolvedValue(false);
+      mockFileStorage.isAvailable!.mockResolvedValue(true);
+      mockFileStorage.getSecret!.mockResolvedValue('sk-file');
+
+      await expect(storage.getSecret('API_KEY')).resolves.toBe('sk-file');
+      expect(mockFileStorage.getSecret).toHaveBeenCalledWith('API_KEY');
+      expect(mockKeychainStorage.getSecret).not.toHaveBeenCalled();
+      expect(await storage.getStorageType()).toBe(
+        TokenStorageType.ENCRYPTED_FILE,
+      );
+
+      await storage.setSecret('API_KEY', 'value');
+      expect(mockFileStorage.setSecret).toHaveBeenCalledWith(
+        'API_KEY',
+        'value',
+      );
+
+      await storage.deleteSecret('API_KEY');
+      expect(mockFileStorage.deleteSecret).toHaveBeenCalledWith('API_KEY');
+
+      await storage.listSecrets();
+      expect(mockFileStorage.listSecrets).toHaveBeenCalled();
     });
   });
 });
