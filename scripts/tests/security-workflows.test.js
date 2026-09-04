@@ -49,6 +49,7 @@ describe('security workflows', () => {
       'Audit production dependencies',
     );
     const secretScanJob = getWorkflowJob(workflow, 'secret-scan');
+    const trackingJob = getWorkflowJob(workflow, 'track-dependency-cve');
     const checkoutStep = getWorkflowStep(secretScanJob, 'Checkout');
     const trufflehogStep = getWorkflowStep(
       secretScanJob,
@@ -62,6 +63,19 @@ describe('security workflows', () => {
     expect(secretScanJob).toContain('if: "github.event_name != \'schedule\'"');
     expect(dependencyJob).not.toContain('continue-on-error');
     expect(secretScanJob).not.toContain('continue-on-error');
+    expect(trackingJob).toContain("needs: 'dependency-cve'");
+    expect(trackingJob).toContain(
+      "always() && github.event_name == 'schedule' && (needs.dependency-cve.result == 'success' || needs.dependency-cve.result == 'failure')",
+    );
+    expect(trackingJob).toContain("issues: 'write'");
+    expect(trackingJob).toContain(
+      'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3',
+    );
+    expect(trackingJob).toContain('<!-- qwen-dependency-cve-audit-failure -->');
+    expect(trackingJob).toContain("labels: 'scope/ci-cd'");
+    expect(trackingJob).toContain('github.rest.issues.createComment');
+    expect(trackingJob).toContain('github.rest.issues.create');
+    expect(trackingJob).toContain("state: 'closed'");
     expect(workflow).toContain(
       "group: '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'",
     );
