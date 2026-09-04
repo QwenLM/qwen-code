@@ -14,6 +14,7 @@ import {
   afterAll,
   type MockInstance,
 } from 'vitest';
+import { readFileSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -20203,7 +20204,7 @@ describe('QwenAgent sessionIdContext binding', () => {
   });
 });
 
-describe('QwenAgent extMethod renameSession routing', () => {
+describe('QwenAgent session-management routing (rename / delete / list / branch / close)', () => {
   type AgentSideConnectionLike = { closed: Promise<void> };
   type AgentLike = {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
@@ -29914,5 +29915,24 @@ describe('createManagedExternalToolGuard', () => {
 
     await expect(pending).rejects.toThrow('aborted');
     expect(extMethod).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('QwenAgent runtime-root pinning choke point', () => {
+  it('routes every per-request runtime-root pin through runWithPinnedRuntimeBaseDir', () => {
+    // #10095 fixed handlers that composed `loadSettingsCached` →
+    // `runWithAcpRuntimeOutputDir` by hand and picked up the stale
+    // `this.settings` cache. The private helper is the one place that
+    // decision is made, so a handler calling `runWithAcpRuntimeOutputDir`
+    // directly is exactly the shape that regressed. No behavioral test can
+    // see the difference (both spellings reach the same function), so pin
+    // the source: the only call left is the helper's own delegation.
+    const source = readFileSync(
+      new URL('./acpAgent.ts', import.meta.url),
+      'utf8',
+    );
+    const directCalls = source.match(/\brunWithAcpRuntimeOutputDir\(/g) ?? [];
+    expect(directCalls).toHaveLength(1);
+    expect(source).toContain('private runWithPinnedRuntimeBaseDir<T>(');
   });
 });

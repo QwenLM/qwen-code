@@ -4555,6 +4555,15 @@ class QwenAgent implements Agent {
     }
   }
 
+  /**
+   * Single choke point for pinning the runtime root of a per-request
+   * operation to the settings loaded for THAT request's cwd. Every handler
+   * that resolves session storage for a caller-supplied cwd goes through
+   * here rather than calling `runWithAcpRuntimeOutputDir` directly, so the
+   * "which settings pin this operation" decision lives in one place — the
+   * bug class fixed in #10095 was handlers composing the routing by hand
+   * with the stale `this.settings` cache.
+   */
   private runWithPinnedRuntimeBaseDir<T>(
     settings: LoadedSettings,
     cwd: string,
@@ -5774,7 +5783,7 @@ class QwenAgent implements Agent {
     // advanced.runtimeOutputDir and this listing would scan the wrong runtime
     // root (returning an empty/foreign list for this cwd).
     const settings = loadSettingsCached(cwd);
-    const result = await runWithAcpRuntimeOutputDir(settings, cwd, () => {
+    const result = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
         cursor: numericCursor,
@@ -8861,7 +8870,7 @@ class QwenAgent implements Agent {
 
         try {
           const settings = loadSettingsCached(cwd);
-          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+          const readTranscriptPage = async () => {
             if (rawDirection === 'backward') {
               await this.sessions
                 .get(sessionId)
@@ -8913,7 +8922,12 @@ class QwenAgent implements Agent {
                 ? { partial: true, replayError: replay.replayError }
                 : {}),
             } as Record<string, unknown>;
-          });
+          };
+          return await this.runWithPinnedRuntimeBaseDir(
+            settings,
+            cwd,
+            readTranscriptPage,
+          );
         } catch (error) {
           if (
             error instanceof InvalidSessionTranscriptCursorError ||
@@ -11786,7 +11800,7 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const settings = loadSettingsCached(cwd);
-        return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+        const readSettledTurnResult = async () => {
           try {
             await session.getConfig().getChatRecordingService()?.flush();
           } catch {
@@ -11859,7 +11873,12 @@ class QwenAgent implements Agent {
             }
             throw error;
           }
-        });
+        };
+        return await this.runWithPinnedRuntimeBaseDir(
+          settings,
+          cwd,
+          readSettledTurnResult,
+        );
       }
       case SERVE_CONTROL_EXT_METHODS.sessionContinue: {
         const sessionId = params['sessionId'];
@@ -12077,7 +12096,7 @@ class QwenAgent implements Agent {
         // destructive lookup at the wrong runtime root — silently returning
         // success:false for a session that exists, or deleting a stale
         // same-id copy under the wrong root.
-        const success = await runWithAcpRuntimeOutputDir(
+        const success = await this.runWithPinnedRuntimeBaseDir(
           loadSettingsCached(cwd),
           cwd,
           async () => {
@@ -12128,7 +12147,7 @@ class QwenAgent implements Agent {
           return { success: ok };
         }
         // Per-request settings for the same reason as deleteSession above.
-        const success = await runWithAcpRuntimeOutputDir(
+        const success = await this.runWithPinnedRuntimeBaseDir(
           loadSettingsCached(cwd),
           cwd,
           async () => {
