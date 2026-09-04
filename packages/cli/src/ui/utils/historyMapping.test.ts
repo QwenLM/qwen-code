@@ -426,6 +426,48 @@ describe('computeApiTruncationIndex', () => {
       expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
     });
 
+    it('fails loud when a non-first-turn target was absorbed and its twin re-minted the id', () => {
+      // R26-1: the R25-1 hazard for non-first turns. A's own entry was
+      // absorbed by marker-less compression (no UI marker, so
+      // compressionIndex === -1 while the API history carries the prefix);
+      // a later entrance re-minted the same id onto B, whose entry survives
+      // post-prefix as the UNIQUE match for that id. The identity shortcut
+      // must not resolve the absorbed A onto B's twin entry — rewinding
+      // would truncate at B's boundary and silently keep the prompt+response
+      // the UI deleted, where the positional walk refuses loudly (-1).
+      const absorbedTurn = userItem(3, 'run 2, prompt 1') as HistoryItem & {
+        promptId: string;
+      };
+      absorbedTurn.promptId = 'session########1';
+      const twinTurn = userItem(5, 'run 3, prompt 2') as HistoryItem & {
+        promptId: string;
+      };
+      twinTurn.promptId = 'session########1';
+      const ui: HistoryItem[] = [
+        userItem(1, 'run 1, prompt 1'),
+        llmItem(2),
+        absorbedTurn,
+        llmItem(4),
+        twinTurn,
+        llmItem(6),
+      ];
+      const survivingTwin = userContent('run 3, prompt 2');
+      markApiHistoryPrompt(survivingTwin, 'session########1');
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        survivingTwin,
+        modelContent('response 2'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+      // The surviving twin itself still maps: no later turn claims its id,
+      // so the unique post-prefix match is its own entry (guard must not
+      // over-refuse this case).
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(3);
+    });
+
     it('fails loud when the only identity match sits inside the compressed prefix', () => {
       // recordChatCompression persists promptIds for absorbed turns, so on
       // resume the compressed prefix entries themselves carry identity marks.

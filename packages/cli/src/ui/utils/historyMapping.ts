@@ -212,12 +212,32 @@ export function computeApiTruncationIndex(
     target.promptId &&
     !target.promptIdFileKeyOnly
   ) {
-    const identifiedIndex = findApiHistoryPromptIndex(
-      apiHistory,
-      target.promptId,
-      startIndex,
-    );
-    if (identifiedIndex !== -1) return identifiedIndex;
+    // A unique post-`startIndex` match is ambiguous only when a real user
+    // turn AFTER the target carries the same promptId: with a marker-less
+    // compressed prefix present (`compressionIndex === -1` yet the API
+    // history carries the prefix), that later turn can hold a re-minted
+    // twin of the target's absorbed entry, and resolving the target onto
+    // the twin would truncate at the twin's boundary and silently keep the
+    // prompt+response the UI deleted, where the positional walk below
+    // refuses loudly (R26-1). Skip the lookup in exactly that state. A
+    // surviving twin is the LAST claimant of its id, so its unique match is
+    // its own entry and stays resolvable (R25-1).
+    const ambiguousTwinPrefix =
+      compressionIndex === -1 &&
+      startIndex > getStartupContextLength(apiHistory) &&
+      uiHistory
+        .slice(targetIndex + 1)
+        .some(
+          (item) => isRealUserTurn(item) && item.promptId === target.promptId,
+        );
+    if (!ambiguousTwinPrefix) {
+      const identifiedIndex = findApiHistoryPromptIndex(
+        apiHistory,
+        target.promptId,
+        startIndex,
+      );
+      if (identifiedIndex !== -1) return identifiedIndex;
+    }
   }
 
   // Walk the API history from after the startup context, counting
