@@ -122,6 +122,25 @@ describe('ContextMenuOverlay', () => {
     await waitFor(() => expect(lastFrame()).not.toContain('Open Link'));
   });
 
+  it('two Enters delivered in one stdin write execute the item once', async () => {
+    const handlers = { open: vi.fn(), copy: vi.fn() };
+    const { lastFrame, stdin } = renderWithProviders(
+      <Scene>
+        <ContextMenuProvider>
+          <MenuOpener items={makeItems(handlers)} />
+          <ContextMenuOverlay />
+        </ContextMenuProvider>
+      </Scene>,
+    );
+    await waitFor(() => expect(lastFrame()).toContain('Open Link'));
+    // KeypressContext can dispatch a whole stdin chunk with no render between
+    // the two Enters; executeIndex must null the mirror synchronously so the
+    // second Enter cannot re-fire onSelect (which would open the browser twice).
+    stdin.write('\r\r');
+    await waitFor(() => expect(handlers.open).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(lastFrame()).not.toContain('Open Link'));
+  });
+
   it('ArrowDown + Enter executes the second item', async () => {
     const handlers = { open: vi.fn(), copy: vi.fn() };
     const { lastFrame, stdin } = renderWithProviders(
