@@ -648,6 +648,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_export',
   'session_transcript',
   'session_transcript_pagination',
+  'session_turn_navigation',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
   // guardrail surface (`--mcp-client-budget`, `clientCount` /
   // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
@@ -1019,6 +1020,7 @@ interface FakeBridgeOpts {
   ) => Promise<ServeSessionResourcesStatus>;
   sessionSavedWorkflowImpl?: AcpSessionBridge['getSessionSavedWorkflow'];
   sessionTranscriptImpl?: AcpSessionBridge['getSessionTranscriptPage'];
+  sessionTurnIndexImpl?: AcpSessionBridge['getSessionTurnIndexPage'];
   cancelSessionTaskImpl?: (
     sessionId: string,
     taskId: string,
@@ -1343,6 +1345,9 @@ interface FakeBridge extends AcpSessionBridge {
   sessionTranscriptCalls: Array<
     Parameters<AcpSessionBridge['getSessionTranscriptPage']>[0]
   >;
+  sessionTurnIndexCalls: Array<
+    Parameters<AcpSessionBridge['getSessionTurnIndexPage']>[0]
+  >;
   cancelSessionTaskCalls: Array<{
     sessionId: string;
     taskId: string;
@@ -1565,6 +1570,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionResourcesCalls: string[] = [];
   const sessionSavedWorkflowCalls: FakeBridge['sessionSavedWorkflowCalls'] = [];
   const sessionTranscriptCalls: FakeBridge['sessionTranscriptCalls'] = [];
+  const sessionTurnIndexCalls: FakeBridge['sessionTurnIndexCalls'] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const controlSessionWorkflowTaskCalls: FakeBridge['controlSessionWorkflowTaskCalls'] =
     [];
@@ -1946,6 +1952,16 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       events: [],
       hasMore: false,
     }));
+  const sessionTurnIndexImpl =
+    opts.sessionTurnIndexImpl ??
+    (async (req) => ({
+      v: 1 as const,
+      sessionId: req.sessionId,
+      snapshot: 'snapshot-default',
+      totalTurns: 0,
+      start: 0,
+      turns: [],
+    }));
   const cancelSessionTaskImpl =
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
   const controlSessionWorkflowTaskImpl =
@@ -2226,6 +2242,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionResourcesCalls,
     sessionSavedWorkflowCalls,
     sessionTranscriptCalls,
+    sessionTurnIndexCalls,
     cancelSessionTaskCalls,
     controlSessionWorkflowTaskCalls,
     clearSessionGoalCalls,
@@ -2535,6 +2552,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionTranscriptPage(req) {
       sessionTranscriptCalls.push(req);
       return sessionTranscriptImpl(req);
+    },
+    async getSessionTurnIndexPage(req) {
+      sessionTurnIndexCalls.push(req);
+      return sessionTurnIndexImpl(req);
     },
     async cancelSessionTask(sessionId, taskId, taskKind, context) {
       cancelSessionTaskCalls.push({
@@ -28833,6 +28854,119 @@ describe('createServeApp', () => {
       ]);
       expect(bridge.loadCalls).toHaveLength(0);
       expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('returns sparse turn-index pages through the owning runtime', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaae';
+      const bridge = fakeBridge({
+        sessionTurnIndexImpl: async (req) => {
+          if (req.start !== undefined && req.start > 1) {
+            throw Object.assign(new Error('Invalid transcript cursor'), {
+              data: { errorKind: 'invalid_transcript_cursor' },
+            });
+          }
+          return {
+            v: 1,
+            sessionId: req.sessionId,
+            snapshot: 'snapshot-1',
+            totalTurns: 1,
+            start: 0,
+            turns: [
+              {
+                ordinal: 0,
+                turnId: 'record-1',
+                kind: 'prompt',
+                label: 'hello transcript',
+              },
+            ],
+          };
+        },
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const missingSnapshot = await request(app)
+        .get(`/session/${sid}/turn-index?start=0`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(missingSnapshot.status).toBe(400);
+      expect(missingSnapshot.body.code).toBe('invalid_transcript_cursor');
+      expect(bridge.sessionTurnIndexCalls).toEqual([]);
+
+      const res = await request(app)
+        .get(`/session/${sid}/turn-index?limit=2`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.body).toMatchObject({
+        snapshot: 'snapshot-1',
+        totalTurns: 1,
+      });
+      expect(bridge.sessionTurnIndexCalls).toEqual([
+        { sessionId: sid, limit: 2 },
+      ]);
+      const outOfRange = await request(app)
+        .get(`/session/${sid}/turn-index?snapshot=snapshot-1&start=2`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(outOfRange.status).toBe(400);
+      expect(outOfRange.body.code).toBe('invalid_transcript_cursor');
+      expect(bridge.loadCalls).toHaveLength(0);
+    });
+
+    it('forwards snapshot-bound turn anchors and response metadata', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaaf';
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [],
+          hasMore: false,
+          targetRecordId: req.atRecordId,
+          hasOlder: true,
+        }),
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const conflictingCursor = await request(app)
+        .get(
+          `/session/${sid}/transcript?cursor=cursor-1&atRecordId=record-1&snapshot=snapshot-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(conflictingCursor.status).toBe(400);
+      expect(conflictingCursor.body.code).toBe('invalid_transcript_cursor');
+
+      const snapshotWithoutAnchor = await request(app)
+        .get(`/session/${sid}/transcript?snapshot=snapshot-1`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(snapshotWithoutAnchor.status).toBe(400);
+      expect(snapshotWithoutAnchor.body.code).toBe('invalid_transcript_cursor');
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
+
+      const res = await request(app)
+        .get(
+          `/session/${sid}/transcript?atRecordId=record-1&snapshot=snapshot-1`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        targetRecordId: 'record-1',
+        hasOlder: true,
+      });
+      expect(bridge.sessionTranscriptCalls).toEqual([
+        {
+          sessionId: sid,
+          atRecordId: 'record-1',
+          snapshot: 'snapshot-1',
+        },
+      ]);
     });
 
     it('reads and exports the active copy of an exact persisted conflict', async () => {

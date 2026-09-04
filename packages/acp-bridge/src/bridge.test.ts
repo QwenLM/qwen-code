@@ -3870,6 +3870,80 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('gets turn-index pages through workspace status without creating a session', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                snapshot: 'snapshot-1',
+                totalTurns: 1,
+                start: 0,
+                turns: [
+                  {
+                    ordinal: 0,
+                    turnId: 'record-1',
+                    kind: 'prompt',
+                    label: 'hello',
+                  },
+                ],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.getSessionTurnIndexPage({
+      sessionId: 'session-1',
+      snapshot: 'snapshot-1',
+      start: 0,
+      limit: 2,
+    });
+
+    expect(result).toEqual({
+      v: 1,
+      sessionId: 'session-1',
+      snapshot: 'snapshot-1',
+      totalTurns: 1,
+      start: 0,
+      turns: [
+        {
+          ordinal: 0,
+          turnId: 'record-1',
+          kind: 'prompt',
+          label: 'hello',
+        },
+      ],
+    });
+    expect(handles[0]?.agent.extMethodCalls).toEqual([
+      {
+        method: SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+        params: {
+          cwd: WS_A,
+          sessionId: 'session-1',
+          snapshot: 'snapshot-1',
+          start: 0,
+          limit: 2,
+        },
+      },
+    ]);
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
+    expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
   it('times out transcript page status requests', async () => {
     vi.useFakeTimers();
     try {
@@ -3888,6 +3962,41 @@ describe('createAcpSessionBridge', () => {
       });
 
       const request = bridge.getSessionTranscriptPage({
+        sessionId: 'session-1',
+      });
+      const rejection =
+        // eslint-disable-next-line vitest/valid-expect -- awaited via `rejection` below, after the fake timers advance (handler attached early so the timeout rejection is not unhandled)
+        expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+      await callSeen.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await rejection;
+      expect(handle.agent.extMethodCalls).toHaveLength(1);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('times out turn-index page status requests', async () => {
+    vi.useFakeTimers();
+    try {
+      const callSeen = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+            callSeen.resolve();
+            return new Promise<never>(() => {});
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const request = bridge.getSessionTurnIndexPage({
         sessionId: 'session-1',
       });
       const rejection =
@@ -3946,6 +4055,27 @@ describe('createAcpSessionBridge', () => {
     ).rejects.toMatchObject({
       name: 'SessionNotFoundError',
       sessionId: 'missing-transcript',
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('maps a missing turn-index session (resourceNotFound) to SessionNotFoundError', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+          throw RequestError.resourceNotFound('session:missing-turn-index');
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await expect(
+      bridge.getSessionTurnIndexPage({ sessionId: 'missing-turn-index' }),
+    ).rejects.toMatchObject({
+      name: 'SessionNotFoundError',
+      sessionId: 'missing-turn-index',
     });
 
     await bridge.shutdown();
