@@ -22,7 +22,7 @@
  */
 
 import {
-  sanitizeTerminalText,
+  sanitizeSingleLineTerminalText,
   truncateToWidth,
 } from '../../ui/utils/textUtils.js';
 import { deriveAgentViewPresentation } from '../../agent-view/presentation.js';
@@ -68,19 +68,15 @@ const NO_SUPERVISOR: ManagedControlResult = {
  * record: escape sequences that repaint the screen, and bidi overrides
  * that reorder what is read. `sessions ps` sanitizes for the same reason.
  *
- * `sanitizeTerminalText` deliberately preserves TAB and LF for multi-line
- * render sites, but everything this file prints is one labelled line: a
- * kept LF would let session text start a forged continuation at column 0
- * — a fake `Answer it with:` hint, for instance. The one-line renderer
- * `ps.ts` drops those two on top of the shared helper for exactly this
- * reason, so this does the same.
+ * Everything this file prints is one labelled line, so the one-line
+ * sanitization variant applies: a kept LF would let session text start a
+ * forged continuation at column 0 — a fake `Answer it with:` hint, for
+ * instance. The one-line renderer `ps.ts` has the same constraint; the
+ * recipe is shared in `sanitizeSingleLineTerminalText`.
  */
 function clean(value: string | undefined, limit = 500): string {
   if (!value) return '';
-  return truncateToWidth(
-    sanitizeTerminalText(value).replace(/[\t\n]/g, ''),
-    limit,
-  );
+  return truncateToWidth(sanitizeSingleLineTerminalText(value), limit);
 }
 
 interface PeekResponse {
