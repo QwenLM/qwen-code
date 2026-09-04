@@ -196,66 +196,79 @@ export function computeApiTruncationIndex(
     return startIndex;
   }
 
-  // Identity first for non-first turns: when the target turn and its
-  // model-facing entry share a prompt identity, the boundary is an exact
-  // lookup instead of a content-shape guess. Anything else — no identity on
-  // the target, an identity that reaches no entry, one that reaches
-  // several, or one flagged file-key-only by `/restore` — falls through to
-  // the positional walk below, which is the behavior that shipped before
-  // identities existed. The lookup is bounded by `startIndex`: compression
-  // records restore identity marks onto entries inside the compressed
-  // prefix, and resolving one of those absorbed marks would truncate at the
-  // prefix and silently drop every real turn.
+  // The positional mapping: walk the API history from after the startup
+  // context, counting user text prompts, and truncate right before the
+  // (uiUserTurnCount + 1)th one. This is exactly the behavior that shipped
+  // before identities existed, so it is the safe baseline - whenever it
+  // lands, the result is what a pre-identity session would have produced.
+  const positionalTruncationIndex = (): number => {
+    let realUserPromptCount = 0;
+    for (let i = startIndex; i < apiHistory.length; i++) {
+      if (isUserTextContent(apiHistory[i]!)) {
+        realUserPromptCount++;
+        // The target turn is the (uiUserTurnCount + 1)th real user prompt.
+        // We want to truncate right before it.
+        if (realUserPromptCount > uiUserTurnCount) {
+          return i;
+        }
+      }
+    }
+    // Not enough user prompts (e.g., after compression): unreachable.
+    return -1;
+  };
+
   const target = uiHistory[targetIndex]!;
   if (
     isRealUserTurn(target) &&
     target.promptId &&
     !target.promptIdFileKeyOnly
   ) {
-    // A unique post-`startIndex` match is ambiguous only when a real user
-    // turn AFTER the target carries the same promptId: with a marker-less
-    // compressed prefix present (`compressionIndex === -1` yet the API
-    // history carries the prefix), that later turn can hold a re-minted
-    // twin of the target's absorbed entry, and resolving the target onto
-    // the twin would truncate at the twin's boundary and silently keep the
-    // prompt+response the UI deleted, where the positional walk below
-    // refuses loudly (R26-1). Skip the lookup in exactly that state. A
-    // surviving twin is the LAST claimant of its id, so its unique match is
-    // its own entry and stays resolvable (R25-1).
-    const ambiguousTwinPrefix =
-      compressionIndex === -1 &&
-      startIndex > getStartupContextLength(apiHistory) &&
-      uiHistory
-        .slice(targetIndex + 1)
-        .some(
-          (item) => isRealUserTurn(item) && item.promptId === target.promptId,
-        );
-    if (!ambiguousTwinPrefix) {
+    // Identities are minted `sessionId########<n>` by entrances whose
+    // counters restart independently, so OTHER real user turns can carry the
+    // target's promptId (twins). Whenever a twin exists, a unique
+    // post-`startIndex` match is not provably the target's own entry: if the
+    // target's own entry is present but UNMARKED (a retry, continuation,
+    // tool-result or cron re-send strips the mark while the UI item keeps
+    // its promptId) while a twin's entry keeps the mark, the lookup resolves
+    // the target onto the TWIN's boundary and silently truncates there
+    // (R27-1) even though the positional walk maps it correctly. This needs
+    // no compressed prefix and the twin may be earlier OR later, so no
+    // prefix/`slice(targetIndex + 1)` gate catches it - the class fix is a
+    // whitelist at this resolution site. In the ambiguous state prefer the
+    // positional walk (the pre-identity behavior). Only when it cannot land
+    // AND the target is the LAST claimant of its id - a surviving twin whose
+    // own marked entry is the unique post-prefix match while earlier twins
+    // were absorbed - fall back to the lookup (R25-1). A target with a LATER
+    // claimant never falls back: the match would be the later twin's entry,
+    // and refusing loudly (-1) is what the positional walk already does
+    // (R26-1).
+    let hasTwin = false;
+    let hasLaterClaimant = false;
+    for (let i = 0; i < uiHistory.length; i++) {
+      if (i === targetIndex) continue;
+      const item = uiHistory[i]!;
+      if (isRealUserTurn(item) && item.promptId === target.promptId) {
+        hasTwin = true;
+        if (i > targetIndex) hasLaterClaimant = true;
+      }
+    }
+
+    if (!hasTwin) {
+      // No other turn claims the id, so the lookup is unambiguous.
       const identifiedIndex = findApiHistoryPromptIndex(
         apiHistory,
         target.promptId,
         startIndex,
       );
       if (identifiedIndex !== -1) return identifiedIndex;
+      return positionalTruncationIndex();
     }
+
+    const positional = positionalTruncationIndex();
+    if (positional !== -1) return positional;
+    if (hasLaterClaimant) return -1;
+    return findApiHistoryPromptIndex(apiHistory, target.promptId, startIndex);
   }
 
-  // Walk the API history from after the startup context, counting
-  // user text prompts to find the one corresponding to the target turn.
-  let realUserPromptCount = 0;
-
-  for (let i = startIndex; i < apiHistory.length; i++) {
-    if (isUserTextContent(apiHistory[i]!)) {
-      realUserPromptCount++;
-      // The target turn is the (uiUserTurnCount + 1)th real user prompt.
-      // We want to truncate right before it.
-      if (realUserPromptCount > uiUserTurnCount) {
-        return i;
-      }
-    }
-  }
-
-  // If we didn't find enough user prompts (e.g., after compression),
-  // signal that the target turn is unreachable.
-  return -1;
+  return positionalTruncationIndex();
 }

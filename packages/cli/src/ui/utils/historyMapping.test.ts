@@ -1080,6 +1080,32 @@ describe('positional fallback when identity does not resolve', () => {
     // The fresh turn still resolves through identity.
     expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
   });
+
+  it('maps an unmarked non-first target positionally when an earlier twin holds the mark (R27-1)', () => {
+    // Two entrances re-minted the same id, so both P and Q carry it in the
+    // UI. Retrying Q re-pushes Q's own entry UNMARKED while P's entry keeps
+    // the mark. Rewinding to Q must map positionally onto Q's own boundary,
+    // not resolve onto P's marked twin entry. No compressed prefix is
+    // involved and the twin is EARLIER, so neither conjunct of the R26-1
+    // `ambiguousTwinPrefix` gate fires; only the resolution-site whitelist
+    // (skip identity whenever another real turn claims the target's id)
+    // catches it. Positional answer is 2; the shortcut returns 0 today.
+    const pEntry = userContent('p');
+    markApiHistoryPrompt(pEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'p', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'q', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      pEntry, // twin P's entry, still marked with the shared id
+      modelContent('r1'),
+      userContent('q'), // Q's own entry, re-pushed unmarked by the retry
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
 });
 
 describe('isRealUserTurn', () => {
