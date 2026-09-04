@@ -5,7 +5,6 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -31,7 +30,7 @@ import sdkTypescriptConfig from '../../packages/sdk-typescript/vitest.config.js'
 import vscodeCompanionConfig from '../../packages/vscode-ide-companion/vitest.config.js';
 import webShellConfig from '../../packages/web-shell/vitest.config.js';
 import webuiConfig from '../../packages/webui/vite.config.js';
-import { getWorkspacePackageJsonPaths } from '../workspaces.js';
+import { getTestCiWorkspacePaths } from '../workspaces.js';
 import scriptsTestsConfig from './vitest.config.js';
 
 // Every vitest project that `npm run test:ci` runs on the Windows/macOS
@@ -307,18 +306,11 @@ describe('shared-pool test timeout', () => {
     // class this pin exists to kill — with every test above still green.
     // One-directional on purpose: the root glob carries negations,
     // packages/channels/plugin-example is a workspace without test:ci, and
-    // scripts/tests is in the map without being a workspace.
+    // scripts/tests is in the map without being a workspace. The selection
+    // itself lives in scripts/workspaces.js so it cannot drift from the
+    // release-workflow pins that gate on the same set.
     const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
-    const { workspaces } = JSON.parse(
-      readFileSync(join(repoRoot, 'package.json'), 'utf8'),
-    ) as { workspaces: string[] };
-    const missing = getWorkspacePackageJsonPaths(repoRoot, workspaces)
-      .filter((packageJsonPath) => {
-        const { scripts } = JSON.parse(
-          readFileSync(join(repoRoot, packageJsonPath), 'utf8'),
-        ) as { scripts?: Record<string, string> };
-        return Boolean(scripts?.['test:ci']);
-      })
+    const missing = getTestCiWorkspacePaths(repoRoot)
       .map((packageJsonPath) =>
         packageJsonPath.slice(0, -'/package.json'.length),
       )
