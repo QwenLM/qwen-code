@@ -853,7 +853,7 @@ qwen sessions ps --json | jq -r 'select(.taskState == "waiting") | .name'
 
 #### `qwen sessions peek|answer|stop <session>`
 
-A background session started with `--bg` runs with nobody watching it. These three commands are how you catch up with one. Each takes a session id or any unique prefix of one — the short form `qwen sessions ps` and `--bg` print is enough.
+A background session started with `--bg` runs with nobody watching it. These three commands are how you catch up with one. Each takes a session id or any unique prefix of one — the full id `--bg` prints at launch is enough, and `qwen sessions ps --json` lists it as `sessionId`.
 
 `peek` shows what the session is doing, and what it has stopped to ask:
 

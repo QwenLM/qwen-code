@@ -98,7 +98,10 @@ function isPeekResponse(value: unknown): value is PeekResponse {
   return typeof state === 'object' && state !== null && 'sessionId' in state;
 }
 
-/** Short handle a user can type back, matching the id `--bg` printed. */
+/**
+ * Short handle a user can type back: ids resolve by unique prefix, so the
+ * first eight characters of the full id `--bg` printed are enough.
+ */
 export function shortSessionId(sessionId: string): string {
   return sessionId.slice(0, 8);
 }
