@@ -130,6 +130,16 @@ describe('TestRig', () => {
         return true;
       });
 
+      // Positive control, through the same KEEP_OUTPUT gate the harness uses:
+      // a forwarding path that never ran satisfies the empty window below
+      // exactly as well as one cleanup() has detached.
+      await expect
+        .poll(() => forwarded.some((chunk) => chunk.includes(FORWARD_CANARY)), {
+          message: 'stdout forwarding never went live before cleanup',
+          timeout: 20_000,
+        })
+        .toBe(true);
+
       await rig.cleanup();
       // Still alive: it swallowed SIGHUP. That is the window the real CLI's
       // graceful shutdown opens between cleanup() and the child's own exit.
@@ -137,6 +147,10 @@ describe('TestRig', () => {
 
       forwarded.length = 0;
       await sleep(500);
+      // Alive at the END of the window too: a producer that died inside it
+      // emits no bytes, so the assertion below could no longer tell
+      // "detached" apart from "dead".
+      expect(isProcessAlive(ptyProcess.pid)).toBe(true);
 
       expect(
         forwarded.filter((chunk) => chunk.includes(FORWARD_CANARY)),
