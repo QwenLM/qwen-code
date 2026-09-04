@@ -371,7 +371,7 @@ afterEach(() => {
 });
 
 describe('ArtifactPanel terminal tabs', () => {
-  const renderPanel = (activeTabId: string) => (
+  const renderPanel = (activeTabId: string, restoring = false) => (
     <I18nProvider language="en">
       <ArtifactPanel
         artifacts={[]}
@@ -380,6 +380,7 @@ describe('ArtifactPanel terminal tabs', () => {
           { id: 'terminal-two', kind: 'terminal', title: 'Terminal (2)' },
         ]}
         activeTabId={activeTabId}
+        restoring={restoring}
         reviewChanges={[]}
         selectedReviewPath={null}
         onSelectTab={() => {}}
@@ -410,6 +411,22 @@ describe('ArtifactPanel terminal tabs', () => {
     expect(
       container.querySelectorAll('[data-testid="terminal-panel"]'),
     ).toHaveLength(2);
+  });
+
+  it('keeps an active terminal visible while restoring', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => root.render(renderPanel('terminal-one', true)));
+
+    expect(
+      container.querySelector('[data-terminal-id="terminal-one"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="right-panel-loading-skeleton"]'),
+    ).toBeNull();
   });
 });
 
@@ -725,6 +742,7 @@ describe('ArtifactPanel code review artifacts', () => {
                 kind: 'file',
                 title: 'page.html',
                 workspacePath: 'page.html',
+                attachmentId: 'page.html',
                 previewContent: '<h1>Attachment page</h1>',
                 previewMimeType: 'text/html',
                 previewOnly: true,

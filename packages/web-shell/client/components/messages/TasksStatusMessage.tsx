@@ -33,6 +33,7 @@ import { formatRuntime } from '../../utils/formatRuntime';
 import { formatContextTokens } from '../../utils/formatTokenCount';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { PlanExecutionView } from './PlanExecutionView';
 import { WorkflowExecutionView } from './WorkflowExecutionView';
 import {
@@ -363,6 +364,7 @@ export function TasksStatusMessage({
   onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
 }) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const actions = useActions();
   const shouldIncludeWorkflows =
     taskView !== 'all' ||
@@ -420,7 +422,7 @@ export function TasksStatusMessage({
   const blockingIds = useMemo(() => computeUserBlockingIds(tasks), [tasks]);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (documentMode || !isOpen) return;
     const refresh = () => {
       if (refreshInFlightRef.current) return;
       refreshInFlightRef.current = true;
@@ -452,7 +454,7 @@ export function TasksStatusMessage({
     };
     const id = setInterval(refresh, REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [isOpen, loadTasks, onTasksChange]);
+  }, [documentMode, isOpen, loadTasks, onTasksChange]);
 
   useEffect(() => {
     if (selectedIndex >= 0) return;
@@ -494,15 +496,15 @@ export function TasksStatusMessage({
   }, [isOpen, step, selectedTask]);
 
   useEffect(() => {
-    if (!manageActiveEvent) return undefined;
+    if (documentMode || !manageActiveEvent) return undefined;
     const id = panelIdRef.current;
     const sessionId = message.snapshot.sessionId;
     dispatchActive(id, sessionId, isOpen);
     return () => dispatchActive(id, sessionId, false);
-  }, [isOpen, manageActiveEvent, message.snapshot.sessionId]);
+  }, [documentMode, isOpen, manageActiveEvent, message.snapshot.sessionId]);
 
   useEffect(() => {
-    if (!manageActiveEvent) return undefined;
+    if (documentMode || !manageActiveEvent) return undefined;
     const onActiveChange = (event: Event) => {
       const detail = (event as CustomEvent<{ id?: string; active?: boolean }>)
         .detail;
@@ -512,15 +514,15 @@ export function TasksStatusMessage({
     };
     window.addEventListener(ACTIVE_EVENT, onActiveChange);
     return () => window.removeEventListener(ACTIVE_EVENT, onActiveChange);
-  }, [manageActiveEvent]);
+  }, [documentMode, manageActiveEvent]);
 
   useEffect(() => {
-    if (!isOpen) onClose?.();
-  }, [isOpen, onClose]);
+    if (!documentMode && !isOpen) onClose?.();
+  }, [documentMode, isOpen, onClose]);
 
   const handleCancel = useCallback(
     async (task: DaemonSessionTaskStatus) => {
-      if (busy) return;
+      if (documentMode || busy) return;
       const sessionId = expectedSessionIdRef.current;
       const isRunning = task.status === 'running';
       const isAbandonable = task.kind === 'agent' && task.status === 'paused';
@@ -569,6 +571,7 @@ export function TasksStatusMessage({
       actions,
       busy,
       blockingIds,
+      documentMode,
       loadTasks,
       onTasksChange,
       pendingCancelId,
@@ -582,7 +585,7 @@ export function TasksStatusMessage({
       task: Extract<DaemonSessionTaskStatus, { kind: 'workflow' }>,
       action: 'pause' | 'resume' | 'retry' | 'rerun',
     ) => {
-      if (busy) return;
+      if (documentMode || busy) return;
       const sessionId = expectedSessionIdRef.current;
       setBusy(true);
       try {
@@ -622,6 +625,7 @@ export function TasksStatusMessage({
     [
       actions,
       busy,
+      documentMode,
       loadTasks,
       onTasksChange,
       onWorkflowRunStarted,
@@ -632,7 +636,7 @@ export function TasksStatusMessage({
 
   const handleWorkflowHistoryDelete = useCallback(
     async (runId: string) => {
-      if (busy) return;
+      if (documentMode || busy) return;
       const sessionId = expectedSessionIdRef.current;
       setBusy(true);
       try {
@@ -664,12 +668,20 @@ export function TasksStatusMessage({
         if (expectedSessionIdRef.current === sessionId) setBusy(false);
       }
     },
-    [actions, busy, loadTasks, onTasksChange, selectedTask?.id, t],
+    [
+      actions,
+      busy,
+      documentMode,
+      loadTasks,
+      onTasksChange,
+      selectedTask?.id,
+      t,
+    ],
   );
 
   useDelayedGlobalKeyDown(
     (event: KeyboardEvent) => {
-      if (!keyboardShortcuts || !isOpen) return;
+      if (documentMode || !keyboardShortcuts || !isOpen) return;
 
       if (
         event.key !== 'Escape' &&
@@ -756,6 +768,7 @@ export function TasksStatusMessage({
     },
     [
       embedded,
+      documentMode,
       keyboardShortcuts,
       isOpen,
       step,
@@ -768,7 +781,7 @@ export function TasksStatusMessage({
     ],
   );
 
-  if (!isOpen) return null;
+  if (!documentMode && !isOpen) return null;
 
   const showCancelConfirm =
     pendingCancelId !== null &&
@@ -836,7 +849,7 @@ export function TasksStatusMessage({
             {emptyLabel ?? t('tasks.empty')}
           </div>
         </div>
-        {!embedded && (
+        {!documentMode && !embedded && (
           <div className={styles.shortcuts}>{t('tasks.shortcut.close')}</div>
         )}
       </div>
@@ -847,8 +860,8 @@ export function TasksStatusMessage({
     tasks,
     clampedSelectedIndex,
   );
-  const listTasks = embedded ? tasks : visible;
-  const listOffset = embedded ? 0 : windowStart;
+  const listTasks = embedded || documentMode ? tasks : visible;
+  const listOffset = embedded || documentMode ? 0 : windowStart;
 
   return (
     <div
@@ -888,17 +901,18 @@ export function TasksStatusMessage({
               <span className={styles.secondary}>({tasks.length})</span>
             </div>
           )}
-          {!embedded && hiddenAbove > 0 && (
+          {!documentMode && !embedded && hiddenAbove > 0 && (
             <div className={styles.overflowHint}>
               {t('tasks.moreAbove', { count: hiddenAbove })}
             </div>
           )}
           {listTasks.map((task, visibleIndex) => {
             const index = listOffset + visibleIndex;
-            const selected = index === clampedSelectedIndex;
+            const selected = !documentMode && index === clampedSelectedIndex;
             const stClass = statusClassName(task.status);
             const taskStatusLabel = statusLabel(task.status, t);
-            const expanded = embedded && selected && step === 'detail';
+            const expanded =
+              documentMode || (embedded && selected && step === 'detail');
             const showSelected = embedded ? expanded : selected;
             const tree: AgentTreeInfo | undefined =
               task.kind === 'agent' ? treeInfo.get(task.id) : undefined;
@@ -938,33 +952,46 @@ export function TasksStatusMessage({
                       ? `${styles.row} ${styles.selected}`
                       : styles.row
                   }
-                  role="button"
-                  tabIndex={0}
+                  role={documentMode ? undefined : 'button'}
+                  tabIndex={documentMode ? undefined : 0}
                   aria-expanded={
                     embedded && !(task.kind === 'monitor' && onOpenMonitor)
                       ? expanded
                       : undefined
                   }
-                  onClick={activateTask}
-                  onKeyDown={(event) => {
-                    if (event.key !== 'Enter' && event.key !== ' ') return;
-                    event.preventDefault();
-                    activateTask();
-                  }}
-                  onFocus={() => {
-                    // Embedded rows are focusable too, and the global
-                    // shortcuts (`x` to cancel) act on the SELECTION — so
-                    // without this the user can Tab to one row and cancel
-                    // another. Not while a row is expanded: focus moving
-                    // into the detail must not re-target the selection
-                    // (pinned by the "focus does not expand" case).
-                    if (!embedded || step !== 'detail') {
-                      setSelectedTaskId(task.id);
-                    }
-                  }}
-                  onMouseEnter={() => {
-                    if (!embedded) setSelectedTaskId(task.id);
-                  }}
+                  onClick={documentMode ? undefined : activateTask}
+                  onKeyDown={
+                    documentMode
+                      ? undefined
+                      : (event) => {
+                          if (event.key !== 'Enter' && event.key !== ' ')
+                            return;
+                          event.preventDefault();
+                          activateTask();
+                        }
+                  }
+                  onFocus={
+                    documentMode
+                      ? undefined
+                      : () => {
+                          // Embedded rows are focusable too, and the global
+                          // shortcuts (`x` to cancel) act on the SELECTION — so
+                          // without this the user can Tab to one row and cancel
+                          // another. Not while a row is expanded: focus moving
+                          // into the detail must not re-target the selection
+                          // (pinned by the "focus does not expand" case).
+                          if (!embedded || step !== 'detail') {
+                            setSelectedTaskId(task.id);
+                          }
+                        }
+                  }
+                  onMouseEnter={
+                    documentMode
+                      ? undefined
+                      : () => {
+                          if (!embedded) setSelectedTaskId(task.id);
+                        }
+                  }
                 >
                   <span className={styles.pointer}>
                     {showSelected ? '❯' : ''}
@@ -1011,8 +1038,12 @@ export function TasksStatusMessage({
                       t={t}
                       hideHeader
                       busy={busy}
-                      showCancelConfirm={pendingCancelId === task.id}
-                      onCancel={() => void handleCancel(task)}
+                      showCancelConfirm={
+                        !documentMode && pendingCancelId === task.id
+                      }
+                      onCancel={
+                        documentMode ? undefined : () => void handleCancel(task)
+                      }
                       sourceWorkflowTask={findWorkflowSourceTask(
                         task,
                         allTasks,
@@ -1021,22 +1052,31 @@ export function TasksStatusMessage({
                         task,
                         allTasks,
                       )}
-                      onWorkflowAction={(action) =>
-                        task.kind === 'workflow'
-                          ? void handleWorkflowAction(task, action)
-                          : undefined
+                      onWorkflowAction={
+                        documentMode
+                          ? undefined
+                          : (action) =>
+                              task.kind === 'workflow'
+                                ? void handleWorkflowAction(task, action)
+                                : undefined
                       }
-                      onDeleteWorkflowHistory={(runId) =>
-                        void handleWorkflowHistoryDelete(runId)
+                      onDeleteWorkflowHistory={
+                        documentMode
+                          ? undefined
+                          : (runId) => void handleWorkflowHistoryDelete(runId)
                       }
-                      onCancelConfirmDismiss={() => setPendingCancelId(null)}
+                      onCancelConfirmDismiss={
+                        documentMode
+                          ? undefined
+                          : () => setPendingCancelId(null)
+                      }
                     />
                   </div>
                 )}
               </div>
             );
           })}
-          {!embedded && hiddenBelow > 0 && (
+          {!documentMode && !embedded && hiddenBelow > 0 && (
             <div className={styles.overflowHint}>
               {t('tasks.moreBelow', { count: hiddenBelow })}
             </div>
@@ -1044,7 +1084,7 @@ export function TasksStatusMessage({
         </div>
       )}
 
-      {!embedded && step === 'detail' && selectedTask && (
+      {!documentMode && !embedded && step === 'detail' && selectedTask && (
         <>
           {actionError && <div className={styles.error}>{actionError}</div>}
           <TaskDetail
@@ -1071,7 +1111,7 @@ export function TasksStatusMessage({
         </>
       )}
 
-      {!embedded && (
+      {!documentMode && !embedded && (
         <div
           className={
             showCancelConfirm
@@ -1561,6 +1601,7 @@ function TaskDetail({
   onDeleteWorkflowHistory?: (runId: string) => void;
   onCancelConfirmDismiss?: () => void;
 }) {
+  const documentMode = useTranscriptRenderMode() === 'document';
   const terminalIcon = terminalStatusIcon(task.status);
   const stClass = statusClassName(task.status);
   const isAbandonable = task.kind === 'agent' && task.status === 'paused';
@@ -1663,8 +1704,9 @@ function TaskDetail({
   const promptLines =
     task.kind === 'agent' && task.prompt ? task.prompt.split('\n') : [];
   const actionControls =
-    (canCancel && onCancel) ||
-    ((canPause || canResume || canRetry || canRerun) && onWorkflowAction) ? (
+    !documentMode &&
+    ((canCancel && onCancel) ||
+      ((canPause || canResume || canRetry || canRerun) && onWorkflowAction)) ? (
       <div className={styles.actionBar} data-plan-interactive>
         {showCancelConfirm ? (
           <>
@@ -1825,7 +1867,7 @@ function TaskDetail({
             </div>
             <div className={styles.detailContent}>
               {task.recentActivities
-                .slice(-MAX_DISPLAYED_ACTIVITIES)
+                .slice(documentMode ? 0 : -MAX_DISPLAYED_ACTIVITIES)
                 .map((a, i, arr) => {
                   const isLast = i === arr.length - 1;
                   const desc = formatActivityLabel(a.name, a.description, t);
@@ -1851,13 +1893,17 @@ function TaskDetail({
             {t('tasks.detail.prompt')}
           </div>
           <div className={styles.promptContent}>
-            {promptLines.slice(0, 5).map((line, i, arr) => (
-              <div key={i}>
-                {i === arr.length - 1 && promptLines.length > 5
-                  ? `${line}…`
-                  : line || ' '}
-              </div>
-            ))}
+            {promptLines
+              .slice(0, documentMode ? undefined : 5)
+              .map((line, i, arr) => (
+                <div key={i}>
+                  {!documentMode &&
+                  i === arr.length - 1 &&
+                  promptLines.length > 5
+                    ? `${line}…`
+                    : line || ' '}
+                </div>
+              ))}
           </div>
         </div>
       )}

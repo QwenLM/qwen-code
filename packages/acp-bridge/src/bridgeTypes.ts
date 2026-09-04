@@ -41,6 +41,8 @@ import type {
 } from './sessionArtifacts.js';
 import type { SessionAttachmentReference } from './sessionAttachments.js';
 import type {
+  ServeSessionAgentsStatus,
+  ServeSessionAgentTrace,
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
@@ -1411,6 +1413,15 @@ export interface WorkspaceEventBridge extends WorkspaceEventPublisher {
 }
 
 export interface AcpSessionBridge extends WorkspaceEventBridge {
+  /**
+   * Immutable proof derived at construction: this bridge's frozen
+   * child-environment overrides carry the exact Conversations provenance
+   * marker AND its configured channel factory is attested to forward those
+   * overrides into the spawned child. The daemon requires this before it
+   * enables mandatory-lease-dependent behavior for the Conversations runtime.
+   */
+  readonly mandatoryLeaseAttested: boolean;
+
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
 
@@ -1878,6 +1889,15 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     opts?: { includeWorkflows?: boolean },
   ): Promise<ServeSessionTasksStatus>;
 
+  /** Read persisted and live subagents for a live session. */
+  getSessionAgentsStatus(sessionId: string): Promise<ServeSessionAgentsStatus>;
+
+  /** Read the persisted subagent lineage for a live session. */
+  getSessionAgentTrace(
+    sessionId: string,
+    rootAgentId?: string,
+  ): Promise<ServeSessionAgentTrace>;
+
   /** Read the captured output tail for a live Shell or Monitor task. */
   getSessionTaskOutputStatus(
     sessionId: string,
@@ -1911,6 +1931,9 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   getSessionTranscriptPage(
     req: BridgeSessionTranscriptPageRequest,
   ): Promise<BridgeSessionTranscriptPage>;
+
+  /** Flush pending transcript writes for a live session. */
+  flushSessionTranscript?(sessionId: string): Promise<void>;
 
   /** Read a sparse page of persisted navigation turns through the ACP child. */
   getSessionTurnIndexPage(
@@ -2202,6 +2225,12 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     attachmentId: string,
     context?: BridgeClientRequestContext,
   ): Promise<{ data: Buffer; mimeType: string } | undefined>;
+
+  /** List every attachment currently stored for the session, upload order. */
+  listSessionAttachments(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionAttachmentReference[]>;
 
   removeSessionAttachment(
     sessionId: string,

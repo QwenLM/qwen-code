@@ -3382,12 +3382,24 @@ describe('createAcpSessionBridge', () => {
                 state: {},
               };
             }
-            if (method === 'qwen/status/session/tasks') {
+            if (
+              method === 'qwen/status/session/tasks' ||
+              method === 'qwen/status/session/agents'
+            ) {
               return {
                 v: 1,
                 sessionId: params['sessionId'],
                 now: 1_700_000_000_000,
                 tasks: [],
+              };
+            }
+            if (method === 'qwen/status/session/agent_trace') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                nodes: [],
+                rootAgentIds: [params['rootAgentId']],
+                warnings: [],
               };
             }
             if (method === 'qwen/status/session/task_output') {
@@ -3477,6 +3489,19 @@ describe('createAcpSessionBridge', () => {
       tasks: [],
     });
     await expect(
+      bridge.getSessionAgentsStatus(session.sessionId),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      tasks: [],
+    });
+    await expect(
+      bridge.getSessionAgentTrace(session.sessionId, 'root-1'),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      rootAgentIds: ['root-1'],
+      nodes: [],
+    });
+    await expect(
       bridge.getSessionTaskOutputStatus(session.sessionId, 'shell-1', 'shell'),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
@@ -3509,6 +3534,8 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/context',
       'qwen/status/session/supported_commands',
       'qwen/status/session/tasks',
+      'qwen/status/session/agents',
+      'qwen/status/session/agent_trace',
       'qwen/status/session/task_output',
       'qwen/status/session/lsp',
       'qwen/status/session/resources',
@@ -3517,7 +3544,7 @@ describe('createAcpSessionBridge', () => {
       sessionId: session.sessionId,
       includeWorkflows: true,
     });
-    expect(handles[0]?.agent.extMethodCalls[3]?.params).toMatchObject({
+    expect(handles[0]?.agent.extMethodCalls[5]?.params).toMatchObject({
       sessionId: session.sessionId,
       taskId: 'shell-1',
       taskKind: 'shell',
@@ -3890,6 +3917,39 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.promptCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
+  it('flushes transcripts through the backward page barrier', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [],
+            hasMore: false,
+          };
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await bridge.flushSessionTranscript?.('session-1');
+
+    expect(handle.agent.extMethodCalls).toEqual([
+      {
+        method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+        params: {
+          cwd: WS_A,
+          sessionId: 'session-1',
+          direction: 'backward',
+          limit: 1,
+        },
+      },
+    ]);
 
     await bridge.shutdown();
   });
@@ -4789,6 +4849,12 @@ describe('createAcpSessionBridge', () => {
     await expect(
       bridge.getSessionTasksStatus('missing'),
     ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(
+      bridge.getSessionAgentsStatus('missing'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(bridge.getSessionAgentTrace('missing')).rejects.toBeInstanceOf(
+      SessionNotFoundError,
+    );
     await expect(bridge.getSessionLspStatus('missing')).rejects.toBeInstanceOf(
       SessionNotFoundError,
     );
@@ -15711,6 +15777,38 @@ describe('createAcpSessionBridge', () => {
         binaryReference,
       ]);
       await bridge.shutdown();
+    });
+
+    it('lists every attachment stored for a session', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({ promptImpl: () => ({ stopReason: 'end_turn' }) })
+            .channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const textReference = await bridge.storeSessionAttachment(
+          session.sessionId,
+          new TextEncoder().encode('hello'),
+          'text/plain',
+          { clientId: session.clientId },
+          'notes.txt',
+        );
+        const imageReference = await bridge.storeSessionAttachment(
+          session.sessionId,
+          Uint8Array.from([1, 2, 3]),
+          'image/png',
+          { clientId: session.clientId },
+        );
+
+        expect(
+          await bridge.listSessionAttachments(session.sessionId, {
+            clientId: session.clientId,
+          }),
+        ).toEqual(expect.arrayContaining([textReference, imageReference]));
+      } finally {
+        await bridge.shutdown();
+      }
     });
 
     it('keeps inline media bytes in echoes for legacy clients', async () => {

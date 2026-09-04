@@ -159,6 +159,52 @@ function turnCompleteFrame(promptId: string): string {
 }
 
 describe('DaemonSessionClient', () => {
+  it('binds agent, trace, and attachment reads to the session identity', async () => {
+    const controller = new AbortController();
+    const { signal } = controller;
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/agents')) {
+        return jsonResponse(200, { v: 1, sessionId: 's-1', tasks: [] });
+      }
+      if (req.url.includes('/agent-trace')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          nodes: [],
+          rootAgentIds: [],
+          warnings: [],
+        });
+      }
+      return jsonResponse(200, { attachments: [] });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.agents(signal)).resolves.toMatchObject({ tasks: [] });
+    await expect(
+      session.agentTrace({ rootAgentId: 'root-1', signal }),
+    ).resolves.toMatchObject({ nodes: [] });
+    await expect(session.listAttachments(signal)).resolves.toEqual([]);
+    expect(calls.map((call) => call.url)).toEqual([
+      'http://daemon/session/s-1/agents',
+      'http://daemon/session/s-1/agent-trace?rootAgentId=root-1',
+      'http://daemon/session/s-1/attachments',
+    ]);
+    controller.abort();
+    expect(calls.every((call) => call.signal?.aborted)).toBe(true);
+    expect(
+      calls.every((call) => call.headers['x-qwen-client-id'] === 'client-1'),
+    ).toBe(true);
+  });
+
   it('binds turn-index reads to the session and client identity', async () => {
     const body = {
       v: 1 as const,
@@ -404,7 +450,12 @@ describe('DaemonSessionClient', () => {
     expect(loaded.replayDegraded).toBe(true);
     expect(loaded.replaySnapshot.compactedReplay[0]?.data).toEqual({
       sessionUpdate: 'user_message_chunk',
-      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      content: {
+        type: 'image',
+        attachmentId: 'media-1',
+        data: 'AQID',
+        mimeType: 'image/png',
+      },
     });
     expect(resumed.restoreStrategy).toEqual({ kind: 'standalone' });
     expect(resumed.state).toEqual({ mode: 'resumed' });
@@ -875,12 +926,22 @@ describe('DaemonSessionClient', () => {
     expect(session.replaySnapshot.compactedReplay[0]?.data).toEqual({
       update: {
         sessionUpdate: 'user_message_chunk',
-        content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        content: {
+          type: 'image',
+          data: 'AQID',
+          mimeType: 'image/png',
+          attachmentId: 'media-1',
+        },
       },
     });
     expect(session.replaySnapshot.compactedReplay[1]?.data).toEqual({
       sessionUpdate: 'user_message_chunk',
-      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      content: {
+        type: 'image',
+        data: 'AQID',
+        mimeType: 'image/png',
+        attachmentId: 'media-1',
+      },
     });
     expect(session.replaySnapshot.compactedReplay[2]?.data).toEqual({
       sessionUpdate: 'user_message_chunk',
@@ -903,7 +964,12 @@ describe('DaemonSessionClient', () => {
     const page = await session.getTranscriptPage();
     expect(page.events[0]?.data).toEqual({
       sessionUpdate: 'user_message_chunk',
-      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      content: {
+        type: 'image',
+        data: 'AQID',
+        mimeType: 'image/png',
+        attachmentId: 'media-1',
+      },
     });
     expect(
       calls.find((call) => call.url.endsWith('/attachments/media-1'))?.headers[
@@ -913,6 +979,14 @@ describe('DaemonSessionClient', () => {
     expect(
       calls.filter((call) => call.url.endsWith('/attachments/media-1')),
     ).toHaveLength(1);
+
+    const reloaded = await DaemonSessionClient.load(client, 's-1');
+    expect(reloaded.replaySnapshot.compactedReplay[0]?.data).toMatchObject({
+      update: { content: { attachmentId: 'media-1' } },
+    });
+    expect(
+      calls.filter((call) => call.url.endsWith('/attachments/media-1')),
+    ).toHaveLength(2);
     expect(
       calls.filter((call) => call.url.endsWith('/attachments/notes.json')),
     ).toHaveLength(0);
@@ -1068,7 +1142,12 @@ describe('DaemonSessionClient', () => {
     const page = await session.getTranscriptPage();
     expect(page.events[0]?.data).toEqual({
       sessionUpdate: 'user_message_chunk',
-      content: { type: 'image', data: 'AQID', mimeType: 'image/png' },
+      content: {
+        type: 'image',
+        data: 'AQID',
+        mimeType: 'image/png',
+        attachmentId: 'flaky-media',
+      },
     });
     expect(
       calls.filter((call) => call.url.endsWith('/attachments/flaky-media')),
@@ -3552,6 +3631,7 @@ describe('DaemonSessionClient clientId self-heal', () => {
       type: 'image',
       data: 'AQID',
       mimeType: 'image/png',
+      attachmentId: 'media-read',
     });
 
     expect(resumeCalls).toBe(3);

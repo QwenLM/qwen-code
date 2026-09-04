@@ -159,6 +159,8 @@ import type {
   SubscribeOptions,
 } from '@qwen-code/acp-bridge/eventBus';
 import type {
+  ServeSessionAgentsStatus,
+  ServeSessionAgentTrace,
   ServeSessionContextStatus,
   ServeSessionContextUsageStatus,
   ServeSessionHooksStatus,
@@ -603,6 +605,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_prompt',
   'session_turn_status',
   'session_attachments',
+  'session_attachment_list',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
   'session_cancel',
@@ -636,6 +639,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_context_usage',
   'session_supported_commands',
   'session_tasks',
+  'session_agents',
+  'session_agent_trace',
   'session_task_output',
   'session_monitor_tool_correlation',
   'session_stats',
@@ -754,7 +759,7 @@ const EXPECTED_REGISTERED_FEATURES = [
     if (feature === 'mcp_guardrail_events') {
       return [feature, 'external_tool_guard'];
     }
-    if (feature === 'session_tasks') {
+    if (feature === 'session_agent_trace') {
       return [feature, 'scheduled_task_session_reuse'];
     }
     if (feature === 'session_export') {
@@ -1016,6 +1021,11 @@ interface FakeBridgeOpts {
     sessionId: string,
     opts?: { includeWorkflows?: boolean },
   ) => Promise<ServeSessionTasksStatus>;
+  sessionAgentsImpl?: (sessionId: string) => Promise<ServeSessionAgentsStatus>;
+  sessionAgentTraceImpl?: (
+    sessionId: string,
+    rootAgentId?: string,
+  ) => Promise<ServeSessionAgentTrace>;
   sessionTaskOutputImpl?: (
     sessionId: string,
     taskId: string,
@@ -1027,6 +1037,7 @@ interface FakeBridgeOpts {
   ) => Promise<ServeSessionResourcesStatus>;
   sessionSavedWorkflowImpl?: AcpSessionBridge['getSessionSavedWorkflow'];
   sessionTranscriptImpl?: AcpSessionBridge['getSessionTranscriptPage'];
+  flushSessionTranscriptImpl?: (sessionId: string) => Promise<void>;
   sessionTurnIndexImpl?: AcpSessionBridge['getSessionTurnIndexPage'];
   cancelSessionTaskImpl?: (
     sessionId: string,
@@ -1296,6 +1307,7 @@ interface FakeBridge extends AcpSessionBridge {
     sessionId: string;
     context?: BridgeClientRequestContext;
   }>;
+  sessionAttachmentListCalls: string[];
   addSessionArtifactCalls: Array<{
     sessionId: string;
     artifact: Parameters<AcpSessionBridge['addSessionArtifact']>[1];
@@ -1345,6 +1357,11 @@ interface FakeBridge extends AcpSessionBridge {
   sessionSupportedCommandsCalls: string[];
   sessionStatsCalls: string[];
   sessionTasksCalls: string[];
+  sessionAgentsCalls: string[];
+  sessionAgentTraceCalls: Array<{
+    sessionId: string;
+    rootAgentId?: string;
+  }>;
   sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined>;
   sessionTaskOutputCalls: Array<{
     sessionId: string;
@@ -1357,6 +1374,7 @@ interface FakeBridge extends AcpSessionBridge {
   sessionTranscriptCalls: Array<
     Parameters<AcpSessionBridge['getSessionTranscriptPage']>[0]
   >;
+  flushSessionTranscriptCalls: string[];
   sessionTurnIndexCalls: Array<
     Parameters<AcpSessionBridge['getSessionTurnIndexPage']>[0]
   >;
@@ -1555,6 +1573,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const listCalls: string[] = [];
   const summaryCalls: string[] = [];
   const sessionArtifactsCalls: FakeBridge['sessionArtifactsCalls'] = [];
+  const sessionAttachmentListCalls: string[] = [];
   const addSessionArtifactCalls: FakeBridge['addSessionArtifactCalls'] = [];
   const removeSessionArtifactCalls: FakeBridge['removeSessionArtifactCalls'] =
     [];
@@ -1576,6 +1595,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionSupportedCommandsCalls: string[] = [];
   const sessionStatsCalls: string[] = [];
   const sessionTasksCalls: string[] = [];
+  const sessionAgentsCalls: string[] = [];
+  const sessionAgentTraceCalls: Array<{
+    sessionId: string;
+    rootAgentId?: string;
+  }> = [];
   const sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined> =
     [];
   const sessionTaskOutputCalls: FakeBridge['sessionTaskOutputCalls'] = [];
@@ -1583,6 +1607,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionResourcesCalls: string[] = [];
   const sessionSavedWorkflowCalls: FakeBridge['sessionSavedWorkflowCalls'] = [];
   const sessionTranscriptCalls: FakeBridge['sessionTranscriptCalls'] = [];
+  const flushSessionTranscriptCalls: string[] = [];
   const sessionTurnIndexCalls: FakeBridge['sessionTurnIndexCalls'] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const controlSessionWorkflowTaskCalls: FakeBridge['controlSessionWorkflowTaskCalls'] =
@@ -1907,6 +1932,23 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       now: 1_700_000_000_000,
       tasks: [],
     }));
+  const sessionAgentsImpl =
+    opts.sessionAgentsImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      now: 1_700_000_000_000,
+      tasks: [],
+    }));
+  const sessionAgentTraceImpl =
+    opts.sessionAgentTraceImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      nodes: [],
+      rootAgentIds: [],
+      warnings: [],
+    }));
   const sessionTaskOutputImpl =
     opts.sessionTaskOutputImpl ??
     (async (sessionId, taskId, taskKind) => ({
@@ -1975,6 +2017,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       events: [],
       hasMore: false,
     }));
+  const flushSessionTranscriptImpl =
+    opts.flushSessionTranscriptImpl ?? (async () => {});
   const sessionTurnIndexImpl =
     opts.sessionTurnIndexImpl ??
     (async (req) => ({
@@ -2207,6 +2251,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessions: [],
     }));
   return {
+    // The fake stands in for production bridges built through
+    // `createSpawnChannelFactory`, which carry the forwarding attestation
+    // the Conversations runtime publication gate requires.
+    mandatoryLeaseAttested: true,
     // F3 Commit 6 — `AcpSessionBridge.permissionPolicy` is required so
     // `/capabilities` can expose `policy.permission`. Tests don't
     // exercise mediation; pin to the pre-F3 default ('first-responder')
@@ -2250,6 +2298,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     listCalls,
     summaryCalls,
     sessionArtifactsCalls,
+    sessionAttachmentListCalls,
     addSessionArtifactCalls,
     removeSessionArtifactCalls,
     workspaceMcpToolsCalls,
@@ -2260,12 +2309,15 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionSupportedCommandsCalls,
     sessionStatsCalls,
     sessionTasksCalls,
+    sessionAgentsCalls,
+    sessionAgentTraceCalls,
     sessionTasksOptions,
     sessionTaskOutputCalls,
     sessionLspCalls,
     sessionResourcesCalls,
     sessionSavedWorkflowCalls,
     sessionTranscriptCalls,
+    flushSessionTranscriptCalls,
     sessionTurnIndexCalls,
     cancelSessionTaskCalls,
     controlSessionWorkflowTaskCalls,
@@ -2561,6 +2613,17 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionTasksOptions.push(opts);
       return sessionTasksImpl(sessionId, opts);
     },
+    async getSessionAgentsStatus(sessionId) {
+      sessionAgentsCalls.push(sessionId);
+      return sessionAgentsImpl(sessionId);
+    },
+    async getSessionAgentTrace(sessionId, rootAgentId) {
+      sessionAgentTraceCalls.push({
+        sessionId,
+        ...(rootAgentId ? { rootAgentId } : {}),
+      });
+      return sessionAgentTraceImpl(sessionId, rootAgentId);
+    },
     async getSessionTaskOutputStatus(sessionId, taskId, taskKind) {
       sessionTaskOutputCalls.push({ sessionId, taskId, taskKind });
       return sessionTaskOutputImpl(sessionId, taskId, taskKind);
@@ -2580,6 +2643,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getSessionTranscriptPage(req) {
       sessionTranscriptCalls.push(req);
       return sessionTranscriptImpl(req);
+    },
+    async flushSessionTranscript(sessionId) {
+      flushSessionTranscriptCalls.push(sessionId);
+      await flushSessionTranscriptImpl(sessionId);
     },
     async getSessionTurnIndexPage(req) {
       sessionTurnIndexCalls.push(req);
@@ -2722,6 +2789,25 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     async readSessionAttachment(_sessionId, attachmentId) {
       return sessionAttachments.get(attachmentId);
+    },
+    async listSessionAttachments(sessionId) {
+      sessionAttachmentListCalls.push(sessionId);
+      return Array.from(sessionAttachments.entries()).map(
+        ([attachmentId, { data, mimeType }]) => ({
+          type: [
+            'image/bmp',
+            'image/gif',
+            'image/jpeg',
+            'image/png',
+            'image/webp',
+          ].includes(mimeType)
+            ? 'image'
+            : 'resource',
+          attachmentId,
+          mimeType,
+          size: data.byteLength,
+        }),
+      );
     },
     async removeSessionAttachment(_sessionId, attachmentId) {
       return sessionAttachments.delete(attachmentId);
@@ -9993,6 +10079,19 @@ describe('createServeApp', () => {
           },
         ],
       };
+      const agents: ServeSessionAgentsStatus = {
+        v: 1,
+        sessionId: 's-1',
+        now: 1_700_000_000_000,
+        tasks: [],
+      };
+      const agentTrace: ServeSessionAgentTrace = {
+        v: 1,
+        sessionId: 's-1',
+        nodes: [],
+        rootAgentIds: [],
+        warnings: [],
+      };
       const lsp: ServeSessionLspStatus = {
         v: 1,
         sessionId: 's-1',
@@ -10036,6 +10135,8 @@ describe('createServeApp', () => {
         sessionSupportedCommandsImpl: async () => commands,
         sessionStatsImpl: async () => stats,
         sessionTasksImpl: async () => tasks,
+        sessionAgentsImpl: async () => agents,
+        sessionAgentTraceImpl: async () => agentTrace,
         sessionLspImpl: async () => lsp,
         sessionResourcesImpl: async () => resources,
       });
@@ -10057,6 +10158,15 @@ describe('createServeApp', () => {
       const tasksRes = await request(app)
         .get('/session/s-1/tasks')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const agentsRes = await request(app)
+        .get('/session/s-1/agents')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const agentTraceRes = await request(app)
+        .get('/session/s-1/agent-trace?rootAgentId=root-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const invalidAgentTraceRes = await request(app)
+        .get('/session/s-1/agent-trace?rootAgentId=')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
       const workflowTasksRes = await request(app)
         .get('/session/s-1/tasks?includeWorkflows=true')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
@@ -10076,6 +10186,11 @@ describe('createServeApp', () => {
       expect(statsRes.body).toEqual(stats);
       expect(tasksRes.status).toBe(200);
       expect(tasksRes.body).toEqual(tasks);
+      expect(agentsRes.status).toBe(200);
+      expect(agentsRes.body).toEqual(agents);
+      expect(agentTraceRes.status).toBe(200);
+      expect(agentTraceRes.body).toEqual(agentTrace);
+      expect(invalidAgentTraceRes.status).toBe(400);
       expect(workflowTasksRes.status).toBe(200);
       expect(workflowTasksRes.body).toEqual(tasks);
       expect(lspRes.status).toBe(200);
@@ -10086,6 +10201,10 @@ describe('createServeApp', () => {
       expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
       expect(bridge.sessionStatsCalls).toEqual(['s-1']);
       expect(bridge.sessionTasksCalls).toEqual(['s-1', 's-1']);
+      expect(bridge.sessionAgentsCalls).toEqual(['s-1']);
+      expect(bridge.sessionAgentTraceCalls).toEqual([
+        { sessionId: 's-1', rootAgentId: 'root-1' },
+      ]);
       expect(bridge.sessionTasksOptions).toEqual([
         { includeWorkflows: false },
         { includeWorkflows: true },
@@ -11267,6 +11386,52 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret');
       expect(missing.status).toBe(404);
+    });
+
+    it('lists session-scoped attachments', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      await request(app)
+        .post('/session/s-1/attachments')
+        .query({ name: 'notes.txt' })
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .send('hello');
+      await request(app)
+        .post('/session/s-1/attachments')
+        .query({ name: 'image.png' })
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .send(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+      const listed = await request(app)
+        .get('/session/s-1/attachments')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(listed.status).toBe(200);
+      expect(listed.body).toEqual({
+        attachments: [
+          {
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 5,
+          },
+          {
+            type: 'image',
+            attachmentId: 'image.png',
+            mimeType: 'image/png',
+            size: 4,
+          },
+        ],
+      });
+      expect(bridge.sessionAttachmentListCalls).toEqual(['s-1']);
     });
 
     it('requires a name for uploads', async () => {
@@ -28694,7 +28859,7 @@ describe('createServeApp', () => {
       expect(res.headers['content-disposition']).toMatch(
         /^attachment; filename="qwen-code-export-.+\.html"$/,
       );
-      expect(res.text).toContain('id="chat-data"');
+      expect(res.text).toContain('id="transcript-document"');
       expect(res.text).toContain('hello export');
       expect(res.text).toContain('export response');
     });
@@ -28852,6 +29017,7 @@ describe('createServeApp', () => {
       sessionId: string,
       state: 'active' | 'archived' = 'active',
       workspaceCwd = wsDir,
+      text = 'hello transcript',
     ): Promise<void> {
       const chatsDir = path.join(
         new Storage(workspaceCwd).getProjectDir(),
@@ -28867,7 +29033,7 @@ describe('createServeApp', () => {
           sessionId,
           timestamp: '2026-05-28T12:00:00.000Z',
           type: 'user',
-          message: { role: 'user', parts: [{ text: 'hello transcript' }] },
+          message: { role: 'user', parts: [{ text }] },
           cwd: workspaceCwd,
           version: '1.0.0',
         }) + '\n',
@@ -28903,7 +29069,7 @@ describe('createServeApp', () => {
       });
 
       const res = await request(app)
-        .get(`/session/${sid}/transcript?limit=2&cursor=cursor-1`)
+        .get(`/session/${sid}/transcript?limit=2&direction=backward`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(res.status).toBe(200);
@@ -28917,10 +29083,56 @@ describe('createServeApp', () => {
       expect(res.body).not.toHaveProperty('lastEventId');
       expect(res.body.events[0]).not.toHaveProperty('id');
       expect(bridge.sessionTranscriptCalls).toEqual([
-        { sessionId: sid, limit: 2, cursor: 'cursor-1' },
+        {
+          sessionId: sid,
+          limit: 2,
+          direction: 'backward',
+        },
       ]);
       expect(bridge.loadCalls).toHaveLength(0);
       expect(bridge.resumeCalls).toHaveLength(0);
+    });
+
+    it('flushes the first live backward workspace transcript page', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaab';
+      await writeTranscriptSession(sid);
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+          pendingInteractionCount: 0,
+          hasTurnError: false,
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+        workspaceRegistry: registry,
+      });
+
+      const res = await request(app)
+        .get(
+          `/workspaces/primary-id/session/${sid}/transcript?direction=backward`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
+      expect(JSON.stringify(res.body)).toContain('hello transcript');
     });
 
     it('returns sparse turn-index pages through the owning runtime', async () => {
@@ -29638,6 +29850,62 @@ describe('createServeApp', () => {
         expect(bridge.sessionTranscriptCalls).toHaveLength(0);
       },
     );
+
+    it('rejects an invalid transcript direction before touching the bridge', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-cdcdcdcdcdcd';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?direction=forward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_transcript_cursor');
+      expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+    });
+
+    it('rejects a transcript cursor combined with direction', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-cececececece';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript?cursor=next&direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_transcript_cursor');
+      expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+    });
+
+    it('rejects a transcript record boundary combined with direction', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-cfcfcfcfcfcf';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const res = await request(app)
+        .get(
+          `/session/${sid}/transcript?beforeRecordId=record-1&direction=backward`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_transcript_cursor');
+      expect(bridge.sessionTranscriptCalls).toHaveLength(0);
+    });
 
     it('maps child invalid cursor errors to 400', async () => {
       const sid = '55555555-bbbb-cccc-dddd-dddddddddddd';
