@@ -1,0 +1,31 @@
+{
+  "name": "@qwen-code/stats",
+  "version": "0.1.0",
+  "description": "Local observability dashboard for Qwen Code usage statistics",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "qwen-stats": "./src/index.ts"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc --noEmit && node build.mjs",
+    "build:client": "esbuild src/client/index.tsx --bundle --outdir=dist/client --minify --platform=browser --format=esm --jsx=automatic --loader:.css=css",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
