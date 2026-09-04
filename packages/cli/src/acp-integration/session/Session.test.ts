@@ -23646,35 +23646,42 @@ describe('Session', () => {
         /**
          * Mocks every tool as an allowed read, with `update_goal` alone
          * reporting that it wants the turn to end -- the shape
-         * `UpdateGoalTool` returns once a proposal is queued for
-         * verification.
+         * `UpdateGoalTool` returns when verification or checkpointing needs a
+         * turn boundary.
          */
         const mockToolsWithTerminatingUpdateGoal = (
           updateGoalTerminates = true,
+          missingToolNames: readonly string[] = [],
         ) => {
           mockConfig.getApprovalMode = vi
             .fn()
             .mockReturnValue(ApprovalMode.YOLO);
-          mockToolRegistry.getTool.mockImplementation((name: string) => ({
-            name,
-            displayName: name,
-            kind: core.Kind.Read,
-            build: vi.fn().mockReturnValue({
-              params: {},
-              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-              getDescription: vi.fn().mockReturnValue(name),
-              toolLocations: vi.fn().mockReturnValue([]),
-              execute: vi.fn().mockResolvedValue(
-                name === 'update_goal'
-                  ? {
-                      llmContent: '{"proposalRecorded":true}',
-                      returnDisplay: 'Proposal queued for verification',
-                      ...(updateGoalTerminates ? { terminateTurn: true } : {}),
-                    }
-                  : { llmContent: 'ok', returnDisplay: 'ok' },
-              ),
-            }),
-          }));
+          mockToolRegistry.getTool.mockImplementation((name: string) =>
+            missingToolNames.includes(name)
+              ? undefined
+              : {
+                  name,
+                  displayName: name,
+                  kind: core.Kind.Read,
+                  build: vi.fn().mockReturnValue({
+                    params: {},
+                    getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                    getDescription: vi.fn().mockReturnValue(name),
+                    toolLocations: vi.fn().mockReturnValue([]),
+                    execute: vi.fn().mockResolvedValue(
+                      name === 'update_goal'
+                        ? {
+                            llmContent: '{"proposalRecorded":true}',
+                            returnDisplay: 'Proposal queued for verification',
+                            ...(updateGoalTerminates
+                              ? { terminateTurn: true }
+                              : {}),
+                          }
+                        : { llmContent: 'ok', returnDisplay: 'ok' },
+                    ),
+                  }),
+                },
+          );
         };
 
         const streamCalling = (...calls: Array<{ id: string; name: string }>) =>
@@ -23701,6 +23708,9 @@ describe('Session', () => {
           mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
           mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
             key === turnKey ? permit : undefined,
+          );
+          agentTelemetry.getActiveInteractionSpan.mockReturnValue(
+            agentTelemetry.span,
           );
           mockToolsWithTerminatingUpdateGoal();
           mockChat.sendMessageStream = vi
@@ -23737,6 +23747,182 @@ describe('Session', () => {
           expect(mockClient.extNotification).toHaveBeenCalledWith(
             '_qwencode/end_turn',
             expect.objectContaining({ reason: 'end_turn', source: 'goal' }),
+          );
+          expect(agentTelemetry.captures[0]?.writeToSpan).toHaveBeenCalledWith(
+            agentTelemetry.span,
+          );
+        });
+
+        it('runs managed memory effects after an early Goal turn end', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-user-terminating-tool',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'finish the goal' }],
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+          expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+          expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
+        });
+
+        it('waits for a channel final before ending its Goal turn', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-channel-terminating-tool',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      {
+                        content: { parts: [{ text: 'final answer' }] },
+                        finishReason: 'STOP',
+                      },
+                    ],
+                  },
+                },
+              ]),
+            );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'finish the goal' }],
+            _meta: {
+              'qwen.channel.prompt': true,
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'goal-channel-final',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          await vi.waitFor(() => {
+            expect(mockClient.extMethod).toHaveBeenCalledWith(
+              'qwen/control/channel-delivery',
+              expect.objectContaining({
+                deliveryId: 'goal-channel-final',
+                text: 'final answer',
+              }),
+            );
+          });
+        });
+
+        it('waits for a channel final without delivery metadata', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-channel-prompt-terminating-tool',
+          };
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.beginTurn.mockReturnValue(permit);
+          mockGoalRuntime.permitForTurn.mockReturnValue(permit);
+          mockToolsWithTerminatingUpdateGoal();
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling({ id: 'call-update', name: 'update_goal' }),
+            )
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    candidates: [
+                      {
+                        content: { parts: [{ text: 'channel final' }] },
+                        finishReason: 'STOP',
+                      },
+                    ],
+                  },
+                },
+              ]),
+            );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'finish the goal' }],
+            _meta: { 'qwen.channel.prompt': true },
+          });
+
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({
+              update: expect.objectContaining({
+                content: expect.objectContaining({ text: 'channel final' }),
+              }) as unknown,
+            }),
+          );
+        });
+
+        it('lets loop protection override a terminating Goal tool', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-terminating-tool-loop',
+          };
+          const turnKey = 'goal-runtime:turn-terminating-tool-loop';
+          mockGoalRuntime.getSnapshot.mockReturnValue(activeGoalSnapshot);
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          mockToolsWithTerminatingUpdateGoal(true, ['missing_tool']);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              streamCalling(
+                { id: 'call-update', name: 'update_goal' },
+                { id: 'call-missing-1', name: 'missing_tool' },
+                { id: 'call-missing-2', name: 'missing_tool' },
+                { id: 'call-missing-3', name: 'missing_tool' },
+              ),
+            );
+
+          expect(boundGoalHost).toBeDefined();
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'write a poem',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          const preservedText = vi
+            .mocked(mockChat.addHistory)
+            .mock.calls.flatMap(([message]) => message.parts ?? [])
+            .flatMap((part) => (part.text ? [part.text] : []));
+          expect(preservedText).toContain(
+            'System: this turn was terminated because the model exceeded tool-call safety limits. Try a different approach on the next turn.',
           );
         });
 
