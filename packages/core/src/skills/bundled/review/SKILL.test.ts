@@ -1026,6 +1026,33 @@ describe('bundled review skill', () => {
     // for its failure) the auditor runs over that stale file and appends
     // the previous run's assumptions to this run's ledger.
     expect(step).toContain('--out ' + hunksPath + ' && \\');
+    // The baseline record is anchored OUTSIDE the tree's write surface: the
+    // snapshot prints a fingerprint of the record, the orchestrator keeps
+    // it, and `--since` refuses the file without it or when it no longer
+    // matches — the one channel a planted process cannot rewrite is the
+    // orchestrator's own argument construction. Both halves have to be in
+    // the step: the instruction to keep the hex, and the flag that hands
+    // it back on the same `--since` invocation the ordering pins read.
+    expect(step).toContain(
+      'fix-delta: snapshot <tree> of <root> — fingerprint <hex>; pass it back as --fingerprint on --since',
+    );
+    expect(step).toContain('that fingerprint is yours to keep');
+    expect(step).toContain(
+      '--since ' +
+        snapshotPath +
+        ' \\\n  --fingerprint <the fingerprint the snapshot printed> \\\n  --out ' +
+        hunksPath,
+    );
+    expect(step).toContain(
+      'never worked around by re-taking the snapshot, which by then would record the edits',
+    );
+    // …and the hex comes from the printed line only: an orchestrator that
+    // re-derived it from the file at `--since` time would hand the check
+    // the forgery's own hash.
+    expect(step).toContain('**Never recompute it from the file**');
+    expect(step).toContain(
+      'the only valid source is the line the snapshot command printed',
+    );
     expect(step).toContain(
       'do not launch the auditor over the hunks file an interrupted earlier run can have left',
     );

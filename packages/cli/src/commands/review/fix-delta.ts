@@ -64,7 +64,8 @@ export interface FixSnapshot {
   /** The tree object recording the working tree at snapshot time. */
   tree: string;
   /**
-   * Paths already holding CONFIRMED invisible edits at snapshot time:
+   * Paths already holding CONFIRMED invisible edits at snapshot time
+   * (see `digests` for the transitions the comparison draws from both):
    * submodule checkouts and nested git repositories, including ones a
    * symlink reaches or an ignored directory hides. Unconfirmed states —
    * paths the probe cannot open or resolve — never enter the baseline:
@@ -235,6 +236,7 @@ function assertNoRedirectedExcludes(
 export function snapshotWorkingTree(
   root: string,
   sidePaths: readonly string[] = [],
+  filtersConfigured = false,
 ): string {
   // The scratch index must live OUTSIDE anything the snapshot can capture:
   // os.tmpdir() honours TMPDIR, and a hermetic sandbox pointing it inside the
@@ -277,7 +279,7 @@ export function snapshotWorkingTree(
       '--',
       ...excludePathspec(root, sidePaths),
     ]);
-    assertCompleteCapture(add);
+    assertCompleteCapture(add, filtersConfigured);
     // The families are excluded above because the flow WRITES them between
     // the two states — as untracked files. A path the repository TRACKS
     // under a family name is not that: the flow never tracks its side
@@ -310,7 +312,7 @@ export function snapshotWorkingTree(
         ],
         Buffer.concat(tracked.flatMap((path) => [path, Buffer.from([0])])),
       );
-      assertCompleteCapture(update);
+      assertCompleteCapture(update, filtersConfigured);
     }
     return gitWithEnv(env, ['-C', root, ...probePins(root), 'write-tree']);
   } finally {
@@ -448,11 +450,35 @@ function zeroCommitPaths(notes: readonly string[]): Set<string> {
   return paths;
 }
 
-export function assertCompleteCapture(add: {
-  stderr: string;
-  status: number;
-  completed: boolean;
-}): void {
+/**
+ * Rule on `add`'s notes. `filtersConfigured` is the one fact that changes
+ * the ruling: a `filter.<name>.clean` / `.process` child runs INSIDE the
+ * capture and writes to the same stderr git does, so once one is
+ * configured the stream can no longer be attributed to git alone. A
+ * planted filter (the module's threat model — the reviewed code has run)
+ * can then forge the tolerated shapes: an unterminated opener (`error: '`)
+ * absorbs git's real failure notes until a genuine zero-commit note closes
+ * the blob, and the reassembly folds all of it into one tolerated note
+ * over a path the capture silently skipped. So with a filter configured
+ * every note is ruled on its own LINE — no reassembly — and anything git
+ * did not print in exactly that shape refuses the capture, naming the
+ * filter. The zero-commit pairing survives on single-line notes: git never
+ * skips a path on an "unable to index file" note alone (the specific
+ * failure — `open()`, the zero-commit refusal — is printed first, and
+ * every shape but the zero-commit one is unexplained), so a filter that
+ * forges the pairing note gains nothing, while a Git-LFS user — whose
+ * `filter.lfs.*` keys are global — keeps the audit in a tree that holds
+ * a freshly initialised repository. Filter-less repositories keep the
+ * reassembly too: there, only git writes the stream.
+ */
+export function assertCompleteCapture(
+  add: {
+    stderr: string;
+    status: number;
+    completed: boolean;
+  },
+  filtersConfigured = false,
+): void {
   // Tolerance belongs to genuine exits alone: a child killed mid-`add`
   // (timeout, buffer overflow) or never spawned leaves the scratch index at
   // its seeded state, and ruling on its notes would record HEAD's tree as
@@ -463,12 +489,11 @@ export function assertCompleteCapture(add: {
         'the child did not exit normally, so its notes are a partial capture.',
     );
   }
-  const notes = reassembleZeroCommitNotes(
-    add.stderr
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line !== ''),
-  );
+  const lines = add.stderr
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  const notes = filtersConfigured ? lines : reassembleZeroCommitNotes(lines);
   const zeroCommit = zeroCommitPaths(notes);
   const unexplained = notes.filter((line) => {
     if (TOLERATED_ADD_NOTES.some((note) => note.test(line))) return false;
@@ -487,7 +512,12 @@ export function assertCompleteCapture(add: {
   if (unexplained.length > 0 || (add.status !== 0 && notes.length === 0)) {
     throw new Error(
       `fix-delta: git add could not capture the whole tree (exit ${add.status}): ` +
-        (unexplained.join(' | ') || add.stderr.trim()),
+        (unexplained.join(' | ') || add.stderr.trim()) +
+        (filtersConfigured
+          ? ' — a clean/process filter is configured, so these notes cannot ' +
+            'be told from the filter’s own output and each is ruled on its ' +
+            'own line'
+          : ''),
     );
   }
 }
@@ -1177,7 +1207,20 @@ function isRegisteredWorktreeOf(
   } catch {
     return false;
   }
-  return target.startsWith(join(commonDir, 'worktrees') + sep);
+  if (!target.startsWith(join(commonDir, 'worktrees') + sep)) return false;
+  // The registry entry binds BACK: `<entry>/gitdir` names the gitfile of
+  // the one worktree it belongs to. A gitfile is a plain file anyone can
+  // write, so a plant at another path pointing into a genuine entry would
+  // otherwise be pruned as that worktree — the entry's own back-link is
+  // what a plant cannot forge without writing into the git dir.
+  try {
+    const back = realpathSync(
+      resolve(target, readFileSync(join(target, 'gitdir'), 'utf8').trim()),
+    );
+    return back === realpathSync(joinBytes(abs, DOT_GIT));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1207,14 +1250,24 @@ function isRegisteredWorktreeOf(
  * family holds files, which the probe never asks about, so walking it
  * costs a directory listing and finds nothing; and git's own registry,
  * unlike a name, cannot be claimed by a plant.
+ *
+ * The two answers differ in what the caller does next. The git dir is
+ * never entered. A review worktree is not PROBED — its own dirt is the
+ * review's — but it IS walked: a repository planted inside it
+ * (`review-pr-1/inner`) is as invisible to both trees as one planted
+ * beside it, and pruning the whole subtree was that entrance.
  */
+type Exclusion = 'git-dir' | 'review-worktree' | null;
+
 function probeExcluded(
   abs: Buffer,
   rel: Buffer,
   ctx: ExclusionContext,
-): boolean {
-  if (underInTreeGitDir(rel, ctx.gitDirRel)) return true;
-  return inWorktreeFamily(rel) && isRegisteredWorktreeOf(abs, ctx.commonDir);
+): Exclusion {
+  if (underInTreeGitDir(rel, ctx.gitDirRel)) return 'git-dir';
+  return inWorktreeFamily(rel) && isRegisteredWorktreeOf(abs, ctx.commonDir)
+    ? 'review-worktree'
+    : null;
 }
 
 /**
@@ -1225,12 +1278,12 @@ function probeExcluded(
  * resolve, or resolves outside the repository, has no root-relative name
  * to match and is left to the probe.
  */
-function linkTargetExcluded(abs: Buffer, ctx: ExclusionContext): boolean {
+function linkTargetExcluded(abs: Buffer, ctx: ExclusionContext): Exclusion {
   let resolved: string;
   try {
     resolved = realpathSync(abs);
   } catch {
-    return false;
+    return null;
   }
   const rel = relative(ctx.root, resolved);
   if (
@@ -1239,7 +1292,7 @@ function linkTargetExcluded(abs: Buffer, ctx: ExclusionContext): boolean {
     rel.startsWith(`..${sep}`) ||
     isAbsolute(rel)
   ) {
-    return false;
+    return null;
   }
   return probeExcluded(
     Buffer.from(resolved),
@@ -1315,10 +1368,23 @@ function reposUnder(
         // The exclusion keys on the link's own NAME; its target is
         // checked separately, or a link planted at a non-family name
         // reaches the review's own worktrees past the exclusion.
-        if (isDir && linkTargetExcluded(childAbs, ctx)) continue;
+        if (isDir) {
+          const target = linkTargetExcluded(childAbs, ctx);
+          if (target === 'git-dir') continue;
+          if (target === 'review-worktree') {
+            queue.push({ abs: childAbs, rel: childRel });
+            continue;
+          }
+        }
       }
       if (!isDir) continue;
-      if (probeExcluded(childAbs, childRel, ctx)) continue;
+      const excluded = probeExcluded(childAbs, childRel, ctx);
+      if (excluded === 'git-dir') continue;
+      if (excluded === 'review-worktree') {
+        // Walked, not probed: see `probeExcluded`.
+        queue.push({ abs: childAbs, rel: childRel });
+        continue;
+      }
       if (existsSync(joinBytes(childAbs, DOT_GIT))) {
         repos.push({ abs: childAbs, rel: childRel });
       } else {
@@ -1363,6 +1429,25 @@ function probeNestedRepo(abs: Buffer, rel: Buffer, state: ProbeState): void {
  * AND on the resolved target, and only a directory that carries a git dir
  * is probed — the class this model names.
  */
+/**
+ * Walk a directory for repositories and probe what it finds — the one
+ * treatment for a collapsed ignored directory, a link target that is not
+ * itself a repository, and a review worktree's interior. What the walk
+ * cannot classify or finish rides `unresolved`: the failure direction
+ * over-warns, it never silences a blind spot.
+ */
+function walkAndProbe(
+  dirAbs: Buffer,
+  dirRel: Buffer,
+  ctx: ExclusionContext,
+  state: ProbeState,
+): void {
+  const found = reposUnder(dirAbs, dirRel, ctx);
+  for (const r of found.repos) probeNestedRepo(r.abs, r.rel, state);
+  for (const u of found.unreadable) state.unresolved.add(u.toString('latin1'));
+  if (found.exhausted) state.unresolved.add(dirRel.toString('latin1'));
+}
+
 function probeLinkedRepo(
   rootBuf: Buffer,
   rel: Buffer,
@@ -1377,13 +1462,19 @@ function probeLinkedRepo(
     return;
   }
   if (!isLink) return;
-  if (probeExcluded(abs, rel, ctx)) return;
+  const own = probeExcluded(abs, rel, ctx);
+  if (own === 'git-dir') return;
   try {
     if (!statSync(abs).isDirectory()) return;
   } catch {
     return;
   }
-  if (linkTargetExcluded(abs, ctx)) return;
+  const target = own ?? linkTargetExcluded(abs, ctx);
+  if (target === 'git-dir') return;
+  if (target === 'review-worktree') {
+    walkAndProbe(abs, rel, ctx, state);
+    return;
+  }
   if (existsSync(joinBytes(abs, DOT_GIT))) {
     probeNestedRepo(abs, rel, state);
     return;
@@ -1395,10 +1486,7 @@ function probeLinkedRepo(
   // neither probed nor disclosed. Walk it the way a collapsed ignored
   // directory is walked; the shared budget bounds a link loop as much as
   // size, and what the walk cannot classify rides `unresolved`.
-  const found = reposUnder(abs, rel, ctx);
-  for (const r of found.repos) probeNestedRepo(r.abs, r.rel, state);
-  for (const u of found.unreadable) state.unresolved.add(u.toString('latin1'));
-  if (found.exhausted) state.unresolved.add(rel.toString('latin1'));
+  walkAndProbe(abs, rel, ctx, state);
 }
 
 /**
@@ -1505,7 +1593,16 @@ function probeBlindSpotState(
   const dirty = new Set<string>();
   const unresolved = new Set<string>();
   const seen = new Set<string>();
-  const digests: Record<string, string> = {};
+  // Null-prototyped: the keys are raw path bytes, and a repository named
+  // `__proto__` (or `constructor`, `toString`, …) on a plain object either
+  // creates no own key at all — the assignment hits the inherited setter —
+  // or reads back an inherited value where `undefined` was meant, so every
+  // digest transition misroutes around it. On a null prototype every name
+  // is an ordinary key.
+  const digests: Record<string, string> = Object.create(null) as Record<
+    string,
+    string
+  >;
   const state: ProbeState = { dirty, unresolved, seen, digests };
   const entries = splitNul(raw);
   for (let i = 0; i < entries.length; i++) {
@@ -1517,20 +1614,16 @@ function probeBlindSpotState(
       if (rel[rel.length - 1] === 0x2f /* / */) {
         const dirRel = rel.subarray(0, rel.length - 1);
         const dirAbs = joinBytes(rootBuf, dirRel);
-        if (probeExcluded(dirAbs, dirRel, ctx)) continue;
-        if (head === 0x21 && !existsSync(joinBytes(dirAbs, DOT_GIT))) {
-          // Collapsed ignored directory that is not itself a repository:
-          // the only way in is to walk it.
-          const found = reposUnder(dirAbs, dirRel, ctx);
-          for (const r of found.repos) {
-            probeNestedRepo(r.abs, r.rel, state);
-          }
-          for (const u of found.unreadable) {
-            unresolved.add(u.toString('latin1'));
-          }
-          if (found.exhausted) {
-            unresolved.add(dirRel.toString('latin1'));
-          }
+        const excluded = probeExcluded(dirAbs, dirRel, ctx);
+        if (excluded === 'git-dir') continue;
+        if (
+          excluded === 'review-worktree' ||
+          (head === 0x21 && !existsSync(joinBytes(dirAbs, DOT_GIT)))
+        ) {
+          // A collapsed ignored directory that is not itself a repository,
+          // or a review worktree (walked, never probed): the only way in
+          // is to walk it.
+          walkAndProbe(dirAbs, dirRel, ctx, state);
         } else {
           probeNestedRepo(dirAbs, dirRel, state);
         }
@@ -1559,8 +1652,11 @@ function probeBlindSpotState(
     // The probe's pathspec keeps the families in (see `literalPathspec`),
     // so every discovery route prunes for itself — this one included: a
     // review worktree that a repository happens to TRACK is still the
-    // review's own bookkeeping.
-    if (probeExcluded(joinBytes(rootBuf, relBytes), relBytes, ctx)) {
+    // review's own bookkeeping, walked for plants and not probed.
+    const excluded = probeExcluded(joinBytes(rootBuf, relBytes), relBytes, ctx);
+    if (excluded === 'git-dir') continue;
+    if (excluded === 'review-worktree') {
+      walkAndProbe(joinBytes(rootBuf, relBytes), relBytes, ctx, state);
       continue;
     }
     const key = relBytes.toString('latin1');
@@ -1604,7 +1700,12 @@ function probeBlindSpotState(
     if (tab === -1) continue;
     const rel = entry.subarray(tab + 1);
     const abs = joinBytes(rootBuf, rel);
-    if (probeExcluded(abs, rel, ctx)) continue;
+    const excluded = probeExcluded(abs, rel, ctx);
+    if (excluded === 'git-dir') continue;
+    if (excluded === 'review-worktree') {
+      walkAndProbe(abs, rel, ctx, state);
+      continue;
+    }
     if (!gitlink) {
       probeLinkedRepo(rootBuf, rel, ctx, state);
       continue;
@@ -1727,6 +1828,40 @@ function movedInsideNote(paths: string[]): string {
   );
 }
 
+/**
+ * A repository the probe answers for now that the baseline never recorded:
+ * created between the two moments (a fix committed inside it leaves its
+ * status clean and no superproject tree records the repository at all), or
+ * unanswerable at snapshot time. Nothing inside it has a baseline to be
+ * compared against, so all of it is disclosed.
+ */
+function appearedNote(paths: string[]): string {
+  const one = paths.length === 1;
+  return (
+    `fix-delta: ${paths.join(', ')} ${one ? 'holds' : 'hold'} a repository ` +
+    `the snapshot never recorded — ${one ? 'it' : 'they'} did not exist, or ` +
+    'could not be answered for, at snapshot time, and the superproject trees ' +
+    `record nothing of what is inside ${one ? 'it' : 'them'} now. Whatever ` +
+    'was committed, stashed or left uncommitted there since is invisible to ' +
+    'this command; the hunks do not show it.'
+  );
+}
+
+/**
+ * The mirror: a baseline repository the probe can no longer answer for —
+ * renamed, deleted, or behind a link that no longer resolves. Its
+ * snapshot-time state is gone with it, and nothing says where.
+ */
+function vanishedNote(paths: string[]): string {
+  const one = paths.length === 1;
+  return (
+    `fix-delta: ${paths.join(', ')} held ${one ? 'a repository' : 'repositories'} ` +
+    'at snapshot time that the probe finds nothing to answer for now — ' +
+    `moved, renamed or deleted between the two states, and ${one ? 'its' : 'their'} ` +
+    'content with it, invisible to this command.'
+  );
+}
+
 /** Snapshot-time dirt that vanished: content changed between the two states. */
 function cleanedSubmoduleNote(cleaned: string[]): string {
   const one = cleaned.length === 1;
@@ -1786,7 +1921,29 @@ function assertRootHoldsCwd(root: string): void {
 export interface FixDeltaArgs {
   snapshot: boolean;
   since?: string;
+  /**
+   * The fingerprint `--snapshot` printed — a SHA-256 of the snapshot file's
+   * bytes — handed back by the orchestrator from its own record. The
+   * snapshot file lives inside the tree the reviewed code can write to, and
+   * is excluded from both captures, so nothing about it is self-certifying:
+   * a rewritten `tree` field makes the comparison diff against a baseline
+   * taken AFTER a hidden edit, and a patched digest silences a transition.
+   * The one channel a planted process cannot rewrite is the orchestrator's
+   * own argument construction, so `--since` refuses to read the file back
+   * without the fingerprint, and refuses a file that no longer matches it.
+   */
+  fingerprint?: string;
   out: string;
+}
+
+/** True when the steering surfaces name a clean/process filter. */
+function hasFilter(surfaces: readonly string[]): boolean {
+  return surfaces.some((surface) => surface.startsWith('filter.'));
+}
+
+/** The fingerprint of a snapshot record: the SHA-256 of its exact bytes. */
+function snapshotFingerprint(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
 }
 
 export function runFixDelta(args: FixDeltaArgs): void {
@@ -1811,7 +1968,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
     // the disclosure is only useful ahead of the bytes it qualifies.
     const steering = captureSteeringSurfaces(root);
     if (steering.length > 0) writeStderrLine(captureSteeringNote(steering));
-    const tree = snapshotWorkingTree(root, sidePaths);
+    const tree = snapshotWorkingTree(root, sidePaths, hasFilter(steering));
     const probe = probeBlindSpotState(root, sidePaths);
     const snapshot: FixSnapshot = {
       root,
@@ -1829,14 +1986,39 @@ export function runFixDelta(args: FixDeltaArgs): void {
       // direction this module fails in.
       digests: probe.digests,
     };
-    writeFileSync(resolve(args.out), `${JSON.stringify(snapshot, null, 2)}\n`);
-    writeStderrLine(`fix-delta: snapshot ${tree.slice(0, 12)} of ${root}`);
+    const record = Buffer.from(`${JSON.stringify(snapshot, null, 2)}\n`);
+    writeFileSync(resolve(args.out), record);
+    // The FULL tree sha and the record's fingerprint, on one line: the
+    // orchestrator reads this line and hands the fingerprint back to
+    // `--since`, which is the only thing that anchors the baseline outside
+    // the tree's own write surface.
+    writeStderrLine(
+      `fix-delta: snapshot ${tree} of ${root} — fingerprint ` +
+        `${snapshotFingerprint(record)}; pass it back as --fingerprint on --since`,
+    );
     return;
   }
 
+  if (args.fingerprint === undefined || args.fingerprint === '') {
+    throw new Error(
+      'fix-delta: --since needs --fingerprint <hex> — the fingerprint ' +
+        '`--snapshot` printed beside its tree. The snapshot file lives in ' +
+        'the tree the reviewed code can write to, so it is read back only ' +
+        'against the record the orchestrator kept.',
+    );
+  }
   let snapshot: FixSnapshot;
   try {
-    const raw = JSON.parse(readFileSync(args.since as string, 'utf8')) as {
+    const bytes = readFileSync(args.since as string);
+    const actual = snapshotFingerprint(bytes);
+    if (actual !== args.fingerprint.trim().toLowerCase()) {
+      throw new Error(
+        `its fingerprint is ${actual}, not the ${args.fingerprint} --snapshot ` +
+          'printed — the file was rewritten since the snapshot was taken, ' +
+          'and a baseline this run did not record cannot be diffed against',
+      );
+    }
+    const raw = JSON.parse(bytes.toString('utf8')) as {
       root?: unknown;
       tree?: unknown;
       dirtySubmodules?: unknown;
@@ -1859,7 +2041,12 @@ export function runFixDelta(args: FixDeltaArgs): void {
       // below then reports all of them as blind spots. That is the
       // over-warning direction on purpose: silently restoring the boolean
       // model would restore the hole it closes.
-      digests:
+      // Null-prototyped for the same reason the probe's map is: a key
+      // named `__proto__` must be an ordinary key on both sides of the
+      // comparison, or it reads back `Object.prototype` where `undefined`
+      // was meant and every transition misroutes around that path.
+      digests: Object.assign(
+        Object.create(null) as Record<string, string>,
         typeof raw.digests === 'object' && raw.digests !== null
           ? Object.fromEntries(
               Object.entries(raw.digests as Record<string, unknown>)
@@ -1867,6 +2054,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
                 .map(([k, v]) => [k, v as string]),
             )
           : {},
+      ),
     };
   } catch (err) {
     throw new Error(
@@ -1894,7 +2082,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
   // moments, and this run takes its own `add -A` capture below.
   const steering = captureSteeringSurfaces(root);
   if (steering.length > 0) writeStderrLine(captureSteeringNote(steering));
-  const now = snapshotWorkingTree(root, sidePaths);
+  const now = snapshotWorkingTree(root, sidePaths, hasFilter(steering));
   const diff =
     now === snapshot.tree
       ? Buffer.alloc(0)
@@ -1962,6 +2150,29 @@ export function runFixDelta(args: FixDeltaArgs): void {
       probe.digests[p] !== undefined &&
       probe.digests[p] !== snapshot.digests[p],
   );
+  // The fifth and sixth transitions close the set: a repository answered
+  // for now with no baseline at all, and a baseline repository with no
+  // answer now. Neither has two digests to compare, so neither reached any
+  // transition above — a clean repository created between the moments
+  // with the fix COMMITTED inside answered clean and landed nowhere, and
+  // a baseline repository renamed or deleted dropped out of every list.
+  // Both are disclosed; a gitlink the hunks record (a submodule the fix
+  // added or removed) is visible there and stays out, as elsewhere.
+  const appeared = Object.keys(probe.digests).filter(
+    (p) =>
+      snapshot.digests[p] === undefined &&
+      !dirtyNow.includes(p) &&
+      !unresolvedNow.includes(p) &&
+      !recorded.has(p),
+  );
+  const vanished = Object.keys(snapshot.digests).filter(
+    (p) =>
+      !snapshot.dirtySubmodules.includes(p) &&
+      probe.digests[p] === undefined &&
+      !dirtyNow.includes(p) &&
+      !unresolvedNow.includes(p) &&
+      !recorded.has(p),
+  );
   if (diff.length === 0) {
     if (preExisting.length > 0) {
       writeStderrLine(preExistingDirtNote(displayNames(preExisting)));
@@ -1978,17 +2189,29 @@ export function runFixDelta(args: FixDeltaArgs): void {
     if (movedInside.length > 0) {
       writeStderrLine(movedInsideNote(displayNames(movedInside)));
     }
+    if (appeared.length > 0) {
+      writeStderrLine(appearedNote(displayNames(appeared)));
+    }
+    if (vanished.length > 0) {
+      writeStderrLine(vanishedNote(displayNames(vanished)));
+    }
     if (
       freshDirt.length === 0 &&
       cleaned.length === 0 &&
       unresolvedNow.length === 0 &&
-      movedInside.length === 0
+      movedInside.length === 0 &&
+      appeared.length === 0 &&
+      vanished.length === 0
     ) {
+      // The scope is stated with the all-clear: the model is the working
+      // tree and the working trees nested in it. Plain gitignored files and
+      // the interior of any git directory are outside every working tree,
+      // so an edit there is not one this command claims to see.
       writeStderrLine(
         'fix-delta: the tree is unchanged since the snapshot — no edit was ' +
-          'applied to the content `git add -A` captures (edits inside ' +
-          'gitignored paths are outside this model), or the snapshot was ' +
-          'taken after the edits.',
+          'applied to the content `git add -A` captures (edits to gitignored ' +
+          'files, and anything inside a git directory, are outside this ' +
+          'model), or the snapshot was taken after the edits.',
       );
     }
     return;
@@ -2020,6 +2243,12 @@ export function runFixDelta(args: FixDeltaArgs): void {
   if (movedInside.length > 0) {
     writeStderrLine(movedInsideNote(displayNames(movedInside)));
   }
+  if (appeared.length > 0) {
+    writeStderrLine(appearedNote(displayNames(appeared)));
+  }
+  if (vanished.length > 0) {
+    writeStderrLine(vanishedNote(displayNames(vanished)));
+  }
 }
 
 export const fixDeltaCommand: CommandModule = {
@@ -2041,6 +2270,12 @@ export const fixDeltaCommand: CommandModule = {
           'A snapshot file from --snapshot; writes the diff from it to the ' +
           'tree now into --out (review side files under .qwen/ excluded)',
       })
+      .option('fingerprint', {
+        type: 'string',
+        describe:
+          'With --since: the fingerprint --snapshot printed for that file; ' +
+          'the file is refused without it, or when it no longer matches',
+      })
       .option('out', {
         type: 'string',
         demandOption: true,
@@ -2050,6 +2285,7 @@ export const fixDeltaCommand: CommandModule = {
     runFixDelta({
       snapshot: argv['snapshot'] === true,
       since: argv['since'] as string | undefined,
+      fingerprint: argv['fingerprint'] as string | undefined,
       out: argv['out'] as string,
     });
   },

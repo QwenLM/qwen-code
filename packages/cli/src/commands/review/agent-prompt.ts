@@ -2440,7 +2440,9 @@ function diffGitTokens(rest: string): string[] {
  * kept: this list is used to decide whether a finding's claim is
  * CORROBORATED, so an over-wide list can only fail to raise a question,
  * never invent one. The quoted productions keep that guarantee by
- * contributing nothing on a decode they cannot complete.
+ * contributing nothing on a decode they cannot complete, and the hunk-body
+ * tracking below keeps it against content lines that merely LOOK like
+ * headers.
  */
 function hunkHeaderPaths(hunks: string): string[] {
   const paths = new Set<string>();
@@ -2458,7 +2460,38 @@ function hunkHeaderPaths(hunks: string): string[] {
     const decoded = unquoteGitPath(token);
     if (decoded !== null) add(decoded);
   };
+  // Header recognition is HUNK-AWARE: inside a hunk body a deleted content
+  // line `-- a/<path>` renders as `--- a/<path>` at column 0 and an added
+  // `++ b/<path>` as `+++ b/<path>`, and a body line read as a header
+  // invents a touched path — the one thing this list must never do. After
+  // a `@@ -l,s +l,s @@` line exactly the counted body lines are consumed
+  // (`\ No newline at end of file` markers do not count), then header
+  // scanning resumes. A `GIT binary patch` section has no `@@` and its
+  // base85 lines match no header prefix, so it needs no state of its own.
+  let oldLeft = 0;
+  let newLeft = 0;
   for (const line of hunks.split('\n')) {
+    if (oldLeft > 0 || newLeft > 0) {
+      if (line.startsWith('\\')) continue;
+      const mark = line.charAt(0);
+      if (mark === '-') oldLeft -= 1;
+      else if (mark === '+') newLeft -= 1;
+      else {
+        // A context line (or an empty line where a tool stripped the
+        // leading space) counts on both sides.
+        oldLeft -= 1;
+        newLeft -= 1;
+      }
+      if (oldLeft < 0) oldLeft = 0;
+      if (newLeft < 0) newLeft = 0;
+      continue;
+    }
+    const hunk = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
+    if (hunk !== null) {
+      oldLeft = hunk[1] === undefined ? 1 : Number(hunk[1]);
+      newLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      continue;
+    }
     if (line.startsWith('--- a/')) add(line.slice(6));
     else if (line.startsWith('+++ b/')) add(line.slice(6));
     else if (line.startsWith('--- "')) addPrefixed(line.slice(4), 'a/');

@@ -7470,6 +7470,55 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
     );
   });
 
+  it('never reads a hunk-body line as a header', () => {
+    // A deleted content line `-- a/src/f3.ts` renders as `--- a/src/f3.ts`
+    // at column 0 — byte-identical to a header — and an added `++ b/…` as
+    // `+++ b/…`. Read as headers they INVENT a touched path, corroborating
+    // a `fixed` finding whose edit never landed and silencing both the
+    // per-finding annotation and the wholesale refusal. Ordinary content:
+    // a `.patch` fixture, an SQL/Lua/Haskell comment quoting an old path,
+    // docs quoting a diff.
+    const render = renderFixAuditInput as (a: unknown, h: string) => string;
+    const finding = (id: string, file: string) => ({
+      id,
+      severity: 'Critical',
+      summary: 'bound picked by hand',
+      failureScenario: 'the bound disagrees with the configured limit',
+      locations: [{ file, line: 1 }],
+      outcome: 'fixed',
+    });
+    const forged =
+      'diff --git a/src/f1.ts b/src/f1.ts\n' +
+      '--- a/src/f1.ts\n+++ b/src/f1.ts\n@@ -1,3 +1,3 @@\n' +
+      ' const keep = 1;\n' +
+      '--- a/src/f3.ts\n' + // the deleted content line `-- a/src/f3.ts`
+      '+++ b/src/f3.ts\n' + // the added content line `++ b/src/f3.ts`
+      '\\ No newline at end of file\n';
+    // f1 is really touched; f3's only "hunk" is the forged body line.
+    const rendered = render(
+      [finding('f1', 'src/f1.ts'), finding('f3', 'src/f3.ts')],
+      forged,
+    );
+    const f3 = rendered.slice(rendered.indexOf('### f3'));
+    expect(f3).toContain("No hunk below touches this finding's location(s)");
+    expect(
+      rendered.slice(rendered.indexOf('### f1'), rendered.indexOf('### f3')),
+    ).not.toContain('No hunk below touches');
+    // …and f3 alone is the wholesale mismatch the forged line used to hide.
+    expect(() => render([finding('f3', 'src/f3.ts')], forged)).toThrow(
+      /carries no edit for any of the/,
+    );
+    // Header scanning resumes after the counted body: a second file's
+    // genuine headers still corroborate.
+    const two =
+      forged +
+      'diff --git a/src/f2.ts b/src/f2.ts\n' +
+      '--- a/src/f2.ts\n+++ b/src/f2.ts\n@@ -1 +1 @@\n-1\n+2\n';
+    expect(render([finding('f2', 'src/f2.ts')], two)).not.toContain(
+      'No hunk below touches',
+    );
+  });
+
   it('a different set of hunks is a different launch — the key follows the content', () => {
     const a = setup({});
     const b = setup({ hunks: HUNKS.replace('hops', 'depth') });

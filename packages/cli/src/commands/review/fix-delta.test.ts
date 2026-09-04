@@ -97,6 +97,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import type { Mock } from 'vitest';
 import yargs from 'yargs';
 import {
@@ -125,6 +126,22 @@ describe('fix-delta', () => {
   const hunksFile = () => join(out, 'fix-hunks.diff');
   const stderr = () =>
     (writeStderrLine as unknown as Mock).mock.calls.map((c) => c[0] as string);
+  /**
+   * The fingerprint `--snapshot` prints for a record — the SHA-256 of the
+   * file's bytes. The flow carries it from the snapshot's stderr line to
+   * `--since`; the suite reads it off the file it just wrote, which is the
+   * same value while nothing has rewritten the file.
+   */
+  const fingerprintOf = (file: string) =>
+    createHash('sha256').update(readFileSync(file)).digest('hex');
+  /** `--since`, the way the flow invokes it: with the record's fingerprint. */
+  const runSince = (since = snapshotFile(), outFile = hunksFile()) =>
+    runFixDelta({
+      snapshot: false,
+      since,
+      fingerprint: fingerprintOf(since),
+      out: outFile,
+    });
 
   /** A scratch repository to add as a submodule: one committed file. */
   function makeSubmoduleSource(): string {
@@ -250,7 +267,7 @@ describe('fix-delta', () => {
     writeFileSync(join(repo, 'a.test.ts'), 'test("bound", () => {});\n');
     rmSync(join(repo, 'gone.ts'));
     writeFileSync(join(repo, '文.ts'), 'export const v = 1;\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).toContain('+export const bound = LIMIT;');
     expect(hunks).not.toContain('-export const x = 1;'); // the reviewed change
@@ -277,7 +294,7 @@ describe('fix-delta', () => {
     git('commit', '-qm', 'add old-name');
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     git('mv', 'old-name.ts', 'new-name.ts');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     expect(stderr().at(-1)).toBe(
       'fix-delta: 1 file(s) changed since the snapshot — new-name.ts',
     );
@@ -296,7 +313,7 @@ describe('fix-delta', () => {
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       // The fix lands inside the submodule, uncommitted there.
       writeFileSync(join(repo, 'sub', 'f.txt'), 'after — the fix\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const last = stderr().at(-1) ?? '';
@@ -329,7 +346,7 @@ describe('fix-delta', () => {
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       // The fix lands inside the submodule, uncommitted there.
       writeFileSync(join(repo, 'sub', 'f.txt'), 'after — the fix\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const last = stderr().at(-1) ?? '';
@@ -350,7 +367,7 @@ describe('fix-delta', () => {
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       writeFileSync(join(repo, 'a.ts'), 'export const x = 42;\n');
       writeFileSync(join(repo, 'sub', 'f.txt'), 'after — the fix\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toContain(
         '+export const x = 42;',
@@ -375,7 +392,7 @@ describe('fix-delta', () => {
     try {
       writeFileSync(join(repo, 'sub', 'f.txt'), 'pre-existing dirt\n');
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -402,7 +419,7 @@ describe('fix-delta', () => {
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       writeFileSync(join(repo, 'a.ts'), 'export const x = 42;\n');
       writeFileSync(join(repo, 'sub', 'f.txt'), 'edited inside after\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toContain(
         '+export const x = 42;',
@@ -428,7 +445,7 @@ describe('fix-delta', () => {
       writeFileSync(join(repo, 'subA', 'f.txt'), 'pre-existing dirt\n');
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       writeFileSync(join(repo, 'subB', 'new-file.txt'), 'untracked inside\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -459,7 +476,7 @@ describe('fix-delta', () => {
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       // The fix restores the committed content.
       writeFileSync(join(repo, 'sub', 'f.txt'), 'before\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -488,7 +505,7 @@ describe('fix-delta', () => {
       writeFileSync(join(repo, 'a.ts'), 'export const x = 42;\n');
       // The fix restores the committed content inside the submodule.
       writeFileSync(join(repo, 'sub', 'f.txt'), 'before\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toContain(
         '+export const x = 42;',
@@ -520,7 +537,7 @@ describe('fix-delta', () => {
       writeFileSync(join(sub, 'f.txt'), 'advanced\n');
       gitAt(sub, 'add', '-A');
       gitAt(sub, 'commit', '-qm', 'advance');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
       expect(stderr().at(-1)).toBe(
         'fix-delta: 1 file(s) changed since the snapshot — sub',
       );
@@ -529,7 +546,7 @@ describe('fix-delta', () => {
       // The same shape with the move already recorded — snapshot taken after
       // the commit inside: nothing applied, nothing invisible.
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       expect(stderr().at(-1)).toContain(
         'the tree is unchanged since the snapshot',
@@ -554,7 +571,7 @@ describe('fix-delta', () => {
     gitAt(emb, 'add', '-A');
     gitAt(emb, 'commit', '-qm', 'init');
     writeFileSync(join(emb, 'f.txt'), 'the fix — uncommitted inside\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     const lines = stderr();
     expect(
@@ -580,7 +597,7 @@ describe('fix-delta', () => {
     gitAt(nd, 'commit', '-qm', 'init');
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(nd, 'f.txt'), 'the fix — uncommitted inside\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -611,7 +628,7 @@ describe('fix-delta', () => {
     // the all-clear is HEDGED to what the capture can see: edits inside
     // gitignored paths are outside the model, and the bare claim beside
     // them is the defect this pins.
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     expect(
       stderr().some((l) =>
         l.includes('the tree is unchanged since the snapshot'),
@@ -623,7 +640,7 @@ describe('fix-delta', () => {
     // (b) A fix editing inside the nested repo, uncommitted there.
     (writeStderrLine as unknown as Mock).mockClear();
     writeFileSync(join(emb, 'f.txt'), 'the fix — uncommitted inside\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     const lines = stderr();
     expect(
       lines.some((l) => /\bemb\b/.test(l) && l.includes('cannot see')),
@@ -642,7 +659,7 @@ describe('fix-delta', () => {
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       git('rm', '--cached', '-q', 'sub');
       writeFileSync(join(repo, 'sub', 'f.txt'), 'after — the fix\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const last = stderr().at(-1) ?? '';
@@ -662,7 +679,7 @@ describe('fix-delta', () => {
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       git('mv', 'sub', 'sub2');
       writeFileSync(join(repo, 'sub2', 'f.txt'), 'after — the fix\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       const lines = stderr();
       expect(
@@ -704,7 +721,7 @@ describe('fix-delta', () => {
       git('commit', '-qm', 'sub v2');
       expect(() => git('merge', 'b1')).toThrow();
       writeFileSync(join(sub, 'f.txt'), 'after — the fix\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       const lines = stderr();
       expect(
@@ -732,7 +749,7 @@ describe('fix-delta', () => {
     utimesSync(file, st.atime, new Date(st.mtimeMs + 5000));
     const indexBefore = readFileSync(join(repo, '.git', 'index'));
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     expect(readFileSync(join(repo, '.git', 'index')).equals(indexBefore)).toBe(
       true,
@@ -751,7 +768,7 @@ describe('fix-delta', () => {
       );
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       writeFileSync(join(repo, 'sub', 'new-file.txt'), 'untracked inside\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const last = stderr().at(-1) ?? '';
@@ -784,7 +801,7 @@ describe('fix-delta', () => {
     // hunks — the property `add -A` is relied on for.
     mkdirSync(join(repo, 'node_modules', 'dep'), { recursive: true });
     writeFileSync(join(repo, 'node_modules', 'dep', 'index.js'), 'x\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(git('status', '--porcelain', '--untracked-files=all')).toBe(
       statusBefore,
@@ -842,7 +859,7 @@ describe('fix-delta', () => {
     writeFileSync(join(repo, '.qwen', 'settings.json'), '{}\n');
     writeFileSync(join(repo, '.qwen', 'tmp', 'user-notes.txt'), 'mine\n');
     writeFileSync(join(repo, 'a.ts'), 'export const x = 9;\n');
-    runFixDelta({ snapshot: false, since: snapshot, out: hunksOut });
+    runSince(snapshot, hunksOut);
     const hunks = readFileSync(hunksOut, 'utf8');
     expect(hunks).toContain('a/a.ts');
     expect(hunks).not.toContain('qwen-review-local-ledger.json');
@@ -877,7 +894,7 @@ describe('fix-delta', () => {
       join(subdir, '.qwen', 'tmp', 'qwen-review-local-side.json'),
       '{}\n',
     );
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).toContain('+export const x = 9;');
@@ -913,7 +930,7 @@ describe('fix-delta', () => {
     );
     runFixDelta({ snapshot: true, since: undefined, out: snapshot });
     writeFileSync(join(repo, 'cone', 'in.ts'), 'in — the fix\n');
-    runFixDelta({ snapshot: false, since: snapshot, out: hunksOut });
+    runSince(snapshot, hunksOut);
 
     const hunks = readFileSync(hunksOut, 'utf8');
     expect(hunks).toContain('+in — the fix');
@@ -924,7 +941,7 @@ describe('fix-delta', () => {
 
   it('writes an empty diff and says so when nothing changed', () => {
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     expect(stderr().at(-1)).toContain(
       'the tree is unchanged since the snapshot',
@@ -959,7 +976,7 @@ describe('fix-delta', () => {
     tmpdirOverride.value = hostile;
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(repo, 'a.ts'), 'export const x = 5;\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).toContain('+export const x = 5;');
@@ -1014,7 +1031,7 @@ describe('fix-delta', () => {
         gitAt(wt, 'ls-tree', '--name-only', snapTree).trim().split('\n'),
       ).not.toContain('.realgit');
       writeFileSync(join(wt, 'a.ts'), 'export const x = 2;\n');
-      runFixDelta({ snapshot: false, since: snap, out: hunks });
+      runSince(snap, hunks);
 
       const h = readFileSync(hunks, 'utf8');
       expect(h).toContain('+export const x = 2;');
@@ -1050,7 +1067,7 @@ describe('fix-delta', () => {
       const hunks = join(out, 'globgd-hunks.diff');
       runFixDelta({ snapshot: true, since: undefined, out: snap });
       writeFileSync(join(wt, 'gbd'), 'v2\n');
-      runFixDelta({ snapshot: false, since: snap, out: hunks });
+      runSince(snap, hunks);
 
       expect(readFileSync(hunks, 'utf8')).toContain('+v2');
       expect(stderr().at(-1)).toBe(
@@ -1107,7 +1124,7 @@ describe('fix-delta', () => {
         gitAt(wt, 'ls-tree', '--name-only', snapTree).trim().split('\n'),
       ).not.toContain('sub');
       writeFileSync(join(wt, 'a.ts'), 'export const x = 2;\n');
-      runFixDelta({ snapshot: false, since: snap, out: hunks });
+      runSince(snap, hunks);
 
       const h = readFileSync(hunks, 'utf8');
       expect(h).toContain('+export const x = 2;');
@@ -1134,7 +1151,7 @@ describe('fix-delta', () => {
     writeFileSync(join(nested, 'f.txt'), 'untracked inside\n');
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(repo, 'a.ts'), 'export const x = 9;\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).toContain('+export const x = 9;');
@@ -1155,7 +1172,7 @@ describe('fix-delta', () => {
     git('commit', '-qm', 'add u x');
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     git('mv', 'u x', 'renamed.txt');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(stderr().at(-1)).toBe(
       'fix-delta: 1 file(s) changed since the snapshot — renamed.txt',
@@ -1180,7 +1197,7 @@ describe('fix-delta', () => {
       join(repo, '.qwen', 'tmp', 'review-pr-1', 'stray.txt'),
       'y\n',
     );
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -1217,10 +1234,17 @@ describe('fix-delta', () => {
       join(repo, '.qwen', 'tmp', 'review-pr-1', 'stray.txt'),
       'y\n',
     );
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     const lines = stderr();
     expect(lines.some((l) => l.includes('review-pr-1'))).toBe(false);
     expect(lines.at(-1)).toContain('the tree is unchanged since the snapshot');
+    // The all-clear states the model's scope beside its claim: the working
+    // tree and the working trees nested in it — a gitignored file's edit
+    // and the interior of any git directory are outside every working
+    // tree, and are not something the command claims to have seen.
+    expect(lines.at(-1)).toContain(
+      'edits to gitignored files, and anything inside a git directory, are outside this model',
+    );
   });
 
   it('keeps user content tracked under .qwen directories visible', () => {
@@ -1234,7 +1258,7 @@ describe('fix-delta', () => {
     git('commit', '-qm', 'commit a review artifact');
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(repo, '.qwen', 'reviews', 'report.md'), 'v2\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toContain('+v2');
     expect(stderr().at(-1)).toBe(
@@ -1288,9 +1312,9 @@ describe('fix-delta', () => {
     rmSync(sidePath);
     const linkPath = join(out, 'fake-snapshot.json');
     symlinkSync(victim, linkPath);
-    expect(() =>
-      runFixDelta({ snapshot: false, since: linkPath, out: hunksFile() }),
-    ).toThrow(/side path .* is a symlink; refusing to write through/);
+    expect(() => runSince(linkPath)).toThrow(
+      /side path .* is a symlink; refusing to write through/,
+    );
   });
 
   // POSIX-only: the raw-0xFF directory name cannot exist on NTFS (Buffer
@@ -1330,7 +1354,7 @@ describe('fix-delta', () => {
       const fAbs = Buffer.concat([ndAbs, Buffer.from('/f.txt')]);
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       writeFileSync(fAbs, 'the fix — uncommitted inside\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -1365,7 +1389,7 @@ describe('fix-delta', () => {
       symlinkSync(target, join(repo, 'linkrepo'));
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       writeFileSync(join(target, 'f.txt'), 'the fix — through the link\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -1402,7 +1426,7 @@ describe('fix-delta', () => {
       git('commit', '-qm', 'commit the link');
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       writeFileSync(join(target, 'f.txt'), 'the fix — through the link\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -1436,7 +1460,7 @@ describe('fix-delta', () => {
 
     // A no-op run against a CLEAN hidden repo keeps the all-clear —
     // hedged to the capture's scope, but still the all-clear.
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     expect(
       stderr().some((l) =>
         l.includes('the tree is unchanged since the snapshot'),
@@ -1448,7 +1472,7 @@ describe('fix-delta', () => {
     // …but a fix editing inside it is disclosed.
     (writeStderrLine as unknown as Mock).mockClear();
     writeFileSync(join(inner, 'f.txt'), 'the fix — uncommitted inside\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     const lines = stderr();
     expect(
       lines.some(
@@ -1475,7 +1499,7 @@ describe('fix-delta', () => {
     gitAt(emb, 'commit', '-qm', 'init');
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(emb, 'self-ignored.txt'), 'the fix\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -1495,7 +1519,7 @@ describe('fix-delta', () => {
     try {
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       writeFileSync(join(repo, 'emb dir', 'f.txt'), 'after — the fix\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -1532,7 +1556,7 @@ describe('fix-delta', () => {
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(emb, '.git', 'index'), 'garbage\n');
     writeFileSync(join(emb, 'f.txt'), 'the fix — uncommitted inside\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     const lines = stderr();
     expect(
@@ -1578,11 +1602,7 @@ describe('fix-delta', () => {
         ) as FixSnapshot;
         expect(realpathSync(snap.root)).toBe(repo);
         writeFileSync(join(repo, 'a.ts'), 'export const x = 8;\n');
-        runFixDelta({
-          snapshot: false,
-          since: snapshotFile(),
-          out: hunksFile(),
-        });
+        runSince();
         expect(readFileSync(hunksFile(), 'utf8')).toContain(
           '+export const x = 8;',
         );
@@ -1636,7 +1656,7 @@ describe('fix-delta', () => {
         Buffer.concat([Buffer.from(repo), Buffer.from('/'), latinName]),
         'y\n',
       );
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       const hunks = readFileSync(hunksFile());
       expect(hunks.includes(0xe9)).toBe(true);
@@ -1660,13 +1680,7 @@ describe('fix-delta', () => {
       writeFileSync(join(blocked, 'fix.txt'), 'the fix\n');
       chmodSync(blocked, 0o000);
       try {
-        expect(() =>
-          runFixDelta({
-            snapshot: false,
-            since: snapshotFile(),
-            out: hunksFile(),
-          }),
-        ).toThrow(/could not capture the whole tree/);
+        expect(() => runSince()).toThrow(/could not capture the whole tree/);
       } finally {
         chmodSync(blocked, 0o755);
       }
@@ -1689,13 +1703,7 @@ describe('fix-delta', () => {
       writeFileSync(join(blocked, 'fix.txt'), 'the fix\n');
       chmodSync(blocked, 0o000);
       try {
-        expect(() =>
-          runFixDelta({
-            snapshot: false,
-            since: snapshotFile(),
-            out: hunksFile(),
-          }),
-        ).toThrow(/could not capture the whole tree/);
+        expect(() => runSince()).toThrow(/could not capture the whole tree/);
       } finally {
         chmodSync(blocked, 0o755);
       }
@@ -1709,7 +1717,7 @@ describe('fix-delta', () => {
     git('config', 'core.autocrlf', 'true');
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(repo, 'a.ts'), 'export const x = 2;\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     expect(readFileSync(hunksFile(), 'utf8')).toContain('+export const x = 2;');
   });
 
@@ -1768,7 +1776,7 @@ describe('fix-delta', () => {
     git('commit', '-qm', 'large tree');
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(repo, 'f0.ts'), 'export const v0 = 42;\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     expect(readFileSync(hunksFile(), 'utf8')).toContain(
       '+export const v0 = 42;',
     );
@@ -1801,11 +1809,7 @@ describe('fix-delta', () => {
           out: snapshotFile(),
         });
         writeFileSync(join(inner, 'f.txt'), 'the fix — uncommitted inside\n');
-        runFixDelta({
-          snapshot: false,
-          since: snapshotFile(),
-          out: hunksFile(),
-        });
+        runSince();
         const lines = stderr();
         expect(
           lines.some(
@@ -1848,7 +1852,7 @@ describe('fix-delta', () => {
       join(repo, '.qwen', 'tmp', 'review-pr-1', 'stray.txt'),
       'y\n',
     );
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     const lines = stderr();
     expect(lines.some((l) => l.includes('review-pr-1'))).toBe(false);
     expect(lines.some((l) => l.includes('cannot see'))).toBe(false);
@@ -1877,7 +1881,7 @@ describe('fix-delta', () => {
     ) as FixSnapshot;
     expect(snap.dirtySubmodules).not.toContain('big');
     writeFileSync(join(inner, 'f.txt'), 'the fix — uncommitted inside\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     const lines = stderr();
     expect(
       lines.some((l) => /\bbig\b/.test(l) && l.includes('cannot see')),
@@ -1900,7 +1904,7 @@ describe('fix-delta', () => {
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(repo, '.env'), 'SECRET=v2\n');
     writeFileSync(join(repo, 'igdir', 'f.txt'), 'v2\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const last = stderr().at(-1) ?? '';
     expect(last).toContain('the tree is unchanged since the snapshot');
@@ -1922,7 +1926,7 @@ describe('fix-delta', () => {
     writeFileSync(join(emb, 'f.txt'), 'dirt at snapshot time\n');
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(emb, '.git', 'index'), 'garbage\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     const lines = stderr();
     expect(
       lines.some((l) => /\bemb\b/.test(l) && l.includes('could not resolve')),
@@ -1940,9 +1944,33 @@ describe('fix-delta', () => {
         })
         .parseAsync();
     await parse(['fix-delta', '--snapshot', '--out', snapshotFile()]);
+    // The snapshot line carries the full tree sha and the fingerprint the
+    // orchestrator hands back — the one channel the tree cannot rewrite.
+    const printed = stderr().find((l) => l.startsWith('fix-delta: snapshot '));
+    const m =
+      /^fix-delta: snapshot ([0-9a-f]{40,64}) of .* — fingerprint ([0-9a-f]{64}); pass it back as --fingerprint on --since$/.exec(
+        printed ?? '',
+      );
+    expect(m).not.toBeNull();
+    expect(m![1]).toBe(
+      (JSON.parse(readFileSync(snapshotFile(), 'utf8')) as FixSnapshot).tree,
+    );
+    expect(m![2]).toBe(fingerprintOf(snapshotFile()));
     writeFileSync(join(repo, 'a.ts'), 'export const x = 7;\n');
-    await parse(['fix-delta', '--since', snapshotFile(), '--out', hunksFile()]);
+    await parse([
+      'fix-delta',
+      '--since',
+      snapshotFile(),
+      '--fingerprint',
+      m![2],
+      '--out',
+      hunksFile(),
+    ]);
     expect(readFileSync(hunksFile(), 'utf8')).toContain('+export const x = 7;');
+    // …and `--since` is refused without it.
+    await expect(async () =>
+      parse(['fix-delta', '--since', snapshotFile(), '--out', hunksFile()]),
+    ).rejects.toThrow(/--since needs --fingerprint/);
     // yargs raises the missing-argument refusal synchronously from inside
     // parseAsync; an async wrapper turns either shape into a rejection.
     await expect(async () =>
@@ -1974,20 +2002,14 @@ describe('fix-delta', () => {
       snapshotFile(),
       JSON.stringify({ ...snap, root: join(repo, 'elsewhere') }),
     );
-    expect(() =>
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() }),
-    ).toThrow(/taken in .*elsewhere, but this is/);
+    expect(() => runSince()).toThrow(/taken in .*elsewhere, but this is/);
     writeFileSync(
       snapshotFile(),
       JSON.stringify({ ...snap, tree: 'f'.repeat(40) }),
     );
-    expect(() =>
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() }),
-    ).toThrow(/is not in this repository/);
+    expect(() => runSince()).toThrow(/is not in this repository/);
     writeFileSync(snapshotFile(), '{"tree": 12}');
-    expect(() =>
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() }),
-    ).toThrow(/not a fix-delta snapshot/);
+    expect(() => runSince()).toThrow(/not a fix-delta snapshot/);
   });
 
   it("excludes the command's own in-repo --out and --since files", () => {
@@ -2001,7 +2023,7 @@ describe('fix-delta', () => {
     const hunksIn = join(repo, 'fd-out', 'hunks.diff');
     runFixDelta({ snapshot: true, since: undefined, out: snapIn });
     writeFileSync(join(repo, 'a.ts'), 'export const x = 9;\n');
-    runFixDelta({ snapshot: false, since: snapIn, out: hunksIn });
+    runSince(snapIn, hunksIn);
 
     const hunks = readFileSync(hunksIn, 'utf8');
     expect(hunks).toContain('+export const x = 9;');
@@ -2027,11 +2049,7 @@ describe('fix-delta', () => {
         (writeStderrLine as unknown as Mock).mockClear();
         gitAt(join(repo, 'sub'), 'update-index', `--${bit}`, 'f.txt');
         writeFileSync(join(repo, 'sub', 'f.txt'), 'the fix — bit-hidden\n');
-        runFixDelta({
-          snapshot: false,
-          since: snapshotFile(),
-          out: hunksFile(),
-        });
+        runSince();
 
         expect(readFileSync(hunksFile(), 'utf8')).toBe('');
         const lines = stderr();
@@ -2066,7 +2084,7 @@ describe('fix-delta', () => {
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       renameSync(join(repo, 'sub', '.git'), join(repo, 'sub', '.git-x'));
       writeFileSync(join(repo, 'sub', 'f.txt'), 'after — the hidden fix\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -2098,7 +2116,7 @@ describe('fix-delta', () => {
     try {
       rmSync(join(repo, 'sub'), { recursive: true, force: true });
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -2135,7 +2153,7 @@ describe('fix-delta', () => {
     readdirHook.unknownDirents = true;
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(inner, 'f.txt'), 'the fix — uncommitted inside\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2165,7 +2183,7 @@ describe('fix-delta', () => {
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(target, 'a.ts'), 'dirtied between the states\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2185,7 +2203,7 @@ describe('fix-delta', () => {
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(target, 'a.ts'), 'dirtied between the states\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2208,7 +2226,7 @@ describe('fix-delta', () => {
 
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       writeFileSync(join(repo, 'a.ts'), 'export const x = 3;\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toContain(
         '+export const x = 3;',
@@ -2232,7 +2250,7 @@ describe('fix-delta', () => {
       join(repo, 'blob.bin'),
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x02, 0x02]),
     );
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).toContain('GIT binary patch');
@@ -2267,7 +2285,7 @@ describe('fix-delta', () => {
         Buffer.concat([dirtyAbs, Buffer.from('/f.txt')]),
         'the hidden fix',
       );
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -2308,7 +2326,7 @@ describe('fix-delta', () => {
         Buffer.concat([realAbs, Buffer.from('/f.txt')]),
         'the hidden fix',
       );
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -2353,7 +2371,7 @@ describe('fix-delta', () => {
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(repo, 'a.ts'), 'export const x = 5;\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(existsSync(marker)).toBe(false);
   });
@@ -2379,7 +2397,7 @@ describe('fix-delta', () => {
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(nested, 'f.txt'), 'the hidden fix\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2407,7 +2425,7 @@ describe('fix-delta', () => {
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(hidden, 'f.txt'), 'the hidden fix\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2438,7 +2456,7 @@ describe('fix-delta', () => {
       join(repo, 'subdir', '.qwen', 'tmp', 'qwen-review-local-side.json'),
       '{}\n',
     );
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2464,7 +2482,7 @@ describe('fix-delta', () => {
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(inner, 'f.txt'), 'the hidden fix\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2514,7 +2532,7 @@ describe('fix-delta', () => {
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       // The fix edits inside `sub` — invisible to both trees.
       writeFileSync(join(sub, 'g.txt'), 'the fix\n');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const lines = stderr();
@@ -2577,7 +2595,7 @@ describe('fix-delta', () => {
           Buffer.concat([plant, Buffer.from('/f.txt')]),
           'the hidden fix',
         );
-        runFixDelta({ snapshot: false, since: snap, out: hunks });
+        runSince(snap, hunks);
 
         expect(readFileSync(hunks, 'utf8')).toBe('');
         const lines = stderr();
@@ -2618,7 +2636,7 @@ describe('fix-delta', () => {
     ).toBe(true);
 
     writeFileSync(join(repo, 'a.ts'), 'export const x = 7;\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     expect(stderr().some((l) => l.includes('what `git add -A` stores'))).toBe(
       true,
     );
@@ -2652,7 +2670,7 @@ describe('fix-delta', () => {
         Buffer.concat([nameBytes, Buffer.from(' -diff\n')]),
       );
       overwriteSh(absFile, 'the fix');
-      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      runSince();
 
       expect(readFileSync(hunksFile(), 'utf8')).toContain('GIT binary patch');
       expect(
@@ -2666,7 +2684,7 @@ describe('fix-delta', () => {
     // must not fire on it — a note every run prints is a note nobody reads.
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(repo, 'a.ts'), 'export const x = 7;\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
     const lines = stderr();
     expect(lines.some((l) => l.includes('repo-local surfaces'))).toBe(false);
     expect(lines.some((l) => l.includes('steers how the hunks'))).toBe(false);
@@ -2682,7 +2700,7 @@ describe('fix-delta', () => {
     mkdirSync(join(repo, '.git', 'info'), { recursive: true });
     writeFileSync(join(repo, '.git', 'info', 'attributes'), 'a.ts -diff\n');
     writeFileSync(join(repo, 'a.ts'), 'export const x = 7;\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     // The rendering really is unreadable…
     expect(readFileSync(hunksFile(), 'utf8')).toContain('GIT binary patch');
@@ -2717,7 +2735,7 @@ describe('fix-delta', () => {
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(repo, 'a.ts'), 'export const x = 7;\n');
     writeFileSync(join(repo, 'newfile.txt'), 'the fix\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     // The drop is real…
     expect(readFileSync(hunksFile(), 'utf8')).not.toContain('newfile.txt');
@@ -2745,7 +2763,7 @@ describe('fix-delta', () => {
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(repo, 'a.ts'), 'export const x = 5;\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toContain('+export const x = 5;');
     expect(existsSync(marker)).toBe(false);
@@ -2788,7 +2806,7 @@ describe('fix-delta', () => {
       join(repo, '.qwen', 'tmp', 'qwen-review-local-ledger.json'),
       '[]\n',
     );
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).toContain('+v2 — the fix');
@@ -2820,7 +2838,7 @@ describe('fix-delta', () => {
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(inner, 'f.txt'), 'the hidden fix\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2851,7 +2869,7 @@ describe('fix-delta', () => {
 
     runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
     writeFileSync(join(planted, 'f.txt'), 'the hidden fix\n');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2885,7 +2903,7 @@ describe('fix-delta', () => {
     writeFileSync(join(inner, 'g.txt'), 'the fix, committed\n');
     gitAt(inner, 'add', '-A');
     gitAt(inner, 'commit', '-qm', 'the fix');
-    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    runSince();
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
@@ -2896,5 +2914,380 @@ describe('fix-delta', () => {
       ),
     ).toBe(true);
     expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('refuses a snapshot record that no longer matches its fingerprint', () => {
+    // The record lives inside the tree the reviewed code can write to and
+    // is excluded from both captures, so nothing about it is
+    // self-certifying: a rewritten `tree` field diffs the fix against a
+    // baseline taken AFTER a hidden edit and corroborates exactly the
+    // claimed fix over it. The fingerprint `--snapshot` printed is the one
+    // value the orchestrator holds outside that write surface.
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    const printed = fingerprintOf(snapshotFile());
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    // The hidden edit, then a baseline fabricated AFTER it with the
+    // module's own recipe, spliced into the record.
+    writeFileSync(join(repo, 'm.ts'), 'HIDDEN_EDIT_M\n');
+    const forged = join(out, 'forged-snapshot.json');
+    runFixDelta({ snapshot: true, since: undefined, out: forged });
+    const forgedTree = (JSON.parse(readFileSync(forged, 'utf8')) as FixSnapshot)
+      .tree;
+    expect(forgedTree).not.toBe(snap.tree);
+    writeFileSync(
+      snapshotFile(),
+      `${JSON.stringify({ ...snap, tree: forgedTree }, null, 2)}\n`,
+    );
+    writeFileSync(
+      join(repo, 'a.ts'),
+      'export const x = 7; // the claimed fix\n',
+    );
+
+    expect(() =>
+      runFixDelta({
+        snapshot: false,
+        since: snapshotFile(),
+        fingerprint: printed,
+        out: hunksFile(),
+      }),
+    ).toThrow(
+      /its fingerprint is [0-9a-f]{64}, not the [0-9a-f]{64} --snapshot/,
+    );
+    expect(existsSync(hunksFile())).toBe(false);
+    // …and a `--since` with no fingerprint at all is refused before the
+    // file is read.
+    expect(() =>
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() }),
+    ).toThrow(/--since needs --fingerprint/);
+  });
+
+  it('probes a gitfile that points into the registry without binding back', () => {
+    // A gitfile is a plain file anyone can write: a plant at another path
+    // pointing into a GENUINE registry entry was pruned as that worktree,
+    // while the capture pathspec hid it from both trees. The entry's own
+    // `gitdir` back-link names the one worktree it belongs to, and a plant
+    // cannot forge that without writing into the git dir.
+    git(
+      'worktree',
+      'add',
+      '-q',
+      '--detach',
+      join('.qwen', 'tmp', 'review-pr-1'),
+    );
+    const evil = join(repo, '.qwen', 'tmp', 'review-pr-evil');
+    mkdirSync(evil, { recursive: true });
+    writeFileSync(
+      join(evil, '.git'),
+      `gitdir: ${join(repo, '.git', 'worktrees', 'review-pr-1')}\n`,
+    );
+    writeFileSync(join(evil, 'payload.txt'), 'v1\n');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(evil, 'payload2.txt'), 'the hidden fix\n');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('cannot see') && l.includes('review-pr-evil'),
+      ),
+    ).toBe(true);
+    // The genuine worktree stays the review's own.
+    expect(lines.some((l) => /review-pr-1\b(?!\/)/.test(l))).toBe(false);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('names a repository planted inside a registered review worktree', () => {
+    // The worktree itself is the review's and is not probed — but its
+    // subtree was dropped whole, so a repository planted one level inside
+    // it was discovered by no route while the capture pathspec removed it
+    // from both trees. A review worktree is walked, never probed.
+    const wt = join(repo, '.qwen', 'tmp', 'review-pr-1');
+    git('worktree', 'add', '-q', '--detach', wt);
+    const inner = join(wt, 'inner');
+    mkdirSync(inner);
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'f.txt'), 'v1\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(inner, 'f.txt'), 'the hidden fix\n');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('cannot see') && l.includes('review-pr-1/inner'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('walks a registered review worktree reached through the ignored-directory walk', () => {
+    // The walk route: with `.qwen` ignored the worktree is reached only by
+    // walking the collapsed `! .qwen/` entry, and the walk must enqueue a
+    // review worktree rather than prune its subtree.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n.qwen/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore .qwen');
+    const wt = join(repo, '.qwen', 'tmp', 'review-pr-1');
+    git('worktree', 'add', '-q', '--detach', wt);
+    const inner = join(wt, 'inner');
+    mkdirSync(inner);
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'f.txt'), 'v1\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(inner, 'f.txt'), 'the hidden fix\n');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) => l.includes('cannot see') && l.includes('review-pr-1/inner'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('walks a registered review worktree reached through a symlink', () => {
+    // The symlink route: a top-level link at a non-family name resolves to
+    // the review worktree. The link's target is excluded content, but the
+    // exclusion is "walk, do not probe" — a repository inside the target
+    // is disclosed under the link's own name.
+    const wt = join(repo, '.qwen', 'tmp', 'review-pr-1');
+    git('worktree', 'add', '-q', '--detach', wt);
+    const inner = join(wt, 'inner');
+    mkdirSync(inner);
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'f.txt'), 'v1\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+    symlinkSync(wt, join(repo, 'x'));
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(inner, 'f.txt'), 'the hidden fix\n');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('cannot see') && l.includes('x/inner')),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('discloses a repository that appeared since the snapshot', () => {
+    // Created between the moments, with the fix COMMITTED inside: its
+    // status is clean, no superproject tree records the repository at all
+    // (it sits in an ignored directory), and it had no baseline digest to
+    // be compared against — so it reached no transition and the run
+    // all-cleared over it.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig');
+    mkdirSync(join(repo, 'ig'));
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    const inner = join(repo, 'ig', 'inner');
+    mkdirSync(inner);
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'fix.txt'), 'the fix, committed\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'the fix');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('the snapshot never recorded') && l.includes('ig/inner'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('discloses a baseline repository the probe can no longer answer for', () => {
+    // The mirror: a clean repository the baseline recorded that is gone at
+    // `--since` — renamed here — dropped out of every transition, because
+    // each compared two digests and this path has one.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig');
+    const inner = join(repo, 'ig', 'inner');
+    mkdirSync(inner, { recursive: true });
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'f.txt'), 'v1\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    renameSync(inner, join(out, 'moved-away'));
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('finds nothing to answer for now') &&
+          l.includes('ig/inner'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('keys a repository named __proto__ like any other', () => {
+    // On a plain object `digests['__proto__'] = …` hits the inherited
+    // setter and creates no own key, and the read back returns
+    // `Object.prototype` where `undefined` was meant — so a repository
+    // literally named `__proto__` was stamped pre-existing whatever its
+    // interior did. Null-prototyped maps make it an ordinary key.
+    const proto = join(repo, '__proto__');
+    mkdirSync(proto);
+    gitAt(proto, 'init', '-q', '-b', 'main');
+    gitAt(proto, 'config', 'user.email', 't@t.t');
+    gitAt(proto, 'config', 'user.name', 't');
+    writeFileSync(join(proto, 'f.txt'), 'v1\n');
+    gitAt(proto, 'add', '-A');
+    gitAt(proto, 'commit', '-qm', 'init');
+    writeFileSync(join(proto, 'dirt.txt'), 'already dirty\n');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    const snap = JSON.parse(
+      readFileSync(snapshotFile(), 'utf8'),
+    ) as FixSnapshot;
+    expect(Object.keys(snap.digests)).toContain('__proto__');
+    writeFileSync(join(proto, 'f.txt'), 'the hidden fix\n');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('cannot see') && l.includes('__proto__')),
+    ).toBe(true);
+    expect(lines.some((l) => l.includes('pre-existing'))).toBe(false);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('keys a clean repository named __proto__ like any other', () => {
+    // The load side has its own setter to fall into: rebuilding the
+    // record's `digests` onto a plain object drops the `__proto__` key
+    // again, so a clean repository of that name whose HEAD moved between
+    // the moments is in neither `Object.keys(snapshot.digests)` (never
+    // `movedInside`) nor "absent from the baseline" (`snapshot.digests[p]`
+    // reads `Object.prototype`, never `undefined`, so never `appeared`) —
+    // a commit inside it drew the bare all-clear. Ignored, so that no
+    // gitlink is recorded and the identity move is the only trace (a
+    // recorded gitlink's move is in the hunks, and is not a blind spot).
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\n__proto__/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore __proto__');
+    const proto = join(repo, '__proto__');
+    mkdirSync(proto);
+    gitAt(proto, 'init', '-q', '-b', 'main');
+    gitAt(proto, 'config', 'user.email', 't@t.t');
+    gitAt(proto, 'config', 'user.name', 't');
+    writeFileSync(join(proto, 'f.txt'), 'v1\n');
+    gitAt(proto, 'add', '-A');
+    gitAt(proto, 'commit', '-qm', 'init');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    writeFileSync(join(proto, 'g.txt'), 'the fix, committed\n');
+    gitAt(proto, 'add', '-A');
+    gitAt(proto, 'commit', '-qm', 'the fix');
+    runSince();
+
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('committed or stashed inside') && l.includes('__proto__'),
+      ),
+    ).toBe(true);
+    expect(lines.at(-1)).not.toContain('the tree is unchanged since');
+  });
+
+  it('rules every add note on its own line once a filter shares the stream', () => {
+    // A clean/process filter runs INSIDE the capture and writes to the same
+    // stderr git does. An unterminated forged opener absorbs git's real
+    // failure notes until a genuine zero-commit note closes the blob, and
+    // the reassembly folded all of it into one tolerated note — over a path
+    // the capture had silently skipped. With a filter configured, no
+    // reassembly and no pairing: the frame refuses the capture.
+    const frame =
+      "error: '\n" +
+      'error: open("secret.txt"): Permission denied\n' +
+      "error: unable to index file 'secret.txt'\n" +
+      "error: 'zzz/' does not have a commit checked out\n";
+    const add = { stderr: frame, status: 1, completed: true };
+    // Filter-less: only git writes the stream, and the shape is git's own
+    // multi-line zero-commit note for a newline-named repository.
+    expect(() => assertCompleteCapture(add, false)).not.toThrow();
+    expect(() => assertCompleteCapture(add, true)).toThrow(
+      /could not capture the whole tree[\s\S]*a clean\/process filter is configured/,
+    );
+    // …and the honest single-line shapes still pass under a filter — the
+    // zero-commit note alone (git ≤ 2.54) and the pair newer gits print
+    // (a Git-LFS user's global `filter.lfs.*` must not cost them the audit
+    // over a freshly initialised repository in the tree).
+    for (const honest of [
+      "error: 'zzz/' does not have a commit checked out\n",
+      "error: 'zzz/' does not have a commit checked out\nerror: unable to index file 'zzz/'\n",
+    ]) {
+      expect(() =>
+        assertCompleteCapture(
+          { stderr: honest, status: 1, completed: true },
+          true,
+        ),
+      ).not.toThrow();
+    }
+    // A pairing note with no zero-commit note for its path stays
+    // unexplained under a filter — nothing git prints skips a path on
+    // that note alone.
+    expect(() =>
+      assertCompleteCapture(
+        {
+          stderr: "error: unable to index file 'secret.txt'\n",
+          status: 1,
+          completed: true,
+        },
+        true,
+      ),
+    ).toThrow(/could not capture the whole tree/);
+
+    // End to end: the filter prints the opener, the tree holds the
+    // zero-commit repository that would close it, and the capture refuses
+    // rather than certify.
+    const filter = join(out, 'forge.sh');
+    writeFileSync(filter, '#!/bin/sh\nprintf "error: \'\\n" >&2\ncat\n');
+    chmodSync(filter, 0o755);
+    git('config', 'filter.p.clean', filter);
+    writeFileSync(join(repo, '.gitattributes'), 'secret.txt filter=p\n');
+    writeFileSync(join(repo, 'secret.txt'), 'v1\n');
+    mkdirSync(join(repo, 'zzz'));
+    gitAt(join(repo, 'zzz'), 'init', '-q', '-b', 'main');
+    expect(() =>
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() }),
+    ).toThrow(/a clean\/process filter is configured/);
   });
 });
