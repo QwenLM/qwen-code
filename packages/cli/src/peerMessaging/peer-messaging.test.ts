@@ -125,6 +125,7 @@ async function start(
     ) => { address: string; previous: 'pending' | 'held' } | undefined;
     reassertSessionRecord?: () => Promise<void>;
     getPolicySetting?: () => InboundPolicy | undefined;
+    getHeldExpiryMs?: () => number | null;
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
@@ -1374,5 +1375,149 @@ describe.skipIf(isWindows)('inbox auth wiring', () => {
     expect(submitted[0]).toContain('origin="own-process"');
     expect(submitted[1]).toContain('buffered peer');
     expect(submitted[1]).not.toContain('origin="own-process"');
+  });
+});
+
+describe.skipIf(isWindows)('held message expiry', () => {
+  it('reports the configured lifetime for the /peers listing', async () => {
+    const { messaging } = await start(ApprovalMode.YOLO, {
+      getPolicySetting: () => 'hold',
+      getHeldExpiryMs: () => 90_000,
+    });
+    expect(messaging.getHeldExpiryMs()).toBe(90_000);
+  });
+
+  it('reports null when holds do not expire', async () => {
+    const { messaging } = await start(ApprovalMode.YOLO, {
+      getPolicySetting: () => 'hold',
+      getHeldExpiryMs: () => null,
+    });
+    expect(messaging.getHeldExpiryMs()).toBeNull();
+  });
+
+  it('expires a held message and receipts the sender', async () => {
+    const sender = await startSenderInbox();
+    const { messaging, submitted } = await start(ApprovalMode.YOLO, {
+      getPolicySetting: () => 'hold',
+      // Real timers: the assertions below straddle a socket round trip,
+      // so the window has to outlast `settle()` and still be short
+      // enough to wait out.
+      getHeldExpiryMs: () => 250,
+    });
+
+    await sendPeerFrame(
+      messaging.socketPath!,
+      buildUserFrame({ content: 'anyone there?', from: sender.socketPath }),
+      { authToken: TEST_TOKEN },
+    );
+    await settle();
+    expect(messaging.getHeld()).toHaveLength(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await settle();
+
+    expect(messaging.getHeld()).toHaveLength(0);
+    expect(submitted).toHaveLength(0);
+    const statuses = receipts
+      .filter((frame) => frame.type === 'control')
+      .map((frame) => (frame as { status: string }).status);
+    expect(statuses).toContain('expired');
+  });
+
+  it('does not call a listing stale when only an expiry removed an entry', async () => {
+    // The expiry timer is a fourth mover of the held set, alongside the
+    // arrivals, evictions and releases the guard was written for. A
+    // removal cannot make a printed handle resolve to a different
+    // message -- `resolveHeld` prefix-matches over the current set, so
+    // shrinking only narrows it -- and bouncing it refuses a decision
+    // that would have been correct.
+    const sender = await startSenderInbox();
+    const { messaging } = await start(ApprovalMode.YOLO, {
+      getPolicySetting: () => 'hold',
+      getHeldExpiryMs: () => 250,
+    });
+
+    await sendPeerFrame(
+      messaging.socketPath!,
+      buildUserFrame({ content: 'first', from: sender.socketPath }),
+      { authToken: TEST_TOKEN },
+    );
+    await settle();
+    expect(messaging.getHeld()).toHaveLength(1);
+    messaging.recordHeldListing(messaging.getHeld());
+    expect(messaging.heldSetChangedSinceListing()).toBe(false);
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await settle();
+    expect(messaging.getHeld()).toHaveLength(0);
+
+    expect(messaging.heldSetChangedSinceListing()).toBe(false);
+  });
+
+  it('calls a listing stale when an expiry lets a handle reassign', async () => {
+    // The exception to the rule above. `msgId` is peer-chosen and only
+    // shape-checked, so a peer can park `abc` beside `abc12345`. While
+    // both are held the handles are distinct and `resolveHeld`'s
+    // exact-match tier gives `abc` to the shorter one. Once `abc`
+    // expires, that handle falls through to prefix-matching and would
+    // release `abc12345` -- a different message than the user reviewed.
+    const sender = await startSenderInbox();
+    const { messaging } = await start(ApprovalMode.YOLO, {
+      getPolicySetting: () => 'hold',
+      getHeldExpiryMs: () => 600,
+    });
+
+    await sendPeerFrame(
+      messaging.socketPath!,
+      {
+        ...buildUserFrame({ content: 'short', from: sender.socketPath }),
+        msgId: 'abc',
+      },
+      { authToken: TEST_TOKEN },
+    );
+    await settle();
+    // Parked later, so it outlives the shorter id's window.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await sendPeerFrame(
+      messaging.socketPath!,
+      {
+        ...buildUserFrame({ content: 'long', from: sender.socketPath }),
+        msgId: 'abc12345',
+      },
+      { authToken: TEST_TOKEN },
+    );
+    await settle();
+    expect(messaging.getHeld().map((e) => e.frame.msgId)).toEqual([
+      'abc',
+      'abc12345',
+    ]);
+    messaging.recordHeldListing(messaging.getHeld());
+    expect(messaging.heldSetChangedSinceListing()).toBe(false);
+
+    // `abc` ages past 600ms while `abc12345` has ~300ms left.
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    await settle();
+    expect(messaging.getHeld().map((e) => e.frame.msgId)).toEqual(['abc12345']);
+
+    expect(messaging.heldSetChangedSinceListing()).toBe(true);
+  });
+
+  it('receipts a refusal as refused rather than denied', async () => {
+    const sender = await startSenderInbox();
+    const { messaging } = await start(ApprovalMode.DEFAULT, {
+      getPolicySetting: () => 'refuse',
+    });
+
+    await sendPeerFrame(
+      messaging.socketPath!,
+      buildUserFrame({ content: 'hello', from: sender.socketPath }),
+      { authToken: TEST_TOKEN },
+    );
+    await settle();
+
+    const statuses = receipts
+      .filter((frame) => frame.type === 'control')
+      .map((frame) => (frame as { status: string }).status);
+    expect(statuses).toEqual(['refused']);
   });
 });
