@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   containsCmdShellMetacharacters,
   getTerminalImageRenderSupport,
+  INLINE_DECODE_NEGATIVE_CACHE_BYTE_LIMIT,
   INLINE_DECODE_NEGATIVE_CACHE_LIMIT,
   MAX_INLINE_IMAGE_PIXELS,
   markKittyImageWritten,
@@ -135,10 +136,10 @@ describe('terminalImageRenderer', () => {
   });
 
   it('caches invalid inline payloads with bounded LRU eviction', () => {
+    const sharedPrefix = 'A'.repeat(64);
     const invalidPayloads = Array.from(
       { length: INLINE_DECODE_NEGATIVE_CACHE_LIMIT + 1 },
-      (_, index) =>
-        Buffer.from(`invalid LRU payload ${index}`).toString('base64'),
+      (_, index) => Buffer.from(`${sharedPrefix}${index}`).toString('base64'),
     );
     const bufferFrom = vi.spyOn(Buffer, 'from');
     const createHash = vi.spyOn(crypto, 'createHash');
@@ -158,6 +159,11 @@ describe('terminalImageRenderer', () => {
       )) {
         prepare(data);
       }
+      expect(bufferFrom).toHaveBeenCalledTimes(
+        INLINE_DECODE_NEGATIVE_CACHE_LIMIT,
+      );
+
+      prepare('A'.repeat(MAX_INLINE_IMAGE_ENCODED_LENGTH + 1));
       expect(bufferFrom).toHaveBeenCalledTimes(
         INLINE_DECODE_NEGATIVE_CACHE_LIMIT,
       );
@@ -188,9 +194,44 @@ describe('terminalImageRenderer', () => {
     }
   });
 
+  it('bounds invalid inline payload cache entries by total bytes', () => {
+    const invalidPayloads = Array.from({ length: 3 }, (_, index) =>
+      Buffer.from(`invalid byte budget payload ${index}`).toString('base64'),
+    );
+    const bufferFrom = vi.spyOn(Buffer, 'from');
+    const byteLength = vi
+      .spyOn(Buffer, 'byteLength')
+      .mockReturnValue(INLINE_DECODE_NEGATIVE_CACHE_BYTE_LIMIT / 2);
+    const prepare = (data: string) =>
+      prepareInlineTerminalImage({
+        data,
+        mimeType: 'image/png',
+        contentWidth: 24,
+        env: { TERM: 'xterm-kitty' },
+        stdoutIsTTY: true,
+      });
+
+    try {
+      prepare(invalidPayloads[0]);
+      prepare(invalidPayloads[1]);
+      prepare(invalidPayloads[0]);
+      prepare(invalidPayloads[2]);
+      prepare(invalidPayloads[0]);
+      expect(bufferFrom).toHaveBeenCalledTimes(3);
+
+      prepare(invalidPayloads[1]);
+      expect(bufferFrom).toHaveBeenCalledTimes(4);
+      expect(byteLength).toHaveBeenCalledTimes(4);
+    } finally {
+      bufferFrom.mockRestore();
+      byteLength.mockRestore();
+    }
+  });
+
   it('rejects inline payloads above the shared image limit before decoding', () => {
     const oversizedBase64 = 'A'.repeat(MAX_INLINE_IMAGE_ENCODED_LENGTH + 1);
     const bufferFrom = vi.spyOn(Buffer, 'from');
+    const createHash = vi.spyOn(crypto, 'createHash');
 
     try {
       expect(
@@ -203,8 +244,10 @@ describe('terminalImageRenderer', () => {
         }),
       ).toEqual({ fallbackText: '[image: png]', result: null });
       expect(bufferFrom).not.toHaveBeenCalled();
+      expect(createHash).not.toHaveBeenCalled();
     } finally {
       bufferFrom.mockRestore();
+      createHash.mockRestore();
     }
   });
 

@@ -51,8 +51,12 @@ const inlineDecodeCache = new Map<
   string,
   { png: Buffer; size: { width: number; height: number } }
 >();
-export const INLINE_DECODE_NEGATIVE_CACHE_LIMIT = 8;
-const invalidInlineImageCache = new Set<string>();
+export const INLINE_DECODE_NEGATIVE_CACHE_LIMIT = 64;
+// Preserve the eight-entry cache's worst-case raw-key budget for large payloads.
+export const INLINE_DECODE_NEGATIVE_CACHE_BYTE_LIMIT =
+  8 * MAX_INLINE_IMAGE_ENCODED_LENGTH;
+const invalidInlineImageCache = new Map<string, number>();
+let invalidInlineImageCacheBytes = 0;
 
 // A Kitty terminal keeps a transmitted image and redraws it from the placeholder
 // cells alone. The live-row -> Static-row move and every resize remount
@@ -381,20 +385,27 @@ function getDecodedInlinePng(
     return cached;
   }
 
-  if (invalidInlineImageCache.has(data)) {
+  const invalidBytes = invalidInlineImageCache.get(data);
+  if (invalidBytes !== undefined) {
     invalidInlineImageCache.delete(data);
-    invalidInlineImageCache.add(data);
+    invalidInlineImageCache.set(data, invalidBytes);
     return null;
   }
 
   const png = decodeInlineImage(data);
   const size = png ? readValidatedInlinePngSize(png) : null;
   if (!png || !size) {
-    invalidInlineImageCache.add(data);
-    while (invalidInlineImageCache.size > INLINE_DECODE_NEGATIVE_CACHE_LIMIT) {
-      const oldest = invalidInlineImageCache.values().next().value;
+    const dataBytes = Buffer.byteLength(data);
+    invalidInlineImageCache.set(data, dataBytes);
+    invalidInlineImageCacheBytes += dataBytes;
+    while (
+      invalidInlineImageCache.size > INLINE_DECODE_NEGATIVE_CACHE_LIMIT ||
+      invalidInlineImageCacheBytes > INLINE_DECODE_NEGATIVE_CACHE_BYTE_LIMIT
+    ) {
+      const oldest = invalidInlineImageCache.entries().next().value;
       if (oldest === undefined) break;
-      invalidInlineImageCache.delete(oldest);
+      invalidInlineImageCache.delete(oldest[0]);
+      invalidInlineImageCacheBytes -= oldest[1];
     }
     return null;
   }
