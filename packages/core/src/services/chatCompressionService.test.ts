@@ -2959,21 +2959,24 @@ describe('ChatCompressionService.compress cache sharing', () => {
   });
 
   it('does not stringify inline media while estimating a visible-history delta', async () => {
+    const textPayload = 'review this screenshot '.repeat(5_000);
+    const inlineMedia = 'A'.repeat(2_000_000);
     const history: Content[] = [
       {
         role: 'user',
         parts: [
-          { text: 'review this screenshot '.repeat(5_000) },
+          { text: textPayload },
           {
             inlineData: {
               mimeType: 'image/png',
-              data: 'A'.repeat(2_000_000),
+              data: inlineMedia,
             },
           },
         ],
       },
       { role: 'model', parts: [{ text: 'done' }] },
     ];
+    const stringify = JSON.stringify.bind(JSON);
     const stringifySpy = vi.spyOn(JSON, 'stringify');
     const { chat, config } = makeFixture({ history });
 
@@ -2988,6 +2991,18 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(stringifySpy.mock.calls.some(([value]) => value === history)).toBe(
       false,
+    );
+    expect(
+      Math.max(
+        ...stringifySpy.mock.calls.map(
+          ([value]) => stringify(value)?.length ?? 0,
+        ),
+      ),
+    ).toBeLessThan(textPayload.length + 1_000);
+    expect(result.info.newTokenCount).toBe(
+      180_000 -
+        estimateUtf8AdjustedVisibleTokens(history) +
+        estimateUtf8AdjustedVisibleTokens(result.newHistory!),
     );
   });
 
@@ -6047,6 +6062,8 @@ describe('issue #9455: compression request admission', () => {
       expect.objectContaining({
         tokens_before: 45_500,
         tokens_after: 45_500,
+        cache_sharing_attempted: false,
+        cache_sharing_used: false,
       }),
     );
   });
