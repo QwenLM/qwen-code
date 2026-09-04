@@ -317,6 +317,16 @@ export function foldLiveEvent(
       });
       return items;
     }
+    case 'confirm-resolved': {
+      const i = findToolIndex(items, ev.id);
+      if (i >= 0) {
+        const t = items[i] as LiveToolItem;
+        if (t.confirm === 'pending') {
+          items[i] = { ...t, confirm: 'approved' };
+        }
+      }
+      return items;
+    }
     case 'task-start':
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };

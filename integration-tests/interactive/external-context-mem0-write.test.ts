@@ -19,6 +19,11 @@ import {
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 import { TestRig, type } from '../test-helper.js';
+import {
+  e2eRendererEnv,
+  pickE2eRenderer,
+  resolveE2eCliCommand,
+} from '../renderer-matrix.js';
 
 const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
 const IS_SANDBOX = Boolean(
@@ -196,10 +201,14 @@ const ENVIRONMENT_KEYS = [
       await type(ptyProcess, '\r');
 
       if (scenario.expectsMcpConfirmation) {
-        expect(
-          await rig.waitForText('Allow execution of MCP tool', 30_000),
+        // Screen-based, not rig.waitForText: OpenTUI emits pty bytes by cell
+        // diff and drops spaces over previously-blank cells, so multi-word
+        // rows never appear verbatim in the raw stream on that leg.
+        await waitForScreen(
+          screen,
+          (value) => value.includes('Allow execution of MCP tool'),
           'ordinary MCP confirmation did not appear',
-        ).toBe(true);
+        );
         await type(ptyProcess, '\r');
       }
 
@@ -246,22 +255,32 @@ const ENVIRONMENT_KEYS = [
         expect(confirmationScreen).toContain('`code-value`');
         expect(confirmationScreen).toContain('<u>under-value</u>');
       } else {
-        expect(
-          await rig.waitForText(
-            'Save this exact content to the bound Mem0 repository memory?',
-            30_000,
-          ),
+        await waitForScreen(
+          screen,
+          (value) =>
+            value.includes(
+              'Save this exact content to the bound Mem0 repository memory?',
+            ) && value.includes('Keep this'),
           'content-visible Hook confirmation did not appear',
-        ).toBe(true);
-        expect(rig._interactiveOutput).toContain('Keep this');
+        );
       }
       await type(ptyProcess, scenario.approveWrite ? '\r' : '\x1b');
 
       if (scenario.approveWrite) {
-        expect(
-          await rig.waitForText('MEM0_WRITE_E2E_DONE', 30_000),
-          'fake model turn did not complete',
-        ).toBe(true);
+        // Sync on request bodies, not transcript text: the OpenTUI leg
+        // redraws by cell diff, so rendered rows never reliably appear in
+        // the raw pty stream (see the screen-based waits above).
+        const modelRequests = fakeModel.requests;
+        const turnCompleted = await rig.poll(
+          () => modelRequests.length >= 2,
+          30_000,
+          200,
+        );
+        if (!turnCompleted) {
+          throw new Error(
+            `fake model turn did not complete. providerRequests=${providerRequests.length} modelRequests=${modelRequests.length}`,
+          );
+        }
       } else {
         await new Promise((resolve) => setTimeout(resolve, 1000));
         expect(fakeModel.requests).toHaveLength(1);
@@ -432,6 +451,7 @@ function fakeMem0McpSource(integrationRoot: string): string {
 
 function runInteractive(rig: TestRig, ...args: string[]) {
   rig._interactiveOutput = '';
+  const renderer = pickE2eRenderer();
   const { Terminal } = xtermHeadless;
   const terminal = new Terminal({
     cols: 110,
@@ -441,14 +461,17 @@ function runInteractive(rig: TestRig, ...args: string[]) {
   });
   let pendingWrite = Promise.resolve();
   const ptyProcess = pty.spawn(
-    process.execPath,
+    resolveE2eCliCommand(renderer),
     [rig.bundlePath, '--no-chat-recording', ...args],
     {
       name: 'xterm-color',
       cols: 110,
       rows: 38,
       cwd: rig.testDir!,
-      env: process.env as Record<string, string>,
+      env: {
+        ...process.env,
+        ...e2eRendererEnv(renderer),
+      } as Record<string, string>,
     },
   );
   ptyProcess.onData((data) => {

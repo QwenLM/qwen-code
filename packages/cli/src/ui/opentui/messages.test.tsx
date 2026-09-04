@@ -23,10 +23,15 @@ vi.mock('@opentui/core', () => ({
 import {
   GENERIC_TOOL_SUMMARIES,
   MAX_RESULT_DISPLAY_CHARACTERS,
+  TOOL_CARD_DESCRIPTION_ROWS,
   assistantMessageMeta,
+  capToolCardDescription,
+  headWindowPhysical,
   hiddenLinesLabel,
+  hiddenTailLinesLabel,
   maxHistoryItemRows,
   tailWindow,
+  tailWindowPhysical,
   thinkingMeta,
   toolCardDescription,
   toolCardName,
@@ -36,6 +41,7 @@ import {
   truncateResultDisplayChars,
   truncateTokenLine,
   userMessageMeta,
+  STATUS_INDICATOR_WIDTH,
 } from './messages.js';
 import { TOOL_STATUS } from '../constants.js';
 import { C } from './theme.js';
@@ -183,6 +189,67 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     expect(hiddenLinesLabel(4779)).toBe('... first 4779 lines hidden ...');
   });
 
+  it('keeps everything when the physical height fits', () => {
+    const rows = ['a'.repeat(150), 'b'];
+    expect(headWindowPhysical(rows, 102, 20)).toEqual({
+      visible: rows,
+      hiddenRows: 0,
+    });
+  });
+
+  it('caps a single over-long logical row by its wrapped height', () => {
+    const win = headWindowPhysical(['head', 'x'.repeat(5000)], 102, 20);
+    expect(win.visible[0]).toBe('head');
+    expect(win.visible[1]).toBe('x'.repeat(18 * 100));
+    expect(win.visible).toHaveLength(2);
+    // 1 + 50 physical rows total, 19 budgeted for content.
+    expect(win.hiddenRows).toBe(32);
+  });
+
+  it('keeps whole rows while they fit and slices the overflowing row', () => {
+    const rows = Array.from(
+      { length: 15 },
+      (_, i) => `${i % 10}`.repeat(150), // 2 physical rows each at 100 cols
+    );
+    const win = headWindowPhysical(rows, 102, 20);
+    expect(win.visible).toHaveLength(10);
+    expect(win.visible[9]).toBe('9'.repeat(100));
+    // 30 physical rows total, 19 budgeted for content.
+    expect(win.hiddenRows).toBe(11);
+  });
+
+  it('renders the ink bottom-overflow hidden-tail indicator', () => {
+    expect(hiddenTailLinesLabel(1)).toBe('... last 1 line hidden ...');
+    expect(hiddenTailLinesLabel(4779)).toBe('... last 4779 lines hidden ...');
+  });
+
+  it('keeps everything when the physical height fits the tail budget', () => {
+    const rows = ['a'.repeat(150), 'b'];
+    expect(tailWindowPhysical(rows, 102, 20)).toEqual({
+      visible: rows,
+      hiddenRows: 0,
+    });
+  });
+
+  it('caps a single over-long logical row by its wrapped tail', () => {
+    const win = tailWindowPhysical(['head', 'x'.repeat(5000)], 102, 20);
+    expect(win.visible).toEqual(['x'.repeat(20 * 100)]);
+    // 1 + 50 physical rows total; the mega row's tail fills the budget.
+    expect(win.hiddenRows).toBe(31);
+  });
+
+  it('keeps the last whole rows whose height fits', () => {
+    const rows = Array.from(
+      { length: 15 },
+      (_, i) => `${i % 10}`.repeat(150), // 2 physical rows each at 100 cols
+    );
+    const win = tailWindowPhysical(rows, 102, 20);
+    expect(win.visible).toHaveLength(10);
+    expect(win.visible[0]).toBe('5'.repeat(150));
+    expect(win.visible[9]).toBe('4'.repeat(150));
+    expect(win.hiddenRows).toBe(10);
+  });
+
   it('truncates over-long results to the trailing characters', () => {
     const short = 'short output';
     expect(truncateResultDisplayChars(short)).toBe(short);
@@ -190,6 +257,37 @@ describe('long-content caps (ink MaxSizedBox parity)', () => {
     const truncated = truncateResultDisplayChars(long);
     expect(truncated.length).toBe(MAX_RESULT_DISPLAY_CHARACTERS + 3);
     expect(truncated.startsWith('...')).toBe(true);
+  });
+});
+
+describe('capToolCardDescription (transcript card flood bound)', () => {
+  it('leaves a description that fits the card budget untouched', () => {
+    const desc = 'Save this exact content to the bound memory?';
+    expect(
+      capToolCardDescription(
+        desc,
+        'mcp__mem0',
+        110,
+        TOOL_CARD_DESCRIPTION_ROWS,
+      ),
+    ).toEqual({ description: desc, hiddenRows: 0 });
+  });
+
+  it('keeps the head of an over-long description and counts the hidden rows', () => {
+    const desc = 'x'.repeat(1000);
+    const cols = 110 - STATUS_INDICATOR_WIDTH;
+    const cap = capToolCardDescription(
+      desc,
+      'mcp__mem0',
+      110,
+      TOOL_CARD_DESCRIPTION_ROWS,
+    );
+    // The label row shares the budget: 4 description rows, the first one
+    // hosting the name inline.
+    const rows = Math.ceil(('mcp__mem0'.length + 1 + desc.length) / cols);
+    expect(cap.description).toBe('x'.repeat(4 * cols - 'mcp__mem0'.length - 1));
+    expect(cap.hiddenRows).toBe(rows - 4);
+    expect(cap.hiddenRows).toBeGreaterThan(0);
   });
 });
 

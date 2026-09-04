@@ -60,6 +60,7 @@ vi.mock('@opentui/react', () => ({
   useKeyboard: (handler: (key: unknown) => void) => {
     mocks.state.keyboardHandlers.push(handler);
   },
+  useTerminalDimensions: () => ({ width: 110, height: 40 }),
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
@@ -135,7 +136,7 @@ describe('buildOutcomeOptions', () => {
 });
 
 describe('OpenTuiToolConfirmation', () => {
-  function press(key: { name: string; sequence?: string }) {
+  function press(key: { name: string; sequence?: string; ctrl?: boolean }) {
     act(() => {
       for (const handler of mocks.state.keyboardHandlers) handler(key);
     });
@@ -230,5 +231,101 @@ describe('OpenTuiToolConfirmation', () => {
       ToolConfirmationOutcome.Cancel,
       undefined,
     );
+  });
+
+  it('renders the ink question line for MCP tool confirmations', () => {
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'mcp__external-context__context_remember',
+          confirmationDetails: {
+            type: 'mcp',
+            title: 'Confirm MCP Tool Execution',
+            serverName: 'external-context',
+            toolName: 'context_remember',
+            toolDisplayName: 'context_remember',
+            onConfirm: onConfirmNoop,
+          },
+        }}
+        onSettled={() => {}}
+      />,
+    );
+    expect(container.textContent).toContain(
+      'Allow execution of MCP tool "context_remember" from server "external-context"?',
+    );
+  });
+
+  it('keeps the head of a long info body and expands it on ctrl-s', () => {
+    const lines = [
+      'BODY_TOP',
+      ...Array.from(
+        { length: 24 },
+        (_, index) => `body-line-${index.toString().padStart(2, '0')}`,
+      ),
+      'BODY_TAIL',
+    ];
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'hook_gate',
+          confirmationDetails: {
+            type: 'info',
+            title: 'Save this content?',
+            prompt: lines.join('\n'),
+            onConfirm: onConfirmNoop,
+          },
+        }}
+        onSettled={() => {}}
+      />,
+    );
+    const collapsed = container.textContent ?? '';
+    expect(collapsed).toContain('BODY_TOP');
+    expect(collapsed).toContain('... last 7 lines hidden ...');
+    expect(collapsed).toContain('Press ctrl-s to show more lines');
+    expect(collapsed).not.toContain('BODY_TAIL');
+
+    press({ name: 's', ctrl: true });
+    const expanded = container.textContent ?? '';
+    expect(expanded).toContain('BODY_TAIL');
+    expect(expanded).not.toContain('lines hidden');
+    expect(expanded).not.toContain('Press ctrl-s to show more lines');
+  });
+
+  it('caps a single-line JSON payload by its wrapped height', () => {
+    const prompt =
+      'Save this exact content to the bound Mem0 repository memory?\n' +
+      JSON.stringify(`CONFIRM_TOP ${'x'.repeat(3000)} CONFIRM_TAIL`);
+    const { container } = render(
+      <OpenTuiToolConfirmation
+        call={{
+          callId: 'call-1',
+          name: 'hook_gate',
+          confirmationDetails: {
+            type: 'info',
+            title: 'Save this content?',
+            prompt,
+            renderPromptAsPlainText: true,
+            onConfirm: onConfirmNoop,
+          },
+        }}
+        onSettled={() => {}}
+      />,
+    );
+    const collapsed = container.textContent ?? '';
+    expect(collapsed).toContain('CONFIRM_TOP');
+    expect(collapsed).toContain('lines hidden');
+    expect(collapsed).toContain('Press ctrl-s to show more lines');
+    expect(collapsed).not.toContain('CONFIRM_TAIL');
+
+    press({ name: 's', ctrl: true });
+    const expanded = container.textContent ?? '';
+    // The expanded tail window surfaces the end of the payload (the alt-screen
+    // viewport has no scrollback, so the tail must be on screen) with no
+    // hidden-lines label left behind.
+    expect(expanded).toContain('CONFIRM_TAIL');
+    expect(expanded).not.toContain('lines hidden');
+    expect(expanded).not.toContain('Press ctrl-s to show more lines');
   });
 });

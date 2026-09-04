@@ -73,6 +73,9 @@ export type OpenTuiStreamEvent =
       visionBridgeNotice?: string;
     }
   | { type: 'confirm'; id: string; tool: string; title: string }
+  /** The call left awaiting_approval (approved, declined, or bounced):
+   * releases the transcript card's pending marker. */
+  | { type: 'confirm-resolved'; id: string }
   /** Structured compression item (/compress command): rendered as the ink
    * CompressionMessage row (spinner/diamond + token counts) instead of the
    * flattened text projection. */

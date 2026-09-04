@@ -75,6 +75,7 @@ import { OpenTuiApp } from './opentui-app-shell.js';
 import { OpenTuiRuntime } from './opentui-runtime.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
+import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
 import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
@@ -319,6 +320,10 @@ export async function startOpenTuiUI(
   const root = createRoot(renderer);
   let runtime: OpenTuiRuntime | null = null;
   try {
+    // Own the single awaited initialization before anything can load commands
+    // or submit: the registry loader's config.initialize() re-entry rejects,
+    // so the turn path must await this same shared promise instead.
+    void ensureConfigInitialized(config);
     const version = await getCliVersion();
     if (
       !settings.merged.ui?.hideWindowTitle &&

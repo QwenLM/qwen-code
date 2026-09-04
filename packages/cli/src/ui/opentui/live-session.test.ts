@@ -25,6 +25,7 @@ import type {
   VisionBridgeModelSelection,
 } from '@qwen-code/qwen-code-core';
 import {
+  ensureConfigInitialized,
   livePromptEvents,
   nextApprovalMode,
   resetPromptCountForTesting,
@@ -137,7 +138,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               name: c.name ?? 'test_tool',
               args: c.args ?? {},
             },
-            status: 'success',
+            status:
+              ((c.args ?? {}) as { __cancelled?: boolean }).__cancelled === true
+                ? 'cancelled'
+                : 'success',
             response: {
               responseParts: [
                 {
@@ -274,6 +278,90 @@ describe('livePromptEvents', () => {
     expect(prompt).toBe('hello');
     expect(passedSignal).toBe(signal);
     expect(options).toEqual({ type: SendMessageType.UserQuery });
+  });
+
+  it('shares one initialization promise across callers', async () => {
+    const initialize = vi.fn(async () => {});
+    const config = { initialize } as unknown as Config;
+
+    await Promise.all([
+      ensureConfigInitialized(config),
+      ensureConfigInitialized(config),
+    ]);
+
+    expect(initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for the shared initialization before the first send', async () => {
+    let resolveInitialize!: () => void;
+    const initialize = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveInitialize = resolve;
+        }),
+    );
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize,
+    } as unknown as Config;
+
+    const gen = livePromptEvents(config, 'hello');
+    const drained = drain(gen);
+
+    // The registry loader's initialize is still in flight; the turn must not
+    // send while it runs (the pre-fix behavior died with "Chat not
+    // initialized" here).
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sendMessageStream).not.toHaveBeenCalled();
+
+    resolveInitialize();
+    await drained;
+
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('proceeds when another caller already initialized the config', async () => {
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => true,
+      }),
+    } as unknown as Config;
+
+    await drain(livePromptEvents(config, 'hello'));
+
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces a failed initialization instead of "Chat not initialized"', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('auth exploded');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => false,
+      }),
+    } as unknown as Config;
+
+    await expect(drain(livePromptEvents(config, 'hello'))).rejects.toThrow(
+      'auth exploded',
+    );
+    expect(sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('uses the ink promptId format and increments promptCount per turn', async () => {
@@ -1265,6 +1353,55 @@ describe('livePromptEvents', () => {
     });
   });
 
+  it('yields a confirm event per awaiting_approval entrance (transcript pending marker)', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'b2',
+            name: 'run_shell_command',
+            args: { __bounceApproval: true },
+          },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'q'),
+    )) as OpenTuiStreamEvent[];
+
+    // One event per entrance: the initial parking and the PreToolUse 'ask'
+    // bounce back under the same callId, with the pending marker released
+    // in between (the executing update drops the call from awaiting).
+    const confirms = events.filter(
+      (e) => e.type === 'confirm' || e.type === 'confirm-resolved',
+    );
+    expect(confirms).toEqual([
+      {
+        type: 'confirm',
+        id: 'b2',
+        tool: 'run_shell_command',
+        title: 'original',
+      },
+      { type: 'confirm-resolved', id: 'b2' },
+      {
+        type: 'confirm',
+        id: 'b2',
+        tool: 'run_shell_command',
+        title: 'Hook requested confirmation to run',
+      },
+    ]);
+  });
+
   it('pushes the real invocation description once per callId (R1-104)', async () => {
     let calls = 0;
     const sendMessageStream = vi.fn(function* (): Generator<{
@@ -1327,6 +1464,34 @@ describe('livePromptEvents', () => {
     )) as OpenTuiStreamEvent[];
 
     expect(events.some((e) => e.type === 'tool-description')).toBe(false);
+  });
+
+  it('ends the turn without a follow-up request when the whole batch was cancelled', async () => {
+    const sendMessageStream = oneToolBatchStream({
+      callId: 'c1',
+      name: 'test_tool',
+      args: { __cancelled: true },
+    });
+    const addHistory = vi.fn();
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      getGeminiClient: () => ({ sendMessageStream, addHistory }),
+    } as unknown as Config;
+
+    await drain(livePromptEvents(config, 'run'));
+
+    // ink use-llm-stream parity: cancelled responses go to history only,
+    // so the model is never asked to continue the turn.
+    expect(sendMessageStream).toHaveBeenCalledTimes(1);
+    expect(addHistory).toHaveBeenCalledTimes(1);
+    const content = addHistory.mock.calls[0][0] as {
+      role: string;
+      parts: Array<{ functionResponse?: { id?: string } }>;
+    };
+    expect(content.role).toBe('user');
+    expect(content.parts.some((p) => p.functionResponse?.id === 'c1')).toBe(
+      true,
+    );
   });
 
   describe('tool execution live output (outputUpdateHandler)', () => {

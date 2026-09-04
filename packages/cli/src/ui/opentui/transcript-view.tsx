@@ -21,9 +21,12 @@ import { C, SYNTAX } from './theme.js';
 import {
   AnsiRows,
   MESSAGE_ICON,
+  TOOL_CARD_DESCRIPTION_ROWS,
   TodoRows,
   assistantMessageMeta,
+  capToolCardDescription,
   hiddenLinesLabel,
+  hiddenTailLinesLabel,
   maxHistoryItemRows,
   selectionProps,
   STATUS_INDICATOR_WIDTH,
@@ -225,8 +228,21 @@ function ToolCard({
 }) {
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
+  // While the call awaits approval the dialog below carries the payload —
+  // ink renders the confirmation as one surface there, and a duplicated
+  // description would flood the column and keep its hidden-lines label on
+  // screen after the body expands. Otherwise the description is capped to
+  // TOOL_CARD_DESCRIPTION_ROWS wrapped rows (ink MaxSizedBox parity).
   const description =
-    item.description ?? toolCardDescription(item.tool, item.args);
+    item.confirm === 'pending' && !item.done
+      ? ''
+      : (item.description ?? toolCardDescription(item.tool, item.args));
+  const cap = capToolCardDescription(
+    description,
+    name,
+    width,
+    TOOL_CARD_DESCRIPTION_ROWS,
+  );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
   return (
     <box flexDirection="column">
@@ -242,13 +258,16 @@ function ToolCard({
         <text fg={C.text} attributes={status.strikethrough ? 129 : 1}>
           {name}
         </text>
-        {description ? (
+        {cap.description ? (
           <text fg={C.dim} {...selectionProps()}>
-            {` ${sanitizeTerminalText(description)}`}
+            {` ${sanitizeTerminalText(cap.description)}`}
           </text>
         ) : null}
         {suffix ? <text fg={C.dim}>{sanitizeTerminalText(suffix)}</text> : null}
       </box>
+      {cap.hiddenRows > 0 && (
+        <text fg={C.dim}>{hiddenTailLinesLabel(cap.hiddenRows)}</text>
+      )}
       {item.confirm === 'pending' && !item.done ? (
         <text fg={C.yellow}> (awaiting approval)</text>
       ) : null}

@@ -545,6 +545,34 @@ async function resolveSteeredPromptParts(
 }
 
 /**
+ * Single shared `config.initialize()` for the OpenTUI app. Config.initialize()
+ * throws on re-entry instead of returning the in-flight promise (its private
+ * `initializationPromise` has no public accessor), so a submit landing while
+ * the command-registry loader's initialization is still running must await the
+ * SAME promise — awaiting `config.initialize()` directly rejects, and sending
+ * with `chat` unset dies with "Chat not initialized". The entry calls this
+ * once before the first render; the turn path awaits the cached promise.
+ */
+const initializationPromises = new WeakMap<Config, Promise<void>>();
+
+export function ensureConfigInitialized(config: Config): Promise<void> {
+  const pending = initializationPromises.get(config);
+  if (pending) return pending;
+  const started = config.initialize().catch((err) => {
+    initializationPromises.delete(config);
+    // Another caller (command loading) won the race. If its initialization
+    // settled with a chat, sending is safe; otherwise surface the failure.
+    if (config.getGeminiClient()?.isInitialized?.()) return;
+    throw err;
+  });
+  // Fire-and-forget callers (the entry) must not trip unhandled-rejection
+  // handling; awaiters still receive the rejection.
+  started.catch(() => {});
+  initializationPromises.set(config, started);
+  return started;
+}
+
+/**
  * Sends one user prompt through the real client and yields neutral events.
  * The caller (backend) drains this into the streaming model.
  *
@@ -559,11 +587,7 @@ export async function* livePromptEvents(
   signal?: AbortSignal,
   options?: LivePromptOptions,
 ): AsyncGenerator<OpenTuiStreamEvent> {
-  try {
-    await config.initialize();
-  } catch {
-    /* already initialized by command loading / startup */
-  }
+  await ensureConfigInitialized(config);
   const client = config.getGeminiClient();
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
@@ -764,24 +788,39 @@ export async function* livePromptEvents(
             description: invocation.getDescription(),
           });
         }
-        if (!options?.onWaitingCall) return;
         // Mirror the calls still awaiting approval: one that left the state
         // (resolved, or bounced back by a PreToolUse 'ask' hook under the
-        // same callId) must be able to surface its dialog again.
+        // same callId) must be able to surface its dialog again. Each
+        // entrance also marks the transcript card pending (event-adapter
+        // 'confirm' parity): it shows the awaiting marker and hides the
+        // card's duplicated description — the confirmation dialog below is
+        // the payload surface, and an MCP card's full JSON getDescription()
+        // would otherwise flood the column and push the dialog off-screen.
         const awaiting = new Set(
           calls
             .filter((c) => c.status === 'awaiting_approval')
             .map((c) => c.request.callId),
         );
         for (const id of waitingSeen) {
-          if (!awaiting.has(id)) waitingSeen.delete(id);
+          if (!awaiting.has(id)) {
+            waitingSeen.delete(id);
+            // Release the transcript card's pending marker — without this it
+            // would keep claiming "awaiting approval" while the call runs.
+            live.push({ type: 'confirm-resolved', id });
+          }
         }
         for (const c of calls) {
           if (c.status !== 'awaiting_approval') continue;
           const callId = c.request.callId;
           if (waitingSeen.has(callId)) continue;
           waitingSeen.add(callId);
-          options.onWaitingCall({
+          live.push({
+            type: 'confirm',
+            id: callId,
+            tool: c.request.name,
+            title: c.confirmationDetails.title,
+          });
+          options?.onWaitingCall?.({
             callId,
             name: c.request.name,
             confirmationDetails: c.confirmationDetails,
@@ -832,6 +871,17 @@ export async function* livePromptEvents(
               : 'ok',
       };
       if (resp?.responseParts) responseParts.push(...resp.responseParts);
+    }
+    // ink use-llm-stream parity (:5328): when every tool in the batch was
+    // cancelled, the cancelled responses go to history only — no follow-up
+    // model request. Checked before the steering drain so surviving steered
+    // texts stay parked for the post-turn queue drain instead of riding a
+    // request that will never be sent.
+    if (completed.every((call) => call.status === 'cancelled')) {
+      if (responseParts.length > 0) {
+        await client.addHistory({ role: 'user', parts: responseParts });
+      }
+      return;
     }
     // Sampling boundary: drained steering rides after the tool responses as
     // genuine user content (original useGeminiStream mid-turn drain).

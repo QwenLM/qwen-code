@@ -42,7 +42,7 @@ import {
   type ToolCallConfirmationDetails,
   type ToolConfirmationPayload,
 } from '@qwen-code/qwen-code-core';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { toOriginalKey } from './key-map.js';
 import {
@@ -53,7 +53,12 @@ import {
   type DialogListItem,
 } from './dialogs-shared.js';
 import { renderDiffBody } from './diff-render.js';
-import { tailWindow } from './messages.js';
+import {
+  headWindowPhysical,
+  hiddenTailLinesLabel,
+  tailWindow,
+  tailWindowPhysical,
+} from './messages.js';
 import { sanitizeTerminalText } from '../utils/textUtils.js';
 import type { ShellConfirmationResolution } from './commands-context.js';
 import { t } from '../../i18n/index.js';
@@ -67,6 +72,15 @@ export interface PendingToolConfirmation {
 
 /** Max body rows before the tail window truncates (keeps dialogs bounded). */
 const MAX_BODY_ROWS = 20;
+
+/**
+ * Rows reserved above/below an EXPANDED body: dialog chrome (frame, title,
+ * options, footer) plus the transcript region that keeps its place above the
+ * dialog. The expanded tail window is budgeted as terminal height minus this
+ * reserve, so the end of the content — where the options still are — stays on
+ * screen (ink reaches the same visible outcome through terminal scrollback).
+ */
+const EXPANDED_BODY_RESERVE_ROWS = 20;
 
 interface OutcomeOption {
   label: string;
@@ -127,18 +141,63 @@ function DiffBody({ fileDiff }: { fileDiff: string }) {
   );
 }
 
-/** Plain, sanitized, line-bounded text body. */
+/**
+ * Plain, sanitized text body. Long bodies keep their head (ink MaxSizedBox
+ * overflowDirection 'bottom' parity) with a hidden-tail indicator plus the
+ * ink ShowMoreLines hint; ctrl-s expands the full text. The cap counts
+ * WRAPPED rows — a single JSON-stringified payload line can wrap to dozens
+ * of physical rows, which a logical-row window never bounds.
+ */
 function TextBody({ text }: { text: string }) {
-  const rows = useMemo(() => {
-    const clean = sanitizeTerminalText(text);
-    const window = tailWindow(clean.split('\n'), MAX_BODY_ROWS);
-    return window.visible;
-  }, [text]);
+  const [expanded, setExpanded] = useState(false);
+  const { width, height } = useTerminalDimensions();
+  const rows = useMemo(() => sanitizeTerminalText(text).split('\n'), [text]);
+  const window = useMemo(
+    () => headWindowPhysical(rows, width, MAX_BODY_ROWS),
+    [rows, width],
+  );
+  const expandedWindow = useMemo(
+    () =>
+      tailWindowPhysical(
+        rows,
+        width,
+        Math.max(height - EXPANDED_BODY_RESERVE_ROWS, 1),
+      ),
+    [rows, width, height],
+  );
+
+  useKeyboard((key) => {
+    if (key.ctrl && toOriginalKey(key).name === 's') setExpanded(true);
+  });
+
+  if (expanded) {
+    // No hidden-lines indicator once expanded: ink's expanded screen shows
+    // the tail with no label (its head lives in terminal scrollback), and
+    // the alt-screen viewport has no scrollback to point at.
+    return (
+      <box flexDirection="column">
+        {expandedWindow.visible.map((row, i) => (
+          <text key={`${i}`}>{row}</text>
+        ))}
+      </box>
+    );
+  }
+  if (window.hiddenRows === 0) {
+    return (
+      <box flexDirection="column">
+        {rows.map((row, i) => (
+          <text key={`${i}`}>{row}</text>
+        ))}
+      </box>
+    );
+  }
   return (
     <box flexDirection="column">
-      {rows.map((row, i) => (
+      {window.visible.map((row, i) => (
         <text key={`${i}`}>{row}</text>
       ))}
+      <text fg={C.dim}>{hiddenTailLinesLabel(window.hiddenRows)}</text>
+      <text fg={C.dim}>Press ctrl-s to show more lines</text>
     </box>
   );
 }
@@ -180,6 +239,17 @@ function ConfirmationBody({
     case 'mcp':
       return (
         <box flexDirection="column">
+          <text>
+            {sanitizeTerminalText(
+              t(
+                'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?',
+                {
+                  tool: details.toolName,
+                  server: details.serverName,
+                },
+              ),
+            )}
+          </text>
           <text fg={C.accent} attributes={1}>
             {sanitizeTerminalText(details.toolDisplayName)}
           </text>

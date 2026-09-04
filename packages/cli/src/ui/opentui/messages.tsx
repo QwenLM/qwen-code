@@ -123,6 +123,118 @@ export function hiddenLinesLabel(hiddenCount: number): string {
 }
 
 /**
+ * Physical-height head window (ink MaxSizedBox overflowDirection 'bottom'
+ * parity): the cap counts WRAPPED rows at width - 2 columns, because a
+ * single logical row — e.g. a JSON.stringify'd confirmation payload — can
+ * wrap to dozens of physical rows that a logical-row window never bounds.
+ * An over-budget tail logical row is sliced to its head characters; the
+ * hidden tail is summarized by hiddenTailLinesLabel.
+ */
+export function headWindowPhysical(
+  rows: readonly string[],
+  width: number,
+  maxRows: number,
+): { visible: string[]; hiddenRows: number } {
+  const cols = Math.max(width - 2, 10);
+  const height = (row: string) => Math.max(1, Math.ceil(row.length / cols));
+  const total = rows.reduce((sum, row) => sum + height(row), 0);
+  if (total <= maxRows) return { visible: [...rows], hiddenRows: 0 };
+  const budget = Math.max(maxRows - 1, 1);
+  const visible: string[] = [];
+  let used = 0;
+  for (const row of rows) {
+    const h = height(row);
+    if (used + h <= budget) {
+      visible.push(row);
+      used += h;
+      continue;
+    }
+    const remaining = budget - used;
+    if (remaining > 0) {
+      visible.push(row.slice(0, remaining * cols));
+      used = budget;
+    }
+    break;
+  }
+  return { visible, hiddenRows: Math.max(total - used, 1) };
+}
+
+/** ink MaxSizedBox bottom-overflow hidden-tail indicator text. */
+export function hiddenTailLinesLabel(hiddenCount: number): string {
+  return `... last ${hiddenCount} line${hiddenCount === 1 ? '' : 's'} hidden ...`;
+}
+
+/**
+ * Physical-height tail window — the expand-side mirror of headWindowPhysical:
+ * keeps the LAST rows whose wrapped height fits the budget, slicing an
+ * over-budget head logical row to its tail characters. OpenTUI paints a
+ * fixed alt-screen viewport, so an expanded dialog body taller than the
+ * screen must surface its tail (where the content ends) instead of letting
+ * the screen clip it away.
+ */
+export function tailWindowPhysical(
+  rows: readonly string[],
+  width: number,
+  maxRows: number,
+): { visible: string[]; hiddenRows: number } {
+  const cols = Math.max(width - 2, 10);
+  const height = (row: string) => Math.max(1, Math.ceil(row.length / cols));
+  const total = rows.reduce((sum, row) => sum + height(row), 0);
+  if (total <= maxRows) return { visible: [...rows], hiddenRows: 0 };
+  const budget = Math.max(maxRows, 1);
+  const visible: string[] = [];
+  let used = 0;
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const row = rows[i];
+    const h = height(row);
+    if (used + h <= budget) {
+      visible.unshift(row);
+      used += h;
+      continue;
+    }
+    const remaining = budget - used;
+    if (remaining > 0) {
+      visible.unshift(row.slice(row.length - remaining * cols));
+      used = budget;
+    }
+    break;
+  }
+  return { visible, hiddenRows: Math.max(total - used, 1) };
+}
+
+/**
+ * Row budget for a tool card's inline description. Ink bounds an over-tall
+ * card through the static-area height distribution (MaxSizedBox); OpenTUI
+ * caps the description head here until that distribution exists — without it
+ * an MCP tool's whole args JSON (one logical row wrapping to dozens of
+ * physical rows) floods the transcript column.
+ */
+export const TOOL_CARD_DESCRIPTION_ROWS = 5;
+
+/**
+ * Keeps the head of a description that would wrap past `maxRows` at the
+ * given width; the hidden tail is summarized by hiddenTailLinesLabel. The
+ * estimate is character-based (name + description wrap inside
+ * width - STATUS_INDICATOR_WIDTH columns), which is intentionally coarse.
+ */
+export function capToolCardDescription(
+  description: string,
+  name: string,
+  width: number,
+  maxRows: number,
+): { description: string; hiddenRows: number } {
+  const cols = Math.max(width - STATUS_INDICATOR_WIDTH, 10);
+  const rows = Math.ceil((name.length + 1 + description.length) / cols);
+  if (rows <= maxRows) return { description, hiddenRows: 0 };
+  const descRows = Math.max(maxRows - 1, 1);
+  const visibleChars = Math.max(descRows * cols - name.length - 1, 0);
+  return {
+    description: description.slice(0, visibleChars),
+    hiddenRows: Math.max(rows - descRows, 1),
+  };
+}
+
+/**
  * Tool-card naming/status parity with the original ToolMessage: a card line
  * is `{glyph} {DisplayName} {description}`, where the display name comes
  * from the shared internal-name → display-name map
