@@ -117,6 +117,12 @@ const { mockResolveSavedWorkflowScript } = vi.hoisted(() => ({
 const { mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockAddDaemonRequestAttribute: vi.fn(),
 }));
+const { mockRestoreWorktreeContext } = vi.hoisted(() => ({
+  mockRestoreWorktreeContext: vi.fn().mockResolvedValue({
+    contextMessage: null,
+    session: null,
+  }),
+}));
 
 const {
   mockExtractDaemonTraceContext,
@@ -299,6 +305,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ),
   initializeTelemetry: vi.fn().mockResolvedValue(undefined),
   addDaemonRequestAttribute: mockAddDaemonRequestAttribute,
+  restoreWorktreeContext: mockRestoreWorktreeContext,
   observeToolResultBoundary: vi.fn(() => false),
   toolResultArtifactState: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
@@ -388,6 +395,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   SESSION_TRANSCRIPT_MAX_LIMIT: 500,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES: 4 * 1024 * 1024,
   InvalidSessionTranscriptCursorError: class InvalidSessionTranscriptCursorError extends Error {},
+  InvalidSessionTranscriptTurnAnchorError: class InvalidSessionTranscriptTurnAnchorError extends Error {},
   SessionTranscriptSnapshotUnavailableError: class SessionTranscriptSnapshotUnavailableError extends Error {},
   SessionTranscriptTooLargeError: class SessionTranscriptTooLargeError extends Error {
     constructor(
@@ -738,6 +746,21 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         ? `${entry.subagentType}: ${entry.description}`
         : entry.description,
   ),
+  getSubagentSessionDir: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).getSubagentSessionDir,
+  MAX_RETAINED_TERMINAL_AGENTS: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).MAX_RETAINED_TERMINAL_AGENTS,
+  readAgentMeta: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).readAgentMeta,
+  readAgentMetaAsync: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).readAgentMetaAsync,
+  sanitizeFilenameComponent: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).sanitizeFilenameComponent,
   SessionStartSource: {
     Startup: 'startup',
     Resume: 'resume',
@@ -1040,6 +1063,7 @@ import {
   Storage,
   SessionTranscriptReader,
   InvalidSessionTranscriptCursorError,
+  InvalidSessionTranscriptTurnAnchorError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   SessionTranscriptPageTooLargeError,
@@ -1064,6 +1088,7 @@ import {
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   SESSION_SOURCE_META_KEY,
 } from '@qwen-code/acp-bridge';
 import { DAEMON_OWNED_STANDALONE_CREATION_KEY } from '@qwen-code/acp-bridge/sessionSource';
@@ -4252,6 +4277,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getModel: vi.fn().mockReturnValue('m'),
       storage: {
         getProjectRoot: vi.fn().mockReturnValue('/tmp'),
+        getProjectDir: vi.fn().mockReturnValue('/tmp'),
         getWorkflowRunsDir: vi.fn().mockReturnValue('/tmp/workflows'),
       },
       getProjectRoot: vi.fn().mockReturnValue('/tmp'),
@@ -10514,6 +10540,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const tasks = await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
       sessionId,
     });
+    const agents = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionAgents,
+      { sessionId },
+    );
     const contextUsage = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContextUsage,
       { sessionId, detail: true },
@@ -10607,6 +10637,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ],
     });
     expect(JSON.stringify(tasks)).not.toContain('abortController');
+    expect(agents).toMatchObject({
+      v: 1,
+      sessionId,
+      tasks: [
+        {
+          kind: 'agent',
+          id: 'agent-1',
+          status: 'paused',
+        },
+      ],
+    });
     expect(JSON.stringify(tasks)).not.toContain('outputOffset');
     expect(JSON.stringify(tasks)).not.toContain('pendingMessages');
     expect(JSON.stringify(tasks)).not.toContain('idleTimer');
@@ -16682,6 +16723,205 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('flushes latest but not frozen turn-index pages', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    const recording = innerConfig.getChatRecordingService();
+    const readTurnIndexPage = vi.fn().mockResolvedValue({
+      v: 1,
+      sessionId: VALID_SESSION_ID,
+      snapshot: 'snapshot-1',
+      totalTurns: 1,
+      start: 0,
+      turns: [
+        {
+          ordinal: 0,
+          turnId: 'u1',
+          kind: 'prompt',
+          label: 'hello',
+        },
+      ],
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readTurnIndexPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const result = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+      { sessionId: VALID_SESSION_ID, limit: 2 },
+    );
+
+    expect(recording?.flush).toHaveBeenCalledOnce();
+    expect(readTurnIndexPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
+      limit: 2,
+    });
+    expect(result).toMatchObject({
+      snapshot: 'snapshot-1',
+      totalTurns: 1,
+    });
+
+    const frozenResult = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+      {
+        sessionId: VALID_SESSION_ID,
+        snapshot: 'snapshot-1',
+        start: 0,
+        limit: 2,
+      },
+    );
+
+    expect(recording?.flush).toHaveBeenCalledOnce();
+    expect(readTurnIndexPage).toHaveBeenNthCalledWith(2, VALID_SESSION_ID, {
+      snapshot: 'snapshot-1',
+      start: 0,
+      limit: 2,
+    });
+    expect(frozenResult).toMatchObject({ snapshot: 'snapshot-1' });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each([
+    {
+      name: 'invalid cursors',
+      error: new InvalidSessionTranscriptCursorError(),
+      snapshot: undefined,
+      expected: {
+        code: -32602,
+        data: { errorKind: 'invalid_transcript_cursor' },
+      },
+    },
+    {
+      name: 'unavailable snapshots',
+      error: new SessionTranscriptSnapshotUnavailableError(VALID_SESSION_ID),
+      snapshot: undefined,
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'oversized snapshots',
+      error: new SessionTranscriptTooLargeError(VALID_SESSION_ID, 300, 200),
+      snapshot: undefined,
+      expected: {
+        code: -32011,
+        data: {
+          errorKind: 'transcript_too_large',
+          sessionId: VALID_SESSION_ID,
+          snapshotSize: 300,
+          maxBytes: 200,
+        },
+      },
+    },
+    {
+      name: 'missing frozen snapshots',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      snapshot: 'snapshot-1',
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'missing first-page transcripts',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      snapshot: undefined,
+      expected: {
+        code: -32002,
+        data: { uri: `session:${VALID_SESSION_ID}` },
+      },
+    },
+  ])(
+    'qwen/status/session/turn_index maps $name',
+    async ({ error, snapshot, expected }) => {
+      const settings = makeCoreSettings();
+      vi.mocked(SessionTranscriptReader).mockImplementation(
+        () =>
+          ({
+            readTurnIndexPage: vi.fn().mockRejectedValue(error),
+          }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+      );
+      const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTurnIndex, {
+          sessionId: VALID_SESSION_ID,
+          ...(snapshot ? { snapshot } : {}),
+        }),
+      ).rejects.toMatchObject(expected);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('rejects a turn-index start without its snapshot', async () => {
+    const { agent, agentPromise } =
+      await bootCoreSettingsAgent(makeCoreSettings());
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTurnIndex, {
+        sessionId: VALID_SESSION_ID,
+        start: 0,
+      }),
+    ).rejects.toThrow('Invalid transcript turn index start');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('passes snapshot-bound transcript anchors and response metadata through', async () => {
+    const settings = makeCoreSettings();
+    const readPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      targetRecordId: 'u1',
+      hasOlder: true,
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    mockHistoryReplayPage.mockResolvedValue({ pendingToolCalls: [] });
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    const result = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      {
+        sessionId: VALID_SESSION_ID,
+        atRecordId: 'u1',
+        snapshot: 'snapshot-1',
+      },
+    );
+
+    expect(readPage).toHaveBeenCalledWith(VALID_SESSION_ID, {
+      atRecordId: 'u1',
+      snapshot: 'snapshot-1',
+      maxBytes: 4 * 1024 * 1024,
+    });
+    expect(result).toMatchObject({ targetRecordId: 'u1', hasOlder: true });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('does not finalize dangling transcript calls when a prompt settles during the read', async () => {
     await setupSessionMocks(VALID_SESSION_ID);
     const page = {
@@ -17278,15 +17518,27 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       name: 'invalid cursors',
       error: new InvalidSessionTranscriptCursorError(),
       cursor: undefined,
+      snapshot: undefined,
       expected: {
         code: -32602,
         data: { errorKind: 'invalid_transcript_cursor' },
       },
     },
     {
+      name: 'invalid turn anchors',
+      error: new InvalidSessionTranscriptTurnAnchorError(),
+      cursor: undefined,
+      snapshot: 'snapshot-1',
+      expected: {
+        code: -32602,
+        data: { errorKind: 'invalid_turn_anchor' },
+      },
+    },
+    {
       name: 'unavailable snapshots',
       error: new SessionTranscriptSnapshotUnavailableError(VALID_SESSION_ID),
       cursor: undefined,
+      snapshot: undefined,
       expected: {
         code: -32010,
         data: {
@@ -17299,6 +17551,20 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       name: 'missing cursor snapshots',
       error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
       cursor: 'cursor-1',
+      snapshot: undefined,
+      expected: {
+        code: -32010,
+        data: {
+          errorKind: 'transcript_snapshot_unavailable',
+          sessionId: VALID_SESSION_ID,
+        },
+      },
+    },
+    {
+      name: 'missing anchored snapshots',
+      error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      cursor: undefined,
+      snapshot: 'snapshot-1',
       expected: {
         code: -32010,
         data: {
@@ -17311,6 +17577,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       name: 'missing first-page transcripts',
       error: Object.assign(new Error('missing'), { code: 'ENOENT' }),
       cursor: undefined,
+      snapshot: undefined,
       expected: {
         code: -32002,
         data: { uri: `session:${VALID_SESSION_ID}` },
@@ -17318,7 +17585,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   ])(
     'qwen/status/session/transcript maps $name',
-    async ({ error, cursor, expected }) => {
+    async ({ error, cursor, snapshot, expected }) => {
       const settings = makeCoreSettings();
       vi.mocked(SessionTranscriptReader).mockImplementation(
         () =>
@@ -17332,6 +17599,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
           sessionId: VALID_SESSION_ID,
           ...(cursor ? { cursor } : {}),
+          ...(snapshot ? { atRecordId: 'turn-1', snapshot } : {}),
         }),
       ).rejects.toMatchObject(expected);
 
@@ -22804,6 +23072,35 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         expect(
           innerConfig.suppressRestorableAskUserQuestionPreservation,
         ).not.toHaveBeenCalled();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s leaves worktree sidecar validation to the daemon when requested',
+    async (action) => {
+      bindRestoreMocks({ sessionExists: true });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+          _meta: {
+            [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+          },
+        };
+        if (action === 'load') {
+          await agent.loadSession(params);
+        } else {
+          await agent.unstable_resumeSession(params);
+        }
+
+        expect(mockRestoreWorktreeContext).not.toHaveBeenCalled();
       } finally {
         mockConnectionState.resolve();
         await agentPromise;

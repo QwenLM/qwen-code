@@ -51,6 +51,7 @@ import {
   extractText,
   formatTokenCount,
   getAgentCancellationReason,
+  getAgentCurrentToolHint,
   getAgentDescription,
   getAgentDisplayStatus,
   getAgentType,
@@ -710,9 +711,16 @@ function SingleToolSummary({
   const { t } = useI18n();
   const isAskUserQuestion = isAskUserQuestionToolName(tool.toolName);
   const isActive = isActiveToolStatus(tool.status);
+  const isBackgroundAgent = isBackgroundSubAgentToolCall(tool);
+  // A detached agent's card is deliberately timer-free (see
+  // docs/design/background-agent-status-and-details.md), so only a foreground
+  // agent subscribes to the shared 1s ticker.
+  const isLiveAgent =
+    isActive && !isBackgroundAgent && isSubAgentToolCall(tool);
+  const now = useSharedNow(isLiveAgent);
   const runningPrefix =
     !isAskUserQuestion && isActive
-      ? isBackgroundSubAgentToolCall(tool)
+      ? isBackgroundAgent
         ? t('subagent.background')
         : t('toolGroup.runningPrefix').trim()
       : '';
@@ -726,7 +734,17 @@ function SingleToolSummary({
     );
   }
 
-  const info = getSingleToolSummaryInfo(tool, t, workspaceCwd);
+  const baseInfo = getSingleToolSummaryInfo(tool, t, workspaceCwd);
+  const activity = isLiveAgent ? getAgentCurrentToolHint(tool, t) : '';
+  const info = isLiveAgent
+    ? {
+        ...baseInfo,
+        description: [baseInfo.description, activity && `(${activity})`]
+          .filter(Boolean)
+          .join(' '),
+        elapsed: getAgentDisplayInfo(tool, now).elapsed,
+      }
+    : baseInfo;
 
   return (
     <>
@@ -1748,6 +1766,16 @@ export const ToolGroup = memo(function ToolGroup({
     hasRunningTool && hasForegroundActiveTool
       ? true
       : streamingThought !== undefined;
+  // A detached agent gets neither the running shimmer nor a ticking timer, so
+  // without a marker its card is indistinguishable from a finished one. The
+  // marker is CSS-only and only fills the gap where nothing else on the row
+  // already moves.
+  const marksDetachedAgent =
+    !animateSummary &&
+    tools.some(
+      (tool) =>
+        isActiveToolStatus(tool.status) && isBackgroundSubAgentToolCall(tool),
+    );
   const opensSubagentDetails = Boolean(
     !compactSummary && singleSubagent && subagentDetails,
   );
@@ -1825,7 +1853,14 @@ export const ToolGroup = memo(function ToolGroup({
                 : t('tool.expand')
           }
         >
-          <span className={styles.chatSummaryIcon} aria-hidden="true">
+          <span
+            className={
+              marksDetachedAgent
+                ? `${styles.chatSummaryIcon} ${styles.chatSummaryIconDetached}`
+                : styles.chatSummaryIcon
+            }
+            aria-hidden="true"
+          >
             {streamingThought ? (
               <ThinkingDoneIcon />
             ) : summaryIconTool ? (
