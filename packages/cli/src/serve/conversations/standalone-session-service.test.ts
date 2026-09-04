@@ -704,6 +704,16 @@ describe('StandaloneSessionService', () => {
     );
     expect(lease.assertOwnedAndUnchanged).toHaveBeenCalledOnce();
     expect(ordinaryRename).not.toHaveBeenCalled();
+    // Parent-side lifecycle acquisitions on the Conversations runtime use the
+    // hardened local reclaim policy shared with the ACP writer they fence.
+    expect(
+      vi.mocked(SessionService.prototype.acquireSessionWriterLease).mock
+        .calls[0]?.[1],
+    ).toEqual({
+      processKind: 'daemon',
+      reclaimPolicy: 'local',
+      takeoverPolicy: 'certified',
+    });
   });
 
   it.each(['', '   ', 'bad\nname', 'x'.repeat(257)])(
@@ -823,7 +833,7 @@ describe('StandaloneSessionService', () => {
       errors: [
         {
           sessionId,
-          code: 'standalone_session_operation_failed',
+          code: 'session_writer_lost',
         },
       ],
     });
@@ -856,7 +866,7 @@ describe('StandaloneSessionService', () => {
         errors: [
           {
             sessionId,
-            code: 'standalone_session_operation_failed',
+            code: 'session_writer_lost',
           },
         ],
       },
@@ -2586,6 +2596,155 @@ describe('StandaloneSessionService', () => {
       harness.bridge.releaseManagedConversationBinding,
     ).toHaveBeenCalledOnce();
     expect(harness.restoreReservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('adopts a safely recreated directory once the local generation is gone', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    await harness.service.load(sessionId);
+
+    // Idle reap: the bridge forgets the session. Another participant may then
+    // legitimately recreate the directory with a fresh identity.
+    harness.bridge.getSessionSummary.mockImplementationOnce(() => {
+      throw new SessionNotFoundError(sessionId);
+    });
+    harness.bridge.getSessionEventEpoch.mockImplementationOnce(() => {
+      throw new SessionNotFoundError(sessionId);
+    });
+    const recreated = { ...identity, inode: identity.inode + 1 };
+    harness.inspectStandaloneDirectory.mockClear();
+    harness.inspectStandaloneDirectory.mockResolvedValueOnce({
+      status: 'ready',
+      identity: recreated,
+    });
+
+    await expect(harness.service.load(sessionId)).resolves.toMatchObject({
+      sessionId,
+      currentCwd: recreated.canonicalPath,
+      workingDirectory: { state: 'ready' },
+    });
+    // The orphaned pin was discarded before the directory was inspected:
+    // no stale `expected` identity condemned the recreated directory.
+    expect(harness.inspectStandaloneDirectory.mock.calls[0]).toEqual([
+      sessionId,
+      undefined,
+    ]);
+  });
+
+  it('fails closed when the directory identity changes while its generation is resident', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    await harness.service.load(sessionId);
+
+    harness.inspectStandaloneDirectory.mockClear();
+    harness.inspectStandaloneDirectory.mockResolvedValueOnce({
+      status: 'compromised',
+    });
+
+    await expect(harness.service.load(sessionId)).rejects.toMatchObject({
+      code: 'working_directory_compromised',
+      sessionId,
+    });
+    // The resident generation's pin remains authoritative as `expected`.
+    expect(harness.inspectStandaloneDirectory.mock.calls[0]).toEqual([
+      sessionId,
+      identity,
+    ]);
+  });
+
+  it('discards the pin when the resident generation was replaced', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    await harness.service.load(sessionId);
+
+    harness.bridge.getSessionEventEpoch.mockReturnValue('epoch-2');
+    const recreated = { ...identity, inode: identity.inode + 1 };
+    harness.inspectStandaloneDirectory.mockClear();
+    harness.inspectStandaloneDirectory.mockResolvedValueOnce({
+      status: 'ready',
+      identity: recreated,
+    });
+    harness.bridge.restoreStandaloneSession.mockResolvedValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      currentCwd: recreated.canonicalPath,
+      attached: true,
+      clientId: 'attached-client',
+      sourceType: 'standalone',
+      state: {},
+    });
+
+    await expect(harness.service.load(sessionId)).resolves.toMatchObject({
+      attached: true,
+    });
+    expect(harness.inspectStandaloneDirectory.mock.calls[0]).toEqual([
+      sessionId,
+      undefined,
+    ]);
+  });
+
+  it('fails closed when the bridge probe of the resident generation is indeterminate', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    await harness.service.load(sessionId);
+
+    const probeFailure = new Error('bridge probe failed');
+    harness.bridge.getSessionSummary.mockImplementationOnce(() => {
+      throw new SessionNotFoundError(sessionId);
+    });
+    harness.bridge.getSessionEventEpoch.mockImplementationOnce(() => {
+      throw probeFailure;
+    });
+
+    await expect(harness.service.load(sessionId)).rejects.toBe(probeFailure);
+  });
+
+  it('inspects the directory fresh when deleting after the local generation exited', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    await harness.service.load(sessionId);
+
+    // The session is then closed or reaped: nothing resident remains.
+    let live = true;
+    harness.bridge.getSessionSummary.mockImplementation(() => {
+      if (!live) throw new SessionNotFoundError(sessionId);
+      return {
+        sessionId,
+        workspaceCwd: root.canonicalRoot,
+        createdAt: '2026-08-24T00:00:00.000Z',
+        sourceType: 'standalone',
+        clientCount: 0,
+        hasActivePrompt: false,
+      };
+    });
+    harness.bridge.killSession.mockImplementation(async () => {
+      live = false;
+      return true;
+    });
+    harness.bridge.getSessionEventEpoch.mockImplementation(() => {
+      throw new SessionNotFoundError(sessionId);
+    });
+    const lease = mockWriterLease();
+    vi.spyOn(
+      SessionService.prototype,
+      'removeSessionTranscriptForLifecycle',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      SessionService.prototype,
+      'cleanupRemovedSessionStateForLifecycle',
+    ).mockResolvedValue();
+
+    await expect(harness.service.delete([sessionId])).resolves.toMatchObject({
+      removed: [sessionId],
+      errors: [],
+    });
+    // The lifecycle lease was held before the inspection, and no orphaned pin
+    // was supplied as the expected identity.
+    expect(lease.assertOwnedAndUnchanged).toHaveBeenCalled();
+    expect(harness.inspectStandaloneDeletionPaths).toHaveBeenCalledWith(
+      sessionId,
+      undefined,
+    );
   });
 
   it('does not recreate a missing directory under an active live entry', async () => {

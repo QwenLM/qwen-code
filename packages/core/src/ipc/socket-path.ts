@@ -27,7 +27,15 @@ export const MAX_SOCKET_PATH_BYTES = 103;
 export const SOCKET_DIR_NAME = 'qwen-socks';
 
 /**
- * Resolve this process's socket path.
+ * The socket path this process would prefer.
+ *
+ * The first candidate, not the address the inbox ends up on: the bind
+ * walks the whole chain and may settle on a fallback directory or on a
+ * `<pid>-<8hex>.sock` sibling. Nothing in this repository calls it, and
+ * nothing should read a running session's address from it -- peers take
+ * `ipcPath` from the session registry record. Kept exported, and pinned
+ * by its own suite, for callers outside this package that only want the
+ * preference.
  *
  * Prefers `$XDG_RUNTIME_DIR` — a per-user tmpfs that the OS cleans up on
  * logout, which is exactly the lifetime a session socket wants. Already
@@ -42,23 +50,40 @@ export const SOCKET_DIR_NAME = 'qwen-socks';
  * long to bind.
  */
 export function resolvePeerSocketPath(pid: number = process.pid): string {
+  return resolvePeerSocketCandidates(pid)[0]!;
+}
+
+/**
+ * Every place this process could bind its socket, best first.
+ *
+ * The runtime directory is preferred but is not always usable: in a
+ * rootless container or a user namespace it can be absent, owned by an
+ * unmapped uid, or mounted read-only, and a session whose inbox silently
+ * fails there is a session nobody can reach and nobody knows why. So the
+ * bind tries these in order and only gives up when the last one fails.
+ * Candidates over the `sun_path` limit are dropped up front.
+ */
+export function resolvePeerSocketCandidates(
+  pid: number = process.pid,
+): string[] {
+  const candidates: string[] = [];
   const runtimeDir = process.env['XDG_RUNTIME_DIR'];
   if (runtimeDir) {
-    const preferred = path.join(runtimeDir, SOCKET_DIR_NAME, `${pid}.sock`);
-    if (Buffer.byteLength(preferred) <= MAX_SOCKET_PATH_BYTES) {
-      return preferred;
-    }
+    candidates.push(path.join(runtimeDir, SOCKET_DIR_NAME, `${pid}.sock`));
   }
-
   const nonce = randomBytes(8).toString('hex');
-  const fallback = path.join(
-    os.tmpdir(),
-    `${SOCKET_DIR_NAME}-${nonce}`,
-    `${pid}.sock`,
+  candidates.push(
+    path.join(os.tmpdir(), `${SOCKET_DIR_NAME}-${nonce}`, `${pid}.sock`),
   );
-  if (Buffer.byteLength(fallback) <= MAX_SOCKET_PATH_BYTES) return fallback;
+  candidates.push(
+    path.join('/tmp', `${SOCKET_DIR_NAME}-${nonce}`, `${pid}.sock`),
+  );
 
-  return path.join('/tmp', `${SOCKET_DIR_NAME}-${nonce}`, `${pid}.sock`);
+  return candidates.filter(
+    (candidate, index) =>
+      Buffer.byteLength(candidate) <= MAX_SOCKET_PATH_BYTES &&
+      candidates.indexOf(candidate) === index,
+  );
 }
 
 /**
