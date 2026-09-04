@@ -134,6 +134,37 @@ describe('peekManagedSession', () => {
     expect(result.lines).toContain('Doing:     Waiting for approval');
   });
 
+  it('prints a working session line by line', async () => {
+    // `Doing:` is the one thing peek shows for a working session — the
+    // command's primary documented purpose — and `Last:` is the only
+    // surface a completed step's result has. Pin the exact lines so
+    // neither output block can be deleted with every test staying green.
+    const h = handle({
+      peek: vi.fn().mockResolvedValue({
+        sessionId: SESSION,
+        state: state({ sessionState: 'working' }),
+        activity: {
+          schemaVersion: 1,
+          summary: 'writing the report',
+          lastResult: 'read the log file',
+          lastActivityAt: '2026-09-04T11:59:00Z',
+          capabilities: [],
+        },
+        rosterEntry: { sessionId: SESSION, displayName: 'release-debugger' },
+        live: true,
+      }),
+    });
+    const result = await peekManagedSession(SESSION, connectTo(h));
+    expect(result.exitCode).toBe(0);
+    expect(result.lines).toEqual([
+      'release-debugger  [0f8e1c42]',
+      'State:     running',
+      'Directory: /w/app',
+      'Doing:     writing the report',
+      'Last:      read the log file',
+    ]);
+  });
+
   it('does not print the summary twice when it is the title', async () => {
     // With no roster name and no launch record, deriveTitle falls back
     // to the summary itself; repeating it as `Doing:` two lines later
@@ -300,6 +331,9 @@ describe('answerManagedSession', () => {
     const result = await answerManagedSession(SESSION, 'yes', connectTo(h));
     expect(result.exitCode).toBe(0);
     expect(h.answer).toHaveBeenCalledWith(SESSION, 'yes');
+    // Pinned exactly, the way stop pins 'Stopped.': swapping the success
+    // message for any other string must not stay green.
+    expect(result.lines).toEqual(['Answer delivered.']);
   });
 
   it('refuses an empty answer without calling the supervisor', async () => {
