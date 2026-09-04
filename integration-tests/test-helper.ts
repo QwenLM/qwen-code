@@ -200,7 +200,12 @@ export class TestRig {
   testName?: string;
   _lastRunStdout?: string;
   _interactiveOutput = '';
-  private readonly interactiveProcesses: pty.IPty[] = [];
+  // Each interactive PTY paired with the listener forwarding its bytes to
+  // this worker's stdout, so cleanup() can detach that forwarding.
+  private readonly interactiveSessions: Array<{
+    ptyProcess: pty.IPty;
+    forwardOutput: pty.IDisposable;
+  }> = [];
 
   constructor() {
     this.bundlePath = join(__dirname, '..', 'dist/cli.js');
@@ -497,9 +502,16 @@ export class TestRig {
     // A session a test never closed keeps its CLI child forwarding PTY bytes
     // into this worker's stdout; after vitest tears the worker down those
     // writes EPIPE and fail an otherwise all-green run (#10969).
-    for (const ptyProcess of this.interactiveProcesses.splice(0)) {
+    //
+    // Killing is not enough: node-pty's signal-less kill() sends SIGHUP, which
+    // the CLI traps into an asynchronous graceful shutdown, so the child still
+    // renders after cleanup() returns and one more forwarded byte can reach a
+    // stdout pipe vitest has since destroyed. Detaching the listener closes
+    // that window however long the child takes to die (#11002).
+    for (const session of this.interactiveSessions.splice(0)) {
+      session.forwardOutput.dispose();
       try {
-        ptyProcess.kill();
+        session.ptyProcess.kill();
       } catch {
         // Process may have already exited
       }
@@ -944,14 +956,13 @@ export class TestRig {
         ...e2eRendererEnv(renderer),
       } as { [key: string]: string },
     });
-    this.interactiveProcesses.push(ptyProcess);
-
-    ptyProcess.onData((data) => {
+    const forwardOutput = ptyProcess.onData((data) => {
       this._interactiveOutput += data;
       if (env.KEEP_OUTPUT === 'true' || env.VERBOSE === 'true') {
         process.stdout.write(data);
       }
     });
+    this.interactiveSessions.push({ ptyProcess, forwardOutput });
 
     const promise = new Promise<{
       exitCode: number;

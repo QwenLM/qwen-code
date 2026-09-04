@@ -17,6 +17,11 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Emitted by the stand-in CLI below; nothing else in the run writes it. */
+const FORWARD_CANARY = 'PTY_FORWARD_CANARY_11002';
+
 describe('TestRig', () => {
   const originalKeepOutput = process.env['KEEP_OUTPUT'];
 
@@ -87,6 +92,64 @@ describe('TestRig', () => {
         timeout: 10_000,
       })
       .toBe(false);
+  });
+
+  it("detaches a session's output forwarding during cleanup", async () => {
+    // KEEP_OUTPUT is what the OpenTUI leg sets, and it is what makes the rig
+    // forward every PTY byte into this worker's stdout.
+    process.env['KEEP_OUTPUT'] = 'true';
+    const rig = new TestRig();
+    await rig.setup('cleanup detaches interactive output');
+    // Stands in for the CLI bundle, which traps the SIGHUP that node-pty's
+    // signal-less kill() sends and keeps rendering while its exit cleanup
+    // drains. The child therefore outlives cleanup() on purpose and keeps
+    // producing bytes: what is under test is whether the harness still
+    // forwards them into a stdout pipe vitest is about to destroy (#11002).
+    rig.bundlePath = rig.createFile(
+      'slow-exit-cli.js',
+      [
+        "process.on('SIGHUP', () => {});",
+        `setInterval(() => process.stdout.write('${FORWARD_CANARY}\\n'), 20);`,
+        'setTimeout(() => process.exit(0), 30000);',
+        '',
+      ].join('\n'),
+    );
+
+    const { ptyProcess } = rig.runInteractive();
+    try {
+      await expect
+        .poll(() => rig._interactiveOutput.includes(FORWARD_CANARY), {
+          message: 'the stand-in CLI never produced output',
+          timeout: 20_000,
+        })
+        .toBe(true);
+
+      const forwarded: string[] = [];
+      vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+        forwarded.push(String(chunk));
+        return true;
+      });
+
+      await rig.cleanup();
+      // Still alive: it swallowed SIGHUP. That is the window the real CLI's
+      // graceful shutdown opens between cleanup() and the child's own exit.
+      expect(isProcessAlive(ptyProcess.pid)).toBe(true);
+
+      forwarded.length = 0;
+      await sleep(500);
+
+      expect(
+        forwarded.filter((chunk) => chunk.includes(FORWARD_CANARY)),
+        'cleanup() left the session forwarding PTY bytes into stdout',
+      ).toEqual([]);
+    } finally {
+      vi.restoreAllMocks();
+      try {
+        process.kill(ptyProcess.pid, 'SIGKILL');
+      } catch {
+        // Already gone
+      }
+    }
   });
 
   it.each([
