@@ -566,6 +566,26 @@ export function isPerfectSlashMatch(parsed: CommandParseResult): boolean {
 }
 
 /**
+ * {@link isPerfectSlashMatch} for a target detected from the buffer as it
+ * stands right now, so a caller holding a key event can answer without the
+ * published completion state — that state is render-derived and trails the
+ * buffer by a render, and reading it on Enter accepts the row of an earlier
+ * keystroke instead of submitting what was typed.
+ */
+export function isPerfectMatchForTarget(
+  target: CompletionTarget,
+  slashCommands: readonly SlashCommand[],
+): boolean {
+  if (target.mode !== CompletionMode.SLASH) return false;
+  return isPerfectSlashMatch(
+    parseSlashCommandQuery(
+      target.query,
+      slashCommandPool(target, slashCommands),
+    ),
+  );
+}
+
+/**
  * Suggestion builder over one command level, porting useSlashCompletion's
  * useCommandSuggestions: an empty partial lists every visible command with
  * recently-used ones first; a non-empty partial goes through the fzf fuzzy

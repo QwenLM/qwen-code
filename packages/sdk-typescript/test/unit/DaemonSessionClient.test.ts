@@ -3223,6 +3223,113 @@ describe('DaemonSessionClient clientId self-heal', () => {
     });
   }
 
+  function newWorktreeSession(client: DaemonClient): DaemonSessionClient {
+    return new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+        worktree: { slug: 'task', path: '/work/a-wt', branch: 'task' },
+        worktreeState: 'persisted-v1',
+      },
+    });
+  }
+
+  it('retries a worktree prompt only after matching durable reattachment', async () => {
+    let promptCalls = 0;
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-2',
+          worktree: { slug: 'task', path: '/work/a-wt', branch: 'task-v2' },
+          worktreeState: 'persisted-v1',
+          state: {},
+        });
+      }
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        promptCalls++;
+        return promptCalls === 1
+          ? invalidClientIdResponse()
+          : jsonResponse(200, { stopReason: 'end_turn' });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const session = newWorktreeSession(
+      new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+    );
+
+    await expect(
+      session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+    ).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(promptCalls).toBe(2);
+    expect(session.clientId).toBe('client-2');
+    expect(session.worktreeState).toBe('persisted-v1');
+    expect(session.worktree).toEqual({
+      slug: 'task',
+      path: '/work/a-wt',
+      branch: 'task-v2',
+    });
+  });
+
+  it.each([
+    ['missing attestation', undefined, '/work/a-wt'],
+    ['changed path', 'persisted-v1', '/work/other-wt'],
+  ] as const)(
+    'does not retry a worktree prompt after %s',
+    async (_label, worktreeState, worktreePath) => {
+      let promptCalls = 0;
+      let detachCalls = 0;
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/resume')) {
+          return jsonResponse(200, {
+            sessionId: 's-1',
+            workspaceCwd: '/work/a',
+            attached: true,
+            clientId: 'client-2',
+            worktree: { slug: 'task', path: worktreePath, branch: 'task' },
+            ...(worktreeState ? { worktreeState } : {}),
+            state: {},
+          });
+        }
+        if (req.url.endsWith('/session/s-1/detach')) {
+          detachCalls++;
+          return new Response(null, { status: 204 });
+        }
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          promptCalls++;
+          return invalidClientIdResponse();
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const session = newWorktreeSession(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch }),
+      );
+
+      await expect(
+        session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+      ).rejects.toThrow('durable worktree identity');
+      expect(promptCalls).toBe(1);
+      expect(detachCalls).toBe(1);
+      expect(session.clientId).toBe('client-1');
+      expect(session.worktreeState).toBe('persisted-v1');
+      expect(session.worktree).toEqual({
+        slug: 'task',
+        path: '/work/a-wt',
+        branch: 'task',
+      });
+      expect(
+        calls.find((call) => call.url.endsWith('/detach'))?.headers[
+          'x-qwen-client-id'
+        ],
+      ).toBe('client-2');
+    },
+  );
+
   it('re-registers and retries once when the blocking prompt is rejected with invalid_client_id', async () => {
     let promptCalls = 0;
     let resumeCalls = 0;
