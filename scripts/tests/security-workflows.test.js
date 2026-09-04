@@ -6,6 +6,7 @@
 
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -134,12 +135,14 @@ describe('security workflows', () => {
 // matching strings: the invariant that matters is that a real high-severity
 // finding still fails on the first attempt, and a string pin cannot prove a
 // `case` arm does not swallow it.
-const auditRunBlock = parse(
+const securityChecks = parse(
   readFileSync(
     path.join(repoRoot, '.github/workflows/security-checks.yml'),
     'utf8',
   ),
-).jobs['dependency-cve'].steps.find(
+);
+const dependencyCveJob = securityChecks.jobs['dependency-cve'];
+const auditRunBlock = dependencyCveJob.steps.find(
   (step) => step.name === 'Audit production dependencies',
 ).run;
 
@@ -177,11 +180,12 @@ const NPM_STUB = [
 // The fake clock moves on each backoff too, so the shared deadline bounds the
 // loop even under a mutation that retries findings — which would otherwise
 // spin to the test timeout, since AUDIT_FINDING has no failure budget to
-// exhaust. The assertion then fails on the attempt COUNT, which says what
-// went wrong.
+// exhaust. It advances by the stub's own ARGUMENT rather than a constant: a
+// hardcoded +30 leaves `sleep 1`, `sleep 300` and a deleted sleep line all
+// green, so the step's retry spacing would be observed by nothing.
 const SLEEP_STUB = [
   '#!/usr/bin/env bash',
-  'now=$(( $(cat "${COUNTER_DIR}/clock") + 30 ))',
+  'now=$(( $(cat "${COUNTER_DIR}/clock") + ${1:-0} ))',
   'echo "${now}" > "${COUNTER_DIR}/clock"',
   'exit 0',
 ].join('\n');
@@ -252,6 +256,10 @@ describe.skipIf(process.platform === 'win32')(
         status: result.status,
         audits: calls.filter((line) => line.startsWith('audit')).length,
         installs: calls.filter((line) => line.startsWith('ci ')).length,
+        // The stub logs its own argv, so the wrapper's "$@" forwarding is
+        // observable: a count alone cannot tell the wrapper's expansion from a
+        // direct `npm audit` call at the vendored site.
+        auditArgv: calls.filter((line) => line.startsWith('audit')),
         retried: result.stdout.includes(
           '::notice::npm audit endpoint unavailable; retrying.',
         ),
@@ -260,13 +268,22 @@ describe.skipIf(process.platform === 'win32')(
     };
 
     it('passes a clean tree and audits every non-skipped lockfile', () => {
-      expect(runAuditStep()).toMatchObject({
+      const result = runAuditStep();
+      expect(result).toMatchObject({
         status: 0,
         // Root workspace audit plus packages/alpha; mobile-mcp is skipped.
         audits: 2,
         installs: 1,
         retried: false,
       });
+      // The wrapper forwards "$@" to npm, which a call COUNT cannot see: a
+      // direct `npm audit … --workspaces=false` at the vendored site, or a
+      // dropped "$@", both leave every count unchanged while the vendored
+      // audit loses the retry or the flag.
+      expect(result.auditArgv).toEqual([
+        'audit --omit=dev --audit-level=high --fetch-retries=0',
+        'audit --omit=dev --audit-level=high --fetch-retries=0 --workspaces=false',
+      ]);
     });
 
     it('retries an attempt that cost what the incident measured', () => {
@@ -286,7 +303,8 @@ describe.skipIf(process.platform === 'win32')(
     });
 
     it('fails a high-severity finding on the first attempt, without retrying', () => {
-      expect(runAuditStep({ finding: true })).toMatchObject({
+      const result = runAuditStep({ finding: true });
+      expect(result).toMatchObject({
         status: 1,
         // One attempt per audit site: a finding is not a transport error, so
         // retrying it would only delay the same red.
@@ -294,6 +312,10 @@ describe.skipIf(process.platform === 'win32')(
         installs: 1,
         retried: false,
       });
+      // The output is captured, so the failure-path print is the only route by
+      // which the report reaches the job log. Deleting it leaves every count
+      // above unchanged and the gate red with no reason recorded.
+      expect(result.stdout).toContain('1 high severity vulnerability');
     });
 
     it('spends the shared budget once and does not top it up per audit', () => {
@@ -301,12 +323,16 @@ describe.skipIf(process.platform === 'win32')(
       // the second attempt lands past 600s; the vendored audit then inherits an
       // already-expired budget and gets none. That is what keeps a dead
       // endpoint inside the job timeout instead of multiplying by audit site.
-      expect(runAuditStep({ endpointFailures: 99 })).toMatchObject({
+      const result = runAuditStep({ endpointFailures: 99 });
+      expect(result).toMatchObject({
         status: 1,
         audits: 3,
         installs: 1,
         retried: true,
       });
+      // npm's own error text reaches the log through the same failure-path
+      // print; without it an oncall sees exit 1 and no cause.
+      expect(result.stdout).toContain('audit endpoint returned an error');
     });
 
     it('does not retry an attempt that outlasted the budget', () => {
@@ -317,5 +343,84 @@ describe.skipIf(process.platform === 'win32')(
         runAuditStep({ endpointFailures: 99, attemptLatency: 700 }),
       ).toMatchObject({ status: 1, audits: 2, installs: 1, retried: false });
     });
+
+    it('paces retries by the backoff the step asks for, not by the attempt', () => {
+      // With --fetch-retries=0 in effect a failing attempt is cheap, so the
+      // sleep is what paces the loop — and nothing else observes it. At 2s an
+      // attempt against `sleep 30` the 600s budget buys exactly 20 root
+      // attempts (the clock reads 32k-30 after attempt k, so k=20 lands at 610)
+      // plus one vendored attempt on an already-expired budget. `sleep 1` runs
+      // to ~200 attempts and a deleted sleep line to ~300, hammering a sick
+      // endpoint every couple of seconds for the whole budget; `sleep 300`
+      // stops after 3, spending the budget in two backoffs so an incident that
+      // recovers in a minute still reddens a clean tree.
+      expect(
+        runAuditStep({ endpointFailures: 999, attemptLatency: 2 }),
+      ).toMatchObject({ status: 1, audits: 21, installs: 1, retried: true });
+    });
   },
 );
+
+// Neither of these drives bash, so both keep running on Windows alongside the
+// YAML-parse assertions at the top of the file.
+describe('Dependency CVE audit job sizing and npm contract', () => {
+  it('keeps the job timeout above the retry budget it has to absorb', () => {
+    // The third leg of the same sizing argument as the twice-pinned 600s
+    // deadline. If --fetch-retries=0 ever stops taking effect, one attempt
+    // costs the 302-422s the incident measured, so the root audit burns two of
+    // them inside the budget and each of the two vendored audits one more —
+    // roughly 30 minutes across the three sites. Normalising this back to the
+    // sibling secret-scan job's 15 cancels the job mid-retry during exactly the
+    // incident the retry exists to ride out, and the deadline pin cannot see
+    // it: it models the 600s budget, not the job cap around it.
+    expect(dependencyCveJob['timeout-minutes']).toBe(35);
+  });
+
+  it('matches a marker the installed npm really throws', () => {
+    // The whole retry rests on one substring, and npm is the only authority on
+    // whether it still emits it. Reword the diagnostic and the `case` arm
+    // silently stops matching, every endpoint error falls through to
+    // `*) return 1`, and the step regresses to reddening clean PRs on registry
+    // outages — while every stub-based test above stays green, because the stub
+    // was written from the workflow's own expectation and so agrees with it by
+    // construction. This reads the contract off the npm that will run it.
+    const auditErrorPath = [
+      // POSIX layout: <node>/bin/node with npm under <node>/lib/node_modules.
+      path.join(
+        path.dirname(process.execPath),
+        '..',
+        'lib',
+        'node_modules',
+        'npm',
+        'lib',
+        'utils',
+        'audit-error.js',
+      ),
+      // Windows layout: npm sits beside node.exe.
+      path.join(
+        path.dirname(process.execPath),
+        'node_modules',
+        'npm',
+        'lib',
+        'utils',
+        'audit-error.js',
+      ),
+    ].find((candidate) => existsSync(candidate));
+    // Failing loudly rather than skipping: a contract test that can silently
+    // decline to run is the unpinned premise it exists to remove.
+    expect(
+      auditErrorPath,
+      "npm's lib/utils/audit-error.js was not found next to the running node, so the marker the workflow retries on is unverified",
+    ).toBeTruthy();
+    // Read the marker OUT of the workflow's case arm rather than restating it,
+    // so the two ends are bound: reword either the workflow's literal or npm's
+    // diagnostic and this fails. Asserting a hardcoded copy against npm's
+    // source would leave the workflow free to drift away from both.
+    const marker = /\*'([^']+)'\*\) ;;/.exec(auditRunBlock)?.[1];
+    expect(
+      marker,
+      'the retry marker could not be read out of the case arm',
+    ).toBeTruthy();
+    expect(readFileSync(auditErrorPath, 'utf8')).toContain(marker);
+  });
+});
