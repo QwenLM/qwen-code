@@ -6773,6 +6773,11 @@ describe('DwsChannel', () => {
       ({ source }) => source.kind === 'group-all',
     );
     expect(groupStreamIndex).toBeGreaterThanOrEqual(0);
+    let releaseSubscriptionDrain!: () => void;
+    const subscriptionDrain = new Promise<void>((resolve) => {
+      releaseSubscriptionDrain = resolve;
+    });
+    firstGroupSubscription!.track(subscriptionDrain);
     const events = ['first', 'second', 'third'].map((suffix) =>
       message(
         'user_im_message_receive_group_all',
@@ -6792,9 +6797,21 @@ describe('DwsChannel', () => {
     expect(groupSubscriptionCalls).toBe(1);
 
     releaseFirstGroupSubscription();
+    let reconnectSettled = false;
+    const observedReconnect = reconnect.finally(() => {
+      reconnectSettled = true;
+    });
+    await vi.waitFor(() =>
+      expect(firstGroupSubscription?.stop).toHaveBeenCalledOnce(),
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(reconnectSettled).toBe(false);
+    expect(groupSubscriptionCalls).toBe(1);
+
+    releaseSubscriptionDrain();
     await expect(firstConnectResult).resolves.toBeInstanceOf(Error);
     await expect(delivery).resolves.toBeUndefined();
-    await reconnect;
+    await observedReconnect;
 
     expect(firstGroupSubscription?.stop).toHaveBeenCalledOnce();
     expect(groupSubscriptionCalls).toBe(2);
