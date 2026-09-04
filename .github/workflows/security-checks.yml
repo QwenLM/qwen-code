@@ -43,21 +43,35 @@ jobs:
       # with this policy.
       - name: 'Audit production dependencies'
         run: |
+          # Streamed through tee rather than captured, so output reaches
+          # the log while the call is still running. With an 8-minute cap
+          # and one retry a capture can leave the job silent for sixteen
+          # minutes and then print everything at once, already labelled a
+          # failure. This does not by itself rescue a report npm never
+          # wrote — npm emits its advisory table at the end, so an attempt
+          # killed before that point has nothing to show either way; the
+          # cap sitting above npm's own 422s error ceiling is what keeps
+          # advisories in the log. PIPESTATUS[0] rather than the pipeline's
+          # status, so a successful tee cannot stand in for npm's code.
           run_npm_audit() {
-            local attempt output result
+            local attempt result log
+            log="$(mktemp)"
+            result=0
             for attempt in 1 2; do
               result=0
-              output="$(timeout 8m npm audit "$@" 2>&1)" || result=$?
-              printf '%s\n' "$output"
-              [ "$result" -eq 0 ] && return 0
+              timeout 8m npm audit "$@" 2>&1 | tee "$log" ||
+                result="${PIPESTATUS[0]}"
+              if [ "$result" -eq 0 ]; then break; fi
               if [ "$result" -ne 124 ] &&
-                ! grep -q 'audit endpoint returned an error' <<<"$output"; then
-                return "$result"
+                ! grep -q 'audit endpoint returned an error' "$log"; then
+                break
               fi
-              [ "$attempt" -eq 2 ] && return "$result"
+              if [ "$attempt" -eq 2 ]; then break; fi
               echo '::warning::npm audit endpoint failed; retrying once in 15 seconds'
               sleep 15
             done
+            rm -f "$log"
+            return "$result"
           }
 
           status=0
