@@ -4,6 +4,7 @@ import { performance as nodePerformance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type Page } from 'playwright';
+import { buildSync } from 'esbuild';
 import {
   EXPORT_TRANSCRIPT_RENDERER_LIMITS,
   EXPORT_TRANSCRIPT_RENDERER_VERSION,
@@ -21,6 +22,7 @@ import {
 import { escapeJsonForHtmlScriptData } from '../packages/cli/src/ui/utils/export/html-script-data.js';
 
 const RENDERER_VERSION = EXPORT_TRANSCRIPT_RENDERER_VERSION;
+const RENDERER_URL = `https://cdn.jsdelivr.net/npm/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`;
 const EXPORTED_AT = '2026-08-16T01:00:00.000Z';
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
 const MAX_DOCUMENT_DURATION_MS = 60_000;
@@ -35,6 +37,24 @@ interface ExpectedNetwork {
   readonly unexpectedRequests: number;
   readonly cspViolations: number;
   readonly allowedImageSources: readonly string[];
+}
+
+const rendererAssetPath = resolve(
+  repoRoot,
+  'packages/web-templates/src/export-html/dist/export-transcript-document.js',
+);
+const rendererAsset = buildSync({
+  entryPoints: [rendererAssetPath],
+  bundle: true,
+  format: 'esm',
+  platform: 'browser',
+  target: ['chrome120'],
+  write: false,
+  legalComments: 'none',
+  define: { 'process.env.NODE_ENV': '"production"' },
+}).outputFiles[0]?.text;
+if (!rendererAsset) {
+  throw new Error('Failed to build the local document renderer test asset.');
 }
 
 const expectedNetwork = JSON.parse(
@@ -272,20 +292,32 @@ function createMaximumDocument(): ExportTranscriptDocumentV1 {
   return { ...document, blocks };
 }
 
-async function installNetworkAndCspProbe(
-  page: Page,
-): Promise<{ requests: string[]; cspErrors: string[] }> {
-  const requests: string[] = [];
+async function installNetworkAndCspProbe(page: Page): Promise<{
+  allowedScriptRequests: string[];
+  unexpectedRequests: string[];
+  cspErrors: string[];
+}> {
+  const allowedScriptRequests: string[] = [];
+  const unexpectedRequests: string[] = [];
   const cspErrors: string[] = [];
   await page.route('**/*', async (route) => {
-    requests.push(route.request().url());
+    const url = route.request().url();
+    if (url === RENDERER_URL) {
+      allowedScriptRequests.push(url);
+      await route.fulfill({
+        body: rendererAsset,
+        contentType: 'text/javascript',
+      });
+      return;
+    }
+    unexpectedRequests.push(url);
     await route.abort('blockedbyclient');
   });
   page.on('console', (message) => {
     const text = message.text();
     if (/content security policy|refused to/i.test(text)) cspErrors.push(text);
   });
-  return { requests, cspErrors };
+  return { allowedScriptRequests, unexpectedRequests, cspErrors };
 }
 
 async function expectConnectSrcCspEnforced(page: Page): Promise<void> {
@@ -395,7 +427,7 @@ describe('ExportTranscriptDocument browser gate', () => {
     visit(schema);
   });
 
-  it('opens, searches, copies, and prints the maximum document with zero network', async () => {
+  it('opens, searches, copies, and prints the maximum document with its pinned CDN runtime', async () => {
     const exportDocument = createMaximumDocument();
     const serialized = JSON.stringify(exportDocument);
     const html = renderExportTranscriptDocumentToHtml(exportDocument);
@@ -515,7 +547,12 @@ describe('ExportTranscriptDocument browser gate', () => {
     });
     expect(interaction.copiedLength).toBeGreaterThan(7_000_000);
     expect(pdf.byteLength).toBeGreaterThan(1_000);
-    expect(probe.requests).toHaveLength(expectedNetwork.unexpectedRequests);
+    expect(probe.unexpectedRequests).toHaveLength(
+      expectedNetwork.unexpectedRequests,
+    );
+    expect(probe.allowedScriptRequests).toEqual(
+      expect.arrayContaining([RENDERER_URL]),
+    );
     expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
       expectedNetwork.cspViolations,
     );
@@ -557,8 +594,9 @@ describe('ExportTranscriptDocument browser gate', () => {
     ];
 
     browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
     for (const invalidDocument of invalidDocuments) {
+      const page = await browser.newPage();
+      await installNetworkAndCspProbe(page);
       await page.setContent(replaceDocumentEnvelope(html, invalidDocument), {
         waitUntil: 'load',
       });
@@ -568,10 +606,42 @@ describe('ExportTranscriptDocument browser gate', () => {
       expect(await page.getByRole('alert').textContent()).toContain(
         'Unable to open this chat export',
       );
+      await page.close();
     }
   });
 
-  it('runs the real HTML export entry point with zero network', async () => {
+  it('fails closed when the CDN renderer is unavailable', async () => {
+    const document = createExportTranscriptDocumentV1(
+      [record('cdn-error', null, 'user', 'CDN error probe')],
+      {
+        startTime: '2026-08-16T00:00:00.000Z',
+        metadata: {
+          sessionId: 'cdn-error',
+          startTime: '2026-08-16T00:00:00.000Z',
+          exportTime: EXPORTED_AT,
+          cwd: '/workspace/project',
+          promptCount: 1,
+          uniqueFiles: [],
+        },
+      },
+      { rendererVersion: RENDERER_VERSION, exportedAt: EXPORTED_AT },
+    );
+
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.route('**/*', (route) => route.abort('blockedbyclient'));
+    await page.setContent(renderExportTranscriptDocumentToHtml(document), {
+      waitUntil: 'load',
+    });
+    await expect
+      .poll(() => page.locator('body').getAttribute('data-render-complete'))
+      .toBe('error');
+    expect(await page.getByRole('alert').textContent()).toContain(
+      'Unable to load this chat export',
+    );
+  });
+
+  it('runs the real HTML export entry point with its pinned CDN runtime', async () => {
     const records = [
       {
         ...record(
@@ -637,7 +707,10 @@ describe('ExportTranscriptDocument browser gate', () => {
     expect(
       await page.locator('img[alt="inline-safe"]').getAttribute('src'),
     ).toBe('data:image/png;base64,iVBORw0KGgo=');
-    expect(probe.requests).toHaveLength(expectedNetwork.unexpectedRequests);
+    expect(probe.unexpectedRequests).toHaveLength(
+      expectedNetwork.unexpectedRequests,
+    );
+    expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
     expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
       expectedNetwork.cspViolations,
     );

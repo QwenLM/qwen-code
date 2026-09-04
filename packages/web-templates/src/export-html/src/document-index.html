@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'nonce-__EXPORT_NONCE__'; style-src-elem 'nonce-__EXPORT_NONCE__'; style-src-attr 'unsafe-inline'; img-src data:; connect-src 'none'; object-src 'none'; frame-src 'none'; media-src 'none'; font-src data:; base-uri 'none'; form-action 'none'"
+      content="default-src 'none'; script-src 'nonce-__EXPORT_NONCE__' https://cdn.jsdelivr.net; style-src-elem 'nonce-__EXPORT_NONCE__'; style-src-attr 'unsafe-inline'; img-src data:; connect-src 'none'; object-src 'none'; frame-src 'none'; media-src 'none'; font-src data:; base-uri 'none'; form-action 'none'"
     />
     <link
       rel="icon"
@@ -34,10 +34,29 @@
           }
           return element;
         };
+        window.addEventListener(
+          'error',
+          function (event) {
+            if (event.target && event.target.id === 'transcript-renderer') {
+              document.body.dataset.renderComplete = 'error';
+              var app = document.getElementById('app');
+              app.setAttribute('role', 'alert');
+              app.textContent =
+                'Unable to load this chat export. Check your network connection and Qwen Code version.';
+            }
+          },
+          true,
+        );
       })();
     </script>
-    <script nonce="__EXPORT_NONCE__">
-      __DOCUMENT_INLINE_SCRIPT__;
+    <script nonce="__EXPORT_NONCE__" type="importmap">
+      __DOCUMENT_IMPORT_MAP__
     </script>
+    <script
+      nonce="__EXPORT_NONCE__"
+      id="transcript-renderer"
+      type="module"
+      src="__DOCUMENT_RENDERER_URL__"
+    ></script>
   </body>
 </html>

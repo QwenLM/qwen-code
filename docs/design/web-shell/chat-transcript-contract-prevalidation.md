@@ -99,7 +99,7 @@ ChatTranscriptModel
 2. 复用现有 SDK reducer 和 `projectChatRecordsToDaemonTranscript()`，不复制 replay 规则；
 3. 为 block、renderer item 和宿主动作建立可审计的稳定 identity；
 4. 让 VS Code 复用 WebShell 聊天时间线，同时保留其 composer、权限、会话和原生操作；
-5. 让 HTML Export 使用版本化、安全、资源有界且不主动联网的文档输入；
+5. 让 HTML Export 使用版本化、安全、资源有界且不从文档内容主动联网的输入；
 6. 保证 Web Shell interactive/readonly 和 Tauri Desktop 不发生功能回归；
 7. 通过 fixture、hash、capability matrix 和自动化门禁使每个架构结论可重复验证；
 8. 允许 VS Code 与 HTML 两条消费路径通过 MR2A/MR2B 独立评审、灰度、观察和回滚。
@@ -573,9 +573,9 @@ document mode 必须：
 - Markdown 远程图片不请求网络，危险 HTML/SVG 不执行；
 - Mermaid 限制、超时和 fallback 只在 document mode 启用，不能污染 interactive/readonly 的全局配置或缓存；
 - Mermaid、代码高亮、diff 和 chart 失败时保留可复制源码；
-- 不加载需要 `unsafe-eval`、远程 WASM、远程 grammar、字体或动态 renderer 的资源。
+- 除版本绑定的 renderer 与 React runtime 外，不加载需要 `unsafe-eval`、远程 WASM、远程 grammar、字体或其他动态资源。
 
-### 10.9 CSP 与零网络
+### 10.9 CSP 与登记网络
 
 HTML 使用与 CLI build 精确绑定的 renderer。禁止 `latest`、版本范围和运行时远程解析。
 
@@ -586,7 +586,7 @@ HTML 使用与 CLI build 精确绑定的 renderer。禁止 `latest`、版本范�
 - `base-uri 'none'`、`form-action 'none'`；
 - images 只允许批准的 `data:` 或明确登记的同包资源；
 - script/style 使用 nonce/hash 或等价静态策略；若现有 React 需要 style attribute，只允许 `style-src-attr` 的最小例外，DTO 不接受 style 字段；
-- V1 优先内联 renderer 必需资源；打开本地 HTML 后不得产生未登记 subrequest；
+- renderer 与 React runtime 只允许从精确版本的 jsDelivr URL 加载；打开本地 HTML 后不得产生其他未登记 subrequest；
 - 浏览器测试拦截打开、展开、Markdown/Mermaid、主题和打印期间的全部请求；任何未登记请求或 CSP violation 立即失败。
 
 ### 10.10 失败、完整性与 canary
@@ -696,7 +696,7 @@ MR2A 中每项生产代码必须有 HTML 产品消费者。实施顺序：
 2. **export builder**：实现 record policy、canonical projection、allowlist、opaque ID、metadata、budget 和 diagnostics；
 3. **document mode**：实现非虚拟化/只读/无动作 renderer，Mermaid 限制仅在此 mode；
 4. **HTML wiring**：CLI、Web API、VS Code `/export html` 和 integration runner 复用同一产品模板及版本绑定 renderer；
-5. **browser/security gates**：CSP、零网络、canary、最大预算和版本失败测试；
+5. **browser/security gates**：CSP、登记网络、canary、最大预算和版本失败测试；
 6. **candidate evidence**：direct-daemon/ACP identity 只保留在 integration helper，不创建 VS Code 生产 adapter；
 7. **gate state**：HTML capability 可标 PASS，但 `selectedVscodePath: null`、`overall: "fail"` 保持不变。
 
@@ -776,12 +776,12 @@ MR1 不以源码文本断言认证 Desktop 打包行为。Web/Tauri 的现有构
 | VS Code        | MR2A 验证 legacy timeline 与 `/export html`；MR2B 验证选定路径、scope/generation、callbacks、feature flag、legacy parity |
 | Web Shell      | interactive/readonly raw 兼容、document safe-only、render/action identity                                                |
 | Export builder | record policy、per-kind allowlist、opaque IDs、metadata、diagnostic、version                                             |
-| Browser        | schema failure、zero network、CSP、canary、find/copy/print、最大预算                                                     |
+| Browser        | schema failure、登记网络、CSP、canary、find/copy/print、最大预算                                                         |
 | Packaging      | Web/Tauri regression、VSIX 三平台、CLI renderer 版本绑定、integration runner 收敛                                        |
 
 Passing test 也必须反向审计：测试是否断言了正确语义、是否加载当前构建产物、是否真的覆盖真实消费者，不能用静态 source assertion 替代浏览器或 VSIX 行为验证。
 
-当前 MR2A 验证结果：SDK、Core、CLI、Web Shell、VS Code `/export html` 聚焦测试和 direct-daemon/ACP integration candidate gate 已通过；产品 HTML 已完成构建、Node 侧安全断言和真实 Chromium browser gate，concurrent runner 也复用同一产品收集、归一化和 formatter。browser gate 已覆盖最大文档、真实产品入口、零网络、主动 CSP 违规、canary、搜索、复制、打印、远程资源降级和 epoch 时间戳排除。VS Code live timeline、scope/generation/reconnect、宿主动作、VSIX 与 packaged artifact 证据全部属于 MR2B。
+当前 MR2A 验证结果：SDK、Core、CLI、Web Shell、VS Code `/export html` 聚焦测试和 direct-daemon/ACP integration candidate gate 已通过；产品 HTML 已完成构建、Node 侧安全断言和真实 Chromium browser gate，concurrent runner 也复用同一产品收集、归一化和 formatter。browser gate 已覆盖最大文档、真实产品入口、登记网络、主动 CSP 违规、canary、搜索、复制、打印、远程资源降级和 epoch 时间戳排除。VS Code live timeline、scope/generation/reconnect、宿主动作、VSIX 与 packaged artifact 证据全部属于 MR2B。
 
 ## 14. 门禁
 

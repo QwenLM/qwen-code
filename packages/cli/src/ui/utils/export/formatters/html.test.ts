@@ -57,15 +57,23 @@ describe('HTML export formatter', () => {
     expect(html).toContain('id="transcript-document"');
     expect(html).toContain('Hello from the document exporter.');
     expect(html).toContain("connect-src 'none'");
+    expect(html).toContain(
+      `https://cdn.jsdelivr.net/npm/@qwen-code/qwen-code@${EXPORT_TRANSCRIPT_RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`,
+    );
+    expect(EXPORT_TRANSCRIPT_RENDERER_VERSION).toMatch(
+      /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\+[a-f0-9]{16}$/,
+    );
+    expect(html).toMatch(
+      /https:\/\/cdn\.jsdelivr\.net\/npm\/react@\d+\.\d+\.\d+\/\+esm/,
+    );
+    expect(html).toMatch(
+      /https:\/\/cdn\.jsdelivr\.net\/npm\/react-dom@\d+\.\d+\.\d+\/client\/\+esm/,
+    );
+    expect(html.length).toBeLessThan(500_000);
     expect(html).not.toContain('id="chat-data"');
     expect(html).not.toContain('session-secret');
     expect(html).not.toContain('/home/alice');
     expect(html).not.toContain('__EXPORT_NONCE__');
-    expect(html).toContain('data-document-metadata');
-    expect(html).toContain('Context Usage');
-    expect(html).toContain('data-document-expand-all');
-    expect(html).toContain('data-document-collapse-all');
-    expect(html).toContain('data-document-theme-toggle');
     expect(nonce).toBeTruthy();
     expect(secondNonce).toBeTruthy();
     expect(secondNonce).not.toBe(nonce);
