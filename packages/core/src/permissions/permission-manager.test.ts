@@ -391,6 +391,91 @@ describe('matchesCommandPattern', () => {
     });
   });
 
+  // Security regression coverage for #10192 / #10197: a leading environment
+  // assignment may only be stripped for permission matching when it is
+  // provably static and carries no runtime/loader semantics.
+  describe('leading environment assignment security (#10192 / #10197)', () => {
+    it('does not match when the assignment hides command substitution', async () => {
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'X=`touch${IFS}/tmp/poc` npm --version',
+        ),
+      ).toBe(false);
+      expect(
+        matchesCommandPattern('npm *', 'X=`touch${IFS}/tmp/poc` npm --version'),
+      ).toBe(false);
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'X=$(touch /tmp/poc) npm --version',
+        ),
+      ).toBe(false);
+      // A quoted substitution collapses into a single assignment-looking
+      // word, so a naive NAME=value strip would hide it entirely.
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'X="$(touch /tmp/poc)" npm --version',
+        ),
+      ).toBe(false);
+    });
+
+    it('does not match when the assignment hides parameter expansion', async () => {
+      // shell-quote drops unknown ${…} references, so the value must be
+      // re-materialized before stripping or the payload vanishes from view.
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'X=${IFS}touch${IFS}/tmp/poc npm --version',
+        ),
+      ).toBe(false);
+    });
+
+    it('does not match runtime-loader assignments (#10197)', async () => {
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+        ),
+      ).toBe(false);
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'GIT_CONFIG_GLOBAL=/tmp/evil.cfg npm --version',
+        ),
+      ).toBe(false);
+      // One unsafe assignment keeps the whole prefix in place.
+      expect(
+        matchesCommandPattern(
+          'npm --version',
+          'FOO=bar NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+        ),
+      ).toBe(false);
+    });
+
+    it('does not match glob-bearing assignments', async () => {
+      expect(matchesCommandPattern('npm --version', 'X=* npm --version')).toBe(
+        false,
+      );
+    });
+
+    it('still strips static assignments for #2846 compatibility', async () => {
+      expect(
+        matchesCommandPattern(
+          'python3 *',
+          'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
+        ),
+      ).toBe(true);
+      expect(
+        matchesCommandPattern('npm --version', 'FOO=bar npm --version'),
+      ).toBe(true);
+      expect(
+        matchesCommandPattern('npm install', 'FOO="bar baz" npm install'),
+      ).toBe(true);
+    });
+  });
+
   // Wildcard at head
   describe('wildcard at head', () => {
     it('matches any command ending with pattern', async () => {
@@ -1933,6 +2018,69 @@ describe('PermissionManager', () => {
             command: 'rm -rf "$(pwd)/build"',
           }),
         ).toBe('deny');
+      });
+    });
+
+    // Security regression coverage for #10192 / #10197: a saved concrete
+    // Bash allow rule must not be reachable through a leading environment
+    // assignment that carries substitution or runtime-loader semantics.
+    describe('leading environment assignments (issues #10192 / #10197)', () => {
+      it('does not allow command substitution hidden in a leading assignment (#10192)', async () => {
+        const pm2 = new PermissionManager(
+          makeConfig({ permissionsAllow: ['Bash(npm --version)'] }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'X=`touch${IFS}/tmp/poc` npm --version',
+          }),
+        ).toBe('ask');
+      });
+
+      it('does not allow loader-variable assignments (#10197)', async () => {
+        const pm2 = new PermissionManager(
+          makeConfig({ permissionsAllow: ['Bash(npm --version)'] }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+          }),
+        ).toBe('ask');
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'GIT_CONFIG_GLOBAL=/tmp/evil.cfg npm --version',
+          }),
+        ).toBe('ask');
+      });
+
+      it('still allows static env prefixes to match saved rules (#2846)', async () => {
+        const pm2 = new PermissionManager(
+          makeConfig({ permissionsAllow: ['Bash(python3 *)'] }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
+          }),
+        ).toBe('allow');
+      });
+
+      it('plain command without prefix still matches the saved rule', async () => {
+        const pm2 = new PermissionManager(
+          makeConfig({ permissionsAllow: ['Bash(npm --version)'] }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({
+            toolName: 'run_shell_command',
+            command: 'npm --version',
+          }),
+        ).toBe('allow');
       });
     });
 
