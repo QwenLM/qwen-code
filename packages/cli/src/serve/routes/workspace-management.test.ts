@@ -498,6 +498,57 @@ describe('owned Conversations runtime quarantine', () => {
     expect(registry.beginDrain).not.toHaveBeenCalled();
     expect(runtimeRemoval.beginDrain).not.toHaveBeenCalled();
   });
+
+  it('publishes the owned Live runtime when user workspaces fill the registration limit', async () => {
+    const runtimes = [makeRuntime('/primary', { primary: true })];
+    for (let index = 1; index < 25; index++) {
+      runtimes.push(makeRuntime(`/user-${index}`));
+    }
+    const registry = createMockRegistry(runtimes);
+    const runtime = makeRuntime('/owned-live-at-limit', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval: createRemovalController(),
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        () => undefined,
+      ),
+    ).resolves.toBe(runtime);
+    expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBe(runtime);
+  });
+
+  it('keeps the registration limit binding for non-owned provenance', async () => {
+    const runtimes = [makeRuntime('/primary', { primary: true })];
+    for (let index = 1; index < 25; index++) {
+      runtimes.push(makeRuntime(`/user-${index}`));
+    }
+    const runtime = makeRuntime('/scratch-at-limit', {
+      provenance: 'managed-scratch',
+    });
+    const createWorkspaceRuntime = vi.fn().mockResolvedValue(runtime);
+    const { handle } = createApp({
+      workspaceRegistry: createMockRegistry(runtimes),
+      createWorkspaceRuntime,
+      runtimeRemoval: createRemovalController(),
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'managed-scratch',
+        () => undefined,
+      ),
+    ).rejects.toThrow('Workspace registration limit reached');
+    expect(createWorkspaceRuntime).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /workspaces', () => {
@@ -601,6 +652,114 @@ describe('POST /workspaces', () => {
       expect(response.body.cwd).toMatch(/scratch-/u);
     } finally {
       await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('does not count the internal Conversations runtime against the user workspace limit', async () => {
+    const runtimes = [makeRuntime('/primary', { primary: true })];
+    runtimes.push(
+      makeRuntime('/owned-live', {
+        provenance: 'live-conversation',
+        removable: false,
+      }),
+    );
+    for (let index = 1; index <= 23; index++) {
+      runtimes.push(makeRuntime(`/user-${index}`));
+    }
+    const added = await mkdtemp(join(REAL_DIR, 'qws-limit-'));
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry(runtimes),
+        runtimeRemoval: createRemovalController(),
+      });
+
+      const response = await request(app)
+        .post('/workspaces')
+        .send({ cwd: added, persist: false });
+
+      expect(response.status).toBe(201);
+    } finally {
+      await rm(added, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the user workspace limit binding with the internal runtime published', async () => {
+    const runtimes = [makeRuntime('/primary', { primary: true })];
+    runtimes.push(
+      makeRuntime('/owned-live', {
+        provenance: 'live-conversation',
+        removable: false,
+      }),
+    );
+    for (let index = 1; index <= 24; index++) {
+      runtimes.push(makeRuntime(`/user-${index}`));
+    }
+    const added = await mkdtemp(join(REAL_DIR, 'qws-limit-full-'));
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry(runtimes),
+        runtimeRemoval: createRemovalController(),
+      });
+
+      const response = await request(app)
+        .post('/workspaces')
+        .send({ cwd: added, persist: false });
+
+      expect(response.status).toBe(409);
+      expect(response.body).toMatchObject({
+        code: 'workspace_limit_reached',
+      });
+    } finally {
+      await rm(added, { recursive: true, force: true });
+    }
+  });
+
+  it('does not count an in-flight owned publication against the user workspace limit', async () => {
+    const runtimes = [makeRuntime('/primary', { primary: true })];
+    for (let index = 1; index <= 23; index++) {
+      runtimes.push(makeRuntime(`/user-${index}`));
+    }
+    const ownedRuntime = makeRuntime('/owned-live-inflight', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    let releaseCreation: ((runtime: WorkspaceRuntime) => void) | undefined;
+    const createWorkspaceRuntime = vi.fn().mockImplementation((cwd: string) =>
+      cwd === ownedRuntime.workspaceCwd
+        ? new Promise<WorkspaceRuntime>((resolve) => {
+            releaseCreation = resolve;
+          })
+        : Promise.resolve(makeRuntime(cwd)),
+    );
+    const added = await mkdtemp(join(REAL_DIR, 'qws-limit-inflight-'));
+    const { app, handle } = createApp({
+      workspaceRegistry: createMockRegistry(runtimes),
+      createWorkspaceRuntime,
+      runtimeRemoval: createRemovalController(),
+    });
+    try {
+      const publication = handle.publishOwnedRuntime(
+        ownedRuntime.workspaceCwd,
+        'live-conversation',
+        () => undefined,
+      );
+      await vi.waitFor(() => {
+        expect(createWorkspaceRuntime).toHaveBeenCalledWith(
+          ownedRuntime.workspaceCwd,
+          { provenance: 'live-conversation' },
+        );
+      });
+
+      const response = await request(app)
+        .post('/workspaces')
+        .send({ cwd: added, persist: false });
+
+      expect(response.status).toBe(201);
+      releaseCreation?.(ownedRuntime);
+      await expect(publication).resolves.toBe(ownedRuntime);
+    } finally {
+      releaseCreation?.(ownedRuntime);
+      await rm(added, { recursive: true, force: true });
     }
   });
 
@@ -1991,6 +2150,34 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(deps.workspaceRegistry.beginDrain).not.toHaveBeenCalled();
   });
 
+  it('blocks non-force removal during zero-session workspace runtime work', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    Object.assign(runtime.bridge, {
+      getWorkspaceRuntimeLifecycleSnapshot: () => ({
+        state: 'active',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: true,
+      }),
+    });
+    const runtimeRemoval = createRemovalController();
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      code: 'workspace_busy',
+      activity: { sessions: 0, workspaceRuntime: 1 },
+    });
+    expect(runtimeRemoval.beginDrain).not.toHaveBeenCalled();
+  });
+
   it('blocks non-force removal while a Voice operation is active', async () => {
     const runtime = makeRuntime(REAL_DIR);
     const runtimeRemoval = createRemovalController();
@@ -2137,6 +2324,38 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(deps.workspaceRegistry.getByWorkspaceId(runtime.workspaceId)).toBe(
       runtime,
     );
+  });
+
+  it('cancels the runtime coordinator drain when persistence removal fails', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    Object.assign(runtime.bridge, {
+      preheat: vi.fn().mockResolvedValue(undefined),
+      getWorkspaceRuntimeLifecycleSnapshot: () => ({
+        state: 'idle',
+        runtimeLive: true,
+        runtimeEpoch: 1,
+        activeWork: false,
+      }),
+    });
+    const runtimeRemoval = createRemovalController();
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+      workspaceRegistrationStore: {
+        removeByIds: vi.fn().mockRejectedValue(new Error('disk full')),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('workspace_persist_failed');
+    expect(runtime.runtimeCoordinator).toBeDefined();
+    await expect(runtime.runtimeCoordinator!.ensure()).resolves.toMatchObject({
+      runtimeLive: true,
+    });
   });
 
   it('force-removes activity, aliases, runtime resources, and registry state', async () => {
@@ -3141,9 +3360,14 @@ describe('POST /workspace-directory-picker', () => {
     });
     const req = request(app).post('/workspace-directory-picker').send({});
     req.end(() => {});
-    await new Promise((r) => setTimeout(r, 30));
+    // Shared-runner scheduling can delay the handler beyond any fixed sleep;
+    // wait for the picker to actually take the signal before hanging up.
+    await vi.waitFor(() => {
+      expect(observed).toBeDefined();
+    });
     req.abort();
-    await new Promise((r) => setTimeout(r, 60));
-    expect(observed?.aborted).toBe(true);
+    await vi.waitFor(() => {
+      expect(observed?.aborted).toBe(true);
+    });
   });
 });

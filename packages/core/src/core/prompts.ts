@@ -14,7 +14,10 @@ import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { applyOutputStyle } from './output-styles.js';
+import {
+  applyOutputStyle,
+  resolveEffectiveOutputStyle,
+} from './output-styles.js';
 import type { OutputStyleDefinition } from './output-styles.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
@@ -197,6 +200,17 @@ export function resolvePathFromEnv(envVar?: string): {
     value: path.resolve(customPath),
     isDisabled: false,
   };
+}
+
+/**
+ * Whether `QWEN_SYSTEM_MD` replaces the base system prompt. The override is a
+ * full, user-owned prompt that carries no output-style section, so the prompt
+ * builders and the per-turn style reminder consult this together — a session
+ * is never reminded about a style its prompt does not carry.
+ */
+export function isSystemMdActive(): boolean {
+  const resolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
+  return resolution.value !== null && !resolution.isDisabled;
 }
 
 /**
@@ -438,6 +452,32 @@ Interaction mode reminder: ${interaction.questions}
 }
 
 /**
+ * The output style a main session's prompt actually carries — the single
+ * decision the prompt builders and the per-turn style reminder consult
+ * together, so a session is never reminded about a style its prompt does not
+ * carry. Prompt overrides own their wording end to end: neither a custom
+ * `systemPrompt` nor a `QWEN_SYSTEM_MD` replacement gets a style section, so
+ * neither gets a reminder. Uses a structural type, like
+ * {@link resolveInteractionMode}, to avoid a hard dependency on the full
+ * Config class.
+ */
+export function resolveMainSessionOutputStyle(config: {
+  getSystemPrompt(): string | undefined;
+  getOutputStyle(): OutputStyleDefinition | null | undefined;
+  getExperimentalZedIntegration(): boolean;
+  getInputFormat?(): string;
+  isInteractive(): boolean;
+}): OutputStyleDefinition | undefined {
+  if (config.getSystemPrompt() || isSystemMdActive()) {
+    return undefined;
+  }
+  return resolveEffectiveOutputStyle(
+    config.getOutputStyle(),
+    resolveInteractionMode(config),
+  );
+}
+
+/**
  * Builds the stable base system prompt (identity, mandates, tool guidance).
  *
  * @param userMemory - Back-compat convenience slot for context files.
@@ -459,24 +499,23 @@ export function getCoreSystemPrompt(
   interactionMode: SystemPromptInteractionMode = 'interactive',
   outputStyle?: OutputStyleDefinition | null,
 ): string {
-  // Learning requires a reply to its handoff, which a headless run cannot receive.
-  const effectiveOutputStyle =
-    interactionMode === 'headless' && outputStyle?.name === 'Learning'
-      ? undefined
-      : outputStyle;
+  const effectiveOutputStyle = resolveEffectiveOutputStyle(
+    outputStyle,
+    interactionMode,
+  );
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
-  let systemMdEnabled = false;
+  const systemMdEnabled = isSystemMdActive();
   let systemMdPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
-  // Resolve the environment variable to get either a path or a switch value.
-  const systemMdResolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
 
-  // Proceed only if the environment variable is set and is not disabled.
-  if (systemMdResolution.value && !systemMdResolution.isDisabled) {
-    systemMdEnabled = true;
+  if (systemMdEnabled) {
+    // Resolve the environment variable to get either a path or a switch value.
+    const systemMdResolution = resolvePathFromEnv(
+      process.env['QWEN_SYSTEM_MD'],
+    );
 
     // We update systemMdPath to this new custom path.
-    if (!systemMdResolution.isSwitch) {
+    if (!systemMdResolution.isSwitch && systemMdResolution.value) {
       systemMdPath = systemMdResolution.value;
     }
 

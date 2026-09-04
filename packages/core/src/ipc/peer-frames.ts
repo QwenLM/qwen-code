@@ -45,7 +45,15 @@ export type PeerMessagePriority = 'now' | 'next';
 /** Terminal states a sent message can reach on the receiving side. */
 export type PeerDeliveryStatus =
   | 'held'
+  /** A person reviewed the message and declined it. */
   | 'denied'
+  /**
+   * The receiving session's policy turns peer messages away, so no
+   * person ever saw this one. Distinct from `denied`, which is a
+   * decision: a sender that is refused should stop rather than wait for
+   * a review that will not happen.
+   */
+  | 'refused'
   | 'expired'
   | 'delivered'
   /**
@@ -61,6 +69,15 @@ export interface PeerUserFrame {
   type: 'user';
   /** Reply address: the sender's own socket path, or absent if it has none. */
   from?: string;
+  /**
+   * Auth token for the sender's own inbox at `from`, so the receiver can
+   * authenticate its delivery receipts. Carried in the frame rather than
+   * looked up from the registry per receipt: a peer this session accepted
+   * a message from could read the token from the sender's 0600 record
+   * anyway, so nothing new is exposed. Untrusted like every field here —
+   * a wrong value just makes the best-effort receipt bounce.
+   */
+  replyToken?: string;
   /** Sender's display name, for the envelope shown to the model. */
   fromName?: string;
   /**
@@ -166,11 +183,13 @@ export function parsePeerFrame(line: string): PeerFrame | null {
     const priority = parsed['priority'];
     const fromMode = parsed['fromMode'];
     const toSessionId = optionalString(parsed['toSessionId']);
+    const replyToken = optionalString(parsed['replyToken']);
     return {
       msgV,
       msgId,
       type: 'user',
       from: optionalString(parsed['from']),
+      ...(replyToken !== undefined ? { replyToken } : {}),
       fromName: optionalString(parsed['fromName']),
       ...(fromMode === 'bypass' || fromMode === 'prompting'
         ? { fromMode }
@@ -187,6 +206,7 @@ export function parsePeerFrame(line: string): PeerFrame | null {
     if (
       status !== 'held' &&
       status !== 'denied' &&
+      status !== 'refused' &&
       status !== 'expired' &&
       status !== 'delivered' &&
       status !== 'misaddressed'
@@ -219,6 +239,7 @@ export function encodePeerFrame(frame: PeerFrame): string {
 export interface BuildUserFrameFields {
   content: string;
   from?: string;
+  replyToken?: string;
   fromName?: string;
   fromMode?: 'bypass' | 'prompting';
   toSessionId?: string;
@@ -231,6 +252,9 @@ export function buildUserFrame(fields: BuildUserFrameFields): PeerUserFrame {
     msgId: randomUUID(),
     type: 'user',
     ...(fields.from !== undefined ? { from: fields.from } : {}),
+    ...(fields.replyToken !== undefined
+      ? { replyToken: fields.replyToken }
+      : {}),
     ...(fields.fromName !== undefined ? { fromName: fields.fromName } : {}),
     ...(fields.fromMode !== undefined ? { fromMode: fields.fromMode } : {}),
     ...(fields.toSessionId !== undefined
@@ -252,6 +276,8 @@ export function describeDeliveryStatus(status: PeerDeliveryStatus): string {
       return 'Your message is held for the recipient user to review before it reaches their Qwen Code session.';
     case 'denied':
       return 'The recipient declined your message; it was not delivered.';
+    case 'refused':
+      return "The recipient session does not accept messages from other sessions, so nobody saw this one. Don't re-send it; reach that session's user another way.";
     case 'expired':
       return 'Your held message expired without a decision and was not delivered.';
     case 'delivered':
@@ -263,6 +289,37 @@ export function describeDeliveryStatus(status: PeerDeliveryStatus): string {
       return exhaustive;
     }
   }
+}
+
+/**
+ * The connection-level admission line, not a member of {@link PeerFrame}:
+ * an inbox that requires a token reads it off the first line of a
+ * connection before any frame is parsed, and it never reaches `onFrame`.
+ *
+ * Shaped like a frame (`msgV` + `type`) so an inbox that does NOT require
+ * a token — an older build — sees an unknown `type` in `parsePeerFrame`,
+ * skips the line, and reads the frames after it: a sender can therefore
+ * always lead with the auth line when it has the peer's token, without
+ * knowing which side of the upgrade the peer is on.
+ */
+export function buildAuthLine(token: string): string {
+  return `${JSON.stringify({ msgV: PEER_FRAME_VERSION, type: 'auth', token })}\n`;
+}
+
+/** The token an auth line presents, or null if the line is not one. */
+export function parsePeerAuthLine(line: string): string | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed)) return null;
+  const msgV = parsed['msgV'];
+  if (typeof msgV !== 'number' || msgV > PEER_FRAME_VERSION) return null;
+  if (parsed['type'] !== 'auth') return null;
+  const token = parsed['token'];
+  return typeof token === 'string' && token.length > 0 ? token : null;
 }
 
 export function buildDeliveryStatusFrame(fields: {

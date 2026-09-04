@@ -867,3 +867,71 @@ describe('parseChannelConfig', () => {
     );
   });
 });
+
+describe('Qwen-internal secrets are never resolved into channel config', () => {
+  const ORIGINAL = process.env['QWEN_SERVER_TOKEN'];
+
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env['QWEN_SERVER_TOKEN'];
+    else process.env['QWEN_SERVER_TOKEN'] = ORIGINAL;
+  });
+
+  it('resolveEnvVars throws instead of yielding the daemon token', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    expect(() => resolveEnvVars('$QWEN_SERVER_TOKEN')).toThrow(
+      'Environment variable QWEN_SERVER_TOKEN is a Qwen-internal secret',
+    );
+    expect(() =>
+      resolveEnvVars('$qwen_server_token', { qwen_server_token: 'x' }),
+    ).toThrow('is a Qwen-internal secret');
+  });
+
+  it('keeps the $$ escape as a literal, not a reference', () => {
+    expect(resolveEnvVars('$$QWEN_SERVER_TOKEN')).toBe('$QWEN_SERVER_TOKEN');
+  });
+
+  it('rejects a credential field that references the daemon token', async () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        token: '$QWEN_SERVER_TOKEN',
+        baseUrl: 'https://attacker.example/api',
+      }),
+    ).rejects.toThrow(
+      'Environment variable QWEN_SERVER_TOKEN is a Qwen-internal secret',
+    );
+  });
+
+  it('rejects a plugin-declared env-resolvable field that references the daemon token', async () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    await expect(
+      parseChannelConfig(
+        'wecom-main',
+        { type: 'wecom', botId: 'b', secret: 's', wsUrl: '$QWEN_SERVER_TOKEN' },
+        process.cwd(),
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow('is a Qwen-internal secret');
+  });
+
+  it('rejects a webhook secretEnv that names the daemon token', async () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            'github-ci': {
+              secretEnv: 'QWEN_SERVER_TOKEN',
+              targets: {
+                default: { chatId: 'group-1', senderId: 'webhook:github-ci' },
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow('is a Qwen-internal secret');
+  });
+});

@@ -65,6 +65,43 @@ export class ImageViewError extends Error {
   }
 }
 
+/**
+ * The metadata fields `orientedSize` depends on.
+ *
+ * sharp >= 0.34 always provides them, but older releases that may still be
+ * installed for compatibility with legacy hosts (for example sharp 0.32.x,
+ * the last series whose prebuilt libvips loads on glibc 2.17 systems such
+ * as AliOS 7) omit `autoOrient`, so it is optional here even though sharp's
+ * current type declarations mark it as required.
+ */
+export interface OrientableMetadata {
+  width?: number;
+  height?: number;
+  orientation?: number;
+  autoOrient?: ImageSize;
+}
+
+/**
+ * Computes the size of the image after applying EXIF orientation.
+ *
+ * Prefers `metadata.autoOrient` (sharp >= 0.34). When that field is
+ * missing (sharp < 0.34), derives the oriented size from the stored
+ * dimensions and the EXIF orientation tag instead: orientations 5-8 swap
+ * the stored axes.
+ */
+export function orientedSize(metadata: OrientableMetadata): ImageSize {
+  const autoOrient = metadata.autoOrient;
+  if (autoOrient) {
+    return { width: autoOrient.width, height: autoOrient.height };
+  }
+  const width = metadata.width ?? 0;
+  const height = metadata.height ?? 0;
+  const orientation = metadata.orientation ?? 0;
+  return orientation >= 5 && orientation <= 8
+    ? { width: height, height: width }
+    : { width, height };
+}
+
 function fitsVisualBudget({ width, height }: ImageSize): boolean {
   return (
     width <= IMAGE_VIEW_MAX_EDGE &&
@@ -204,13 +241,17 @@ async function renderImageView(
   signal: AbortSignal,
 ): Promise<ImageView> {
   const { bytes, metadata, sharp } = prepared;
+  const sourceSize = orientedSize(metadata);
   let output: Buffer;
   try {
+    // `.rotate()` without an angle applies the EXIF orientation on every
+    // supported sharp release, including sharp < 0.33 where the
+    // `autoOrient` constructor option does not exist yet.
     output = await sharp(bytes, {
-      autoOrient: true,
       failOn: 'error',
       limitInputPixels: true,
     })
+      .rotate()
       .extract(selection)
       .resize(outputSize.width, outputSize.height, {
         fit: 'fill',
@@ -240,8 +281,8 @@ async function renderImageView(
   return {
     bytes: output,
     mimeType: 'image/jpeg',
-    sourceWidth: metadata.autoOrient.width,
-    sourceHeight: metadata.autoOrient.height,
+    sourceWidth: sourceSize.width,
+    sourceHeight: sourceSize.height,
     selectedWidth: selection.width,
     selectedHeight: selection.height,
     outputWidth: outputSize.width,
@@ -254,8 +295,9 @@ export async function renderImageOverview(
   signal: AbortSignal,
 ): Promise<ImageView> {
   const prepared = await prepareImage(filePath, signal);
-  const sourceWidth = prepared.metadata.autoOrient.width;
-  const sourceHeight = prepared.metadata.autoOrient.height;
+  const { width: sourceWidth, height: sourceHeight } = orientedSize(
+    prepared.metadata,
+  );
   const outputSize = boundedSize(sourceWidth, sourceHeight, 1);
   return renderImageView(
     filePath,
@@ -272,8 +314,9 @@ export async function renderNormalizedImageCrop(
   signal: AbortSignal,
 ): Promise<ImageView> {
   const prepared = await prepareImage(filePath, signal);
-  const sourceWidth = prepared.metadata.autoOrient.width;
-  const sourceHeight = prepared.metadata.autoOrient.height;
+  const { width: sourceWidth, height: sourceHeight } = orientedSize(
+    prepared.metadata,
+  );
   const left = Math.min(
     sourceWidth - 1,
     Math.max(0, Math.floor((region.x1 / 1000) * sourceWidth)),

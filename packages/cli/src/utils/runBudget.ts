@@ -22,6 +22,8 @@
  * reason so the caller can emit a structured error envelope.
  */
 
+import { GOAL_TOKEN_BUDGET_CAP } from '@qwen-code/qwen-code-core';
+
 export type BudgetKind = 'wall-time' | 'tool-calls';
 
 export interface BudgetExceeded {
@@ -176,6 +178,31 @@ export function validateMaxWallTimeSetting(value: number): number {
   if (value > MAX_WALL_TIME_SECONDS) {
     throw new Error(
       `model.maxWallTimeSeconds ${value} exceeds the maximum supported wall-clock budget (${MAX_WALL_TIME_SECONDS}s ≈ 24 days).`,
+    );
+  }
+  return value;
+}
+
+export function validateGoalTokenBudget(value: unknown): number {
+  if (value === -1) return -1;
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(
+      `model.goalTokenBudget must be a finite number; got ${String(value)}.`,
+    );
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error(
+      `model.goalTokenBudget must be an integer (or -1 for unlimited); got ${value}.`,
+    );
+  }
+  if (value <= 0) {
+    throw new Error(
+      `model.goalTokenBudget must be > 0 (or -1 for unlimited); got ${value}. Use -1 to disable, not 0.`,
+    );
+  }
+  if (value > GOAL_TOKEN_BUDGET_CAP) {
+    throw new Error(
+      `model.goalTokenBudget ${value} exceeds the supported ceiling (${GOAL_TOKEN_BUDGET_CAP}). Use a smaller value or -1 for unlimited.`,
     );
   }
   return value;

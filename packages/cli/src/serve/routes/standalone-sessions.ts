@@ -266,6 +266,16 @@ export function registerStandaloneSessionRoutes(
     }
   };
 
+  app.get('/standalone/session-options', (req, res) =>
+    handle('GET /standalone/session-options', req, res, async () => {
+      if (Object.keys(req.query).length > 0) {
+        sendInvalidRequest(res, 'The request query contains unknown fields.');
+        return;
+      }
+      res.status(200).json(await deps.service.getOptions());
+    }),
+  );
+
   app.post('/standalone/sessions', deps.mutate({ strict: true }), (req, res) =>
     handle('POST /standalone/sessions', req, res, async () => {
       const body = requireExactBody(req, res, [

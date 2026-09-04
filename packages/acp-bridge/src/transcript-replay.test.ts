@@ -1422,6 +1422,7 @@ describe('createTranscriptReplayMachine', () => {
           resultDisplay: {
             type: 'todo_list',
             planId: 'plan-1',
+            sessionWorkflow: true,
             todos: [
               {
                 id: 'ship',
@@ -1447,6 +1448,7 @@ describe('createTranscriptReplayMachine', () => {
         },
       ],
       _meta: {
+        qwenSessionWorkflow: true,
         stats: {
           promptTokens: 5,
           candidateTokens: 3,

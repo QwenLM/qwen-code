@@ -17,6 +17,7 @@ import type {
 } from '@google/genai';
 import type {
   Config,
+  ContentGeneratorConfig,
   LlmChat,
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
@@ -110,6 +111,9 @@ import {
   MessageDisplayDispatcher,
   getPlanModeSystemReminder,
   getArenaSystemReminder,
+  getOutputStyleTurnReminder,
+  resolveMainSessionOutputStyle,
+  wrapSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
   buildSessionRecoveryPlanFromApiHistory,
@@ -323,8 +327,24 @@ import {
   resolveAcpModelOption,
 } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  getPersistScopeForModelSelection,
+  getWritableScopes,
+} from '../../config/modelProvidersScope.js';
+import {
+  deleteNestedPropertySafe,
+  settingExistsInScope,
+} from '../../config/settingsUtils.js';
 import { recordDaemonSessionModel } from '../session-model-persistence.js';
+import {
+  applyReasoningSelection,
+  clearReasoningRequestOverrides,
+  getModelConfiguration,
+  isReasoningSelectionSupported,
+  parseReasoningSelection,
+  REASONING_EFFORT_DEFAULT,
+  type ReasoningSelection,
+} from '../model-configuration.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
@@ -1783,12 +1803,10 @@ export async function buildAvailableCommandsSnapshot(
     settings,
     executionPolicy,
   );
-  const disabledSkillNames = config.getDisabledSkillNames();
   const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
 
   const visibleSlashCommands = slashCommands.filter((cmd) => {
     if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
-    const skillName = cmd.skillDetail.name.toLowerCase();
     const isInactiveExtensionCommand =
       cmd.skillDetail.level === 'extension' &&
       isInactiveExtensionSkill(
@@ -1803,7 +1821,9 @@ export async function buildAvailableCommandsSnapshot(
         },
         inactiveSkillRefs,
       );
-    return !disabledSkillNames.has(skillName) && !isInactiveExtensionCommand;
+    return (
+      config.isSkillEnabled(cmd.skillDetail) && !isInactiveExtensionCommand
+    );
   });
 
   const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
@@ -1847,7 +1867,7 @@ export async function buildAvailableCommandsSnapshot(
     if (skillManager) {
       const skills = (await skillManager.listSkills()).filter(
         (skill) =>
-          !disabledSkillNames.has(skill.name.toLowerCase()) &&
+          config.isSkillEnabled(skill) &&
           !isInactiveExtensionSkill(skill, inactiveSkillRefs),
       );
       availableSkills = skills.map((skill) => skill.name);
@@ -2062,6 +2082,8 @@ export class Session implements SessionContext {
     planId: string;
     sourceCallId: string;
   };
+  private activeTodoPlanStructure?: string;
+  private todoPlanRevisionGeneration = 0;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -2113,6 +2135,7 @@ export class Session implements SessionContext {
 
   // Implement SessionContext interface
   readonly sessionId: string;
+  private sessionReasoningSelection?: ReasoningSelection;
 
   constructor(
     id: string,
@@ -2156,6 +2179,20 @@ export class Session implements SessionContext {
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
       !this.config.isSafeMode();
+    // Capture the settings-derived gate value ONCE instead of tracking the
+    // live settings view: this session's LoadedSettings is reloaded from
+    // disk behind the session's back (e.g. `reloadSkillSettings` during a
+    // workspaceSkillsRefresh), and such a reload must not silently flip the
+    // Session Workflow gate with no change event and no plan-revision
+    // cleanup. Gate changes flow only through the daemon's explicit writers
+    // (the workspaceSessionWorkflow UI write and the workspaceReload
+    // re-derivation, both via applySessionWorkflowOverrideToLiveSessions),
+    // which re-pin the provider and run the per-session side effects.
+    const sessionWorkflowEnabledFromSettings =
+      this.settings.merged.experimental?.sessionWorkflow === true;
+    this.config.setSessionWorkflowEnabledProvider?.(
+      () => sessionWorkflowEnabledFromSettings,
+    );
     this.todoStopGuard = new DaemonTodoStopGuard(todoStopGuardEnabled);
     const configuredGuardMode =
       process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD];
@@ -2875,7 +2912,10 @@ export class Session implements SessionContext {
   }
 
   clearActiveTodoPlanRevision(): void {
+    this.todoPlanRevisionGeneration++;
     this.activeTodoPlanRevision = undefined;
+    this.activeTodoPlanStructure = undefined;
+    this.config.clearSessionWorkflowPlanRevision?.();
   }
 
   hardSuspendTodoStopGuard(): void {
@@ -3447,6 +3487,10 @@ export class Session implements SessionContext {
 
   getConfig(): Config {
     return this.config;
+  }
+
+  getSettings(): LoadedSettings {
+    return this.settings;
   }
 
   getWorkflowHistory(): readonly WorkflowSnapshot[] {
@@ -4061,6 +4105,7 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.clearActiveTodoPlanRevision();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
@@ -4131,6 +4176,7 @@ export class Session implements SessionContext {
       this.#workflowStatusChangeCallback = undefined;
     }
     this.config.getChatRecordingService()?.setTitleRecordedCallback(undefined);
+    this.config.getSessionService().setSessionPrBoundCallback(undefined);
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
@@ -4207,7 +4253,7 @@ export class Session implements SessionContext {
       // belong to finished cycles; only live updates may bind the next
       // exit_plan_mode approval, so a replayed session starts text-only —
       // even when the replay fails part-way.
-      this.activeTodoPlanRevision = undefined;
+      this.clearActiveTodoPlanRevision();
     }
   }
 
@@ -4248,7 +4294,7 @@ export class Session implements SessionContext {
 
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
-    this.activeTodoPlanRevision = undefined;
+    this.clearActiveTodoPlanRevision();
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
       (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -4311,7 +4357,7 @@ export class Session implements SessionContext {
     }
 
     this.config.getLlmClient()!.getChat().setHistory(structuredClone(history));
-    this.activeTodoPlanRevision = undefined;
+    this.clearActiveTodoPlanRevision();
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
@@ -7292,22 +7338,76 @@ export class Session implements SessionContext {
       sessionId: this.sessionId,
       update: projectedUpdate,
     };
+    const canUpdateTodoPlanRevision =
+      update.sessionUpdate === 'plan' &&
+      this.config.getApprovalMode() === ApprovalMode.PLAN;
+    const todoPlanRevision = canUpdateTodoPlanRevision
+      ? this.#readTodoPlanRevision(update)
+      : undefined;
+    const preservesPendingRevision =
+      todoPlanRevision !== undefined &&
+      todoPlanRevision.structure === this.activeTodoPlanStructure;
+    const previousActiveTodoPlanRevision = this.activeTodoPlanRevision;
+    const previousActiveTodoPlanStructure = this.activeTodoPlanStructure;
+    const previousWorkflowRevision =
+      this.config.getSessionWorkflowPlanRevision?.();
 
-    if (update.sessionUpdate === 'plan') {
-      // Clear before delivery: a plan update the client never receives
-      // must not stay bound to the next exit_plan_mode approval. The
-      // capture below re-stamps only after delivery succeeds.
-      this.activeTodoPlanRevision = undefined;
+    if (canUpdateTodoPlanRevision && !preservesPendingRevision) {
+      // Clear during delivery so a replacement cannot be approved before the
+      // client sees it. Success captures the new revision below; failure
+      // restores the previous one while the session remains in PLAN mode.
+      this.clearActiveTodoPlanRevision();
     }
-    await this.client.sessionUpdate(params);
-    if (update.sessionUpdate === 'plan') {
-      this.#captureTodoPlanRevision(update);
+    try {
+      await this.client.sessionUpdate(params);
+    } catch (error) {
+      if (
+        canUpdateTodoPlanRevision &&
+        !preservesPendingRevision &&
+        this.config.getApprovalMode() === ApprovalMode.PLAN
+      ) {
+        this.activeTodoPlanRevision = previousActiveTodoPlanRevision;
+        this.activeTodoPlanStructure = previousActiveTodoPlanStructure;
+        this.config.setSessionWorkflowPlanRevision?.(previousWorkflowRevision);
+      }
+      throw error;
+    }
+    if (
+      canUpdateTodoPlanRevision &&
+      this.config.getApprovalMode() === ApprovalMode.PLAN &&
+      todoPlanRevision?.allPending
+    ) {
+      if (
+        this.activeTodoPlanRevision?.planId !== todoPlanRevision.planId ||
+        this.activeTodoPlanRevision?.sourceCallId !==
+          todoPlanRevision.sourceCallId
+      ) {
+        this.todoPlanRevisionGeneration++;
+      }
+      this.activeTodoPlanRevision = {
+        planId: todoPlanRevision.planId,
+        sourceCallId: todoPlanRevision.sourceCallId,
+      };
+      this.activeTodoPlanStructure = todoPlanRevision.structure;
+      this.config.setSessionWorkflowPlanRevision?.({
+        planId: todoPlanRevision.planId,
+        sourceCallId: todoPlanRevision.sourceCallId,
+        todoIds: todoPlanRevision.todoIds,
+      });
     }
   }
 
-  #captureTodoPlanRevision(
+  #readTodoPlanRevision(
     update: Extract<SessionUpdate, { sessionUpdate: 'plan' }>,
-  ): void {
+  ):
+    | {
+        planId: string;
+        sourceCallId: string;
+        todoIds: string[];
+        structure: string;
+        allPending: boolean;
+      }
+    | undefined {
     const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
     const plan = isRecord(meta?.['qwenTodoPlan'])
       ? meta['qwenTodoPlan']
@@ -7317,12 +7417,58 @@ export class Session implements SessionContext {
       : undefined;
     const planId = plan?.['id'];
     const sourceCallId = transcript?.['planToolCallId'];
-    this.activeTodoPlanRevision =
+    const workflowPlan = meta?.['qwenSessionWorkflow'] === true;
+    const hasValidIdentity =
       typeof planId === 'string' &&
+      planId.trim() !== '' &&
       typeof sourceCallId === 'string' &&
-      update.entries.length > 0
-        ? { planId, sourceCallId }
+      sourceCallId.trim() !== '' &&
+      update.entries.length > 0;
+    const workflowEnabled = this.config.isSessionWorkflowEnabled?.() === true;
+    if (!workflowEnabled || !workflowPlan || !hasValidIdentity)
+      return undefined;
+
+    const todos = update.entries.flatMap((entry) => {
+      const entryRecord = entry as unknown as Record<string, unknown>;
+      const entryMeta = isRecord(entryRecord['_meta'])
+        ? entryRecord['_meta']
         : undefined;
+      const todo = isRecord(entryMeta?.['qwenTodo'])
+        ? entryMeta['qwenTodo']
+        : undefined;
+      const todoId = todo?.['id'];
+      const blockedBy = todo?.['blockedBy'];
+      if (
+        typeof todoId !== 'string' ||
+        todoId.trim() === '' ||
+        (blockedBy !== undefined &&
+          (!Array.isArray(blockedBy) ||
+            !blockedBy.every((dependency) => typeof dependency === 'string')))
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: todoId,
+          content: entry.content,
+          priority: entry.priority,
+          blockedBy: blockedBy ?? [],
+        },
+      ];
+    });
+    const todoIds = todos.map((todo) => todo.id);
+    if (
+      todos.length !== update.entries.length ||
+      new Set(todoIds).size !== todoIds.length
+    )
+      return undefined;
+    return {
+      planId,
+      sourceCallId,
+      todoIds,
+      structure: JSON.stringify([planId, todos]),
+      allPending: update.entries.every((entry) => entry.status === 'pending'),
+    };
   }
 
   #scheduleChannelDelivery(params: Record<string, unknown>): void {
@@ -8159,8 +8305,15 @@ export class Session implements SessionContext {
         // for. Recover that late response and inject it on the next batch instead
         // of discarding it (which would lose the messages from both queues —
         // silent loss). `#recoverLateDrain` bounds the wait and swallows a late
-        // rejection.
-        if (drainPromise) void this.#recoverLateDrain(drainPromise);
+        // rejection, but only of the drain promise: anything that throws after
+        // that race — the debug logger among them — escapes a bare `void` as an
+        // unhandled rejection, which ends the process. This recovery is
+        // best-effort by construction, so nothing it does may take the session
+        // down with it. Swallow silently rather than log, since the logger is
+        // itself one of the things that can throw here.
+        if (drainPromise) {
+          void this.#recoverLateDrain(drainPromise).catch(() => {});
+        }
       }
       // Repeated timeouts are also permanent: a conforming client answers
       // (or rejects with -32601) immediately, so sustained silence means the
@@ -9289,6 +9442,25 @@ export class Session implements SessionContext {
           });
       });
 
+    // Shell-detected `gh pr create` bindings persist in the child's own
+    // sidecar write; the daemon never sees it, so carry the catalog-clock
+    // mark — version-watching clients then refetch the binding the same way
+    // they pick up automatic titles.
+    this.config
+      .getSessionService()
+      .setSessionPrBoundCallback((sessionId, pr) => {
+        void this.client
+          .extNotification('qwen/notify/session/pr-binding', {
+            v: 1,
+            sessionId,
+            pr: { number: pr.number, url: pr.url },
+          })
+          .catch(() => {
+            // Best-effort: a dropped notification only delays the badge
+            // until the client's next catalog refresh.
+          });
+      });
+
     if (typeof this.config.onChatRecordingFailure === 'function') {
       this.unsubscribeChatRecordingFailure = this.config.onChatRecordingFailure(
         (event) =>
@@ -10064,12 +10236,21 @@ export class Session implements SessionContext {
     }
     const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
+    // Only plan-involving transitions touch the revision: entering PLAN starts
+    // a fresh approval cycle and leaving PLAN abandons the draft, but an
+    // approved workflow plan keeps executing in a non-plan mode — switching
+    // between non-plan modes (default → auto-edit/yolo) must not disarm it
+    // mid-execution. Matches the sibling sessionApprovalMode ext route and the
+    // workspaceReload handler; the exit_plan_mode approval path deliberately
+    // retains the revision.
+    if (
+      previousApprovalMode !== approvalMode &&
+      (previousApprovalMode === ApprovalMode.PLAN ||
+        approvalMode === ApprovalMode.PLAN)
+    ) {
+      this.clearActiveTodoPlanRevision();
+    }
     if (approvalMode === ApprovalMode.PLAN) {
-      if (previousApprovalMode !== ApprovalMode.PLAN) {
-        // A redundant plan re-select keeps the revision captured by the
-        // live cycle; only a fresh entry starts a new approval cycle.
-        this.activeTodoPlanRevision = undefined;
-      }
       this.clearTodoStopGuardTrust();
     }
 
@@ -10149,6 +10330,12 @@ export class Session implements SessionContext {
     const isRuntime =
       resolvedRoute?.isRuntime ??
       rawModelId.startsWith(RUNTIME_SNAPSHOT_PREFIX);
+    const persistDefault =
+      !this.requiresManagedConversationBinding &&
+      (options.persistDefault ?? true);
+    this.reconcileReasoningSelection(effectiveModelId, {
+      persist: persistDefault,
+    });
     void recordDaemonSessionModel(this.config, {
       modelId: isRuntime
         ? (resolvedRoute?.modelId ?? parsed.modelId)
@@ -10192,9 +10379,6 @@ export class Session implements SessionContext {
         debugLogger.debug('model-update extNotification failed', error);
       });
 
-    const persistDefault =
-      !this.requiresManagedConversationBinding &&
-      (options.persistDefault ?? true);
     if (persistDefault) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
       this.settings.setValue(
@@ -10229,6 +10413,175 @@ export class Session implements SessionContext {
         },
       },
     };
+  }
+
+  getDefaultReasoningConfig(): ContentGeneratorConfig['reasoning'] {
+    // Runtime snapshots already include the persisted selection, not its defaults.
+    const authType = this.config.getAuthType?.();
+    const model =
+      authType && !this.config.getActiveRuntimeModelSnapshot?.()
+        ? this.config.getResolvedModelConfig?.(
+            authType,
+            this.config.getModel(),
+            this.config.getCurrentModelRegistryBaseUrl?.() ?? undefined,
+          )
+        : undefined;
+    if (model) return model.generationConfig.reasoning;
+    return (
+      this.settings.merged.model?.generationConfig as
+        | Partial<ContentGeneratorConfig>
+        | undefined
+    )?.reasoning;
+  }
+
+  reloadReasoningSelection(): void {
+    this.settings.reloadScopeFromDisk(SettingScope.User);
+    this.settings.reloadScopeFromDisk(SettingScope.Workspace);
+    this.reconcileReasoningSelection(this.config.getModel(), {
+      persist: !this.requiresManagedConversationBinding,
+    });
+  }
+
+  setSessionReasoningSelection(
+    selection: ReasoningSelection | undefined,
+  ): void {
+    this.sessionReasoningSelection = selection;
+  }
+
+  getSessionReasoningSelection(): ReasoningSelection | undefined {
+    return this.sessionReasoningSelection;
+  }
+
+  persistReasoningSelection(selection: ReasoningSelection): void {
+    if (this.requiresManagedConversationBinding) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Reasoning selection cannot be persisted for this session',
+      );
+    }
+
+    const key = 'model.reasoningEffort';
+    const persistScope = getPersistScopeForModelSelection(this.settings);
+    const clears = getWritableScopes(this.settings)
+      .filter(
+        (scope) =>
+          (selection === REASONING_EFFORT_DEFAULT || scope !== persistScope) &&
+          settingExistsInScope(key, this.settings.forScope(scope).settings),
+      )
+      .map((scope) => ({ scope, value: undefined }));
+    const writes =
+      selection === REASONING_EFFORT_DEFAULT
+        ? clears
+        : [{ scope: persistScope, value: selection }, ...clears];
+    const committed: Array<{ scope: SettingScope; value: unknown }> = [];
+    // setValues does not roll back scopes it already wrote.
+    for (const write of writes) {
+      const previous = this.settings.forScope(write.scope).settings.model
+        ?.reasoningEffort;
+      try {
+        this.writeReasoningSelection(write.scope, write.value);
+      } catch (error) {
+        this.settings.reloadScopeFromDisk(write.scope);
+        for (const previousWrite of committed.reverse()) {
+          try {
+            this.writeReasoningSelection(
+              previousWrite.scope,
+              previousWrite.value,
+            );
+          } catch (rollbackError) {
+            this.settings.reloadScopeFromDisk(previousWrite.scope);
+            debugLogger.warn(
+              `Failed to roll back reasoning preference: ${
+                rollbackError instanceof Error
+                  ? rollbackError.message
+                  : String(rollbackError)
+              }`,
+            );
+          }
+        }
+        throw error;
+      }
+      committed.push({ scope: write.scope, value: previous });
+    }
+  }
+
+  private reconcileReasoningSelection(
+    modelId: string,
+    options: { persist: boolean },
+  ): void {
+    const rawSelection = this.settings.merged.model?.reasoningEffort;
+    let hasSessionSelection = this.sessionReasoningSelection !== undefined;
+    if (!hasSessionSelection && rawSelection === undefined) return;
+
+    let selection = hasSessionSelection
+      ? this.sessionReasoningSelection
+      : parseReasoningSelection(rawSelection);
+    const generation = this.config.getContentGeneratorConfig?.();
+    const thinkingMandatory = generation?.thinkingMandatory === true;
+    let supported =
+      selection !== undefined &&
+      selection !== REASONING_EFFORT_DEFAULT &&
+      isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+
+    const appliesSessionDefault =
+      hasSessionSelection && selection === REASONING_EFFORT_DEFAULT;
+    if (hasSessionSelection && !supported && !appliesSessionDefault) {
+      this.sessionReasoningSelection = undefined;
+      hasSessionSelection = false;
+      selection = parseReasoningSelection(rawSelection);
+      supported =
+        selection !== undefined &&
+        selection !== REASONING_EFFORT_DEFAULT &&
+        isReasoningSelectionSupported(modelId, selection, thinkingMandatory);
+    }
+    if (
+      !hasSessionSelection &&
+      rawSelection !== undefined &&
+      !supported &&
+      options.persist
+    ) {
+      try {
+        this.persistReasoningSelection(REASONING_EFFORT_DEFAULT);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to clear incompatible reasoning preference: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+    const modelReasoning = getModelConfiguration(modelId)?.reasoning;
+    if (
+      supported &&
+      generation &&
+      modelReasoning &&
+      !modelReasoning.toggleOnly
+    ) {
+      clearReasoningRequestOverrides(generation);
+    }
+    const effectiveSelection =
+      (supported || appliesSessionDefault) && selection !== undefined
+        ? selection
+        : REASONING_EFFORT_DEFAULT;
+    applyReasoningSelection(
+      this.config,
+      effectiveSelection,
+      this.getDefaultReasoningConfig(),
+    );
+  }
+
+  private writeReasoningSelection(scope: SettingScope, value: unknown): void {
+    const key = 'model.reasoningEffort';
+    this.settings.setValue(scope, key, value, undefined, {
+      throwOnWriteFailure: true,
+    });
+    if (value !== undefined) return;
+    const file = this.settings.forScope(scope);
+    for (const settings of [file.settings, file.originalSettings]) {
+      if (settings)
+        deleteNestedPropertySafe(settings as Record<string, unknown>, key);
+    }
+    this.settings.recomputeMerged();
   }
 
   /**
@@ -10982,6 +11335,18 @@ export class Session implements SessionContext {
       }
     }
 
+    // The output-style reminder, exactly as `LlmClient.sendMessageStream`
+    // sends it: the ACP prompt carries the style section, so it needs the
+    // same per-turn nudge or the style fades over a long session.
+    if (this.config.getOutputStyle?.()) {
+      const outputStyle = resolveMainSessionOutputStyle(this.config);
+      if (outputStyle) {
+        reminders.push({
+          text: wrapSystemReminder(getOutputStyleTurnReminder(outputStyle)),
+        });
+      }
+    }
+
     return reminders;
   }
 
@@ -11041,6 +11406,10 @@ export class Session implements SessionContext {
     let nestedPermissionCancelled = false;
     let agentToolAbortController: AbortController | undefined;
     let removeAgentToolAbortPropagation: (() => void) | undefined;
+    let todoPlanApprovalGeneration: number | undefined;
+    let todoPlanApprovalRevision:
+      | { planId: string; sourceCallId: string }
+      | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
 
     const cleanupAgentToolResources = () => {
@@ -11672,8 +12041,16 @@ export class Session implements SessionContext {
                 // Drop through to the manual-approval flow below.
                 wasAutoModeManualFallback =
                   isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable';
-                autoModeFallbackMessage = outcome.message;
+                  outcome.reason === 'classifier_unavailable' ||
+                  outcome.reason === 'external_write';
+
+                if (
+                  outcome.reason === 'classifier_unavailable' ||
+                  outcome.reason === 'external_write'
+                ) {
+                  autoModeFallbackMessage = outcome.message;
+                }
+
                 if (wasAutoModeManualFallback) {
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
@@ -11690,6 +12067,46 @@ export class Session implements SessionContext {
 
           let didRequestPermission = false;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
+          const cancelStaleTodoPlanApproval = async () => {
+            const configRevision =
+              this.config.getSessionWorkflowPlanRevision?.();
+            if (
+              todoPlanApprovalGeneration === undefined ||
+              !todoPlanApprovalRevision ||
+              (todoPlanApprovalGeneration === this.todoPlanRevisionGeneration &&
+                this.activeTodoPlanRevision?.planId ===
+                  todoPlanApprovalRevision.planId &&
+                this.activeTodoPlanRevision?.sourceCallId ===
+                  todoPlanApprovalRevision.sourceCallId &&
+                configRevision?.planId === todoPlanApprovalRevision.planId &&
+                configRevision?.sourceCallId ===
+                  todoPlanApprovalRevision.sourceCallId)
+            ) {
+              return undefined;
+            }
+            try {
+              await confirmationDetails?.onConfirm(
+                ToolConfirmationOutcome.Cancel,
+              );
+            } catch (error) {
+              debugLogger.warn(
+                `Failed to cancel stale plan approval: ${this.#formatError(error)}`,
+              );
+            }
+            onStopAfterPermissionCancel?.();
+            return earlyErrorResponse(
+              new Error(
+                'Plan approval is stale because its Session Workflow revision changed. No action was taken.',
+              ),
+              toolName,
+              {
+                status: 'cancelled',
+                errorType: undefined,
+                executionStatus: 'not_started',
+                stopAfterPermissionCancel: true,
+              },
+            );
+          };
           const recordAutoModeFallbackResolution = (
             outcome: ToolConfirmationOutcome,
           ) => {
@@ -11996,6 +12413,22 @@ export class Session implements SessionContext {
               const offeredPermissionOptions = permissionOptions.map(
                 (option) => ({ ...option }),
               );
+              const workflowPlanRevision = isExitPlanModeTool
+                ? this.config.getSessionWorkflowPlanRevision?.()
+                : undefined;
+              const qwenTodoApproval =
+                isExitPlanModeTool &&
+                this.activeTodoPlanRevision &&
+                workflowPlanRevision?.planId ===
+                  this.activeTodoPlanRevision.planId &&
+                workflowPlanRevision.sourceCallId ===
+                  this.activeTodoPlanRevision.sourceCallId
+                  ? this.activeTodoPlanRevision
+                  : undefined;
+              if (qwenTodoApproval) {
+                todoPlanApprovalGeneration = this.todoPlanRevisionGeneration;
+                todoPlanApprovalRevision = qwenTodoApproval;
+              }
               const params: RequestPermissionRequest = {
                 sessionId: this.sessionId,
                 options: permissionOptions,
@@ -12014,11 +12447,7 @@ export class Session implements SessionContext {
                   _meta: {
                     toolName,
                     ...interactionMetaFields(confirmationDetails),
-                    ...(isExitPlanModeTool && this.activeTodoPlanRevision
-                      ? {
-                          qwenTodoApproval: this.activeTodoPlanRevision,
-                        }
-                      : {}),
+                    ...(qwenTodoApproval ? { qwenTodoApproval } : {}),
                   },
                 },
               };
@@ -12060,6 +12489,9 @@ export class Session implements SessionContext {
                 if (permissionRequestCancellation) {
                   return permissionRequestCancellation;
                 }
+                const staleTodoPlanApproval =
+                  await cancelStaleTodoPlanApproval();
+                if (staleTodoPlanApproval) return staleTodoPlanApproval;
                 outcome = resolvePermissionOutcome(
                   output,
                   offeredPermissionOptions,
@@ -12389,6 +12821,8 @@ export class Session implements SessionContext {
           if (executionBoundaryCancellation) {
             return executionBoundaryCancellation;
           }
+          const staleTodoPlanApproval = await cancelStaleTodoPlanApproval();
+          if (staleTodoPlanApproval) return staleTodoPlanApproval;
 
           const continuedAgentId =
             toolName === ToolNames.SEND_MESSAGE &&
@@ -12626,7 +13060,7 @@ export class Session implements SessionContext {
           ) {
             await this.sendCurrentModeUpdateNotification();
             if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
-              this.activeTodoPlanRevision = undefined;
+              this.clearActiveTodoPlanRevision();
               this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
             }
           }
@@ -13087,14 +13521,24 @@ export class Session implements SessionContext {
       : undefined;
 
     switch (result.type) {
-      case 'submit_prompt':
-        // Command wants to submit a prompt to the model
-        // Convert PartListUnion to Part[]
+      case 'submit_prompt': {
+        const expandedPrompt = normalizePartList(result.content);
+        const attachmentBlocks =
+          result.resolvedCommand?.kind === CommandKind.BUILT_IN
+            ? []
+            : originalPrompt.filter((block) => block.type !== 'text');
+        const attachmentParts =
+          attachmentBlocks.length === 0
+            ? []
+            : await this.#resolvePrompt(attachmentBlocks, abortSignal, {
+                deferBridgeConversions: true,
+              });
         return this.#applyBridgeConversionsIfNeeded(
-          normalizePartList(result.content),
+          [...attachmentParts, ...expandedPrompt],
           abortSignal,
           onFullTurnModel,
         );
+      }
 
       case 'message': {
         if (result.messageType === 'error') {

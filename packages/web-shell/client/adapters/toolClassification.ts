@@ -15,6 +15,23 @@ export function isActiveToolStatus(
   );
 }
 
+export type TerminalBackgroundAgentStatus =
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'canceled';
+
+export function isTerminalBackgroundAgentStatus(
+  status: unknown,
+): status is TerminalBackgroundAgentStatus {
+  return (
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'canceled'
+  );
+}
+
 export function hasActiveAgents(agents: readonly ACPToolCall[]): boolean {
   return agents.some((agent) => isActiveToolStatus(agent.status));
 }
@@ -25,6 +42,7 @@ export function isTaskExecutionRaw(raw: unknown): boolean {
 
 export function isSubAgentToolCall(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
+  if (name === 'workflow') return false;
   if (name === 'agent' || name === 'task') return true;
   if (tool.subTools || tool.subContent) return true;
   if (isTaskExecutionRaw(tool.rawOutput)) return true;
@@ -70,6 +88,28 @@ export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
     explicitlyBackground ||
     defaultsToBackground
   );
+}
+
+export function projectTerminalBackgroundAgentTool(
+  tool: ACPToolCall,
+  status: unknown,
+  endTime?: number,
+): ACPToolCall {
+  if (!isTerminalBackgroundAgentStatus(status)) return tool;
+  const cancelled = status === 'cancelled' || status === 'canceled';
+  return {
+    ...tool,
+    status: status === 'failed' ? 'failed' : 'completed',
+    ...(endTime !== undefined ? { endTime } : {}),
+    ...(cancelled
+      ? {
+          rawOutput: {
+            ...(getRecord(tool.rawOutput) ?? {}),
+            status: 'cancelled',
+          },
+        }
+      : {}),
+  };
 }
 
 const BACKGROUND_SHELL_NAMES = new Set([

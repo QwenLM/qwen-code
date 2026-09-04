@@ -23,7 +23,10 @@ import type {
   DaemonMessageTodoItem,
   DaemonUserMessage,
 } from './messageTypes.js';
-import { isSubAgentToolCall } from './toolClassification.js';
+import {
+  isSubAgentToolCall,
+  projectTerminalBackgroundAgentTool,
+} from './toolClassification.js';
 import { parseTodoItemsFromEntries } from '../utils/todos.js';
 
 interface PermissionToolInfo {
@@ -82,32 +85,6 @@ function collectBackgroundAgentTaskUpdates(
     });
   }
   return updates;
-}
-
-function applyBackgroundAgentTaskUpdate(
-  tool: DaemonMessageToolCall,
-  update: BackgroundAgentTaskUpdate | undefined,
-): void {
-  if (!update) return;
-  switch (update.status) {
-    case 'completed':
-      tool.status = 'completed';
-      tool.endTime = update.endTime;
-      break;
-    case 'failed':
-      tool.status = 'failed';
-      tool.endTime = update.endTime;
-      break;
-    case 'cancelled':
-    case 'canceled':
-      tool.status = 'completed';
-      tool.endTime = update.endTime;
-      tool.rawOutput = {
-        ...(getRecord(tool.rawOutput) ?? {}),
-        status: 'cancelled',
-      };
-      break;
-  }
 }
 
 function isIgnoredWebShellStatus(text: string): boolean {
@@ -253,12 +230,18 @@ function getSessionBranchDisplayName(data: unknown): string | null {
  */
 function getMidTurnInjectedImages(
   data: unknown,
-): Array<{ data: string; mimeType: string }> | undefined {
+):
+  | Array<{ data: string; mimeType: string; attachmentId?: string }>
+  | undefined {
   if (!data || typeof data !== 'object') return undefined;
   const items = (data as { items?: unknown }).items;
   if (!Array.isArray(items) || items.length === 0) return undefined;
 
-  const images: Array<{ data: string; mimeType: string }> = [];
+  const images: Array<{
+    data: string;
+    mimeType: string;
+    attachmentId?: string;
+  }> = [];
   for (const item of items) {
     if (!item || typeof item !== 'object') continue;
     const content = (item as { content?: unknown }).content;
@@ -275,7 +258,14 @@ function getMidTurnInjectedImages(
         typeof blockData === 'string' &&
         typeof mimeType === 'string'
       ) {
-        images.push({ data: blockData, mimeType });
+        const record = block as Record<string, unknown>;
+        images.push({
+          data: blockData,
+          mimeType,
+          ...(typeof record['attachmentId'] === 'string'
+            ? { attachmentId: record['attachmentId'] }
+            : {}),
+        });
       }
     }
   }
@@ -446,6 +436,7 @@ export function transcriptBlocksToDaemonMessages(
         const images = textBlock.images?.map((img) => ({
           data: img.data,
           mimeType: img.mimeType || 'image/*',
+          ...(img.attachmentId ? { attachmentId: img.attachmentId } : {}),
         }));
         const files = textBlock.files?.map((file) => ({
           name: file.name,
@@ -680,10 +671,14 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'tool': {
         const toolBlock = block as DaemonToolTranscriptBlock;
-        const toolCall = daemonToolBlockToToolCall(toolBlock);
-        applyBackgroundAgentTaskUpdate(
-          toolCall,
-          backgroundAgentTaskUpdates.get(toolCall.callId),
+        const projectedToolCall = daemonToolBlockToToolCall(toolBlock);
+        const backgroundAgentUpdate = backgroundAgentTaskUpdates.get(
+          projectedToolCall.callId,
+        );
+        const toolCall = projectTerminalBackgroundAgentTool(
+          projectedToolCall,
+          backgroundAgentUpdate?.status,
+          backgroundAgentUpdate?.endTime,
         );
         const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
         if (permissionInfo?.title) {

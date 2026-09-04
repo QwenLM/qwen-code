@@ -564,6 +564,41 @@ describe('AssistantMessage markdown tables', () => {
   });
 });
 
+describe('AssistantMessage copy reset timer', () => {
+  it('leaves no pending reset timer behind on unmount', async () => {
+    vi.useFakeTimers();
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+    try {
+      const container = render(
+        <AssistantMessage content="copy me" showFooterActions />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[title="Copy"]',
+      );
+      await act(async () => {
+        button?.click();
+        await Promise.resolve();
+      });
+      // The 2s reset is pending; unmounting must clear it, or it fires
+      // after the file's environment is torn down and the unit suites'
+      // unhandled-error gate turns an all-green run red.
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      const { root, container: mountedContainer } = mounted.pop()!;
+      act(() => root.unmount());
+      mountedContainer.remove();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(navigator, 'clipboard', descriptor);
+      }
+    }
+  });
+});
+
 describe('AssistantMessage copy without the async Clipboard API (issue #9485)', () => {
   it('falls back to execCommand and still shows the copied state', async () => {
     const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
