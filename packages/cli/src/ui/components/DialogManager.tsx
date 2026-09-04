@@ -368,6 +368,7 @@ export const DialogManager = ({
       <Box flexDirection="column">
         <OutputStyleDialog
           currentStyleName={config.getOutputStyle()?.name}
+          styles={uiState.outputStyleChoices}
           onSelect={uiActions.handleOutputStyleSelect}
         />
       </Box>
