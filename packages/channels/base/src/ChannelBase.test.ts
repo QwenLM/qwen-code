@@ -4395,6 +4395,16 @@ describe('ChannelBase', () => {
           'Usage: /session current | /session new <name> [--worktree]',
         );
         expect(bridge.newSession).not.toHaveBeenCalled();
+
+        // Any leading-flag token is missing the task name, not just
+        // --worktree: the guard covers the class, and no legal task name
+        // starts with '-' (TASK_NAME_PATTERN requires a leading
+        // alphanumeric).
+        await ch.handleInbound(envelope({ text: '/session new --force' }));
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Usage: /session current | /session new <name> [--worktree]',
+        );
+        expect(bridge.newSession).not.toHaveBeenCalled();
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }

@@ -120,8 +120,14 @@ export async function createWorktreeSessionMarkerExclusive(
   // already exists, so it stays outside the try: only a failure past this
   // point has a file of ours to remove.
   const handle = await fs.open(markerPath, flags, 0o600);
+  // Captured from the opened handle so the cleanup below can verify the path
+  // still refers to the file this call created before removing it.
+  let createdDev = 0;
+  let createdIno = 0;
   try {
     const before = await handle.stat();
+    createdDev = before.dev;
+    createdIno = before.ino;
     if (!before.isFile() || before.nlink !== 1 || before.ino === 0) {
       throw new Error('Worktree session marker has an unsafe identity');
     }
@@ -142,15 +148,29 @@ export async function createWorktreeSessionMarkerExclusive(
     ) {
       throw new Error('Worktree session marker identity changed');
     }
-    await handle.close();
   } catch (error) {
-    // The O_EXCL open created this file, so it is ours to remove: never
-    // leave the empty or half-verified shell behind, or every later create
-    // wedges on EEXIST and the strict reader reports an invalid owner.
     await handle.close().catch(() => {});
-    await fs.unlink(markerPath).catch(() => {});
+    // Remove only the file this call created: on the identity-changed branch
+    // the path already refers to someone else's inode, and unlinking it would
+    // turn a fail-closed detection into a destructive action against the
+    // detected file. Without a captured identity there is nothing to match,
+    // so the rare shell is left for operator cleanup instead.
+    if (createdIno !== 0) {
+      try {
+        const current = await fs.lstat(markerPath);
+        if (current.dev === createdDev && current.ino === createdIno) {
+          await fs.unlink(markerPath);
+        }
+      } catch {
+        // Path already gone — nothing of ours to remove.
+      }
+    }
     throw error;
   }
+  // Close after the catch: the marker is fully written and fsync'd at this
+  // point, so a close rejection must propagate with the marker intact rather
+  // than trigger cleanup of a valid file.
+  await handle.close();
   await addWorktreeSessionMarkerExclude(worktreePath);
 }
 

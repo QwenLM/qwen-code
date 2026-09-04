@@ -3606,7 +3606,7 @@ export abstract class ChannelBase {
           if (
             (isolation === 'shared' && parts.length !== 1) ||
             (isolation === 'worktree' && parts.length !== 2) ||
-            parts[0] === '--worktree'
+            parts[0]?.startsWith('-')
           ) {
             break;
           }
