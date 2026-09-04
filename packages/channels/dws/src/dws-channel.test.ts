@@ -1318,6 +1318,41 @@ describe('DwsChannel', () => {
     ]);
   });
 
+  it('parses a prefixed single-line document link after the strip', async () => {
+    // The anchored link patterns only match a line that is nothing but the
+    // link, so a prefixed link parses only on the second pass over the
+    // stripped text.
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(
+      client,
+      makeConfig({ messagePrefix: '/review' }),
+    );
+    const link = documentMentionCard('doc-prefixed-link', 'comment-link')
+      .split('\n')
+      .find((line) => line.startsWith('[https://alidocs.dingtalk.com/'))!;
+
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'document-with-prefix',
+        `/review ${link}`,
+      ),
+    );
+
+    expect(client.readDocument).toHaveBeenCalledWith(
+      'doc-prefixed-link',
+      expect.any(AbortSignal),
+    );
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'doc-prefixed-link',
+        threadId: 'comment-link',
+        bypassMessagePrefix: true,
+      }),
+    ]);
+  });
+
   it('lets polling recover a stale replayed document notification', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);

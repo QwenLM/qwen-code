@@ -1694,8 +1694,93 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments?.[0]?.fileName).toBe('secret.png');
-    expect(channel.envelopes[0]?.bypassMessagePrefix).toBe(true);
+    expect(channel.envelopes[0]?.syntheticText).toBe(true);
   });
+
+  it.each([
+    {
+      label: 'a transcribed voice message stays gated on the prefix',
+      event: 'message.voice',
+      payload: {
+        msgtype: 'voice',
+        voice: { content: 'please look at the build' },
+      },
+      dispatched: false,
+    },
+    {
+      label: 'a prefixed transcript is dispatched and stripped',
+      event: 'message.voice',
+      payload: {
+        msgtype: 'voice',
+        voice: { content: '/review please look at the build' },
+      },
+      dispatched: true,
+      text: 'please look at the build',
+      synthetic: undefined,
+    },
+    {
+      label: 'an untranscribed voice message runs as media',
+      event: 'message.voice',
+      payload: { msgtype: 'voice', voice: {} },
+      dispatched: true,
+      text: '(voice)',
+      synthetic: true,
+    },
+    {
+      label: 'a mixed message carrying text stays gated on the prefix',
+      event: 'message.mixed',
+      payload: {
+        msgtype: 'mixed',
+        mixed: {
+          msg_item: [
+            { msgtype: 'text', text: { content: 'inspect this' } },
+            { msgtype: 'image', image: {} },
+          ],
+        },
+      },
+      dispatched: false,
+    },
+    {
+      label: 'a mixed message with no text runs as media',
+      event: 'message.mixed',
+      payload: {
+        msgtype: 'mixed',
+        mixed: { msg_item: [{ msgtype: 'image', image: {} }] },
+      },
+      dispatched: true,
+      text: '',
+      synthetic: true,
+    },
+  ])(
+    'under a configured prefix, $label',
+    async ({ event, payload, dispatched, text, synthetic }) => {
+      // A transcript is the user's own words, so it carries the prefix like
+      // any other message; only the adapter's own placeholder is exempt.
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const channel = new TestWeComChannel(
+        'bot',
+        makeConfig({ messagePrefix: '/review' }),
+        makeBridge(),
+      );
+      await channel.connect();
+
+      lastClient().emit(event, {
+        msgid: `msg-${event}-${String(dispatched)}`,
+        chattype: 'single',
+        from: { userid: 'alice' },
+        ...payload,
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      if (!dispatched) {
+        expect(channel.envelopes).toHaveLength(0);
+        return;
+      }
+      await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+      expect(channel.envelopes[0]?.text).toBe(text);
+      expect(channel.envelopes[0]?.syntheticText).toBe(synthetic);
+    },
+  );
 
   it('logs sanitized payloads only when debug payload logging is enabled', async () => {
     const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];

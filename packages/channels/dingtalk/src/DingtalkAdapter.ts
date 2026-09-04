@@ -2416,6 +2416,10 @@ export class DingtalkChannel extends ChannelBase {
     if (msgtype === 'audio') {
       const code = data.content?.downloadCode;
       const recognition = data.content?.recognition;
+      // A transcript is the user's own words, so it stays gated on the
+      // configured prefix -- the same call WeCom makes for its voice
+      // branch. An untranscribed note carries only the `(audio)`
+      // placeholder and runs as synthetic media instead.
       return {
         text: recognition || '(audio)',
         downloadCodes: code ? [code] : [],
@@ -2694,9 +2698,7 @@ export class DingtalkChannel extends ChannelBase {
           ? { chatName: conversationTitle }
           : {}),
         text: messageText,
-        ...(!content.userAuthoredText
-          ? { bypassMessagePrefix: true as const }
-          : {}),
+        ...(!content.userAuthoredText ? { syntheticText: true as const } : {}),
         ...(mentionedMemberIds.length > 0 ? { mentionedMemberIds } : {}),
         isGroup,
         isMentioned,

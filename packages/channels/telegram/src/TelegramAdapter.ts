@@ -209,9 +209,12 @@ export class TelegramChannel extends ChannelBase {
           process.stderr.write(
             `[Telegram:${this.name}] Failed to download document: ${err instanceof Error ? err.message : err}\n`,
           );
-          const promptText = this.configuredMessagePrefix()
-            ? envelope.text
-            : msg.caption || '';
+          // Mirrors the success branch: the placeholder is adapter text, so
+          // only a real caption may survive into the prompt.
+          const promptText =
+            this.configuredMessagePrefix() && msg.caption
+              ? envelope.text
+              : msg.caption || '';
           envelope.text = `${promptText}\n\n(User sent a file "${fileName}" but download failed)`;
         }
       }).catch((err) => {
@@ -269,9 +272,12 @@ export class TelegramChannel extends ChannelBase {
           process.stderr.write(
             `[Telegram:${this.name}] Failed to download voice message: ${err instanceof Error ? err.message : err}\n`,
           );
-          const promptText = this.configuredMessagePrefix()
-            ? envelope.text
-            : msg.caption || '';
+          // Mirrors the success branch: the placeholder is adapter text, so
+          // only a real caption may survive into the prompt.
+          const promptText =
+            this.configuredMessagePrefix() && msg.caption
+              ? envelope.text
+              : msg.caption || '';
           envelope.text = `${promptText}\n\n(User sent a voice message but download failed)`;
         }
       }).catch((err) => {
@@ -305,10 +311,13 @@ export class TelegramChannel extends ChannelBase {
   }
 
   private startMessage(): string {
+    const prefix = this.configuredMessagePrefix();
     return [
       'Qwen Code Telegram bot',
       '',
-      'Send any message to chat with Qwen Code.',
+      prefix
+        ? `Start each message with ${prefix} to chat with Qwen Code.`
+        : 'Send any message to chat with Qwen Code.',
       `Use ${this.prefixedCommand('/new')} to start a fresh conversation.`,
       `Use ${this.prefixedCommand('/cancel')} to stop a running request.`,
       `Use ${this.prefixedCommand('/help')} to see available commands.`,
@@ -553,30 +562,34 @@ export class TelegramChannel extends ChannelBase {
 
     // Extract referenced message text (when user replies to a message)
     const referencedText = msg.reply_to_message?.text || undefined;
+    // A configured prefix wins over the command-menu bypass: nothing rejects
+    // `/new` as a prefix, and without this every prefixed message would run
+    // the colliding command instead of being stripped and dispatched. Bare
+    // menu commands that do not start with the prefix keep the bypass.
+    const configuredPrefix = this.configuredMessagePrefix();
     const bypassMessagePrefix =
-      syntheticText ||
-      (allowRegisteredCommandBypass &&
-        (entities?.some((entity) => {
-          if (entity.type !== 'bot_command' || entity.offset !== 0)
-            return false;
-          const value = text.slice(0, entity.length).toLowerCase();
-          const command = value.slice(1).split('@', 1)[0];
-          // `/cancel@OtherBot` is addressed to a different bot. `parseCommand`
-          // strips the suffix, so without this check the bypass would let a
-          // command meant for someone else past the prefix gate and run it
-          // here -- cancelling our own request, for instance.
-          const atIndex = value.indexOf('@', 1);
-          if (
-            atIndex !== -1 &&
-            value.slice(atIndex + 1) !== this.botUsername.toLowerCase()
-          ) {
-            return false;
-          }
-          return TELEGRAM_BOT_COMMANDS.some(
-            (registered) => registered.command === command,
-          );
-        }) ??
-          false));
+      allowRegisteredCommandBypass &&
+      !(configuredPrefix && text.trim().startsWith(configuredPrefix)) &&
+      (entities?.some((entity) => {
+        if (entity.type !== 'bot_command' || entity.offset !== 0) return false;
+        const value = text.slice(0, entity.length).toLowerCase();
+        const command = value.slice(1).split('@', 1)[0];
+        // `/cancel@OtherBot` is addressed to a different bot. `parseCommand`
+        // strips the suffix, so without this check the bypass would let a
+        // command meant for someone else past the prefix gate and run it
+        // here -- cancelling our own request, for instance.
+        const atIndex = value.indexOf('@', 1);
+        if (
+          atIndex !== -1 &&
+          value.slice(atIndex + 1) !== this.botUsername.toLowerCase()
+        ) {
+          return false;
+        }
+        return TELEGRAM_BOT_COMMANDS.some(
+          (registered) => registered.command === command,
+        );
+      }) ??
+        false);
 
     return {
       channelName: this.name,
@@ -591,6 +604,7 @@ export class TelegramChannel extends ChannelBase {
           ? String(msg.message_thread_id)
           : undefined,
       text: cleanText,
+      ...(syntheticText ? { syntheticText: true as const } : {}),
       ...(bypassMessagePrefix ? { bypassMessagePrefix: true as const } : {}),
       isGroup,
       isMentioned,

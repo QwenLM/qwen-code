@@ -525,7 +525,7 @@ describe('TelegramChannel', () => {
       reply: vi.fn(),
     });
     const preparation = channel.inboundPreparations[0]!;
-    expect(preparation.envelope.bypassMessagePrefix).toBe(true);
+    expect(preparation.envelope.syntheticText).toBe(true);
     await preparation.prepare();
 
     expect(preparation.envelope.text).toBe('');
@@ -536,6 +536,106 @@ describe('TelegramChannel', () => {
       recursive: true,
     });
   });
+
+  it.each([
+    {
+      label: 'photo',
+      event: 'message:photo',
+      message: { photo: [{ file_id: 'photo-1' }] },
+    },
+    {
+      label: 'document',
+      event: 'message:document',
+      message: {
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+    },
+  ])(
+    'runs a captionless $label despite a configured prefix',
+    async ({ event, message }) => {
+      // Without the synthetic marking, the `(image)` / `(file: …)`
+      // placeholder is gated like user text and the media is dropped with
+      // no action the sender could take.
+      const channel = createChannel({ messagePrefix: '/review' });
+      const bot = installFakeBot(channel);
+      vi.spyOn(process, 'once').mockReturnValue(process);
+      await channel.connect();
+      const handler = bot.on.mock.calls.find(
+        ([registered]) => registered === event,
+      )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+      await handler!({
+        message: {
+          message_id: 1,
+          from: { id: 1, first_name: 'User' },
+          chat: { id: 1, type: 'private' },
+          ...message,
+        },
+        api: bot.api,
+        reply: vi.fn(),
+      });
+
+      expect(channel.inboundPreparations[0]?.envelope.syntheticText).toBe(true);
+    },
+  );
+
+  it.each([
+    {
+      label: 'document',
+      event: 'message:document',
+      message: {
+        document: {
+          file_id: 'file-1',
+          file_name: 'report.pdf',
+          mime_type: 'application/pdf',
+        },
+      },
+      placeholder: '(file: report.pdf)',
+      note: '(User sent a file "report.pdf" but download failed)',
+    },
+    {
+      label: 'voice',
+      event: 'message:voice',
+      message: { voice: { file_id: 'voice-1', mime_type: 'audio/ogg' } },
+      placeholder: '(voice message)',
+      note: '(User sent a voice message but download failed)',
+    },
+  ])(
+    'drops the $label placeholder from the prompt when the download fails',
+    async ({ event, message, placeholder, note }) => {
+      // The synthetic envelope skips stripping, so the placeholder is still
+      // in `envelope.text` at catch time -- keying on the caption keeps it
+      // out of the prompt, as the success branch already does.
+      const channel = createChannel({ messagePrefix: '/review' });
+      const bot = installFakeBot(channel);
+      vi.spyOn(process, 'once').mockReturnValue(process);
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      await channel.connect();
+      const handler = bot.on.mock.calls.find(
+        ([registered]) => registered === event,
+      )?.[1] as ((ctx: unknown) => Promise<void>) | undefined;
+
+      await handler!({
+        message: {
+          message_id: 1,
+          from: { id: 1, first_name: 'User' },
+          chat: { id: 1, type: 'private' },
+          ...message,
+        },
+        api: bot.api,
+        reply: vi.fn(),
+      });
+      const preparation = channel.inboundPreparations[0]!;
+      await preparation.prepare();
+
+      expect(preparation.envelope.text).not.toContain(placeholder);
+      expect(preparation.envelope.text).toBe(`\n\n${note}`);
+    },
+  );
 
   it('still gates a captioned photo on the configured prefix', async () => {
     // The narrowness control: a caption IS user-authored, so it must
@@ -561,7 +661,7 @@ describe('TelegramChannel', () => {
     });
 
     expect(
-      channel.inboundPreparations[0]?.envelope.bypassMessagePrefix,
+      channel.inboundPreparations[0]?.envelope.syntheticText,
     ).toBeUndefined();
   });
 
@@ -704,6 +804,44 @@ describe('TelegramChannel', () => {
     },
   );
 
+  it('does not grant the bypass for a bot_command entity past offset 0', () => {
+    // Telegram attaches `bot_command` entities anywhere in a message. Only
+    // a leading one is a menu action; anything else is prose that has to
+    // stay behind the prefix gate.
+    const channel = createChannel({ messagePrefix: '/review' });
+
+    const built = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+      },
+      'hi /cancel',
+      [{ type: 'bot_command', offset: 3, length: 7 }],
+      true,
+    );
+
+    expect(built.bypassMessagePrefix).toBeUndefined();
+  });
+
+  it('keeps a prefix that collides with a menu command a prefix', () => {
+    // Nothing rejects `/new` as a prefix. Without the precedence rule the
+    // command-menu bypass would run the clear command on every prefixed
+    // message instead of stripping and dispatching it.
+    const channel = createChannel({ messagePrefix: '/new' });
+
+    const built = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private' },
+      },
+      '/new fix the bug',
+      [{ type: 'bot_command', offset: 0, length: 4 }],
+      true,
+    );
+
+    expect(built.bypassMessagePrefix).toBeUndefined();
+  });
+
   it('handles the Telegram Start button when a prefix is configured', async () => {
     const channel = createChannel({ messagePrefix: '/review' });
     const bot = installFakeBot(channel);
@@ -730,6 +868,12 @@ describe('TelegramChannel', () => {
       expect.stringContaining('Use /review /help'),
       { parse_mode: 'HTML' },
     );
+    // The greeting must not invite the very messages the gate drops.
+    const greeting = String(bot.api.sendMessage.mock.calls[0]?.[1]);
+    expect(greeting).toContain(
+      'Start each message with /review to chat with Qwen Code.',
+    );
+    expect(greeting).not.toContain('Send any message');
   });
 
   it('sends command replies back to the Telegram forum topic', async () => {

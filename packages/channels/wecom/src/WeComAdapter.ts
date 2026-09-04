@@ -442,7 +442,7 @@ export class WeComChannel extends ChannelBase {
       chatId,
       text,
       ...(isSyntheticMediaText(body, text)
-        ? { bypassMessagePrefix: true as const }
+        ? { syntheticText: true as const }
         : {}),
       messageId: rawMessageId ?? messageId,
       isGroup,
@@ -1360,6 +1360,9 @@ function isSyntheticMediaText(
     return true;
   }
   if (msgType === 'voice') {
+    // A transcript is the user's own words, so it stays gated on the
+    // configured prefix; a voice note without one carries only the
+    // `(voice)` placeholder.
     return !getString(getRecord(body, 'voice'), 'content');
   }
   return msgType === 'mixed' && text.length === 0;
