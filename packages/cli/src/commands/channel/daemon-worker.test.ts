@@ -552,6 +552,34 @@ describe('createDaemonSessionFactory', () => {
       'qwen-channel-worker',
     );
   });
+
+  it('forwards worktree isolation only while creating a session', async () => {
+    const sdk = createSdk();
+    const factory = createDaemonSessionFactory({
+      client: sdk.client,
+      DaemonSessionClient: sdk.DaemonSessionClient,
+      clientId: 'qwen-channel-worker',
+    });
+
+    await factory({ workspaceCwd: '/workspace', worktree: {} });
+    await factory({
+      workspaceCwd: '/workspace',
+      sessionId: 'existing-session',
+      worktree: {},
+    });
+
+    expect(sdk.DaemonSessionClient.createOrAttach).toHaveBeenCalledWith(
+      sdk.client,
+      expect.objectContaining({ worktree: {} }),
+      'qwen-channel-worker',
+    );
+    expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
+      sdk.client,
+      'existing-session',
+      expect.not.objectContaining({ worktree: expect.anything() }),
+      'qwen-channel-worker',
+    );
+  });
 });
 
 describe('createDaemonChannelBridgeFacade', () => {
@@ -1578,6 +1606,43 @@ describe('runChannelDaemonWorker', () => {
 
     expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
       expect.objectContaining({ sessionPermissionVote: false }),
+    );
+  });
+
+  it('enables worktree persistence only when the daemon advertises it', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['session_worktree_persistence_v1'],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+    });
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionWorktreePersistence: true }),
+    );
+  });
+
+  it('keeps worktree persistence off when the daemon omits the capability', async () => {
+    const sdk = createSdk();
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionWorktreePersistence: false }),
     );
   });
 

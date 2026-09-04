@@ -27,6 +27,8 @@ import type {
   DaemonSessionAttachmentReference,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
+  DaemonSessionTurnIndexPage,
+  DaemonSessionTurnIndexPageOptions,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
@@ -510,6 +512,10 @@ export class DaemonSessionClient {
     return this.session.worktree;
   }
 
+  get worktreeState(): DaemonSession['worktreeState'] {
+    return this.session.worktreeState;
+  }
+
   get branch(): DaemonSession['branch'] {
     return this.session.branch;
   }
@@ -726,8 +732,23 @@ export class DaemonSessionClient {
         : this.client.resumeSession(this.sessionId, {
             workspaceCwd: this.restoreStrategy.workspaceCwd,
           });
-    this.reattaching = resume.then((session) => {
-      // Refresh only the clientId; leave the SSE cursor and ACP state intact.
+    this.reattaching = resume.then(async (session) => {
+      if (this.session.worktreeState === 'persisted-v1') {
+        const sameWorktree =
+          session.worktreeState === 'persisted-v1' &&
+          session.worktree?.path === this.session.worktree?.path;
+        if (!sameWorktree) {
+          await this.client
+            .detachSession(session.sessionId, session.clientId)
+            .catch(() => {});
+          throw new Error(
+            `Daemon lost durable worktree identity for session ${this.sessionId}`,
+          );
+        }
+        this.session.worktree = session.worktree;
+        this.session.worktreeState = session.worktreeState;
+      }
+      // Refresh only the client identity; leave the SSE cursor and ACP state intact.
       this.session.clientId = session.clientId;
     });
     try {
@@ -949,6 +970,15 @@ export class DaemonSessionClient {
         page.events.map(async (event) => await this.hydrateEvent(event)),
       ),
     };
+  }
+
+  async getTurnIndexPage(
+    opts: DaemonSessionTurnIndexPageOptions = {},
+  ): Promise<DaemonSessionTurnIndexPage> {
+    return this.client.getSessionTurnIndexPage(this.sessionId, {
+      ...opts,
+      clientId: opts.clientId ?? this.clientId,
+    });
   }
 
   removePendingPrompt(
