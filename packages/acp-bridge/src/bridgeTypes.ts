@@ -228,6 +228,8 @@ export interface BridgeSession {
   modelApplied?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Set by the daemon route after durable worktree ownership is verified. */
+  worktreeState?: 'persisted-v1';
   /** Present when the session was created with a new branch. */
   branch?: { name: string; baseBranch: string };
 }
@@ -260,6 +262,10 @@ export interface BridgeRestoreSessionRequest {
   sourceType?: string;
   /** Optional persisted identifier paired with `sourceType`. */
   sourceId?: string;
+  /** Internal daemon route owns strict worktree sidecar validation. */
+  suppressWorktreeContextRestore?: boolean;
+  /** Delay ask_user_question recovery until daemon route validation finishes. */
+  deferRestoreAskUserQuestionPrompt?: boolean;
 }
 
 /** Internal daemon-only restore surface for a managed standalone session. */
@@ -947,6 +953,8 @@ export const DAEMON_PERMISSION_CANCEL_REASON_META_KEY =
  */
 export const DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.suppressRestoreAskUserQuestion';
+export const DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY =
+  'qwen.daemon.suppressWorktreeContextRestore';
 export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
   'qwen.daemon.attachmentReferences';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
@@ -1477,6 +1485,18 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   setSessionWorktree(
     sessionId: string,
     worktree: { slug: string; path: string; branch: string },
+  ): void;
+
+  /** Admit a restore question deferred by the daemon's integrity gate. */
+  fireDeferredRestoreAskUserQuestionPrompt?(
+    sessionId: string,
+    clientId: string | undefined,
+  ): boolean;
+
+  /** Drop a restore question rejected by the daemon's integrity gate. */
+  discardDeferredRestoreAskUserQuestionPrompt?(
+    sessionId: string,
+    clientId: string | undefined,
   ): void;
 
   /**

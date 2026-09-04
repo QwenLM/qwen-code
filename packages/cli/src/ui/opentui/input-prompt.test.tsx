@@ -933,6 +933,70 @@ describe('OpenTuiInputPrompt Enter accepts completions (G-13)', () => {
     expect(submitted).toEqual(['/help']);
   });
 
+  it('Enter submits the live exact command when the dropdown trails the buffer', async () => {
+    const submitted: string[] = [];
+    await renderWithCommands(
+      [
+        {
+          name: 'model',
+          description: 'Set the model',
+          kind: 'built-in',
+          action: () => undefined,
+          completionPriority: 1,
+        },
+        {
+          name: 'quit',
+          description: 'Quit',
+          kind: 'built-in',
+          action: () => undefined,
+        },
+      ],
+      (text) => submitted.push(text),
+    );
+    const editor = currentEditor();
+    // Publish the dropdown for the `/` prefix alone: `/model` highlighted, no
+    // perfect match. This is the state Enter would read if it trusted it.
+    await typeText('/');
+    // Then move the buffer without a flush — what a render loop busy with a
+    // streaming turn does to the last keystrokes before an Enter.
+    editor.setText('/quit');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    // Counterfactual (mutation-checked): trusting the stale row splices it
+    // into the live buffer instead — the range still describes `/`, so
+    // `/quit` comes out as `/model quit` and nothing is ever submitted.
+    expect(submitted).toEqual(['/quit']);
+    expect(editor.plainText).toBe('');
+  });
+
+  it('Enter does not submit a partial command the trailing dropdown called perfect', async () => {
+    const submitted: string[] = [];
+    await renderWithCommands(
+      [
+        {
+          name: 'quit',
+          description: 'Quit',
+          kind: 'built-in',
+          action: () => undefined,
+        },
+        { name: 'clear', description: 'Clear', kind: 'built-in' },
+      ],
+      (text) => submitted.push(text),
+    );
+    // The mirror image: a perfect match published for `/quit`, then the buffer
+    // moves back to a partial. The stale verdict must not submit it as text.
+    const editor = currentEditor();
+    await typeText('/quit');
+    editor.setText('/cle');
+    await act(async () => {
+      lastKeyboardHandler()(baseKeyEvent({ name: 'return', sequence: '\r' }));
+    });
+    expect(submitted).toEqual([]);
+    // Non-vacuity: Enter took the accept path instead of doing nothing at all.
+    expect(editor.plainText).not.toBe('/cle');
+  });
+
   it('after navigating, Enter fills the highlighted sub-command', async () => {
     const submitted: string[] = [];
     await renderWithCommands(
