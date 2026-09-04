@@ -5,7 +5,7 @@
  */
 
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -253,24 +253,31 @@ describe('scripts suite timeout', () => {
     // a suite applies to itself: a runtime `setConfig` in a test file outranks
     // the project config and holds that suite at its own number while this file
     // reads green — install-script.test.js sat at 30s under the raised ceiling
-    // that way. Every argument shape does that, so the call itself is the
+    // that way. `vitest` is vitest's own alias for `vi`, and under this
+    // suite's `globals: true` a bare global besides, so both spellings clamp
+    // the same. Every argument shape does that too, so the call itself is the
     // violation; matching `testTimeout` inside the arguments let a parenthesized
     // value ahead of it slip past. The walk takes every file here, not the
     // include glob's extension list, so widening that list cannot leave the scan
     // behind. Deliberate per-test budgets (`it(name, fn, ms)`) are out of scope:
     // they are visible at the test they clamp, unlike a file-wide override.
+    const clampsCeiling = (source: string) =>
+      /\b(vi|vitest)\.setConfig\(/.test(source);
+    // Assembled, not spelled out: this file is inside its own walk.
+    for (const alias of ['vi', 'vitest']) {
+      expect(
+        clampsCeiling(`${alias}.setConfig({ testTimeout: 1 })`),
+        alias,
+      ).toBe(true);
+    }
     const here = fileURLToPath(new URL('.', import.meta.url));
     const shadowing = readdirSync(here, {
       recursive: true,
       withFileTypes: true,
     })
       .filter((entry) => entry.isFile())
-      .filter((entry) =>
-        /vi\.setConfig\(/.test(
-          readFileSync(join(entry.parentPath, entry.name), 'utf8'),
-        ),
-      )
-      .map((entry) => entry.name);
+      .map((entry) => relative(here, join(entry.parentPath, entry.name)))
+      .filter((path) => clampsCeiling(readFileSync(join(here, path), 'utf8')));
     expect(shadowing).toEqual([]);
   });
 });
