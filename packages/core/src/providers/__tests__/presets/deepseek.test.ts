@@ -24,7 +24,7 @@ describe('deepseekProvider', () => {
     const plan = buildInstallPlan(deepseekProvider, {
       baseUrl: 'https://api.deepseek.com',
       apiKey: 'sk-deepseek',
-      modelIds: ['deepseek-v4-flash', 'DeepSeek-V4-Pro'],
+      modelIds: ['deepseek-v4-flash', 'deepseek-v4-pro', 'DeepSeek-V4-Pro'],
     });
 
     const models = plan.modelProviders?.[0]?.models;
@@ -36,8 +36,10 @@ describe('deepseekProvider', () => {
     expect(models?.[0]?.generationConfig).toEqual({
       contextWindowSize: 1000000,
     });
-    expect(models?.[1]?.generationConfig).toEqual({
-      contextWindowSize: 1000000,
+    expect(models?.[1]).toMatchObject({
+      id: 'DeepSeek-V4-Pro',
+      name: '[DeepSeek] DeepSeek-V4-Pro',
+      generationConfig: { contextWindowSize: 1000000 },
     });
     expect(models?.[1]?.capabilities?.reasoning).toEqual({
       thinking: true,
