@@ -7,11 +7,13 @@
 /**
  * @fileoverview Checks that a compiled cli can still reach core by module path.
  *
- * The cli's own sources say `@qwen-code/qwen-code-core/config/storage.js` and
- * the like. Inside the repo those resolve through tsconfig `paths` (for tsc and
- * esbuild) or through vitest aliases (for the suites) — three mechanisms, none
- * of which the published package has. There, the emitted JS keeps the specifier
- * verbatim and Node resolves it against core's `exports` map.
+ * The cli's own sources — and the workspace packages its runtime graph pulls in
+ * (acp-bridge, sdk-typescript) — say
+ * `@qwen-code/qwen-code-core/config/storage.js` and the like. Inside the repo
+ * those resolve through tsconfig `paths` (for tsc and esbuild) or through
+ * vitest aliases (for the suites) — three mechanisms, none of which the
+ * published package has. There, the emitted JS keeps the specifier verbatim
+ * and Node resolves it against core's `exports` map.
  *
  * Nothing else exercises that entry. Remove it, rename the `dist/src` root, or
  * add a pattern that shadows it, and every suite stays green while `qwen` dies
@@ -31,11 +33,24 @@ const EXPORT_PROBES = new Map([
   ['@qwen-code/qwen-code-core/noFollowOpen', 'openSyncNoFollow'],
 ]);
 const specifiers = new Set(EXPORT_PROBES.keys());
-const cliSrc = path.join(root, 'packages', 'cli', 'src');
+// acp-bridge and sdk-typescript are runtime dependencies of the cli, and their
+// compiled dist keeps core subpath specifiers verbatim just like the cli's own
+// dist. Scanning them too gates entries that only a dependency names (e.g.
+// ./goalWire, ./transcriptRecords, ./subSessionConstants); without this, those
+// exports entries could be deleted while every gate stays green.
+const scannedSources = [
+  path.join(root, 'packages', 'cli', 'src'),
+  path.join(root, 'packages', 'acp-bridge', 'src'),
+  path.join(root, 'packages', 'sdk-typescript', 'src'),
+];
 const coreSpecifier = /['"](@qwen-code\/qwen-code-core\/[^'"]+)['"]/g;
-for (const relativePath of globSync('**/*.{ts,tsx}', { cwd: cliSrc })) {
-  const source = readFileSync(path.join(cliSrc, relativePath), 'utf8');
-  for (const match of source.matchAll(coreSpecifier)) specifiers.add(match[1]);
+for (const sourceDir of scannedSources) {
+  for (const relativePath of globSync('**/*.{ts,tsx}', { cwd: sourceDir })) {
+    const source = readFileSync(path.join(sourceDir, relativePath), 'utf8');
+    for (const match of source.matchAll(coreSpecifier)) {
+      specifiers.add(match[1]);
+    }
+  }
 }
 
 const coreDist = path.join(root, 'packages', 'core', 'dist', 'src');
