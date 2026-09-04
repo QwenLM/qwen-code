@@ -93,6 +93,9 @@ import type {
   DaemonPendingPromptSummary,
   DaemonPendingPromptsResult,
   DaemonSessionLspStatus,
+  DaemonSessionAgentsStatus,
+  DaemonAgentTrace,
+  DaemonAgentTraceNode,
   DaemonSessionResourcesStatus,
   DaemonRuntimeMcpAddRequest,
   DaemonRuntimeMcpAddResult,
@@ -244,6 +247,12 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionTurnIndexEntry>().not.toBeNever();
     expectTypeOf<DaemonSessionTurnIndexPage>().not.toBeNever();
     expectTypeOf<DaemonSessionTurnIndexPageOptions>().not.toBeNever();
+  });
+
+  it('exports session agent types from the package entry', () => {
+    expectTypeOf<DaemonSessionAgentsStatus>().not.toBeNever();
+    expectTypeOf<DaemonAgentTrace>().not.toBeNever();
+    expectTypeOf<DaemonAgentTraceNode>().not.toBeNever();
   });
 
   it('round-trips a raw DaemonEvent through the public narrow helper', () => {
