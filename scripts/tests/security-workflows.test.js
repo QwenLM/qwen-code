@@ -94,6 +94,23 @@ describe('security workflows', () => {
     expect(auditStep).toContain(
       'npm audit --omit=dev --audit-level=high --workspaces=false',
     );
+    // A registry-side audit failure is retried and then reported as its own
+    // error, never swallowed: an endpoint outage must not read as a CVE
+    // finding, and must not pass the gate either. Witnessed by bash in
+    // security-checks-audit-retry.test.js.
+    expect(auditStep).toContain('audit endpoint returned an error');
+    expect(auditStep).toContain(
+      'audit npm audit --omit=dev --audit-level=high || status=$?',
+    );
+    expect(auditStep).toContain(
+      'audit npm audit --omit=dev --audit-level=high --workspaces=false',
+    );
+    expect(auditStep).not.toContain('|| true');
+    // The retry is bounded on both axes: every attempt is capped, and the job
+    // ceiling covers the worst case (2 audit sites x 2 attempts x 300s). Drop
+    // either and a registry outage turns a reported verdict into a job cancel.
+    expect(auditStep).toContain('timeout 300 "$@"');
+    expect(dependencyJob).toContain('timeout-minutes: 25');
     expect(trufflehogStep).not.toContain('continue-on-error');
     const trufflehogPin = trufflehogStep.match(
       /trufflesecurity\/trufflehog@[0-9a-f]{40}' # v([\d.]+)/,
