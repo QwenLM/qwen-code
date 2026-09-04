@@ -43,6 +43,7 @@ import {
   type PeerInbox,
 } from './uds-inbox.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
+import { leaveStaleSocket } from '../test-utils/stale-socket.js';
 
 /**
  * A PID no process can ever hold.
@@ -129,25 +130,6 @@ async function makeShortTmpDir(prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(`/tmp/${prefix}`);
   shortTmpDirs.push(dir);
   return dir;
-}
-
-let staleSocketSequence = 0;
-
-async function leaveStaleSocket(socketPath: string): Promise<void> {
-  const livePath = path.join(
-    path.dirname(socketPath),
-    `.stale-${staleSocketSequence++}`,
-  );
-  const server = net.createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(livePath, resolve);
-  });
-  try {
-    await fs.rename(livePath, socketPath);
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
 }
 
 describe.skipIf(isWindows)('startPeerInbox', () => {
