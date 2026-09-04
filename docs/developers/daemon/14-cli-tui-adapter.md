@@ -11,7 +11,7 @@
 - **Renderers** (`render.ts`, `terminal.ts`, `toolPreview.ts`): transcript blocks to HTML, terminal text, and tool preview strings. Hosts can use or replace them.
 - **Conformance** (`conformance.ts`): cross-host consistency tests used when channel, TUI, and IDE surfaces migrate to these primitives.
 
-The first production consumer is **`packages/web-shell/client/daemon/`** ([#4328](https://github.com/QwenLM/qwen-code/pull/4328)). Its React `DaemonSessionProvider` and transcript adapter let Web Shell connect directly to daemon HTTP+SSE. CLI TUI, channel base, and VS Code daemon transport can reuse the same layer later; [`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md) documents the v2 incremental migration guide.
+The first production consumer was introduced in [#4328](https://github.com/QwenLM/qwen-code/pull/4328) and now lives in **`packages/web-shell/client/daemon/`**. Its React `DaemonSessionProvider` and transcript adapter let Web Shell connect directly to daemon HTTP+SSE. CLI TUI, channel base, and VS Code IDE can reuse the same layer; [`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md) documents the v2 incremental migration guide.
 
 ## Responsibilities
 
@@ -105,7 +105,7 @@ store.subscribe(() => render(store.getState()));
 store.dispatch(uiEvents); // internally runs the reducer
 ```
 
-Web Shell's `DaemonSessionProvider` builds its React context on top of this store.
+The web UI's `DaemonSessionProvider` builds its React context on top of this store.
 
 ## Flow
 
@@ -124,7 +124,7 @@ flowchart LR
     G --> I["selectors<br/>selectCurrentTool / selectApprovalMode / ..."]
 ```
 
-Hosts can stop at `(E)` and implement their own reducer, or consume `(G)` and the provided selectors. Web Shell uses the full `(B) -> (H)` path. A migrated TUI can consume `(G)` and render with Ink-specific components.
+Hosts can stop at `(E)` and implement their own reducer, or consume `(G)` and the provided selectors. The web UI uses the full `(B) -> (H)` path. A migrated TUI can consume `(G)` and render with Ink-specific components.
 
 ### `state_resync_required`
 
@@ -139,10 +139,10 @@ This landed in [#4328](https://github.com/QwenLM/qwen-code/pull/4328).
 | File                        | Exports                                                                                                                                                                                                                                                                                                                        |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `DaemonSessionProvider.tsx` | React `<DaemonSessionProvider />`; `useDaemonSession()`, `useDaemonTranscriptStore()`, `useDaemonTranscriptState()`, `useDaemonTranscriptBlocks()`, `useDaemonPendingPermissions()`, `useDaemonActions()`, `useDaemonConnection()` hooks; `DaemonConnectionStatus`, `DaemonConnectionState`, `DaemonSessionContextValue` types |
-| `transcriptToMessages.ts`   | Adapts SDK `DaemonTranscriptBlock` into Web Shell messages, including markdown streaming chunk merge and tool call summaries                                                                                                                                                                                                  |
+| `transcriptAdapter.ts`      | Adapts SDK `DaemonTranscriptBlock` into the web UI's `UnifiedMessage`, including markdown streaming chunk merge and tool call summaries                                                                                                                                                                                        |
 | `index.ts`                  | Subpackage barrel                                                                                                                                                                                                                                                                                                              |
 
-Web Shell can connect directly to daemon HTTP+SSE and render a transcript. The VS Code companion separately embeds the same renderer behind its ACP host boundary.
+The web UI can now connect directly to daemon HTTP+SSE and render a transcript. The old `ACPAdapter` host `postMessage` path remains available.
 
 ### Later migrations
 
@@ -176,10 +176,10 @@ Web Shell can connect directly to daemon HTTP+SSE and render a transcript. The V
 ## Caveats and known limits
 
 - **`daemon-tui-adapter.ts` still exists**. It is the CLI package's legacy experimental adapter. New code should prefer SDK `ui/*`: `normalizeDaemonEvent`, `reduceDaemonTranscriptEvents`, and `DaemonTranscriptBlock`.
-- **CLI TUI, channel base, and VS Code daemon transport are not migrated yet**. They still maintain their own transport or rendering paths. The `docs/developers/daemon-client-adapters/` directory also has `ide.md`, `channel-web.md`, and the historical `tui.md` draft.
+- **CLI TUI, channel base, and VS Code IDE are not migrated yet**. They still maintain their own rendering logic. The `docs/developers/daemon-client-adapters/` directory still has `ide.md`, `channel-web.md`, and the historical `tui.md` draft; the newer `web-ui.md` covers the web UI adapter design.
 - **`eventId` is the primary ordering key**. `createdAt` remains as a deprecated alias (`clientReceivedAt`). New code should use `selectTranscriptBlocksOrderedByEventId(state)`. `MIGRATION.md` shows the code diff for switching from `createdAt` ordering to `eventId` ordering.
 - **Unknown wire types normalize to `debug`**. They are no longer dropped as in the old adapter. Renderers do not show `debug` by default; hosts must opt in to display it.
-- **Bundle size**: the `ui/*` subpackage is exported as an ESM subpath through `@qwen-code/sdk/daemon` and does not pull in React or DOM dependencies. React integration is only loaded when a Web Shell consumer uses `DaemonSessionProvider`.
+- **Bundle size**: the `ui/*` subpackage is exported as an ESM subpath through `@qwen-code/sdk/daemon` and does not pull in React or DOM dependencies. React integration is only loaded when a web UI consumer uses `DaemonSessionProvider`.
 
 ## References
 
@@ -188,6 +188,6 @@ Web Shell can connect directly to daemon HTTP+SSE and render a transcript. The V
 - `packages/sdk-typescript/src/daemon/ui/normalizer.ts` (wire-to-UI mapping)
 - `packages/sdk-typescript/src/daemon/ui/store.ts`, `render.ts`, `terminal.ts`, `toolPreview.ts`, `conformance.ts`
 - `packages/sdk-typescript/src/daemon/index.ts` (`ui/*` re-export block)
-- `packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx`, `packages/web-shell/client/adapters/transcriptToMessages.ts`
+- `packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx`, `packages/web-shell/client/adapters/transcriptAdapter.ts`
 - Upstream docs: [`../daemon-ui/README.md`](../daemon-ui/README.md), [`../daemon-ui/MIGRATION.md`](../daemon-ui/MIGRATION.md), [`../daemon-client-adapters/web-shell.md`](../daemon-client-adapters/web-shell.md)
 - Context PRs: [#4328](https://github.com/QwenLM/qwen-code/pull/4328) (v1 transcript layer and web UI provider), [#4353](https://github.com/QwenLM/qwen-code/pull/4353) (v2 unified completeness follow-up)

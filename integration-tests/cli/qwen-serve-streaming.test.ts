@@ -197,6 +197,27 @@ beforeAll(async () => {
       return { content: 'The test Todo remains unfinished.' };
     }
 
+    // Gate out the memory-selection side query (its system prompt starts
+    // with "You are selecting memories"): it replays the prompt text, so a
+    // bare marker match would error it too and muddy the request count.
+    if (
+      messages.includes('turn-error-provider-detail-e2e') &&
+      !messages.includes('You are selecting memories')
+    ) {
+      // Reproduces the production failure shape: the gateway reports an
+      // upstream overload as a single `error_finish` chunk whose content is
+      // the provider's JSON error body instead of an HTTP error status.
+      return {
+        errorContent: JSON.stringify({
+          error: {
+            message:
+              'The engine is currently overloaded, please try again later',
+            type: 'engine_overloaded_error',
+          },
+        }),
+      };
+    }
+
     if (messages.includes('turn-final-answer-boundary-e2e')) {
       const toolCallId = 'call_turn_final_answer_boundary';
       if (!messages.includes(toolCallId)) {
@@ -532,6 +553,79 @@ describePOSIX('qwen serve — pollable turn results', () => {
           resultText: 'fake response complete',
         });
     } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 60_000);
+});
+
+describePOSIX('qwen serve — turn_error provider detail', () => {
+  it('publishes the provider message as the turn_error message', async () => {
+    const marker = 'turn-error-provider-detail-e2e';
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+
+    const events: DaemonEvent[] = [];
+    const ac = new AbortController();
+    let promptId: string | undefined;
+    const subscriber = (async () => {
+      try {
+        for await (const event of sseFrames(session.sessionId, {
+          signal: ac.signal,
+        })) {
+          events.push(event);
+          const data = event.data as { promptId?: string } | undefined;
+          if (event.type === 'turn_error' && data?.promptId === promptId) {
+            break;
+          }
+        }
+      } catch {
+        /* aborted */
+      }
+    })();
+
+    const requestStart = fakeServer.requests.length;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: marker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+      promptId = accepted.promptId;
+
+      const findTurnError = () =>
+        events.find((event) => {
+          if (event.type !== 'turn_error') return false;
+          const data = event.data as { promptId?: string } | undefined;
+          return data?.promptId === promptId;
+        });
+      await expect.poll(findTurnError, { timeout: 30_000 }).toBeDefined();
+
+      const data = findTurnError()!.data as { message?: string };
+      expect(data.message).toBe(
+        'The engine is currently overloaded, please try again later',
+      );
+      // The JSON error body carries no numeric code, so no rate-limit retry
+      // fires: the turn must fail after exactly one model request. The
+      // memory-selection side query also carries the marker text (it replays
+      // the prompt), so exclude it from the count the same way the fake
+      // server callback does.
+      const modelRequests = fakeServer.requests
+        .slice(requestStart)
+        .map((request) => JSON.stringify(request.body['messages'] ?? []))
+        .filter(
+          (messages) =>
+            messages.includes(marker) &&
+            !messages.includes('You are selecting memories'),
+        );
+      expect(modelRequests).toHaveLength(1);
+    } finally {
+      ac.abort();
+      await subscriber;
       await client.closeSession(session.sessionId).catch(() => undefined);
     }
   }, 60_000);

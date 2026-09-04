@@ -320,10 +320,7 @@ async function exportSessionAction(
       config,
     );
 
-    const content = exportFormat.format(
-      normalizedData,
-      conversation.messages,
-    );
+    const content = exportFormat.format(normalizedData, conversation.messages);
 
     if (target.outputDirKind === 'custom') {
       try {

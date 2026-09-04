@@ -264,7 +264,7 @@ export function createExportTranscriptDocumentV1(
   for (const block of visibleBlocks) {
     const checkpoint = budget.checkpoint();
     const safe = sanitizeBlock(block, budget, ids, diagnostics);
-    if (budget.textBudgetExceeded) {
+    if (budget.cumulativeTextBudgetExceeded) {
       budget.restore(checkpoint);
       break;
     }
@@ -442,6 +442,15 @@ function sanitizeBlock(
             return safe ? [safe] : [];
           })
         : undefined;
+      if (block.files && block.files.length > 0) {
+        diagnostics.add(
+          'file_attachment_excluded',
+          'warning',
+          block.files.length,
+          true,
+        );
+        budget.markContentLoss();
+      }
       return {
         ...common,
         kind: block.kind,
@@ -475,6 +484,16 @@ function sanitizeBlock(
       let resultPreview = block.resultPreview
         ? sanitizeResultPreview(block.resultPreview, budget, diagnostics, ids)
         : undefined;
+      if (
+        !resultPreview &&
+        block.preview.kind === 'file_diff' &&
+        status === 'completed'
+      ) {
+        resultPreview = {
+          kind: 'text',
+          text: budget.plainText('File change applied'),
+        };
+      }
       if (!resultPreview && (status === 'completed' || status === 'failed')) {
         diagnostics.add('tool_result_presentation_missing', 'error');
         budget.markContentLoss();
@@ -509,16 +528,22 @@ function sanitizeBlock(
       return {
         ...common,
         kind: 'shell',
-        text: budget.plainText(redactHomePaths(block.text)),
+        text: budget.plainText(block.text),
         ...(block.stream ? { stream: block.stream } : {}),
       };
     case 'user_shell':
       return {
         ...common,
         kind: 'user_shell',
-        text: budget.plainText(redactHomePaths(block.text)),
-        command: budget.plainText(redactHomePaths(block.command)),
-        ...(block.cwd ? { cwd: budget.label(safePath(block.cwd), 400) } : {}),
+        text: budget.plainText(block.text),
+        command: budget.plainText(
+          sanitizeEmbeddedUrls(block.command, diagnostics, () =>
+            budget.markContentLoss(),
+          ),
+        ),
+        ...(block.cwd
+          ? { cwd: budget.label(safePath(block.cwd), 400, false) }
+          : {}),
         ...(block.stream ? { stream: block.stream } : {}),
       };
     case 'permission': {
@@ -610,15 +635,19 @@ function sanitizeToolPreview(
     case 'command':
       return {
         kind: preview.kind,
-        command: budget.plainText(redactHomePaths(preview.command)),
+        command: budget.plainText(
+          sanitizeEmbeddedUrls(preview.command, diagnostics, () =>
+            budget.markContentLoss(),
+          ),
+        ),
         ...(preview.cwd
-          ? { cwd: budget.label(safePath(preview.cwd), 400) }
+          ? { cwd: budget.label(safePath(preview.cwd), 400, false) }
           : {}),
       };
     case 'file_diff':
       return {
         kind: preview.kind,
-        path: budget.label(safePath(preview.path), 400),
+        path: budget.label(safePath(preview.path), 400, false),
         ...(preview.oldText !== undefined
           ? { oldText: budget.plainText(preview.oldText) }
           : {}),
@@ -638,7 +667,7 @@ function sanitizeToolPreview(
         : undefined;
       return {
         kind: preview.kind,
-        path: budget.label(safePath(preview.path), 400),
+        path: budget.label(safePath(preview.path), 400, false),
         ...(range ? { range } : {}),
       };
     }
@@ -666,7 +695,7 @@ function sanitizeToolPreview(
     case 'code_block': {
       const language = budget.optionalLabel(preview.language, 64);
       const origin = preview.origin
-        ? budget.optionalLabel(safePath(preview.origin), 400)
+        ? budget.optionalLabel(safePath(preview.origin), 400, false)
         : undefined;
       return {
         kind: preview.kind,
@@ -686,7 +715,7 @@ function sanitizeToolPreview(
           ? {
               top: budget
                 .array(preview.top)
-                .map((item) => budget.plainText(redactHomePaths(item))),
+                .map((item) => budget.plainText(item)),
             }
           : {}),
       };
@@ -737,7 +766,7 @@ function sanitizeToolPreview(
         kind: preview.kind,
         rows: budget.array(preview.rows).map((row) => ({
           label: budget.plainText(row.label),
-          value: budget.plainText(redactHomePaths(row.value)),
+          value: budget.plainText(row.value),
         })),
       };
     case 'todo_list':
@@ -764,10 +793,10 @@ function sanitizeResultPreview(
     return sanitizeTodoPreview(preview, budget, ids);
   }
   if (preview.kind === 'text') {
-    return { kind: 'text', text: budget.text(redactHomePaths(preview.text)) };
+    return { kind: 'text', text: budget.text(preview.text) };
   }
   if (!preview.summary?.trim()) return undefined;
-  const summary = budget.text(redactHomePaths(preview.summary));
+  const summary = budget.text(preview.summary);
   return summary.trim()
     ? { kind: 'generic', summary }
     : { kind: 'text', text: summary };
@@ -862,6 +891,7 @@ function createMetadataPresentation(
         'project_name',
         diagnostics,
         budget,
+        false,
       )
     : undefined;
   const repository = metadata?.gitRepo
@@ -912,7 +942,7 @@ class ExportBudget {
   totalRasterBytes = 0;
   richRenderTasks = 0;
   truncated = false;
-  textBudgetExceeded = false;
+  cumulativeTextBudgetExceeded = false;
 
   constructor(private readonly diagnostics: DiagnosticCounter) {}
 
@@ -951,26 +981,47 @@ class ExportBudget {
     this.truncated = true;
   }
 
-  label(value: unknown, maxLength: number): string {
-    const safe = safeLabel(value, maxLength);
-    if (safe !== value) this.markTruncated('label_sanitized');
+  private homeSafeText(value: string): string {
+    const redaction = redactHomePaths(value);
+    for (const code of redaction.omissions) this.markTruncated(code);
+    const redacted = redaction.text;
+    if (!containsUnredactedHomePath(redacted, true)) return redacted;
+    this.markTruncated('home_path_omitted');
+    return '[home path omitted]';
+  }
+
+  label(value: unknown, maxLength: number, redact = true): string {
+    const initiallySafe = safeLabel(value, maxLength);
+    const redacted = redact ? this.homeSafeText(initiallySafe) : initiallySafe;
+    const safe = safeLabel(redacted, maxLength);
+    if (initiallySafe !== value || safe !== redacted) {
+      this.markTruncated('label_sanitized');
+    }
     return this.applyTextBudgetWithFallback(
-      redactHomePaths(safe),
+      safe,
       safeLabel('[content omitted]', maxLength),
     );
   }
 
-  optionalLabel(value: unknown, maxLength: number): string | undefined {
+  optionalLabel(
+    value: unknown,
+    maxLength: number,
+    redact = true,
+  ): string | undefined {
     if (value === undefined || value === '') return undefined;
-    return this.label(value, maxLength);
+    return this.label(value, maxLength, redact);
   }
 
   plainText(value: string): string {
-    return this.applyTextBudget(redactHomePaths(value));
+    return this.applyTextBudget(this.homeSafeText(value));
   }
 
   text(value: string): string {
-    value = redactHomePaths(value);
+    value = this.homeSafeText(value);
+    const onComplexityLimit = (): void => {
+      this.truncated = true;
+      this.diagnostics.add('markdown_complexity_exceeded', 'warning', 1, true);
+    };
     const replaceImage = (alt: string, source: string | undefined): string => {
       const safeAlt = safeLabel(alt, 200).replace(/([\\[\]])/g, '\\$1');
       const parsed = source ? parseApprovedImageDataUrl(source) : undefined;
@@ -988,6 +1039,7 @@ class ExportBudget {
         this.truncated = true;
         this.diagnostics.add(code, 'warning', 1, true);
       },
+      onComplexityLimit,
     });
     const richTaskSafeValue = transformRichMarkdownTasks(
       resourceSafeValue,
@@ -1001,6 +1053,7 @@ class ExportBudget {
         this.diagnostics.add('rich_render_budget_exceeded', 'warning');
         return false;
       },
+      onComplexityLimit,
     );
     return this.applyTextBudget(richTaskSafeValue);
   }
@@ -1017,12 +1070,11 @@ class ExportBudget {
     const normalTextLimit =
       EXPORT_TRANSCRIPT_LIMITS_V1.maxVisibleTextBytes -
       REQUIRED_TEXT_FALLBACK_RESERVE_BYTES;
-    if (
-      bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxTextBytes ||
-      this.visibleTextBytes + bytes > normalTextLimit
-    ) {
+    const perItemExceeded = bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxTextBytes;
+    const cumulativeExceeded = this.visibleTextBytes + bytes > normalTextLimit;
+    if (perItemExceeded || cumulativeExceeded) {
       this.truncated = true;
-      this.textBudgetExceeded = true;
+      if (cumulativeExceeded) this.cumulativeTextBudgetExceeded = true;
       this.diagnostics.add('text_budget_exceeded', 'warning');
       const fallbackBytes = utf8Bytes(fallback);
       if (
@@ -1053,7 +1105,7 @@ class ExportBudget {
       bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
       this.totalRasterBytes + bytes >
         EXPORT_TRANSCRIPT_LIMITS_V1.maxTotalRasterBytes ||
-      (image.mimeType === 'image/gif' && isAnimatedGif(image.data))
+      !hasRasterSignature(image.data, image.mimeType)
     ) {
       this.truncated = true;
       this.diagnostics.add('image_budget_or_animation_rejected', 'warning');
@@ -1424,6 +1476,7 @@ const TRUNCATION_DIAGNOSTIC_CODES = new Set([
   'array_budget_exceeded',
   'todo_preview_truncated',
   'markdown_image_rejected',
+  'markdown_complexity_exceeded',
   'text_budget_exceeded',
   'image_type_rejected',
   'image_budget_or_animation_rejected',
@@ -1439,6 +1492,10 @@ const TRUNCATION_DIAGNOSTIC_CODES = new Set([
   'project_name_rejected',
   'permission_resolution_sanitized',
   'tool_result_presentation_missing',
+  'file_attachment_excluded',
+  'home_path_omitted',
+  'encoded_content_omitted',
+  'url_home_path_omitted',
   'label_sanitized',
 ]);
 
@@ -1460,7 +1517,14 @@ function assertNoForbiddenFields(value: unknown): void {
   ]);
   const visit = (entry: unknown, key?: string): void => {
     if (typeof entry === 'string') {
-      if (key !== 'data' && redactHomePaths(entry) !== entry) {
+      const safePathField =
+        key !== undefined &&
+        ['path', 'cwd', 'origin', 'projectName', 'repository'].includes(key);
+      if (
+        key !== 'data' &&
+        key !== 'thumbnailUrl' &&
+        containsUnredactedHomePath(entry, !safePathField)
+      ) {
         throw new ExportTranscriptDocumentError('home_path_forbidden');
       }
       return;
@@ -1550,7 +1614,8 @@ function assertResourceBudgets(value: unknown): void {
           bytes === undefined ||
           bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
           entry !== canonical ||
-          (image?.mimeType === 'image/gif' && isAnimatedGif(image.data))
+          !image ||
+          !hasRasterSignature(image.data, image.mimeType)
         ) {
           throw new ExportTranscriptDocumentError('invalid_thumbnail_image');
         }
@@ -1572,6 +1637,11 @@ function assertResourceBudgets(value: unknown): void {
           onUrlChange: () => {
             throw new ExportTranscriptDocumentError('invalid_markdown_url');
           },
+          onComplexityLimit: () => {
+            throw new ExportTranscriptDocumentError(
+              'markdown_complexity_exceeded',
+            );
+          },
           replaceImage: (alt, source) => {
             const image = source
               ? parseApprovedImageDataUrl(source)
@@ -1583,7 +1653,7 @@ function assertResourceBudgets(value: unknown): void {
               !image ||
               imageBytes === undefined ||
               imageBytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
-              (image.mimeType === 'image/gif' && isAnimatedGif(image.data))
+              !hasRasterSignature(image.data, image.mimeType)
             ) {
               throw new ExportTranscriptDocumentError('invalid_markdown_image');
             }
@@ -1612,7 +1682,7 @@ function assertResourceBudgets(value: unknown): void {
         bytes === undefined ||
         bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
         !SAFE_RASTER_MIME_TYPES.has(entry['mimeType']) ||
-        (entry['mimeType'] === 'image/gif' && isAnimatedGif(entry['data']))
+        !hasRasterSignature(entry['data'], entry['mimeType'])
       ) {
         throw new ExportTranscriptDocumentError('raster_budget_exceeded');
       }
@@ -1652,6 +1722,12 @@ function isMarkdownExportText(
 
 function normalizeNavigableUrl(value: string): string | undefined {
   if (value.startsWith('#')) return value;
+  // WHATWG URL repairs an empty authority by treating the first path segment
+  // as a host, which would erase evidence of a local home path.
+  const urlInput = value.trim().replace(/[\t\r\n]/g, '');
+  if (/^https?:/i.test(urlInput) && !/^https?:\/\/[^/?#\\]/i.test(urlInput)) {
+    return undefined;
+  }
   if (value.startsWith('/') && !value.startsWith('//')) {
     if (value.includes('\\')) return undefined;
     const queryIndex = value.search(/[?#]/);
@@ -1744,6 +1820,43 @@ function safeDisplayUrl(
   }
 }
 
+/**
+ * Commands are free text that may EMBED a URL, so `safeDisplayUrl` (which
+ * expects the whole string to be one) does not apply. Rewrite each embedded
+ * http(s) URL through the same `normalizeNavigableUrl` the typed `web_fetch`
+ * and repository paths use, dropping userinfo, query and fragment. Without
+ * this a reachable `curl https://user:pass@host/f?token=...` carried both the
+ * credential and the secret query into the shareable document, against the
+ * contract that credentials never enter it.
+ *
+ * Runs BEFORE the byte budget: a URL truncated first may no longer match, and
+ * the truncation boundary should be measured on the text that actually ships.
+ *
+ * Scope is http(s) only, matching `normalizeNavigableUrl`. A credential in a
+ * non-navigable scheme (`ssh user:pw@host`) or in a bare flag (`-pSECRET`,
+ * `--token=...`) is NOT covered — those need argument-aware redaction, which
+ * this projector does not attempt.
+ */
+function sanitizeEmbeddedUrls(
+  raw: string,
+  diagnostics: DiagnosticCounter,
+  onContentLoss?: () => void,
+): string {
+  return raw.replace(/https?:\/\/[^\s"'<>\\]+/gi, (match) => {
+    const safe = normalizeNavigableUrl(match);
+    if (!safe) {
+      diagnostics.add('url_rejected', 'warning', 1, true);
+      onContentLoss?.();
+      return '[link omitted]';
+    }
+    if (safe !== match) {
+      diagnostics.add('url_sanitized', 'warning', 1, true);
+      onContentLoss?.();
+    }
+    return safe;
+  });
+}
+
 function safeRepository(
   raw: string,
   diagnostics: DiagnosticCounter,
@@ -1759,7 +1872,7 @@ function safeRepository(
     return budget.plainText('[link omitted]');
   }
   const safe = safePath(raw).replace(/\.git$/i, '');
-  if (isSafeLabel(safe, 200)) return budget.plainText(safe);
+  if (isSafeLabel(safe, 200)) return budget.label(safe, 200, false);
   diagnostics.add('repository_rejected', 'warning', 1, true);
   budget.markContentLoss();
   return budget.plainText('[link omitted]');
@@ -1771,9 +1884,12 @@ function safeMetadataLabel(
   field: string,
   diagnostics: DiagnosticCounter,
   budget: ExportBudget,
+  redact = true,
 ): string | undefined {
   if (value === undefined || value === '') return undefined;
-  if (isSafeLabel(value, maxLength)) return budget.plainText(value);
+  if (isSafeLabel(value, maxLength)) {
+    return budget.label(value, maxLength, redact);
+  }
   diagnostics.add(`${field}_rejected`, 'warning', 1, true);
   budget.markContentLoss();
   return undefined;
@@ -1809,8 +1925,37 @@ function isSafeRepository(value: unknown): value is string {
 }
 
 function safePath(value: string): string {
-  const normalized = value.replaceAll('\\', '/').replace(/\/+$/, '');
-  const basename = normalized.split('/').filter(Boolean).at(-1);
+  const normalized = value
+    .replaceAll('\\', '/')
+    .replace(/^file:\/\/[^/]+\//i, '/')
+    .replace(/^file:\/\/\//i, '/')
+    .replace(/^file:\//i, '/')
+    .replace(/\/+$/, '');
+  const components: string[] = [];
+  for (const component of normalized.split('/').filter(Boolean)) {
+    if (component === '.') continue;
+    if (component === '..') {
+      if (
+        components.length > 0 &&
+        !(components.length === 1 && /^[A-Za-z]:$/.test(components[0]))
+      ) {
+        components.pop();
+      }
+      continue;
+    }
+    components.push(component);
+  }
+  const homeIndex = components.findIndex((component) =>
+    /^(?:Users|home)$/i.test(component),
+  );
+  if (homeIndex !== -1 && components[homeIndex + 1] !== undefined) {
+    const homeBasename = components.at(-1);
+    if (components.length === homeIndex + 2) return '[home]';
+    return homeBasename && homeBasename !== '.' && homeBasename !== '..'
+      ? homeBasename
+      : '[path]';
+  }
+  const basename = components.at(-1);
   return basename && !/^[A-Za-z]:$/.test(basename) ? basename : '[path]';
 }
 
@@ -1822,112 +1967,206 @@ function isSafeExportPath(value: unknown): value is string {
   );
 }
 
-function redactHomePaths(value: string): string {
-  const urlPattern =
-    /\b(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/|file:(?:\/\/)?)[^\s<>"'`]+/gi;
+const EXPORT_URL_PATTERN =
+  /\b(?:https?:\/\/[^\s<>"\x60]+|data:image\/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/gi;
+const HOME_USERNAME_SEGMENT_SOURCE = String.raw`(?:[^/\\\t\r\n<>]+(?=[/\\])|[^/\\\s<>]+)`;
+const FILE_HOME_PATH_SOURCE = String.raw`file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?(?:\.\/|\/)*(?:home|Users)\/(?:\.\/|\/)*${HOME_USERNAME_SEGMENT_SOURCE}`;
+const LOCAL_HOME_PATH_SOURCE = String.raw`(?:[A-Za-z]:)?[\\/](?:\.[\\/]|[\\/])*(?:home|Users)[\\/](?:\.[\\/]|[\\/])*${HOME_USERNAME_SEGMENT_SOURCE}`;
+const BARE_HOME_ROOT_SOURCE = String.raw`(?:[A-Za-z]:)?[\\/](?:\.[\\/]|[\\/])*(?:home|Users)[\\/](?=$|\s|[<>"'\x60,;:|()](?=\s|$))`;
+const RELATIVE_HOME_PATH_SOURCE = String.raw`(^|[\r\n])(?:home|Users)[\\/](?:\.[\\/]|[\\/])*${HOME_USERNAME_SEGMENT_SOURCE}`;
+const RELATIVE_HOME_ROOT_SOURCE = String.raw`(^|[\r\n])(?:home|Users)[\\/](?=$|\s|[<>"'\x60,;:|()](?=\s|$))`;
+const FILE_HOME_PATH_PATTERN = new RegExp(FILE_HOME_PATH_SOURCE, 'gi');
+const LOCAL_HOME_PATH_PATTERN = new RegExp(LOCAL_HOME_PATH_SOURCE, 'gi');
+const BARE_HOME_ROOT_PATTERN = new RegExp(BARE_HOME_ROOT_SOURCE, 'gi');
+const RELATIVE_HOME_PATH_PATTERN = new RegExp(RELATIVE_HOME_PATH_SOURCE, 'gim');
+const RELATIVE_HOME_ROOT_PATTERN = new RegExp(RELATIVE_HOME_ROOT_SOURCE, 'gim');
+const ENCODED_CONTENT_OMITTED = '[encoded content omitted]';
+const URL_HOME_PATH_OMITTED = '[link omitted]';
+
+interface HomeRedactionResult {
+  text: string;
+  omissions: string[];
+}
+
+function redactHomePaths(value: string): HomeRedactionResult {
+  return redactHomePathStructures(value);
+}
+function redactHomePathStructures(value: string): HomeRedactionResult {
+  const urlPattern = EXPORT_URL_PATTERN;
   let result = '';
   let cursor = 0;
+  const omissions: string[] = [];
+  const append = (redaction: HomeRedactionResult): void => {
+    result += redaction.text;
+    omissions.push(...redaction.omissions);
+  };
   for (const match of value.matchAll(urlPattern)) {
-    const index = match.index;
-    result += redactStandaloneHomePaths(value.slice(cursor, index));
-    result += /^file:/i.test(match[0])
-      ? redactFileUrlHomePath(match[0])
-      : redactUrlCredentials(match[0]);
-    cursor = index + match[0].length;
+    append(redactNonHttpHomePathStructures(value.slice(cursor, match.index)));
+    if (
+      match[0].toLowerCase().startsWith('data:image/') &&
+      containsNonHttpHomePath(match[0], true)
+    ) {
+      append(redactNonHttpHomePathStructures(match[0]));
+    } else if (shouldOmitHttpUrlToken(match[0])) {
+      result += URL_HOME_PATH_OMITTED;
+      omissions.push('url_home_path_omitted');
+    } else {
+      result += match[0];
+    }
+    cursor = match.index + match[0].length;
   }
-  return result + redactStandaloneHomePaths(value.slice(cursor));
+  append(redactNonHttpHomePathStructures(value.slice(cursor)));
+  return { text: result, omissions };
 }
 
-function redactUrlCredentials(value: string): string {
-  const schemeEnd = value.indexOf('://');
-  if (schemeEnd === -1) return value;
-  const authorityStart = schemeEnd + 3;
-  const suffixStart = value.slice(authorityStart).search(/[/?#]/);
-  const authorityEnd =
-    suffixStart === -1 ? value.length : authorityStart + suffixStart;
-  const userInfoEnd = value.lastIndexOf('@', authorityEnd - 1);
-  return userInfoEnd < authorityStart
-    ? value
-    : value.slice(0, authorityStart) + value.slice(userInfoEnd + 1);
-}
-
-function redactStandaloneHomePaths(value: string): string {
-  return value
-    .replace(
-      /(^|[^A-Za-z0-9+/,])(\/[^\s<>"'`]+)/g,
-      (_match, prefix: string, path: string) =>
-        `${prefix}${redactHomePathToken(path, '/') ?? path}`,
-    )
-    .replace(
-      /(^|[^A-Za-z0-9+/,])([A-Za-z]:\\[^\s<>"'`]+)/g,
-      (_match, prefix: string, path: string) =>
-        `${prefix}${redactHomePathToken(path, '\\') ?? path}`,
-    )
-    .replace(
-      /(^|[^A-Za-z0-9%])(%[0-9A-Fa-f]{2}[^\s<>"'`]*)/g,
-      (_match, prefix: string, path: string) =>
-        `${prefix}${redactHomePathToken(path, '/') ?? path}`,
-    );
-}
-
-function redactFileUrlHomePath(value: string): string {
-  try {
-    const url = new URL(value);
-    if (url.protocol !== 'file:') return value;
-    const components = normalizedUrlPathComponents(url.pathname);
-    const redacted = redactHomePathComponents(components, '/');
-    return redacted ? `file://${redacted}` : value;
-  } catch {
-    return redactStandaloneHomePaths(value);
+function shouldOmitHttpUrlToken(value: string): boolean {
+  const authority = /^https?:\/\/([^/?#]*)/i.exec(value)?.[1];
+  if (authority === undefined) return false;
+  const decoded = decodePercentText(value);
+  const decodedAuthority = decodePercentText(authority);
+  if (
+    decoded === undefined ||
+    decodedAuthority === undefined ||
+    containsRawHomePath(decodedAuthority)
+  ) {
+    return true;
   }
-}
-
-function redactHomePathToken(
-  value: string,
-  separator: '/' | '\\',
-): string | undefined {
-  return redactHomePathComponents(
-    normalizedUrlPathComponents(value),
-    separator,
+  return (
+    hasAmbiguousUrlHomePath(decoded) ||
+    ((authority === '' ||
+      normalizeNavigableUrl(value) === undefined ||
+      /[(),;|'\\]/.test(authority)) &&
+      containsNonHttpHomePath(value, true))
   );
 }
 
-function redactHomePathComponents(
-  components: readonly string[],
-  separator: '/' | '\\',
-): string | undefined {
-  const rootIndex = /^[A-Za-z]:$/.test(components[0] ?? '') ? 1 : 0;
-  if (
-    !/^(?:Users|home)$/i.test(components[rootIndex] ?? '') ||
-    components[rootIndex + 1] === undefined
-  ) {
-    return undefined;
+function hasAmbiguousUrlHomePath(value: string): boolean {
+  let afterDelimiter = false;
+  let parenthesisDepth = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if ("?#&,;|'\\".includes(character)) afterDelimiter = true;
+    if (character === '(') parenthesisDepth += 1;
+    if (character === ')') {
+      if (parenthesisDepth > 0) parenthesisDepth -= 1;
+      else afterDelimiter = true;
+    }
+    if (!afterDelimiter || (character !== '/' && character !== '\\')) {
+      continue;
+    }
+    const component = value.slice(index + 1, index + 6).toLowerCase();
+    const length = component.startsWith('users')
+      ? 5
+      : component.startsWith('home')
+        ? 4
+        : 0;
+    const separator = value[index + length + 1];
+    const firstUsernameCharacter = value[index + length + 2];
+    if (
+      length > 0 &&
+      (separator === '/' || separator === '\\') &&
+      firstUsernameCharacter !== undefined &&
+      firstUsernameCharacter !== '/' &&
+      firstUsernameCharacter !== '\\' &&
+      !/\s/.test(firstUsernameCharacter)
+    ) {
+      return true;
+    }
   }
-  const suffix = components.slice(rootIndex + 2).join(separator);
-  return `[home]${suffix ? `${separator}${suffix}` : ''}`;
+  return false;
 }
 
-function normalizedUrlPathComponents(pathname: string): string[] {
-  let decoded = pathname;
+function redactNonHttpHomePathStructures(value: string): HomeRedactionResult {
+  const rawRedacted = redactRawHomePathStructures(value);
+  const decoded = decodePercentText(rawRedacted);
+  if (decoded === undefined) {
+    return {
+      text: ENCODED_CONTENT_OMITTED,
+      omissions: ['encoded_content_omitted'],
+    };
+  }
+  const encodedRedacted = containsRawHomePath(decoded)
+    ? redactRawHomePathStructures(decoded).replace(
+        /(?:\[home\]){2,}/g,
+        '[home]',
+      )
+    : rawRedacted;
+  return {
+    text: encodedRedacted.replace(
+      /file:\/+(?:[^/\s]+\/)?(?:[A-Za-z]:\/)?\[home\]/gi,
+      'file://[home]',
+    ),
+    omissions: [],
+  };
+}
+
+function redactRawHomePathStructures(value: string): string {
+  return value
+    .replace(FILE_HOME_PATH_PATTERN, 'file://[home]')
+    .replace(BARE_HOME_ROOT_PATTERN, '[home]')
+    .replace(LOCAL_HOME_PATH_PATTERN, '[home]')
+    .replace(RELATIVE_HOME_ROOT_PATTERN, '$1[home]')
+    .replace(RELATIVE_HOME_PATH_PATTERN, '$1[home]');
+}
+
+function containsUnredactedHomePath(
+  value: string,
+  checkPercentEncoding: boolean,
+): boolean {
+  const urlPattern = EXPORT_URL_PATTERN;
+  let cursor = 0;
+  for (const match of value.matchAll(urlPattern)) {
+    if (shouldOmitHttpUrlToken(match[0])) return true;
+    if (
+      match[0].toLowerCase().startsWith('data:image/') &&
+      containsNonHttpHomePath(match[0], checkPercentEncoding)
+    ) {
+      return true;
+    }
+    if (
+      containsNonHttpHomePath(
+        value.slice(cursor, match.index),
+        checkPercentEncoding,
+      )
+    ) {
+      return true;
+    }
+    cursor = match.index + match[0].length;
+  }
+  return containsNonHttpHomePath(value.slice(cursor), checkPercentEncoding);
+}
+
+function containsNonHttpHomePath(
+  value: string,
+  checkPercentEncoding: boolean,
+): boolean {
+  if (containsRawHomePath(value)) return true;
+  if (!checkPercentEncoding) return false;
+  const decoded = decodePercentText(value);
+  return decoded === undefined || containsRawHomePath(decoded);
+}
+
+function decodePercentText(value: string): string | undefined {
+  let decoded = value;
   for (let pass = 0; pass < 3; pass += 1) {
-    try {
-      const next = decodeURIComponent(decoded);
-      if (next === decoded) break;
-      decoded = next;
-    } catch {
-      break;
-    }
+    const next = decodePrintablePercentEscapes(decoded);
+    if (next === decoded) return decoded;
+    decoded = next;
   }
-  const components: string[] = [];
-  for (const component of decoded.replaceAll('\\', '/').split('/')) {
-    if (!component || component === '.') continue;
-    if (component === '..') {
-      components.pop();
-    } else {
-      components.push(component);
-    }
-  }
-  return components;
+  return decodePrintablePercentEscapes(decoded) === decoded
+    ? decoded
+    : undefined;
+}
+
+function decodePrintablePercentEscapes(value: string): string {
+  return value.replace(/%([0-9A-Fa-f]{2})/g, (escape, hex) => {
+    const code = Number.parseInt(hex, 16);
+    return code >= 0x20 && code <= 0x7e ? String.fromCharCode(code) : escape;
+  });
+}
+
+function containsRawHomePath(value: string): boolean {
+  return redactRawHomePathStructures(value) !== value;
 }
 
 function safeLabel(value: unknown, maxLength: number): string {
@@ -2005,6 +2244,21 @@ function decodedBase64Bytes(value: string): number | undefined {
   }
   const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
   return (value.length / 4) * 3 - padding;
+}
+
+function hasRasterSignature(data: string, mimeType: string): boolean {
+  if (mimeType === 'image/gif') return !isAnimatedGif(data);
+  const header = atob(data.slice(0, 16));
+  switch (mimeType) {
+    case 'image/png':
+      return header.startsWith('\x89PNG\r\n\x1a\n');
+    case 'image/jpeg':
+      return header.startsWith('\xff\xd8\xff');
+    case 'image/webp':
+      return header.startsWith('RIFF') && header.slice(8, 12) === 'WEBP';
+    default:
+      return false;
+  }
 }
 
 function isAnimatedGif(value: string): boolean {

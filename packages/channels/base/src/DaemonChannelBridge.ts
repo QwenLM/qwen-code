@@ -11,6 +11,7 @@ import {
   type AvailableCommand,
   type BridgeSessionInfo,
   type ChannelAgentBridge,
+  type ChannelBtwResult,
   type ChannelAgentBridgePromptOptions,
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
@@ -37,6 +38,8 @@ export interface DaemonChannelEvent {
 export interface DaemonChannelSessionClient {
   readonly sessionId: string;
   readonly workspaceCwd: string;
+  readonly worktree?: { slug: string; path: string; branch: string };
+  readonly worktreeState?: 'persisted-v1';
   readonly lastEventId?: number;
   prompt(
     req: {
@@ -45,6 +48,10 @@ export interface DaemonChannelSessionClient {
     },
     signal?: AbortSignal,
   ): Promise<{ stopReason?: string; [key: string]: unknown }>;
+  btw?(
+    question: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<ChannelBtwResult>;
   uploadAttachment?(
     data: Blob,
     name: string,
@@ -64,6 +71,10 @@ export interface DaemonChannelSessionClient {
     requestId: string,
     response: RequestPermissionResponse,
   ): Promise<boolean>;
+  respondToSessionPermission?(
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): Promise<boolean>;
   shellCommand?(
     command: string,
     signal?: AbortSignal,
@@ -76,8 +87,9 @@ export interface DaemonChannelSessionFactoryRequest {
   sessionId?: string;
   sessionScope?: SessionScope;
   approvalMode?: string;
-  /** Channel instance name stamped as daemon `sourceId` (new sessions only). */
+  /** Channel instance name stamped as daemon `sourceId`. */
   sourceId?: string;
+  worktree?: Record<string, never>;
 }
 
 export type DaemonChannelSessionFactory = (
@@ -106,6 +118,17 @@ export interface DaemonChannelBridgeOptions {
    * instead, as before the upload path existed.
    */
   sessionAttachments?: boolean;
+  /**
+   * The daemon advertises the `session_permission_vote` capability.
+   *
+   * Unconditional in `SERVE_CAPABILITY_REGISTRY` since the session-scoped route
+   * landed, and older than the channel worker itself, so the daemon-managed
+   * worker never takes the legacy branch below. Retained for parity with
+   * `sessionAttachments`, and for hosts that construct this bridge themselves.
+   */
+  sessionPermissionVote?: boolean;
+  /** Daemon guarantees durable worktree create/restore attestation. */
+  sessionWorktreePersistence?: boolean;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -368,6 +391,10 @@ export class DaemonChannelBridge
         sessionId: session.sessionId,
         workspaceCwd: session.workspaceCwd,
         hasActivePrompt: this.activePrompts.has(session.sessionId),
+        ...(session.worktree ? { worktree: { ...session.worktree } } : {}),
+        ...(session.worktreeState
+          ? { worktreeState: session.worktreeState }
+          : {}),
       });
     }
     return result;
@@ -382,6 +409,11 @@ export class DaemonChannelBridge
     options?: ChannelAgentBridgeSessionOptions,
     bindingToken?: object,
   ): Promise<string> {
+    if (options?.worktree && !this.options.sessionWorktreePersistence) {
+      throw new Error(
+        'The daemon does not support durable Channel worktree sessions.',
+      );
+    }
     const lifecycleGeneration = this.lifecycleGeneration;
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
@@ -389,6 +421,7 @@ export class DaemonChannelBridge
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
       ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
+      ...(options?.worktree ? { worktree: options.worktree } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
       await this.rejectStaleSession(session);
@@ -416,6 +449,7 @@ export class DaemonChannelBridge
       sessionId,
       sessionScope: this.options.sessionScope ?? 'thread',
       ...(options?.approvalMode ? { approvalMode: options.approvalMode } : {}),
+      ...(options?.sourceId ? { sourceId: options.sourceId } : {}),
     });
     if (lifecycleGeneration !== this.lifecycleGeneration) {
       await this.rejectStaleSession(session);
@@ -520,7 +554,7 @@ export class DaemonChannelBridge
         removeAttachment
       ) {
         try {
-          // Fan the uploads out like the webui's attachment path: names are
+          // Fan the uploads out like the browser attachment path: names are
           // index-disambiguated and prompt order comes from the array order,
           // so nothing serializes the uploads themselves.
           const uploads = await Promise.allSettled(
@@ -702,6 +736,18 @@ export class DaemonChannelBridge
     }
   }
 
+  async btw(
+    sessionId: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Promise<ChannelBtwResult> {
+    const session = this.ensureSession(sessionId);
+    if (!session.btw) {
+      throw new Error('BTW is not supported by this daemon session');
+    }
+    return session.btw(question, signal ? { signal } : undefined);
+  }
+
   async shellCommand(
     sessionId: string,
     command: string,
@@ -773,7 +819,11 @@ export class DaemonChannelBridge
       return false;
     }
     try {
-      const accepted = await session.respondToPermission(requestId, response);
+      const accepted =
+        this.options.sessionPermissionVote &&
+        typeof session.respondToSessionPermission === 'function'
+          ? await session.respondToSessionPermission(requestId, response)
+          : await session.respondToPermission(requestId, response);
       this.requestToSession.delete(requestId);
       if (accepted) {
         this.rememberRespondedPermissionRequest(requestId, sessionId);

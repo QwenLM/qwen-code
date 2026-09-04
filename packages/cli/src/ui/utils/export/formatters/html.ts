@@ -8,11 +8,13 @@ import type { ExportSessionData } from '../types.js';
 import { randomBytes } from 'node:crypto';
 import {
   EXPORT_TRANSCRIPT_HTML_TEMPLATE,
+  EXPORT_TRANSCRIPT_RENDERER_LIMITS,
   EXPORT_TRANSCRIPT_RENDERER_VERSION,
 } from '@qwen-code/web-templates';
 import {
   assertExportTranscriptDocumentV1,
   createExportTranscriptDocumentV1,
+  EXPORT_TRANSCRIPT_LIMITS_V1,
   type ExportTranscriptDocumentV1,
 } from '../export-transcript-document.js';
 import { escapeJsonForHtmlScriptData } from '../html-script-data.js';
@@ -30,6 +32,14 @@ export function renderExportTranscriptDocumentToHtml(
   assertExportTranscriptDocumentV1(document);
   if (document.rendererVersion !== EXPORT_TRANSCRIPT_RENDERER_VERSION) {
     throw new Error('Export transcript renderer version mismatch.');
+  }
+  if (
+    EXPORT_TRANSCRIPT_RENDERER_LIMITS.maxBlocks !==
+      EXPORT_TRANSCRIPT_LIMITS_V1.maxBlocks ||
+    EXPORT_TRANSCRIPT_RENDERER_LIMITS.maxEnvelopeBytes !==
+      EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes
+  ) {
+    throw new Error('Export transcript renderer limits mismatch.');
   }
   const nonce = randomBytes(16).toString('base64url');
   const template = injectDocumentNonce(EXPORT_TRANSCRIPT_HTML_TEMPLATE, nonce);

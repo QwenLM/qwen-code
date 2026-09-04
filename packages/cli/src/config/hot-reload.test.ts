@@ -18,8 +18,10 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import {
   ApprovalMode,
+  AuthType,
   type Config,
   type MCPServerConfig,
+  type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings, Settings } from './settings.js';
 import type {
@@ -28,6 +30,7 @@ import type {
 } from './settingsWatcher.js';
 import {
   registerMcpHotReload,
+  registerModelProvidersHotReload,
   mcpServersEqual,
   mcpGatingEqual,
 } from './hot-reload.js';
@@ -576,5 +579,207 @@ describe('registerMcpHotReload', () => {
     } finally {
       appEvents.off(AppEvent.McpPendingApprovalChanged, spy);
     }
+  });
+});
+
+// ── modelProviders hot-reload (#10568) ────────────────────────────────
+
+describe('registerModelProvidersHotReload', () => {
+  let listener: SettingsChangeListener;
+  let watcher: SettingsWatcher;
+  let unsubscribe: Mock;
+  let settings: LoadedSettings;
+  let merged: Settings;
+  let reloadModelProvidersConfig: Mock;
+  let refreshAuth: Mock;
+  let config: Config;
+  /** The registry's APPLIED providers config (what the gate diffs against). */
+  let applied: ModelProvidersConfig | undefined;
+  function makeModelConfig(initialApplied?: ModelProvidersConfig): void {
+    applied = initialApplied;
+    reloadModelProvidersConfig = vi.fn((next?: ModelProvidersConfig) => {
+      applied = next;
+    });
+    refreshAuth = vi.fn(async () => {});
+    config = {
+      reloadModelProvidersConfig,
+      refreshAuth,
+      getAuthType: () => AuthType.USE_OPENAI,
+      getModelProvidersConfig: () => applied,
+    } as unknown as Config;
+  }
+
+  beforeEach(() => {
+    unsubscribe = vi.fn();
+    watcher = {
+      addChangeListener: vi.fn((l: SettingsChangeListener) => {
+        listener = l;
+        return unsubscribe;
+      }),
+    } as unknown as SettingsWatcher;
+
+    merged = {} as Settings;
+    settings = { merged } as LoadedSettings;
+    makeModelConfig(undefined);
+  });
+
+  it('returns the watcher unsubscribe fn', () => {
+    const dispose = registerModelProvidersHotReload(watcher, settings, config);
+    expect(watcher.addChangeListener).toHaveBeenCalledOnce();
+    dispose();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it('reloads the registry with the merged modelProviders on change', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-new', baseUrl: 'https://example.com' }],
+    } as ModelProvidersConfig;
+    await listener([]);
+
+    // providerProtocol is boot-frozen (requiresRestart), so it must NOT be
+    // passed — reloadModels preserves the existing protocol map.
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(reloadModelProvidersConfig).toHaveBeenCalledWith(
+      merged.modelProviders,
+    );
+    expect(refreshAuth).toHaveBeenCalledOnce();
+    // Watcher-triggered refresh must never start an interactive auth flow:
+    // the second argument makes QWEN_OAUTH require cached credentials, so
+    // unavailable credentials reject into the listener's catch (debug-logged,
+    // retried on later events) instead of prompting a device-auth mid-session.
+    expect(refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI, true);
+  });
+
+  it('skips the reload when an unrelated settings key changed', async () => {
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    // Boot already applied the boot-time providers.
+    makeModelConfig(merged.modelProviders);
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    (merged as Settings & { theme?: string }).theme = 'dark';
+    await listener([]);
+
+    expect(reloadModelProvidersConfig).not.toHaveBeenCalled();
+    expect(refreshAuth).not.toHaveBeenCalled();
+  });
+
+  it('treats absent and {} modelProviders as unchanged', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {} as ModelProvidersConfig;
+    await listener([]);
+
+    expect(reloadModelProvidersConfig).not.toHaveBeenCalled();
+    expect(refreshAuth).not.toHaveBeenCalled();
+  });
+
+  it('does not re-reload the same snapshot on repeat events', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    await listener([]);
+    await listener([]);
+
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledOnce();
+  });
+
+  it('retries a throwing reload on the next event', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+    reloadModelProvidersConfig.mockImplementationOnce(() => {
+      throw new Error('rebuild failed');
+    });
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    await listener([]);
+
+    await listener([]);
+    expect(reloadModelProvidersConfig).toHaveBeenCalledTimes(2);
+    expect(reloadModelProvidersConfig).toHaveBeenLastCalledWith(
+      merged.modelProviders,
+    );
+    expect(refreshAuth).toHaveBeenCalledOnce();
+  });
+
+  it('retries only refreshAuth on later unchanged events after it failed once', async () => {
+    registerModelProvidersHotReload(watcher, settings, config);
+    refreshAuth
+      .mockRejectedValueOnce(new Error('transient token blip'))
+      .mockRejectedValueOnce(new Error('still flaky'));
+
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-x', baseUrl: 'https://x' }],
+    } as ModelProvidersConfig;
+    await listener([]);
+
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledOnce();
+
+    // Same snapshot again: retry only refreshAuth, never the registry reload.
+    await listener([]);
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledTimes(2);
+
+    // A successful retry clears the flag.
+    await listener([]);
+    await listener([]);
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledTimes(3);
+  });
+
+  it('reloads after an out-of-band registry rewrite desynced applied state', async () => {
+    const bootProviders = {
+      openai: [{ id: 'gpt-a', baseUrl: 'https://a' }],
+    } as ModelProvidersConfig;
+    merged.modelProviders = bootProviders;
+    makeModelConfig(bootProviders);
+    registerModelProvidersHotReload(watcher, settings, config);
+
+    // Provider-template / ACP flow: settings.setValue updates merged without
+    // a watcher event (self-write), then reloads the registry out-of-band.
+    const outOfBand = {
+      openai: [{ id: 'gpt-b', baseUrl: 'https://b' }],
+    } as ModelProvidersConfig;
+    merged.modelProviders = outOfBand;
+    applied = outOfBand;
+
+    // User hand-edits settings.json back to the boot value.
+    merged.modelProviders = bootProviders;
+    await listener([]);
+
+    // The gate diffs against APPLIED state, so the edit is not skipped even
+    // though it equals an earlier value.
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(reloadModelProvidersConfig).toHaveBeenCalledWith(bootProviders);
+    expect(refreshAuth).toHaveBeenCalledOnce();
+  });
+
+  it('reconciles once at registration for edits that landed before the listener attached', async () => {
+    const bootProviders = {
+      openai: [{ id: 'gpt-a', baseUrl: 'https://a' }],
+    } as ModelProvidersConfig;
+    makeModelConfig(bootProviders);
+    // An edit refreshed settings.merged during the loadCliConfig window,
+    // before any listener existed.
+    merged.modelProviders = {
+      openai: [{ id: 'gpt-b', baseUrl: 'https://b' }],
+    } as ModelProvidersConfig;
+
+    registerModelProvidersHotReload(watcher, settings, config);
+    await Promise.resolve();
+
+    expect(reloadModelProvidersConfig).toHaveBeenCalledOnce();
+    expect(reloadModelProvidersConfig).toHaveBeenCalledWith(
+      merged.modelProviders,
+    );
+    expect(refreshAuth).toHaveBeenCalledOnce();
   });
 });

@@ -60,7 +60,8 @@ const todoWriteToolSchemaData: FunctionDeclaration = {
               type: 'array',
               items: { type: 'string', maxLength: 500 },
               uniqueItems: true,
-              description: 'Todo IDs that must be completed before this item',
+              description:
+                'Todo IDs that must be completed before this item. Active-plan updates preserve omitted dependencies for existing IDs; use [] to remove them.',
             },
           },
           required: ['content', 'status', 'id'],
@@ -150,6 +151,9 @@ async function writeTodosToFile(
   });
 }
 
+const TODO_DEPENDENCY_CYCLE_ERROR =
+  'Todo dependencies must not contain a cycle.';
+
 function validateTodos(value: unknown): string | null {
   if (!Array.isArray(value)) {
     return 'Parameter "todos" must be an array.';
@@ -235,7 +239,7 @@ function validateTodos(value: unknown): string | null {
     }
   }
   if (queue.length !== todos.length) {
-    return 'Todo dependencies must not contain a cycle.';
+    return TODO_DEPENDENCY_CYCLE_ERROR;
   }
 
   return null;
@@ -302,7 +306,10 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       // 1. Read current todos (for change detection)
       const previousPlan = await readTodoPlanFromFile(sessionId);
       const oldTodos = previousPlan.todos;
-
+      const oldTodosMap = new Map(oldTodos.map((todo) => [todo.id, todo]));
+      const hasActivePlan = oldTodos.some(
+        (todo) => todo.status !== 'completed',
+      );
       let candidateTodos: unknown;
 
       if (modified_by_user && modified_content !== undefined) {
@@ -310,13 +317,64 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         const data = JSON.parse(modified_content) as Record<string, unknown>;
         candidateTodos = data['todos'];
       } else {
-        // Use the normal todo logic - simply replace with new todos
-        candidateTodos = todos;
+        let preservedAnyBlockedBy = false;
+        candidateTodos = todos.map((todo) => {
+          // Preserved edges may only reference ids that survive this update:
+          // dropping a dependency target is a valid plan-shrinking edit, and
+          // re-injecting the stale edge would make validateTodos reject the
+          // entire call with 'references unknown dependency' mid-execute.
+          const blockedBy =
+            todo.blockedBy ??
+            (hasActivePlan
+              ? oldTodosMap
+                  .get(todo.id)
+                  ?.blockedBy?.filter((dependency) =>
+                    todos.some((incoming) => incoming.id === dependency),
+                  )
+              : undefined);
+          if (blockedBy === undefined) return todo;
+          if (todo.blockedBy === undefined) preservedAnyBlockedBy = true;
+          return { ...todo, blockedBy };
+        });
+        if (preservedAnyBlockedBy) {
+          const preservedValidationError = validateTodos(candidateTodos);
+          if (preservedValidationError === TODO_DEPENDENCY_CYCLE_ERROR) {
+            // A preserved edge that survives the update can close a cycle
+            // with incoming explicit edges when the model reorders or
+            // reverses a dependency chain (flipping chain a<-b<-c re-injects
+            // c.blockedBy=['b'], producing b<->c). The incoming list itself
+            // passed validateToolParams before execute, so fall back to the
+            // edges the caller actually sent instead of failing the entire
+            // call mid-execute on an edge it never sent.
+            candidateTodos = todos;
+          }
+        }
       }
 
       const validationError = validateTodos(candidateTodos);
       if (validationError) throw new Error(validationError);
       const finalTodos = candidateTodos as TodoItem[];
+      const boundWorkflowRevision =
+        this.config.getSessionWorkflowPlanRevision?.();
+      // Approved/pending status is stamped on the session-global revision by
+      // the approved exit_plan_mode transition
+      // (Config.approveSessionWorkflowPlanRevision), not derived from this
+      // config's approval mode: per-agent Config wrappers carry their OWN
+      // approvalMode (e.g. an `approvalMode: plan` subagent frontmatter)
+      // while the revision is session-global, so a mode-based heuristic would
+      // misread an already-approved revision as a pending draft inside such
+      // a wrapper and unconstrain its membership here. An unstamped revision
+      // is still a pending draft: refining membership before approval is
+      // ordinary drafting, not divergence.
+      const approvedWorkflowRevision = boundWorkflowRevision?.approved
+        ? boundWorkflowRevision
+        : undefined;
+      const matchesApprovedTodoIds =
+        !approvedWorkflowRevision ||
+        (finalTodos.length === approvedWorkflowRevision.todoIds.length &&
+          finalTodos.every((todo) =>
+            approvedWorkflowRevision.todoIds.includes(todo.id),
+          ));
 
       if (isDeepStrictEqual(oldTodos, finalTodos)) {
         debugLogger.debug(
@@ -330,6 +388,9 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
           ...(previousPlan.planId ? { planId: previousPlan.planId } : {}),
           todos: finalTodos,
           changes: { created: [], completed: [] },
+          ...(this.config.isSessionWorkflowTodoContextActive?.() === true
+            ? { sessionWorkflow: true }
+            : {}),
           unchanged: true,
         };
 
@@ -345,7 +406,6 @@ Your todo list was not modified because it is already current. Continue with you
 
       // 2. Detect changes
       const changes = detectTodoChanges(oldTodos, finalTodos);
-      const oldTodosMap = new Map(oldTodos.map((t) => [t.id, t]));
 
       // 3. VALIDATION PHASE: Execute all hooks with Validation phase
       // Hooks should only check and return block/approve decisions, no side effects
@@ -416,7 +476,9 @@ Your todo list was not modified because it is already current. Continue with you
         finalTodos.length > 0 &&
         (oldTodos.length === 0 ||
           (oldTodos.every((todo) => todo.status === 'completed') &&
-            !isDeepStrictEqual(finalTodos, oldTodos)));
+            !isDeepStrictEqual(finalTodos, oldTodos)) ||
+          (previousPlan.planId === approvedWorkflowRevision?.planId &&
+            !matchesApprovedTodoIds));
       const activePlanId =
         finalTodos.length === 0
           ? undefined
@@ -427,6 +489,13 @@ Your todo list was not modified because it is already current. Continue with you
 
       // 4. Write new todos AFTER all validation passes
       await writeTodosToFile(finalTodos, activePlanId, sessionId);
+      const continuesApprovedWorkflow =
+        !approvedWorkflowRevision ||
+        (resultPlanId === approvedWorkflowRevision.planId &&
+          matchesApprovedTodoIds);
+      if (!continuesApprovedWorkflow) {
+        this.config.clearSessionWorkflowPlanRevision?.();
+      }
       this.refreshActiveTodoReminder(finalTodos);
 
       // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
@@ -480,9 +549,13 @@ Your todo list was not modified because it is already current. Continue with you
       }
 
       // 6. Create structured display object for rich UI rendering
+      const workflowContextActive =
+        continuesApprovedWorkflow &&
+        this.config.isSessionWorkflowTodoContextActive?.() === true;
       const todoResultDisplay = {
         type: 'todo_list' as const,
         ...(resultPlanId ? { planId: resultPlanId } : {}),
+        ...(workflowContextActive ? { sessionWorkflow: true } : {}),
         todos: finalTodos,
         changes,
       };

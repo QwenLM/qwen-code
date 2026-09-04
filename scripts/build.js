@@ -48,7 +48,7 @@ const cliOnly = process.argv.includes('--cli-only');
 // 8. web-templates (embeddable web templates - used by cli)
 // 9. cli (depends on core, acp-bridge, web-templates, channel packages, sdk)
 // 10. vscode-ide-companion
-// 11. external-context (private Qwen extension)
+// 11. external-context integrations (private Qwen extensions)
 const buildOrder = [
   'packages/core',
   'packages/channels/base',
@@ -74,6 +74,7 @@ const buildOrder = [
   ...(cliOnly
     ? []
     : [
+        'packages/qwen-live',
         'packages/vscode-ide-companion',
         'packages/chrome-extension',
         'integrations/external-context',

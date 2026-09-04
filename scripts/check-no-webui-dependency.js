@@ -1,56 +1,54 @@
 #!/usr/bin/env node
 
-import { existsSync } from 'node:fs';
-import { readFile, readdir } from 'node:fs/promises';
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const forbidden = [/@qwen-code\/webui\b/g, /packages\/webui(?:[/'"`]|$)/g];
-const ignoredDirectories = new Set(['.git', '.qwen', 'node_modules', 'dist']);
-const historicalPrefixes = ['docs/design/', 'docs/plans/'];
-const ignoredFiles = new Set([
-  'scripts/check-no-webui-dependency.js',
+const historicalPrefixes = ['.qwen/e2e-tests/', 'docs/design/', 'docs/plans/'];
+const intentionalReferences = new Set([
+  '.github/scripts/qwen-triage-workflow.test.mjs',
+  'eslint.config.js',
   'packages/web-shell/client/build-artifact.test.ts',
+  'scripts/check-no-webui-dependency.js',
+  'scripts/tests/vscode-companion-no-webui-config.test.js',
 ]);
-
-async function collectFiles(directory, relative = '') {
-  const files = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const entryRelative = path.posix.join(relative, entry.name);
-    if (entry.isDirectory()) {
-      if (!ignoredDirectories.has(entry.name)) {
-        files.push(
-          ...(await collectFiles(
-            path.join(directory, entry.name),
-            entryRelative,
-          )),
-        );
-      }
-    } else if (
-      !ignoredFiles.has(entryRelative) &&
-      !historicalPrefixes.some((prefix) => entryRelative.startsWith(prefix))
-    ) {
-      files.push(entryRelative);
-    }
-  }
-  return files;
-}
 
 const matches = existsSync(path.join(root, 'packages/webui'))
   ? ['packages/webui/ directory']
   : [];
+const trackedFiles = execFileSync('git', ['ls-files', '-z'], {
+  cwd: root,
+  encoding: 'utf8',
+}).split('\0');
 
-for (const relative of await collectFiles(root)) {
+for (const relative of trackedFiles) {
+  if (
+    !relative ||
+    intentionalReferences.has(relative) ||
+    historicalPrefixes.some((prefix) => relative.startsWith(prefix))
+  ) {
+    continue;
+  }
   let source;
   try {
-    source = await readFile(path.join(root, relative), 'utf8');
+    source = readFileSync(path.join(root, relative), 'utf8');
   } catch {
     continue;
   }
   for (const pattern of forbidden) {
     pattern.lastIndex = 0;
-    if (pattern.test(source)) matches.push(relative);
+    if (pattern.test(source)) {
+      matches.push(relative);
+    }
   }
 }
 

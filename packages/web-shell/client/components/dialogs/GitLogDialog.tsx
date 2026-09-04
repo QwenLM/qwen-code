@@ -23,6 +23,7 @@ import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../../utils/clipboard';
+import { useCopiedFlash } from '../../hooks/useCopiedFlash';
 import { timeAgo } from '../../utils/timeAgo';
 import { DialogShell } from './DialogShell';
 import styles from './GitLogDialog.module.css';
@@ -60,14 +61,13 @@ function CommitRow({
   const [detail, setDetail] = useState<DaemonGitCommitDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [copied, flashCopied] = useCopiedFlash(1500);
   const cancelledRef = useRef(false);
 
   const copySha = () => {
     void writeClipboardText(entry.sha)
       .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
+        flashCopied();
       })
       .catch(warnClipboardWriteFailure);
   };

@@ -2,7 +2,7 @@
   "name": "qwen-code-vscode-ide-companion",
   "displayName": "Qwen Code Companion",
   "description": "Enable Qwen Code with direct access to your VS Code workspace.",
-  "version": "0.22.3",
+  "version": "0.23.0",
   "publisher": "qwenlm",
   "icon": "assets/icon.png",
   "repository": {
@@ -253,9 +253,8 @@
   "scripts": {
     "prepackage": "node ./scripts/prepackage.js",
     "build": "npm run build:dev",
-    "build:dev": "npm run check:no-webui && npm run check-types && npm run lint && node esbuild.js",
-    "build:prod": "npm run check:no-webui && node esbuild.js --production",
-    "check:no-webui": "node ../../scripts/check-no-webui-dependency.js",
+    "build:dev": "npm run check-types && npm run lint && node esbuild.js",
+    "build:prod": "node esbuild.js --production",
     "generate:notices": "node ./scripts/generate-notices.js",
     "prepare": "npm run generate:notices",
     "check-types": "tsc --noEmit",
@@ -265,7 +264,7 @@
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "package": "vsce package --no-dependencies",
     "test": "vitest run",
-    "test:ci": "vitest run --coverage"
+    "test:ci": "vitest run"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",

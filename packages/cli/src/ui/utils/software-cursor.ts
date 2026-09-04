@@ -67,5 +67,8 @@ export function getSoftwareCursorBackground(
 }
 
 export function renderSoftwareCursor(text: string): string {
-  return chalk.bgHex(getSoftwareCursorBackground())(text || ' ');
+  const cursorText = text || ' ';
+  return process.platform === 'win32'
+    ? chalk.underline(cursorText)
+    : chalk.bgHex(getSoftwareCursorBackground())(cursorText);
 }

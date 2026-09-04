@@ -18,6 +18,10 @@ Use `modelProviders` to declare models per provider id that the `/model` picker 
 >
 > **Model uniqueness:** Models within the same `authType` are uniquely identified by the combination of `id` + `baseUrl`. This means you can define the same model ID (e.g., `"gpt-4o"`) multiple times under a single `authType` as long as each entry has a different `baseUrl` — for example, one pointing to OpenAI directly and another to a proxy endpoint. If two entries share both the same `id` and the same `baseUrl` (or both omit `baseUrl`), the first occurrence wins and subsequent duplicates are skipped with a warning.
 
+> [!note]
+>
+> **Hot reload vs. restart:** `modelProviders` edits in `settings.json` are picked up by a running interactive session without a restart (the file watcher debounces ~300ms; reopen `/model` to see new entries, the current selection is kept). `providerProtocol` is read once at startup and **requires a restart**.
+
 ### Image generation routes
 
 Set `supportsImageGeneration: true` when a route can be used by the built-in
@@ -469,9 +473,11 @@ Coding Plan model configurations are versioned. When Qwen Code detects a newer v
 
 - Replace the existing Coding Plan model configurations with the latest versions
 - Preserve any custom model configurations you've added manually
-- Automatically switch to the first model in the updated configuration
+- Leave your selected model unchanged; if it is no longer in the updated
+  configuration, use `/model` to choose a new one
 
-The update process ensures you always have access to the latest model configurations and features without manual intervention.
+The update process refreshes the model configurations and features without
+changing your selected model.
 
 ### Manual Configuration (Advanced)
 

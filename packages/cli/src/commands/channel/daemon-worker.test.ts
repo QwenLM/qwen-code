@@ -132,6 +132,7 @@ const mockBridgeOff = vi.hoisted(() => vi.fn());
 const mockBridgeNewSession = vi.hoisted(() => vi.fn());
 const mockBridgeLoadSession = vi.hoisted(() => vi.fn());
 const mockBridgePrompt = vi.hoisted(() => vi.fn());
+const mockBridgeBtw = vi.hoisted(() => vi.fn());
 const mockBridgeCancelSession = vi.hoisted(() => vi.fn());
 const mockBridgeDiscardSession = vi.hoisted(() => vi.fn());
 const mockBridgeRespondToPermission = vi.hoisted(() => vi.fn());
@@ -171,6 +172,7 @@ const mockDaemonChannelBridge = vi.hoisted(() =>
     newSession: mockBridgeNewSession,
     loadSession: mockBridgeLoadSession,
     prompt: mockBridgePrompt,
+    btw: mockBridgeBtw,
     cancelSession: mockBridgeCancelSession,
     discardSession: mockBridgeDiscardSession,
     respondToPermission: mockBridgeRespondToPermission,
@@ -434,7 +436,7 @@ function stubProcessSend(send: NodeJS.Process['send'] | undefined): () => void {
 }
 
 describe('createDaemonSessionFactory', () => {
-  it('tags created channel sessions without changing loaded sessions', async () => {
+  it('tags created and resumed channel sessions', async () => {
     const sdk = createSdk();
     const factory = createDaemonSessionFactory({
       client: sdk.client,
@@ -466,6 +468,7 @@ describe('createDaemonSessionFactory', () => {
         workspaceCwd: '/workspace',
         modelServiceId: 'qwen-plus',
         sessionScope: 'thread',
+        sourceType: 'channel',
       },
       'qwen-channel-worker',
     );
@@ -506,12 +509,13 @@ describe('createDaemonSessionFactory', () => {
         workspaceCwd: '/workspace',
         approvalMode: 'yolo',
         sessionScope: 'thread',
+        sourceType: 'channel',
       },
       'qwen-channel-worker',
     );
   });
 
-  it('stamps channel sourceId on created sessions only', async () => {
+  it('stamps channel sourceId on created and resumed sessions', async () => {
     const sdk = createSdk();
     const factory = createDaemonSessionFactory({
       client: sdk.client,
@@ -536,21 +540,95 @@ describe('createDaemonSessionFactory', () => {
       },
       'qwen-channel-worker',
     );
-    // The load branch never re-stamps creation attribution: no sourceId in the
-    // load request even when the factory request carried one.
     expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
       sdk.client,
       'existing-session',
       {
         workspaceCwd: '/workspace',
         sessionScope: 'thread',
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
       },
+      'qwen-channel-worker',
+    );
+  });
+
+  it('forwards worktree isolation only while creating a session', async () => {
+    const sdk = createSdk();
+    const factory = createDaemonSessionFactory({
+      client: sdk.client,
+      DaemonSessionClient: sdk.DaemonSessionClient,
+      clientId: 'qwen-channel-worker',
+    });
+
+    await factory({ workspaceCwd: '/workspace', worktree: {} });
+    await factory({
+      workspaceCwd: '/workspace',
+      sessionId: 'existing-session',
+      worktree: {},
+    });
+
+    expect(sdk.DaemonSessionClient.createOrAttach).toHaveBeenCalledWith(
+      sdk.client,
+      expect.objectContaining({ worktree: {} }),
+      'qwen-channel-worker',
+    );
+    expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
+      sdk.client,
+      'existing-session',
+      expect.not.objectContaining({ worktree: expect.anything() }),
       'qwen-channel-worker',
     );
   });
 });
 
 describe('createDaemonChannelBridgeFacade', () => {
+  it('forwards BTW when exposed independently of shell support', async () => {
+    const btw = vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      answer: 'side answer',
+    });
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      btw,
+      cancelSession: mockBridgeCancelSession,
+    };
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: true,
+      exposeShellCommand: false,
+    });
+
+    await facade.btw?.('session-1', 'question');
+
+    expect(btw).toHaveBeenCalledWith('session-1', 'question');
+    expect('shellCommand' in facade).toBe(false);
+  });
+
+  it('omits BTW when the daemon does not advertise BTW support', () => {
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      btw: vi.fn(),
+      cancelSession: mockBridgeCancelSession,
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: false,
+      exposeShellCommand: false,
+    });
+
+    expect('btw' in facade).toBe(false);
+  });
+
   it('omits shellCommand when the daemon does not advertise shell support', () => {
     const bridge = mockDaemonChannelBridge.mock.results[0]?.value ?? {
       availableCommands: [],
@@ -564,6 +642,7 @@ describe('createDaemonChannelBridgeFacade', () => {
     };
 
     const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: false,
       exposeShellCommand: false,
     });
 
@@ -586,6 +665,7 @@ describe('createDaemonChannelBridgeFacade', () => {
     };
 
     const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: false,
       exposeShellCommand: true,
     });
 
@@ -612,6 +692,7 @@ describe('createDaemonChannelBridgeFacade', () => {
     };
 
     const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: false,
       exposeShellCommand: false,
     });
 
@@ -641,6 +722,7 @@ describe('createDaemonChannelBridgeFacade', () => {
     };
 
     const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: false,
       exposeShellCommand: false,
     });
 
@@ -668,6 +750,7 @@ describe('createDaemonChannelBridgeFacade', () => {
     };
 
     const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: false,
       exposeShellCommand: false,
     });
 
@@ -691,6 +774,7 @@ describe('createDaemonChannelBridgeFacade', () => {
       deleteSessionData,
     };
     const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: false,
       exposeShellCommand: false,
     });
 
@@ -711,6 +795,7 @@ describe('createDaemonChannelBridgeFacade', () => {
     };
 
     const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: false,
       exposeShellCommand: false,
     });
 
@@ -731,6 +816,7 @@ describe('createDaemonChannelBridgeFacade', () => {
     };
 
     const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: false,
       exposeShellCommand: false,
     });
 
@@ -751,6 +837,7 @@ describe('createDaemonChannelBridgeFacade', () => {
     };
 
     const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: false,
       exposeShellCommand: false,
     });
 
@@ -1386,6 +1473,45 @@ describe('runChannelDaemonWorker', () => {
     );
   });
 
+  it('omits BTW when capabilities do not include session_btw', async () => {
+    const sdk = createSdk();
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    const bridgeFacade = mockSessionRouter.mock.calls[0]![0] as {
+      btw?: unknown;
+    };
+    expect('btw' in bridgeFacade).toBe(false);
+  });
+
+  it('exposes BTW when capabilities include session_btw', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['session_btw'],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+    });
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    const bridgeFacade = mockSessionRouter.mock.calls[0]![0] as {
+      btw?: unknown;
+    };
+    expect(bridgeFacade.btw).toBeTypeOf('function');
+  });
+
   it('exposes shellCommand only when capabilities include session_shell_command', async () => {
     const sdk = createSdk();
     sdk.client.capabilities.mockResolvedValueOnce({
@@ -1443,6 +1569,80 @@ describe('runChannelDaemonWorker', () => {
 
     expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
       expect.objectContaining({ sessionAttachments: false }),
+    );
+  });
+
+  it('enables session-scoped permission votes when the daemon supports them', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['session_permission_vote'],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+    });
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionPermissionVote: true }),
+    );
+  });
+
+  it('keeps session-scoped permission votes off for older daemons', async () => {
+    const sdk = createSdk();
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionPermissionVote: false }),
+    );
+  });
+
+  it('enables worktree persistence only when the daemon advertises it', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['session_worktree_persistence_v1'],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+    });
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionWorktreePersistence: true }),
+    );
+  });
+
+  it('keeps worktree persistence off when the daemon omits the capability', async () => {
+    const sdk = createSdk();
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionWorktreePersistence: false }),
     );
   });
 
@@ -1578,33 +1778,31 @@ describe('runChannelDaemonWorker', () => {
     expect(sdk.DaemonClient).not.toHaveBeenCalled();
   });
 
-  // R18-1: mirrors the boot certifier — the primary Host gate answers only
-  // 127.0.0.1, localhost, and [::1], so a worker aimed at any other 127/8
-  // spelling is refused by the daemon itself with 403 Invalid Host header.
-  // Reject it here too instead of letting it restart-loop.
-  it('rejects loopback spellings the daemon Host gate refuses', async () => {
+  it('accepts an IPv4 loopback spelling the daemon bound', async () => {
     const sdk = createSdk();
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      telegram: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
 
-    await expect(
-      runChannelDaemonWorker({
-        daemonUrl: 'http://127.0.0.2:4170',
-        workspace: '/workspace',
-        selection: { mode: 'names', names: ['telegram'] },
-        loadDaemonSdk: async () => sdk,
-      }),
-    ).rejects.toThrow(
-      /points at a loopback address the daemon's Host header gate refuses/,
-    );
-    expect(sdk.DaemonClient).not.toHaveBeenCalled();
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.2:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(sdk.DaemonClient).toHaveBeenCalledWith({
+      baseUrl: 'http://127.0.0.2:4170',
+    });
   });
 
-  // The refusal above is host-state-dependent: on a host that ASSIGNS the
-  // wide spelling (`ip addr add 127.0.0.2/8 dev lo`, a standard
-  // container-mesh pattern), the own-interface escape used to accept the URL
-  // and every worker dial then got `403 Invalid Host header`. Pin the
-  // assigned state so the refusal is witnessed on every host.
-  it('rejects an assigned wide loopback the Host gate answers 403', async () => {
+  it('accepts an assigned wide loopback', async () => {
     const sdk = createSdk();
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      telegram: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
     mockNetworkInterfaces.value = {
       lo: [
         {
@@ -1635,26 +1833,22 @@ describe('runChannelDaemonWorker', () => {
       ],
     };
     try {
-      // Witness the assigned state: without this assert a broken mock would
-      // let the rejection below pass for the wrong (unassigned) reason.
       expect(isOwnInterfaceAddress('127.0.0.2')).toBe(true);
-      await expect(
-        runChannelDaemonWorker({
-          daemonUrl: 'http://127.0.0.2:4170',
-          workspace: '/workspace',
-          selection: { mode: 'names', names: ['telegram'] },
-          loadDaemonSdk: async () => sdk,
-        }),
-      ).rejects.toThrow(
-        /points at a loopback address the daemon's Host header gate refuses/,
-      );
-      expect(sdk.DaemonClient).not.toHaveBeenCalled();
+      await runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.2:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      });
+      expect(sdk.DaemonClient).toHaveBeenCalledWith({
+        baseUrl: 'http://127.0.0.2:4170',
+      });
     } finally {
       mockNetworkInterfaces.value = undefined;
     }
   });
 
-  it('still accepts the loopback spellings the Host gate answers', async () => {
+  it('accepts the canonical loopback spellings', async () => {
     const sdk = createSdk();
     mockLoadChannelsConfig.mockReturnValueOnce({
       telegram: { type: 'telegram' },

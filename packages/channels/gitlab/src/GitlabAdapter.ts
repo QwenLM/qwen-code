@@ -117,6 +117,7 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     chatId: string,
     threadId: string | undefined,
     text: string,
+    sourceLabel?: string,
   ): Promise<void> {
     if (!threadId) {
       throw new Error(
@@ -130,7 +131,12 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       );
     }
     const targetType = threadId.startsWith('mr:') ? 'mr' : 'issue';
-    await this.createNote(chatId, targetType, Number(match[1]), text);
+    await this.createNote(
+      chatId,
+      targetType,
+      Number(match[1]),
+      this.formatMarkdownAttributedText(text, sourceLabel),
+    );
   }
 
   protected override onPromptStart(
@@ -356,6 +362,23 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     }
     try {
       await this.handleInbound(envelope);
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] error processing todo ${todo.id}: ${err}\n`,
+      );
+      try {
+        await this.createNote(
+          chatId,
+          targetType,
+          target.iid,
+          this.formatMarkdownAttributedText(
+            '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+            this.getInboundErrorSourceLabel(envelope),
+          ),
+        );
+      } catch {
+        // best-effort error comment
+      }
     } finally {
       this.reactions.delete(messageId);
     }

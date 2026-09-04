@@ -387,16 +387,38 @@ export enum CompressionStatus {
    * splitter). (R5.2)
    */
   COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+
+  /**
+   * The compression side-query failed before producing a summary. Kept
+   * distinct from empty summaries so callers can tell API/provider failures
+   * apart from model output quality failures.
+   */
+  COMPRESSION_FAILED_API_ERROR,
+}
+
+export function isCompressionFailureStatus(
+  status: CompressionStatus | null | undefined,
+): boolean {
+  return (
+    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
+    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
+    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
+    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR
+  );
 }
 
 /**
  * Why an auto-compaction fired. Drives the user-facing notice so a
  * screenshot-overflow trigger isn't mislabeled as "approached the token
- * limit". Undefined on NOOP / failure paths and for callers that don't set it.
+ * limit" and a 413-driven compaction isn't mislabeled as a token overflow
+ * (#10380). Undefined on NOOP / failure paths and for callers that don't
+ * set it.
  */
 export type CompactionTriggerReason =
   | 'token_limit'
   | 'image_overflow'
+  | 'payload_overflow'
   | 'manual';
 
 export interface ChatCompressionInfo {

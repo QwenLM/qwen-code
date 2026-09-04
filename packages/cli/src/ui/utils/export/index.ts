@@ -9,7 +9,7 @@ export type {
   ExportMessage,
   ExportSessionData,
 } from './types.js';
-export { collectSessionData } from './collect.js';
+export { collectSessionData, collectSessionMetadata } from './collect.js';
 export { normalizeSessionData } from './normalize.js';
 export { toMarkdown } from './formatters/markdown.js';
 export {

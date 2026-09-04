@@ -130,6 +130,20 @@ describe('skillDescriptionKey', () => {
   });
 });
 
+describe('settings message catalog', () => {
+  it('does not retain translations for the removed dynamic command setting', () => {
+    const removedKeys = [
+      'settings.label.general.dynamicCommandTranslation',
+      'settings.description.general.dynamicCommandTranslation',
+    ];
+
+    for (const key of removedKeys) {
+      expect(zh(key)).toBe(key);
+      expect(en(key)).toBe(key);
+    }
+  });
+});
+
 describe('App command pipeline', () => {
   // Mirrors App.tsx: merge -> localize commands -> tag skills (which localizes
   // known skills by name, session-independently).

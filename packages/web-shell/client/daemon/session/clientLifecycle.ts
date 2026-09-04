@@ -5,8 +5,7 @@
  */
 
 // Keep the persisted key stable across the WebUI-to-Web-Shell migration.
-const SESSION_CLIENT_ID_STORAGE_PREFIX =
-  'qwen-code-webui-client-id:session:';
+const SESSION_CLIENT_ID_STORAGE_PREFIX = 'qwen-code-webui-client-id:session:';
 
 export function getStableClientId(
   clientId: string | undefined,

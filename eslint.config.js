@@ -12,8 +12,6 @@ import prettierConfig from 'eslint-config-prettier';
 import importPlugin from 'eslint-plugin-import';
 import vitest from '@vitest/eslint-plugin';
 import globals from 'globals';
-// For more info, see https://github.com/storybookjs/eslint-plugin-storybook#configuration-flat-config-format
-import storybook from 'eslint-plugin-storybook';
 import checkFile from 'eslint-plugin-check-file';
 import noCoreRootBarrelImport from './eslint-rules/no-core-root-barrel-import.js';
 import noUtilsUpwardImport from './eslint-rules/no-utils-upward-import.js';
@@ -42,6 +40,7 @@ export default tseslint.config(
     ignores: [
       'node_modules/*',
       'packages/**/dist/**',
+      'packages/web-templates/src/generated/**',
       'integrations/**/dist/**',
       'bundle/**',
       'package/bundle/**',
@@ -52,6 +51,7 @@ export default tseslint.config(
       'docs-site/.next/**',
       'docs-site/out/**',
       '.qwen/**',
+      'scripts/codemod/fixtures/**', // codemod test data; intentionally non-idiomatic ink input/output
       'packages/desktop-shell/runtime/**',
       'packages/desktop-shell/src-tauri/target/**',
       'packages/live-host/**', // standalone Electron app with its own Node test conventions
@@ -605,5 +605,4 @@ export default tseslint.config(
       'react/react-in-jsx-scope': 'off',
     },
   },
-  storybook.configs['flat/recommended'],
 );

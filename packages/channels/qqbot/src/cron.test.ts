@@ -57,6 +57,19 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected getResponseMessageId(_sessionId: string): string | undefined {
       return undefined;
     }
+    protected getResponseSourceLabel(_sessionId: string): undefined {
+      return undefined;
+    }
+    protected formatMarkdownAttributedText(
+      text: string,
+      sourceLabel?: string,
+    ): string {
+      const label = sourceLabel?.replace(/([\\`*_[\]{}()#+.!|>~-])/gu, '\\$1');
+      return label ? `${label}\n${text}` : text;
+    }
+    protected formatAttributedText(text: string, sourceLabel?: string): string {
+      return sourceLabel ? `${sourceLabel} ${text}` : text;
+    }
     protected onSessionDied(_sessionId: string): void {}
   },
   SessionRouter: class {

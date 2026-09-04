@@ -34,7 +34,18 @@ export interface MarkdownDocumentPolicy {
   normalizeUrl(source: string): string | undefined;
   replaceImage(alt: string, source: string | undefined): string;
   onUrlChange(code: 'url_rejected' | 'url_sanitized'): void;
+  onComplexityLimit?(): void;
 }
+
+const MARKDOWN_COMPLEXITY_FALLBACK =
+  '[markdown omitted: complexity limit exceeded]';
+const MAX_MARKDOWN_SOURCE_CHARACTERS = 400 * 1024;
+const MAX_MARKDOWN_INLINE_DELIMITERS = 2_048;
+const MAX_MARKDOWN_BRACKET_DEPTH = 512;
+const MAX_MARKDOWN_BLOCKQUOTE_DEPTH = 512;
+const MAX_MARKDOWN_AST_NODES = 20_000;
+const MAX_MARKDOWN_AST_DEPTH = 512;
+const MAX_MARKDOWN_LEADING_INDENT = 2 * MAX_MARKDOWN_AST_DEPTH;
 
 const markdownParser = unified()
   .use(remarkParse)
@@ -54,16 +65,158 @@ function mayContainFencedCode(value: string): boolean {
   return value.includes('```') || value.includes('~~~');
 }
 
-function parseMarkdown(value: string): MarkdownNode {
-  return markdownParser.parse(value) as unknown as MarkdownNode;
+function parseMarkdown(value: string): MarkdownNode | undefined {
+  if (!isMarkdownSourceWithinBudget(value)) return undefined;
+  try {
+    const root = markdownParser.parse(value) as unknown as MarkdownNode;
+    return isMarkdownTreeWithinBudget(root) ? root : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isMarkdownSourceWithinBudget(value: string): boolean {
+  if (value.length > MAX_MARKDOWN_SOURCE_CHARACTERS) return false;
+  const source = value.replace(/\r\n?/g, '\n');
+  let inlineDelimiters = 0;
+  let bracketDepth = 0;
+  let fence:
+    | { character: string; length: number; blockquoteDepth: number }
+    | undefined;
+  let htmlBlockDepth: number | undefined;
+  const blockquoteMarkerPattern = / {0,3}>[ \t]?/y;
+  for (const line of source.split('\n')) {
+    const blockquoteOffsets = [0];
+    let contentOffset = 0;
+    let blockquoteDepth = 0;
+    while (!fence || blockquoteDepth < fence.blockquoteDepth) {
+      blockquoteMarkerPattern.lastIndex = contentOffset;
+      const blockquoteMarker = blockquoteMarkerPattern.exec(line);
+      if (!blockquoteMarker) break;
+      contentOffset = blockquoteMarkerPattern.lastIndex;
+      blockquoteDepth += 1;
+      blockquoteOffsets.push(contentOffset);
+      if (!fence && blockquoteDepth > MAX_MARKDOWN_BLOCKQUOTE_DEPTH) {
+        return false;
+      }
+    }
+    const contentLine = line.slice(contentOffset);
+    if (fence && blockquoteDepth < fence.blockquoteDepth) fence = undefined;
+    const fenceText = (
+      fence ? line.slice(blockquoteOffsets[fence.blockquoteDepth]) : contentLine
+    ).replace(/^ {0,3}/, '');
+    const fenceRun = /^(`+|~+)/.exec(fenceText)?.[1];
+    if (fence) {
+      if (
+        fenceRun?.[0] === fence.character &&
+        fenceRun.length >= fence.length &&
+        fenceText.slice(fenceRun.length).trim() === ''
+      ) {
+        fence = undefined;
+      }
+      continue;
+    }
+    if (
+      htmlBlockDepth !== undefined &&
+      (blockquoteDepth < htmlBlockDepth ||
+        line.slice(blockquoteOffsets[htmlBlockDepth]).trim() === '')
+    ) {
+      htmlBlockDepth = undefined;
+    }
+    if (
+      htmlBlockDepth === undefined &&
+      startsConservativeHtmlBlock(contentLine)
+    ) {
+      htmlBlockDepth = blockquoteDepth;
+    }
+    if (htmlBlockDepth === undefined && fenceRun && fenceRun.length >= 3) {
+      const character = fenceRun[0];
+      const info = fenceText.slice(fenceRun.length);
+      if (character !== '`' || !info.includes('`')) {
+        fence = { character, length: fenceRun.length, blockquoteDepth };
+        continue;
+      }
+    }
+
+    let leadingIndent = 0;
+    for (const character of contentLine) {
+      if (character === ' ') leadingIndent += 1;
+      else if (character === '\t') leadingIndent += 4;
+      else break;
+      if (leadingIndent > MAX_MARKDOWN_LEADING_INDENT) return false;
+    }
+    let escaped = false;
+    for (const character of contentLine) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (character === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (character === '[') {
+        bracketDepth += 1;
+        if (bracketDepth > MAX_MARKDOWN_BRACKET_DEPTH) return false;
+      } else if (character === ']') {
+        bracketDepth = Math.max(0, bracketDepth - 1);
+      } else if (
+        character === '*' ||
+        character === '_' ||
+        character === '~' ||
+        character === '$'
+      ) {
+        inlineDelimiters += 1;
+        if (inlineDelimiters > MAX_MARKDOWN_INLINE_DELIMITERS) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+function startsConservativeHtmlBlock(line: string): boolean {
+  return /^ {0,3}<(?:\/?[A-Za-z][A-Za-z0-9-]*(?:\s|\/?>|$)|!--|\?|!\[CDATA\[|![A-Z])/.test(
+    line,
+  );
 }
 
 function walkMarkdown(
   node: MarkdownNode,
   visit: (node: MarkdownNode) => boolean | void,
 ): void {
-  if (visit(node) === false) return;
-  for (const child of node.children ?? []) walkMarkdown(child, visit);
+  const stack = [node];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current || visit(current) === false) continue;
+    const children = current.children ?? [];
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      stack.push(children[index]);
+    }
+  }
+}
+
+function isMarkdownTreeWithinBudget(root: MarkdownNode): boolean {
+  const stack: Array<{ node: MarkdownNode; depth: number }> = [
+    { node: root, depth: 0 },
+  ];
+  let nodes = 0;
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+    nodes += 1;
+    if (
+      nodes > MAX_MARKDOWN_AST_NODES ||
+      current.depth > MAX_MARKDOWN_AST_DEPTH
+    ) {
+      return false;
+    }
+    for (const child of current.node.children ?? []) {
+      stack.push({ node: child, depth: current.depth + 1 });
+    }
+  }
+  return true;
 }
 
 function rangeOf(
@@ -119,7 +272,11 @@ function safeLinkReplacement(
       : '[link omitted]';
   }
   if (!original.trimStart().startsWith('[')) return safe;
-  return `[${escapeLabel(markdownText(node))}](${safe})`;
+  return `[${escapeLabel(markdownText(node))}](${markdownDestination(safe)})`;
+}
+
+function markdownDestination(value: string): string {
+  return `<${value.replaceAll('<', '%3C').replaceAll('>', '%3E')}>`;
 }
 
 export function sanitizeMarkdownDocument(
@@ -128,8 +285,13 @@ export function sanitizeMarkdownDocument(
 ): string {
   if (!mayContainNavigableMarkdown(value)) return value;
   const root = parseMarkdown(value);
+  if (!root) {
+    policy.onComplexityLimit?.();
+    return MARKDOWN_COMPLEXITY_FALLBACK;
+  }
   const definitions = new Map<string, MarkdownNode>();
   const imageDefinitionIds = new Set<string>();
+  const linkDefinitionIds = new Set<string>();
   walkMarkdown(root, (node) => {
     if (node.type === 'definition') {
       const identifier = normalizedIdentifier(node);
@@ -139,6 +301,9 @@ export function sanitizeMarkdownDocument(
     } else if (node.type === 'imageReference') {
       const identifier = normalizedIdentifier(node);
       if (identifier) imageDefinitionIds.add(identifier);
+    } else if (node.type === 'linkReference') {
+      const identifier = normalizedIdentifier(node);
+      if (identifier) linkDefinitionIds.add(identifier);
     }
   });
 
@@ -171,7 +336,11 @@ export function sanitizeMarkdownDocument(
     }
     if (node.type === 'definition') {
       const identifier = normalizedIdentifier(node);
-      if (identifier && imageDefinitionIds.has(identifier)) {
+      if (
+        identifier &&
+        imageDefinitionIds.has(identifier) &&
+        !linkDefinitionIds.has(identifier)
+      ) {
         replacements.push({ ...range, value: '' });
         return false;
       }
@@ -182,7 +351,9 @@ export function sanitizeMarkdownDocument(
       replacements.push({
         ...range,
         value:
-          safe && identifier ? `[${escapeLabel(identifier)}]: ${safe}` : '',
+          safe && identifier
+            ? `[${escapeLabel(identifier)}]: ${markdownDestination(safe)}`
+            : '',
       });
       return false;
     }
@@ -221,10 +392,11 @@ function demoteFence(
 ): Replacement | undefined {
   const range = rangeOf(node);
   if (!range) return undefined;
-  const lineEnd = value.indexOf('\n', range.start);
-  const end = lineEnd === -1 || lineEnd > range.end ? range.end : lineEnd;
+  const relativeLineEnd = value.slice(range.start, range.end).search(/[\r\n]/);
+  const end =
+    relativeLineEnd === -1 ? range.end : range.start + relativeLineEnd;
   const opening = value.slice(range.start, end);
-  const match = /^(`{3,}|~{3,})[ \t]*([^\s`~]+)(.*)$/.exec(opening);
+  const match = /^(`{3,}|~{3,})[ \t]*(\S+)(.*)$/.exec(opening);
   if (!match) return undefined;
   return {
     start: range.start,
@@ -236,10 +408,16 @@ function demoteFence(
 export function transformRichMarkdownTasks(
   value: string,
   keepTask: (language: string) => boolean,
+  onComplexityLimit?: () => void,
 ): string {
   if (!mayContainFencedCode(value)) return value;
   const replacements: Replacement[] = [];
-  walkMarkdown(parseMarkdown(value), (node) => {
+  const root = parseMarkdown(value);
+  if (!root) {
+    onComplexityLimit?.();
+    return MARKDOWN_COMPLEXITY_FALLBACK;
+  }
+  walkMarkdown(root, (node) => {
     const language = richLanguage(node);
     if (!language || keepTask(language)) return;
     const replacement = demoteFence(value, node, language);
@@ -251,7 +429,9 @@ export function transformRichMarkdownTasks(
 export function countRichMarkdownTasks(value: string): number {
   if (!mayContainFencedCode(value)) return 0;
   let count = 0;
-  walkMarkdown(parseMarkdown(value), (node) => {
+  const root = parseMarkdown(value);
+  if (!root) return 0;
+  walkMarkdown(root, (node) => {
     if (richLanguage(node)) count += 1;
   });
   return count;

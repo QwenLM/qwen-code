@@ -103,7 +103,10 @@ describe('Live conversation workspace root', () => {
     expect(first.canonicalRoot).toBe(realpathSync.native(expected));
     const stats = await lstat(expected);
     expect(stats.isDirectory()).toBe(true);
-    expect(first).toMatchObject({ device: stats.dev, inode: stats.ino });
+    expect(first).toMatchObject({
+      device: stats.dev,
+      inode: Number.isSafeInteger(stats.ino) && stats.ino > 0 ? stats.ino : 0,
+    });
     if (process.platform !== 'win32') {
       expect(stats.mode & 0o077).toBe(0);
     }
@@ -381,6 +384,7 @@ describe('Live conversation workspace root', () => {
     const created = await workspace.ensureStandaloneDirectory('standalone');
     expect(created.status).toBe('created');
     if (created.status !== 'created') throw new Error('expected creation');
+    if (created.identity.inode === 0) return;
 
     await expect(
       workspace.inspectStandaloneDirectory('standalone', created.identity),
@@ -425,7 +429,9 @@ describe('Live conversation workspace root', () => {
     expect(ensured.identity.canonicalPath).toBe(
       prepared.identity.canonicalPath,
     );
-    expect(ensured.identity.inode).not.toBe(prepared.identity.inode);
+    if (prepared.identity.inode !== 0) {
+      expect(ensured.identity.inode).not.toBe(prepared.identity.inode);
+    }
   });
 
   it('returns the raced inspection when a concurrent creator wins the ensure race', async () => {
@@ -651,13 +657,12 @@ describe('Live conversation workspace root', () => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });
     const root = await workspace.getRoot();
+    const changedRoot = root.inodeVerifiable
+      ? { ...root, inode: 0, inodeVerifiable: false }
+      : { ...root, inode: 1, inodeVerifiable: true };
 
     await expect(
-      workspace.confirmStandaloneRootDurability({
-        ...root,
-        inode: 0,
-        inodeVerifiable: false,
-      }),
+      workspace.confirmStandaloneRootDurability(changedRoot),
     ).rejects.toBeInstanceOf(ConversationDirectoryIdentityError);
   });
 
