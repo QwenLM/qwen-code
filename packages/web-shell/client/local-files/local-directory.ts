@@ -218,6 +218,21 @@ function toLocalDirectoryError(
   return new LocalDirectoryError('failed', `${path}: ${message}`);
 }
 
+/**
+ * `getFileHandle` throws TypeMismatchError when the name resolves to a
+ * DIRECTORY, so at file-expecting sites the generic mapping would report the
+ * exact opposite of what happened.
+ */
+function toFileExpectingError(err: unknown, path: string): LocalDirectoryError {
+  if ((err as { name?: unknown })?.name === 'TypeMismatchError') {
+    return new LocalDirectoryError(
+      'not_a_file',
+      `${path} is a directory, not a file.`,
+    );
+  }
+  return toLocalDirectoryError(err, path);
+}
+
 export class LocalDirectory {
   constructor(
     private readonly root: LocalDirectoryHandleLike,
@@ -250,41 +265,48 @@ export class LocalDirectory {
     const dir = await this.resolveDirectory(segments, path, false);
     // A non-positive or non-finite limit falls back to the default rather than
     // clamping to zero: a zero cap would report a non-empty directory as empty.
+    // A fractional limit truncates to zero the same way, so floor at one.
     const requested =
       typeof limit === 'number' && Number.isFinite(limit) && limit > 0
-        ? Math.trunc(limit)
+        ? Math.max(1, Math.trunc(limit))
         : this.limits.maxListEntries;
     const max = Math.min(requested, this.limits.maxListEntries);
     const entries: LocalDirectoryEntry[] = [];
     let truncated = false;
-    for await (const entry of dir.values()) {
-      if (entries.length >= max) {
-        truncated = true;
-        break;
-      }
-      if (isDirectoryEntry(entry)) {
-        entries.push({
-          name: entry.name,
-          path: joinPath(segments, entry.name),
-          kind: 'directory',
-        });
-      } else if (isFileEntry(entry)) {
-        const entryPath = joinPath(segments, entry.name);
-        // A file's size needs getFile(); report the entry without it rather
-        // than failing the whole listing on one unreadable file.
-        try {
-          const file = await entry.getFile();
+    try {
+      for await (const entry of dir.values()) {
+        if (entries.length >= max) {
+          truncated = true;
+          break;
+        }
+        if (isDirectoryEntry(entry)) {
           entries.push({
             name: entry.name,
-            path: entryPath,
-            kind: 'file',
-            size: file.size,
-            lastModified: file.lastModified,
+            path: joinPath(segments, entry.name),
+            kind: 'directory',
           });
-        } catch {
-          entries.push({ name: entry.name, path: entryPath, kind: 'file' });
+        } else if (isFileEntry(entry)) {
+          const entryPath = joinPath(segments, entry.name);
+          // A file's size needs getFile(); report the entry without it rather
+          // than failing the whole listing on one unreadable file.
+          try {
+            const file = await entry.getFile();
+            entries.push({
+              name: entry.name,
+              path: entryPath,
+              kind: 'file',
+              size: file.size,
+              lastModified: file.lastModified,
+            });
+          } catch {
+            entries.push({ name: entry.name, path: entryPath, kind: 'file' });
+          }
         }
       }
+    } catch (err) {
+      // A grant revoked mid-enumeration is a filesystem problem, i.e. a tool
+      // result with a recovery hint, not a raw protocol error.
+      throw toLocalDirectoryError(err, path);
     }
     // Code-unit order, not localeCompare: a listing the model reads must be
     // byte-stable across environments, and the default locale collation is not.
@@ -315,7 +337,7 @@ export class LocalDirectory {
       const handle = await dir.getFileHandle(name);
       file = await handle.getFile();
     } catch (err) {
-      throw toLocalDirectoryError(err, path);
+      throw toFileExpectingError(err, path);
     }
     if (file.size > this.limits.maxReadBytes) {
       throw new LocalDirectoryError(
@@ -340,7 +362,7 @@ export class LocalDirectory {
     const count =
       limit === undefined || !Number.isFinite(limit) || limit <= 0
         ? lines.length
-        : Math.trunc(limit);
+        : Math.max(1, Math.trunc(limit));
     const window = lines.slice(start, start + count);
     return {
       path,
@@ -392,7 +414,7 @@ export class LocalDirectory {
       writer = undefined;
       return { path, bytes, created };
     } catch (err) {
-      throw toLocalDirectoryError(err, path);
+      throw toFileExpectingError(err, path);
     } finally {
       // A half-written file is worse than no file: never leave the stream open.
       await writer?.close().catch(() => {});
@@ -439,76 +461,82 @@ export class LocalDirectory {
     const queue: Array<{ dir: LocalDirectoryHandleLike; prefix: string[] }> = [
       { dir: root, prefix: segments },
     ];
-    while (queue.length > 0 && truncatedBy === null) {
-      const { dir, prefix } = queue.shift()!;
-      for await (const entry of dir.values()) {
-        if (truncatedBy !== null) break;
-        if (isDirectoryEntry(entry)) {
-          queue.push({ dir: entry, prefix: [...prefix, entry.name] });
-          continue;
-        }
-        if (!isFileEntry(entry)) continue;
-        if (filesExamined >= maxFiles) {
-          truncatedBy = 'files';
-          break;
-        }
-        const entryPath = joinPath(prefix, entry.name);
-        let file: LocalFileLike;
-        try {
-          file = await entry.getFile();
-        } catch {
-          filesSkipped += 1;
-          continue;
-        }
-        // filesExamined bounds the work (every getFile() costs a round trip),
-        // including for files we then skip — otherwise a binary-heavy tree
-        // would only be stopped by the byte budget.
-        filesExamined += 1;
-        // Skipped files are counted, not silently invisible: without this a
-        // "no match" could mean "the only copy was a 4 MB bundle we never
-        // opened", which would send the agent to the wrong conclusion.
-        if (file.size > this.limits.maxReadBytes) {
-          filesSkipped += 1;
-          continue;
-        }
-        if (bytesScanned + file.size > maxBytes) {
-          truncatedBy = 'bytes';
-          break;
-        }
-        // bytesScanned is a budget account (the bytes really were pulled);
-        // filesScanned counts only files actually searched, so it never
-        // overlaps filesSkipped.
-        bytesScanned += file.size;
-        let content: string;
-        try {
-          content = await file.text();
-        } catch {
-          filesSkipped += 1;
-          continue;
-        }
-        if (content.includes('\u0000')) {
-          filesSkipped += 1;
-          continue;
-        }
-        filesScanned += 1;
-        const lines = content.split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          const text = lines[i]!;
-          if (!text.includes(pattern)) continue;
-          hits.push({
-            path: entryPath,
-            line: i + 1,
-            text:
-              text.length > MAX_HIT_LINE_CHARS
-                ? `${text.slice(0, MAX_HIT_LINE_CHARS)}…`
-                : text,
-          });
-          if (hits.length >= this.limits.maxSearchHits) {
-            truncatedBy = 'hits';
+    try {
+      while (queue.length > 0 && truncatedBy === null) {
+        const { dir, prefix } = queue.shift()!;
+        for await (const entry of dir.values()) {
+          if (truncatedBy !== null) break;
+          if (isDirectoryEntry(entry)) {
+            queue.push({ dir: entry, prefix: [...prefix, entry.name] });
+            continue;
+          }
+          if (!isFileEntry(entry)) continue;
+          if (filesExamined >= maxFiles) {
+            truncatedBy = 'files';
             break;
+          }
+          const entryPath = joinPath(prefix, entry.name);
+          let file: LocalFileLike;
+          try {
+            file = await entry.getFile();
+          } catch {
+            filesSkipped += 1;
+            continue;
+          }
+          // filesExamined bounds the work (every getFile() costs a round trip),
+          // including for files we then skip — otherwise a binary-heavy tree
+          // would only be stopped by the byte budget.
+          filesExamined += 1;
+          // Skipped files are counted, not silently invisible: without this a
+          // "no match" could mean "the only copy was a 4 MB bundle we never
+          // opened", which would send the agent to the wrong conclusion.
+          if (file.size > this.limits.maxReadBytes) {
+            filesSkipped += 1;
+            continue;
+          }
+          if (bytesScanned + file.size > maxBytes) {
+            truncatedBy = 'bytes';
+            break;
+          }
+          // bytesScanned is a budget account (the bytes really were pulled);
+          // filesScanned counts only files actually searched, so it never
+          // overlaps filesSkipped.
+          bytesScanned += file.size;
+          let content: string;
+          try {
+            content = await file.text();
+          } catch {
+            filesSkipped += 1;
+            continue;
+          }
+          if (content.includes('\u0000')) {
+            filesSkipped += 1;
+            continue;
+          }
+          filesScanned += 1;
+          const lines = content.split('\n');
+          for (let i = 0; i < lines.length; i++) {
+            const text = lines[i]!;
+            if (!text.includes(pattern)) continue;
+            hits.push({
+              path: entryPath,
+              line: i + 1,
+              text:
+                text.length > MAX_HIT_LINE_CHARS
+                  ? `${text.slice(0, MAX_HIT_LINE_CHARS)}…`
+                  : text,
+            });
+            if (hits.length >= this.limits.maxSearchHits) {
+              truncatedBy = 'hits';
+              break;
+            }
           }
         }
       }
+    } catch (err) {
+      // A grant revoked mid-scan is a filesystem problem, i.e. a tool result
+      // with a recovery hint, not a raw protocol error.
+      throw toLocalDirectoryError(err, options.path ?? '');
     }
     return {
       pattern,

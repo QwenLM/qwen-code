@@ -104,7 +104,7 @@ Desktop Shell 没有第二套 UI：它拉起本机 daemon（钳制 `127.0.0.1`�
 
 1. **必须 session-scoped。** workspace 级注册会让同 workspace 下**所有**会话——包括渠道消息（DingTalk 等）驱动的会话、后台 agent、别人的 tab——都能读写用户本地磁盘（事实 11）。会话级注册由 `client-mcp-sender-registry.ts:165-183` 硬拒绝跨会话调用（事实 10）。
 2. **`mcp_register` 带 `sessionId`（已实现）。授权靠结构性保证，不是新检查。** `activeMount.bridge` 本身是 workspace 作用域的，`addSessionRuntimeMcpServer` 到子进程后走 `sessionOrThrow(sessionId)`，所以别的 workspace 的 sessionId 解析不到、直接 `register_failed`。**残余风险**：同一 workspace 内，任何通过鉴权的 WS 客户端都能绑定到该 workspace 的任意会话——这与该 workspace 其余 API 的信任级别一致，v1 接受；多用户共享单个 workspace 的场景需要额外的会话归属检查，留待后续。
-3. **路径规则**：所有工具参数都是**相对授权根**的路径；拒绝绝对路径、`..`、反斜杠、URL 编码穿越（`%2e%2e%2f`）。授权根本身不可越出——这是 FSA 的天然边界，服务端仍要再校验一次。
+3. **路径规则**：所有工具参数都是**相对授权根**的路径；拒绝绝对路径、`..`、反斜杠、盘符与控制字符。URL 编码穿越（`%2e%2e%2f`）不需要专门拒绝：路径从不做 URL 解码，段按字面与句柄名匹配，所以 `%2e%2e` 只是一个普通（通常不存在的）文件名，永远不可能变成 `..`。授权根本身不可越出——这是 FSA 的天然边界，服务端仍要再校验一次。
 4. **两层权限**：浏览器目录授权（粗，按目录，需用户手势）+ 现有 MCP 工具调用审批（细，每次调用）。事实陈述：yolo / 自动批准模式下，写本地盘不会再问。
 5. **单 owner**：用 Web Locks API 在多 tab 间选主，只有 owner 持有桥；其余 tab 显示「另一标签页已连接」。避免同名注册的抢占语义暴露给用户。既有约束正好与之一致：`ClientMcpWsConnection` 按**名字**拒绝同一条连接上的重复注册（`already_registered`），不区分 session，所以一条 WS 连接本来就无法用同一个 server 名绑两个会话——要绑多个就得用不同名字。v1 不做。
 6. **`alwaysLoadTools: true` 必须带上**（事实 12、13），否则 agent 想读本地文件得先猜工具名去 `tool_search`。顺带核实到仓库有一个用户可见设置 `tools.toolSearch.enabled`，其中文文案明写"启用后，MCP 工具会通过 ToolSearch 按需加载"——关掉它 MCP 工具就会全量加载。但桥不能依赖用户去关这个设置，所以 `alwaysLoadTools` 仍是正确的杠杆：它对两种设置都成立。
@@ -115,7 +115,7 @@ server 名要短（会进每个工具名，事实 5）：`local-files` → `mcp_
 
 | 工具             | 参数                                         | 说明                                                                                                        |
 | ---------------- | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `list_directory` | `path`                                       | 返回条目名 + 类型 + 大小 + mtime；有界（默认 500 条）                                                       |
+| `list_directory` | `path`                                       | 返回条目名 + 类型 + 大小（mtime 在条目层收集但 v1 formatter 不输出）；有界（默认 500 条）                   |
 | `read_file`      | `path`, `offset?`, `limit?`                  | 文本读取；字节上限；二进制拒绝并说明                                                                        |
 | `write_file`     | `path`, `content`                            | 整文件覆盖（v1 不做 `edit_file` 的字符串匹配，避开唯一匹配/CRLF/编码边界）                                  |
 | `search_files`   | `pattern`, `path?`, `maxFiles?`, `maxBytes?` | 有界遍历 + 子串匹配。实测遍历本身很快（事实 14），成本在逐文件取内容，所以必须有 `maxFiles`/`maxBytes` 上限 |
@@ -129,13 +129,13 @@ server 名要短（会进每个工具名，事实 5）：`local-files` → `mcp_
 1. **连接**：用户点「连接本地目录」→ frame/secure-context 自检 → `showDirectoryPicker` → Web Locks 抢主 → 懒开 `/acp` WS（bearer 子协议）→ ACP `initialize`。
 2. **注册**：`mcp_register {server, sessionId}`；遇 `register_failed` 则重新预热（`POST /workspace/acp/preheat`）后重试（事实 8）。客户端必须有耐心，daemon 自己在 CDP 路径上重试 20×250ms（`acp-http/index.ts:813-826`）。
 3. **使用**：工具调用经现有审批流。
-4. **断开**：WS close → daemon 自动摘除 server（事实 7）。UI 要能从 `mcp_server_removed` 事件感知（既有 `mcpVersion` signal 已覆盖，无需新事件管道）。
+4. **断开**：WS close → daemon 自动摘除 server（事实 7）。会话级增删**不发任何 workspace 事件**（`mcpVersion` signal 只覆盖 workspace 级路径，且本桥不消费它）：hook 的 status 是唯一事实源，UI 经由桥自身状态与 WS 生命周期感知来去，无需新事件管道。
 5. **刷新恢复**：IndexedDB 取回句柄 → `queryPermission` → `granted` 静默重连；`prompt` 要求一次点击（事实 15、17）。
 6. **UI 状态机**：`未连接 / 授权中 / 已连接(绑定会话 X, 根目录 Y) / 已断开 / 不可用(原因)`。
 
 ## 8. 实施切片
 
-**片3 — daemon 侧最小改动（已完成，未提交）**
+**片3 — daemon 侧最小改动（已完成，随本 PR 提交）**
 
 改动落在两个文件，`ClientMcpSenderRegistry` 本身**一行未动**（`setSession`/`ownsSession`/`deleteSession`/`lookup` 全部是既有能力）：
 
@@ -153,17 +153,17 @@ server 名要短（会进每个工具名，事实 5）：`local-files` → `mcp_
 
 **片4 — Web Shell 侧**
 
-- **4a FSA 封装（已完成，未提交）** — `packages/web-shell/client/local-files/`：
+- **4a FSA 封装（已完成，随本 PR 提交）** — `packages/web-shell/client/local-files/`：
   - `file-system-access.d.ts`：TS 的 DOM lib 缺 `showDirectoryPicker`、`FileSystemHandle.queryPermission/requestPermission`、目录异步迭代器，本地补声明（`createWritable`/`getFile` 已在 lib 里）。
   - `capabilities.ts`：运行时探测 `pickerAvailable`/`secureContext`/`frame`，产出 §4 降级矩阵要的 `blocker`。
   - `local-directory.ts`：路径安全门面。`splitRelativePath` 拒 `..`/绝对路径/盘符/反斜杠/控制字符（**不**拒字面 `%`，因为路径从不做 URL 解码）；`list`/`read`/`write`/`search` 带各自上限；错误带 `code`。
   - `directory-handle-store.ts`：IndexedDB 存句柄，**resolve 在 `tx.oncomplete` 而非 `request.onsuccess`**（提交前 ack 会在页面离开时丢掉授权）；全部方法软失败，持久化不可用只降级成"再问一次"。
   - `pick-directory.ts`：`pickDirectoryHandle` 区分 `picked`/`cancelled`/`unavailable`/`failed`（用户取消不是失败，策略拦截也不该被说成"浏览器不支持"）；`ensureReadwritePermission` 只在真实手势里才 `requestPermission`。
-- **4b 浏览器内 MCP server（已完成，未提交）** — `mcp-server.ts`：手写 JSON-RPC（不引 MCP SDK 进 bundle），`initialize` 回显 protocolVersion 且幂等，`prompts/list`/`resources/list`/`resources/templates/list` 回空，4 个工具，工具描述里写明文件在**用户本机**且带上授权目录名。文件系统失败作为 `isError` 工具结果返回（模型能看到原因并自行处理），协议错误才用 JSON-RPC error（未知方法 -32601、内部错误 -32603）。
+- **4b 浏览器内 MCP server（已完成，随本 PR 提交）** — `mcp-server.ts`：手写 JSON-RPC（不引 MCP SDK 进 bundle），`initialize` 回显 protocolVersion 且幂等，`prompts/list`/`resources/list`/`resources/templates/list` 回空，4 个工具，工具描述里写明文件在**用户本机**且带上授权目录名。文件系统失败作为 `isError` 工具结果返回（模型能看到原因并自行处理），协议错误才用 JSON-RPC error（未知方法 -32601、内部错误 -32603）。
 - 验证：`packages/web-shell` 下 5 个测试文件 **89 tests 全绿**，`npm run typecheck` / `eslint` / `prettier --check` 均干净。全部用注入假依赖跑在 node 环境，不需要 jsdom、不碰真实浏览器 API。
-- **尚未接线**：4a/4b 目前没有任何调用方，端到端仍未验证——spike 证明的是 Node 客户端走通反向通道，浏览器里跑同一套还没做过。
+- **接线与端到端**：4a/4b 由 4d 接线（侧边栏入口 + hook）；端到端已验证——无头运行断言注册被 daemon 以 4 个工具确认、断开即拆除，人工验收用真句柄读回 canary token（见 §10）。
 
-**4c WS 客户端（已完成，未提交）** — `bridge-client.ts`：`LocalFilesBridge` 状态机（`idle / held-elsewhere / connecting / registering / connected / reconnecting / stopped / failed`），懒开 `/acp`、bearer 子协议（与 `TerminalPanel.tsx:38-57` 同方案，`qwen-ws` 标记 + `qwen-bearer.<b64url>`）、ACP initialize、`mcp_register {server, sessionId}`、把 `mcp_message` 帧接到 `LocalFilesMcpServer`。框架无关（不依赖 React/DOM 全局），socket 与 lock manager 都注入，整个状态机跑在 node 测试里。
+**4c WS 客户端（已完成，随本 PR 提交）** — `bridge-client.ts`：`LocalFilesBridge` 状态机（`idle / held-elsewhere / connecting / registering / connected / reconnecting / stopped / failed`），懒开 `/acp`、bearer 子协议（与 `TerminalPanel.tsx:38-57` 同方案，`qwen-ws` 标记 + `qwen-bearer.<b64url>`）、ACP initialize、`mcp_register {server, sessionId}`、把 `mcp_message` 帧接到 `LocalFilesMcpServer`。框架无关（不依赖 React/DOM 全局），socket 与 lock manager 都注入，整个状态机跑在 node 测试里。
 
 四条行为是实测驱动的，不是猜的：
 
@@ -176,7 +176,7 @@ server 名要短（会进每个工具名，事实 5）：`local-files` → `mcp_
 
 验证：6 个测试文件 **118 tests 全绿**，`typecheck` / `eslint` / `prettier --check` 干净。
 
-**4d UI 与接线（已完成，未提交）**
+**4d UI 与接线（已完成，随本 PR 提交）**
 
 - `local-files/useLocalFilesBridge.ts`：React 接线。挂载时探测上下文 → 从 IndexedDB 取回句柄 → `queryPermission` 为 `granted` 就**静默重连**（片0 实测 Chrome 151 是 granted），为 `prompt` 就落到 `needs-gesture` 等一次真实点击（`requestPermission()` 消耗 activation，effect 里做不到）。`sessionId` 变化即重绑。所有每次渲染会变的选项都经 `optionsRef` 读取，使回调身份稳定——否则调用方内联的 `rewarm` 会让挂载 effect 每次渲染都重跑。
 - `components/LocalFilesControl.tsx`：StatusBar 里的图标按钮 + popover。popover 主体拆成 props 驱动的 `LocalFilesPanel`（无 hook、无 portal），所以 §4 降级矩阵的每一态都能在 jsdom 里直接断言，不需要 Radix portal 或 daemon provider。

@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   LocalFilesBridge,
   openBrowserSocket,
+  type AcpWorkspaceSelector,
   type LocalFilesBridgeState,
   type LockManagerLike,
   type OpenSocket,
@@ -76,6 +77,8 @@ export interface UseLocalFilesBridgeOptions {
   locks?: LockManagerLike | null;
   store?: DirectoryHandleStore | null;
   win?: LocalFilesWindowLike;
+  /** The session's workspace when not the primary one; see the bridge. */
+  workspaceSelector?: AcpWorkspaceSelector;
 }
 
 function defaultStore(): DirectoryHandleStore | null {
@@ -196,6 +199,9 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         locks: current.locks === undefined ? defaultLocks() : current.locks,
         ...(current.token === undefined ? {} : { token: current.token }),
         ...(current.rewarm === undefined ? {} : { rewarm: current.rewarm }),
+        ...(current.workspaceSelector === undefined
+          ? {}
+          : { workspaceSelector: current.workspaceSelector }),
         onState: (state) => {
           setStatus(phaseFromBridge(state, handle.name));
         },

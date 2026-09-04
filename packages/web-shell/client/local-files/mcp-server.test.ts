@@ -301,6 +301,28 @@ describe('tools/call', () => {
     expect(resultText(response)).toMatch(/^No match for "nothing"/);
   });
 
+  it('qualifies a truncated zero-hit search as stopped early, not absent', async () => {
+    const fs = fakeFs({
+      search: async () => ({
+        pattern: 'needle',
+        hits: [],
+        filesScanned: 3,
+        bytesScanned: 20_000_000,
+        filesSkipped: 0,
+        truncated: true,
+        truncatedBy: 'bytes',
+      }),
+    });
+    const response = await call(fs, 'tools/call', {
+      name: 'search_files',
+      arguments: { pattern: 'needle' },
+    });
+    const text = resultText(response);
+    expect(text).toMatch(/^No match for "needle"/);
+    // Without the note the model would act on a false negative.
+    expect(text).toMatch(/stopped early: hit the bytes budget/);
+  });
+
   it.each([
     ['read_file without a path', { name: 'read_file', arguments: {} }],
     [

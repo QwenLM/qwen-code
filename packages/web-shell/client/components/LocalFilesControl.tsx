@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { FolderOpenIcon } from 'lucide-react';
 import {
   useConnection,
@@ -18,6 +18,7 @@ import {
   type LocalFilesPhase,
   type LocalFilesStatus,
 } from '../local-files/useLocalFilesBridge';
+import { resolveVoiceWorkspaceTarget } from '../voice/voice-workspace-target';
 import { Button } from './ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Spinner } from './ui/spinner';
@@ -167,10 +168,24 @@ export function LocalFilesControl({
   triggerClassName,
 }: LocalFilesControlProps) {
   const { t } = useI18n();
-  const { baseUrl, token } = useWorkspace();
+  const { baseUrl, token, capabilities } = useWorkspace();
   const actions = useWorkspaceActions();
-  const { sessionId } = useConnection();
+  const { sessionId, workspaceCwd } = useConnection();
   const [open, setOpen] = useState(false);
+
+  // The bare /acp socket lands on the primary mount, where a secondary
+  // runtime's session cannot register; resolve the workspace-qualified route
+  // with the same rules voice uses (primary → legacy, untrusted → no bridge).
+  const workspaceSelector = useMemo(() => {
+    const target = resolveVoiceWorkspaceTarget({
+      capabilities,
+      intendedCwd: workspaceCwd ?? undefined,
+      sessionId: sessionId ?? undefined,
+    });
+    return target?.route === 'workspace-qualified'
+      ? target.selector
+      : undefined;
+  }, [capabilities, workspaceCwd, sessionId]);
 
   const rewarm = useCallback(async () => {
     await actions.preheatAcp(5_000);
@@ -181,6 +196,7 @@ export function LocalFilesControl({
     baseUrl,
     token,
     rewarm,
+    workspaceSelector,
   });
 
   const active =

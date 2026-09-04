@@ -219,6 +219,46 @@ describe('LocalDirectory.list', () => {
     }
   });
 
+  it('floors a fractional limit at one entry', async () => {
+    // Math.trunc(0.5) is 0: without the floor a non-empty directory would be
+    // reported as empty.
+    const result = await new LocalDirectory(tree()).list('', 0.5);
+    expect(result.entries).toHaveLength(1);
+    expect(result.truncated).toBe(true);
+    expect(result.limit).toBe(1);
+  });
+
+  it('maps an enumeration failure to a tool error, not a protocol error', async () => {
+    const revoked = Object.assign(tree(), {
+      values: () => {
+        async function* gen(): AsyncGenerator<unknown> {
+          yield undefined;
+          throw domError('NotAllowedError', 'grant revoked mid-scan');
+        }
+        return gen() as unknown as AsyncIterableIterator<unknown>;
+      },
+    });
+    await expect(new LocalDirectory(revoked).list('')).rejects.toMatchObject({
+      code: 'permission_denied',
+    });
+    await expect(
+      new LocalDirectory(revoked).search('needle'),
+    ).rejects.toMatchObject({ code: 'permission_denied' });
+
+    const deleted = Object.assign(tree(), {
+      values: () => {
+        async function* gen(): AsyncGenerator<unknown> {
+          yield undefined;
+          throw domError('NotFoundError', 'directory deleted mid-scan');
+        }
+        return gen() as unknown as AsyncIterableIterator<unknown>;
+      },
+    });
+    await expect(new LocalDirectory(deleted).list('')).rejects.toMatchObject({
+      code: 'not_found',
+    });
+  });
+
   it('maps a missing directory to not_found', async () => {
     await expect(new LocalDirectory(tree()).list('nope')).rejects.toMatchObject(
       {
@@ -240,6 +280,13 @@ describe('LocalDirectory.read', () => {
     expect(result.content).toBe('# hello\nworld\n');
     expect(result.truncated).toBe(false);
     expect(result.totalLines).toBe(3);
+  });
+
+  it('maps reading a directory to not_a_file', async () => {
+    await expect(new LocalDirectory(tree()).read('src')).rejects.toMatchObject({
+      code: 'not_a_file',
+      message: 'src is a directory, not a file.',
+    });
   });
 
   it('pages with offset and limit and reports that more remains', async () => {
@@ -292,6 +339,12 @@ describe('LocalDirectory.write', () => {
     const result = await new LocalDirectory(root).write('README.md', '# bye\n');
     expect(result.created).toBe(false);
     expect(root.files.get('README.md')?.file.content).toBe('# bye\n');
+  });
+
+  it('maps writing a directory to not_a_file', async () => {
+    await expect(
+      new LocalDirectory(tree()).write('src', 'x'),
+    ).rejects.toMatchObject({ code: 'not_a_file' });
   });
 
   it('creates intermediate directories', async () => {

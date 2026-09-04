@@ -96,6 +96,11 @@ export interface LocalFilesBridgeOptions {
   registerTimeoutMs?: number;
   delay?: (ms: number) => Promise<void>;
   onState?: (state: LocalFilesBridgeState) => void;
+  /**
+   * The session's workspace when it is not the primary one: routes the socket
+   * to the mount that owns the session. Omit for the primary workspace.
+   */
+  workspaceSelector?: AcpWorkspaceSelector;
 }
 
 const DEFAULTS = {
@@ -104,6 +109,8 @@ const DEFAULTS = {
   reconnectBaseDelayMs: 500,
   initializeTimeoutMs: 15_000,
   registerTimeoutMs: 30_000,
+  lockAttempts: 3,
+  lockRetryDelayMs: 100,
 };
 
 /** Mirrors the bearer-subprotocol scheme the daemon's WS upgrade accepts. */
@@ -123,11 +130,31 @@ export function bearerSubprotocols(token: string | undefined): string[] {
   return [WS_AUTH_SUBPROTOCOL, `${WS_BEARER_SUBPROTOCOL_PREFIX}${encoded}`];
 }
 
-/** Mirrors `TerminalPanel.buildWsUrl`: keep any base path, swap the scheme. */
-export function buildAcpWsUrl(baseUrl: string): string {
+/** Identifies the workspace a session belongs to, for the qualified route. */
+export interface AcpWorkspaceSelector {
+  kind: 'id' | 'cwd';
+  value: string;
+}
+
+/**
+ * Mirrors `TerminalPanel.buildWsUrl`: keep any base path, swap the scheme.
+ *
+ * The bare `/acp` upgrade binds the PRIMARY mount, so a session owned by a
+ * secondary runtime would fail registration there; with a selector the URL
+ * takes the workspace-qualified shape the daemon resolves per runtime (the
+ * same route the voice stream uses).
+ */
+export function buildAcpWsUrl(
+  baseUrl: string,
+  selector?: AcpWorkspaceSelector,
+): string {
   const base = new URL(baseUrl);
+  const path =
+    selector === undefined
+      ? ACP_PATH
+      : `workspaces/${encodeURIComponent(selector.value)}/${ACP_PATH}`;
   const url = new URL(
-    ACP_PATH,
+    path,
     `${base.origin}${base.pathname.replace(/\/?$/, '/')}`,
   );
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -228,17 +255,32 @@ export class LocalFilesBridge {
         return;
       }
       let owned = false;
-      await locks.request(
-        LOCAL_FILES_LOCK_NAME,
-        { ifAvailable: true },
-        async (lock) => {
-          // `ifAvailable` means the callback is skipped entirely when another
-          // tab holds the lock; a null lock is the other way it can decline.
-          if (lock === null || lock === undefined) return;
-          owned = true;
-          await this.run();
-        },
-      );
+      // A same-tab replacement stops the old bridge and starts this one in
+      // the same task, while the old lock release is still settling; a single
+      // ifAvailable attempt would misread that as another tab and park here
+      // forever, so retry a few times before concluding held-elsewhere.
+      const attempts = DEFAULTS.lockAttempts;
+      for (
+        let attempt = 0;
+        attempt < attempts && !owned && !this.stopped;
+        attempt++
+      ) {
+        if (attempt > 0) await this.delay(DEFAULTS.lockRetryDelayMs);
+        if (this.stopped) break;
+        await locks.request(
+          LOCAL_FILES_LOCK_NAME,
+          { ifAvailable: true },
+          async (lock) => {
+            // `ifAvailable` means the callback is skipped entirely when
+            // another tab holds the lock; a null lock is the other way it can
+            // decline. A stop() landing before the grant must release it
+            // again instead of starting a run nobody can stop.
+            if (lock === null || lock === undefined || this.stopped) return;
+            owned = true;
+            await this.run();
+          },
+        );
+      }
       if (!owned && !this.stopped) this.setState({ phase: 'held-elsewhere' });
     } finally {
       this.running = false;
@@ -282,6 +324,14 @@ export class LocalFilesBridge {
   private async run(): Promise<void> {
     await new Promise<void>((resolve) => {
       this.releaseRun = resolve;
+      // A stop() that landed between the lock grant and this point must not
+      // orphan the promise: the lock callback would never settle and the
+      // cross-tab lock would stay held until a page reload.
+      if (this.stopped) {
+        this.releaseRun = undefined;
+        resolve();
+        return;
+      }
       void this.connect();
     });
   }
@@ -294,7 +344,7 @@ export class LocalFilesBridge {
     let socket: WebSocketLike;
     try {
       socket = this.options.openSocket(
-        buildAcpWsUrl(this.options.baseUrl),
+        buildAcpWsUrl(this.options.baseUrl, this.options.workspaceSelector),
         bearerSubprotocols(this.options.token),
       );
     } catch (err) {
@@ -339,6 +389,9 @@ export class LocalFilesBridge {
   }
 
   private sendRegister(): void {
+    // A retry path can re-arm while a previous timer is still live; never
+    // orphan the old handle or it fires into an already-settled sequence.
+    if (this.registerTimer) clearTimeout(this.registerTimer);
     const attempt = this.registerAttempts + 1;
     this.registerAttempts = attempt;
     this.setState({ phase: 'registering', attempt });
@@ -374,6 +427,9 @@ export class LocalFilesBridge {
       // A failed re-warm is not fatal: the retry may still find a live child.
     }
     if (this.stopped) return;
+    // The ack can arrive while the re-warm is in flight; registering again
+    // would be answered already_registered and fail the bridge terminally.
+    if (this.state.phase === 'connected') return;
     this.sendRegister();
   }
 
@@ -386,6 +442,10 @@ export class LocalFilesBridge {
     } catch {
       return;
     }
+    // A frame can arrive during the close handshake after stop(); dispatching
+    // it would let a dead bridge overwrite its replacement's status through
+    // the shared onState callback.
+    if (this.stopped) return;
 
     // ACP initialize reply.
     if (frame.id === INITIALIZE_ID && ('result' in frame || 'error' in frame)) {

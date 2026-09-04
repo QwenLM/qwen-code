@@ -84,6 +84,28 @@ class FakeLocks implements LockManagerLike {
   }
 }
 
+/** Models a grant that arrives late: the callback runs only when told to. */
+class DeferringLocks implements LockManagerLike {
+  requested = 0;
+  released = false;
+  grant: (() => Promise<void>) | undefined;
+  async request(
+    _name: string,
+    _options: { ifAvailable: boolean },
+    callback: (lock: unknown) => Promise<void>,
+  ): Promise<unknown> {
+    this.requested += 1;
+    await new Promise<void>((resolve) => {
+      this.grant = async () => {
+        await callback({});
+        this.released = true;
+        resolve();
+      };
+    });
+    return undefined;
+  }
+}
+
 function recordingRpc(reply?: JsonRpcResponse): {
   server: LocalFilesRpcServer;
   calls: JsonRpcRequest[];
@@ -183,6 +205,18 @@ describe('buildAcpWsUrl', () => {
       'wss://daemon.example/qwen/acp',
     );
   });
+
+  it('qualifies the route for a non-primary workspace', () => {
+    expect(
+      buildAcpWsUrl('https://daemon.example/', { kind: 'id', value: 'ws-1' }),
+    ).toBe('wss://daemon.example/workspaces/ws-1/acp');
+    expect(
+      buildAcpWsUrl('http://127.0.0.1:4170', {
+        kind: 'cwd',
+        value: '/repo/second space',
+      }),
+    ).toBe('ws://127.0.0.1:4170/workspaces/%2Frepo%2Fsecond%20space/acp');
+  });
 });
 
 describe('bearerSubprotocols', () => {
@@ -222,6 +256,16 @@ describe('LocalFilesBridge handshake', () => {
     expect(lastPhase(h)).toBe('connected');
     expect(h.states.at(-1)).toEqual({ phase: 'connected', toolCount: 4 });
 
+    h.bridge.stop();
+    await h.running;
+  });
+
+  it('targets the workspace-qualified mount when a selector is given', async () => {
+    const h = harness({
+      workspaceSelector: { kind: 'id', value: 'ws-2' },
+    });
+    await flush();
+    expect(h.sockets[0]!.url).toBe('wss://daemon.example/workspaces/ws-2/acp');
     h.bridge.stop();
     await h.running;
   });
@@ -346,6 +390,52 @@ describe('LocalFilesBridge registration retries', () => {
       toolCount: 4,
     });
     await flush();
+    expect(lastPhase(h)).toBe('connected');
+    h.bridge.stop();
+    await h.running;
+  });
+
+  it('does not re-register when the ack lands while rewarm is in flight', async () => {
+    let rewarmStarted = 0;
+    let resolveRewarm: (() => void) | undefined;
+    const h = harness({
+      registerTimeoutMs: 0,
+      rewarm: () => {
+        rewarmStarted += 1;
+        return new Promise<void>((resolve) => {
+          resolveRewarm = resolve;
+        });
+      },
+    });
+    await flush();
+    const socket = h.sockets[0]!;
+    socket.emitOpen();
+    await flush();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await flush();
+    expect(socket.framesOfType('mcp_register')).toHaveLength(1);
+
+    // The register timeout fires and parks inside the rewarm await.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(rewarmStarted).toBe(1);
+
+    // The late ack arrives while rewarm is still pending.
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await flush();
+    resolveRewarm!();
+    await flush();
+
+    // A duplicate register would be answered already_registered and fail the
+    // bridge terminally.
+    expect(socket.framesOfType('mcp_register')).toHaveLength(1);
     expect(lastPhase(h)).toBe('connected');
     h.bridge.stop();
     await h.running;
@@ -666,6 +756,26 @@ describe('LocalFilesBridge stop', () => {
     await h.running;
     expect(h.locks.held).toBe(false);
   });
+
+  it('drops frames delivered after stop() instead of reviving state', async () => {
+    const h = harness();
+    const socket = await connect(h);
+    expect(lastPhase(h)).toBe('connected');
+
+    h.bridge.stop();
+    expect(lastPhase(h)).toBe('stopped');
+
+    // A ghost ack from the close handshake must not overwrite the state a
+    // replacement bridge (or the disconnect itself) just set.
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await flush();
+    expect(lastPhase(h)).toBe('stopped');
+    await h.running;
+  });
 });
 
 describe('LocalFilesBridge cross-tab ownership', () => {
@@ -679,6 +789,7 @@ describe('LocalFilesBridge cross-tab ownership', () => {
       sessionId: 'session-1',
       server: rpc.server,
       locks,
+      delay: async () => {},
       openSocket: (url, protocols) => {
         const socket = new FakeSocket(url, protocols);
         sockets.push(socket);
@@ -691,7 +802,48 @@ describe('LocalFilesBridge cross-tab ownership', () => {
 
     expect(sockets).toHaveLength(0);
     expect(states.at(-1)).toEqual({ phase: 'held-elsewhere' });
-    expect(locks.requests).toBe(1);
+    // Retried a few times: a same-tab replacement's release can still be
+    // settling when the first attempt lands.
+    expect(locks.requests).toBe(3);
+  });
+
+  it('retries a declined lock before concluding another tab owns it', async () => {
+    let declineLeft = 1;
+    const locks: LockManagerLike = {
+      request: async (_name, _options, callback) => {
+        if (declineLeft > 0) {
+          declineLeft -= 1;
+          return undefined;
+        }
+        await callback({});
+        return undefined;
+      },
+    };
+    const h = harness({ locks });
+    await flush();
+    expect(h.sockets).toHaveLength(1);
+    expect(lastPhase(h)).not.toBe('held-elsewhere');
+    h.bridge.stop();
+    await h.running;
+  });
+
+  it('releases the lock when stop() lands before the grant arrives', async () => {
+    const locks = new DeferringLocks();
+    const h = harness({ locks });
+    await flush();
+    expect(locks.requested).toBe(1);
+    expect(locks.grant).not.toBeUndefined();
+
+    h.bridge.stop();
+    await flush();
+    await locks.grant!();
+    await h.running;
+
+    // The callback returned without starting a run, so the lock settled and
+    // no socket was ever opened.
+    expect(locks.released).toBe(true);
+    expect(h.sockets).toHaveLength(0);
+    expect(lastPhase(h)).toBe('stopped');
   });
 
   it('runs without a lock manager at all', async () => {

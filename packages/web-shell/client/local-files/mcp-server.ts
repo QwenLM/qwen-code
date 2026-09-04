@@ -209,12 +209,14 @@ function formatHits(result: LocalSearchResult): string {
       ? `, skipped ${result.filesSkipped} (binary or over the read limit)`
       : '';
   const budget = `scanned ${result.filesScanned} file(s), ${result.bytesScanned} bytes${skipped}`;
-  if (result.hits.length === 0) {
-    return `No match for "${result.pattern}" (${budget}).`;
-  }
   const note = result.truncated
     ? `\n(stopped early: hit the ${result.truncatedBy} budget after ${budget})`
     : '';
+  if (result.hits.length === 0) {
+    // A truncated scan with zero hits is not "the pattern does not exist":
+    // without the note the model would act on a false negative.
+    return `No match for "${result.pattern}" (${budget}).${note}`;
+  }
   return `${lines.join('\n')}\n\n${result.hits.length} hit(s), ${budget}.${note}`;
 }
 
