@@ -104,6 +104,10 @@ vi.mock('../selection/use-text-selection.js', () => ({
   TextSelectionController: () => null,
 }));
 
+vi.mock('../context-menu/ContentMouseController.js', () => ({
+  ContentMouseController: () => null,
+}));
+
 vi.mock('./shared/ScrollableList.js', async () => {
   const actual = await vi.importActual<
     typeof import('./shared/ScrollableList.js')

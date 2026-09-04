@@ -907,6 +907,78 @@ describe('main-session style: reminder decision matches prompt section', () => {
   });
 });
 
+describe('main-session style: project trust gate', () => {
+  const projectStyle: OutputStyleDefinition = {
+    name: 'Team',
+    source: 'project',
+    description: 'The style this repo ships',
+    keepCodingInstructions: true,
+    prompt: 'Answer the way this team answers.',
+  };
+  const userStyle: OutputStyleDefinition = {
+    ...projectStyle,
+    name: 'Mine',
+    source: 'user',
+  };
+
+  const makeConfig = (style: OutputStyleDefinition, trusted?: boolean) => ({
+    getSystemPrompt: () => undefined,
+    getModel: () => 'test-model',
+    getOutputStyle: () => style,
+    getExperimentalZedIntegration: () => false,
+    getInputFormat: () => InputFormat.TEXT,
+    isInteractive: () => true,
+    ...(trusted === undefined ? {} : { isTrustedFolder: () => trusted }),
+  });
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+    vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', undefined);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  // Trust can be revoked mid-session — the IDE branch flips the verdict in
+  // place — while the catalog is read once at startup, so the gate has to hold
+  // where the style is consumed, not only where it is loaded.
+  it('drops a project style once the workspace is untrusted', () => {
+    const config = makeConfig(projectStyle, false);
+    expect(resolveMainSessionOutputStyle(config)).toBeUndefined();
+    expect(getMainSessionBaseSystemPrompt(config)).not.toContain(
+      '# Output Style: Team',
+    );
+  });
+
+  it('keeps a project style while the workspace is trusted', () => {
+    const config = makeConfig(projectStyle, true);
+    expect(resolveMainSessionOutputStyle(config)).toBe(projectStyle);
+    expect(getMainSessionBaseSystemPrompt(config)).toContain(
+      '# Output Style: Team',
+    );
+  });
+
+  // The gate is about repo-authored prompts; a style from the user's own home
+  // directory is theirs either way.
+  it('keeps a user style in an untrusted workspace', () => {
+    const config = makeConfig(userStyle, false);
+    expect(resolveMainSessionOutputStyle(config)).toBe(userStyle);
+    expect(getMainSessionBaseSystemPrompt(config)).toContain(
+      '# Output Style: Mine',
+    );
+  });
+
+  it('keeps a project style when the config reports no trust verdict', () => {
+    expect(resolveMainSessionOutputStyle(makeConfig(projectStyle))).toBe(
+      projectStyle,
+    );
+  });
+});
+
 describe('Model-specific tool call formats', () => {
   beforeEach(() => {
     vi.resetAllMocks();

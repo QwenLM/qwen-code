@@ -39,7 +39,12 @@ import {
   SCROLL_TO_ITEM_END,
   type ScrollableListRef,
 } from './shared/ScrollableList.js';
-import { TextSelectionController } from '../selection/use-text-selection.js';
+import {
+  TextSelectionController,
+  type SelectionQuery,
+} from '../selection/use-text-selection.js';
+import { ContentMouseController } from '../context-menu/ContentMouseController.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import { measureElementPosition } from '../utils/measure-element-position.js';
 
 // Limit LLM messages to a very high number of lines to mitigate performance
@@ -157,6 +162,8 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
   // useMemo keeps it cheap when nothing changes.
   const useVirtualScroll = uiState.useTerminalBuffer;
   const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
+  const selectionQueryRef = useRef<SelectionQuery | null>(null);
+  const { menu: contextMenuOpen } = useContextMenu();
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
@@ -494,6 +501,13 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
       0,
       uiState.availableTerminalHeight ?? 0,
     );
+    // While the context menu is open it owns the pointer and keyboard: the
+    // scroll list goes quiet so clicks/keys don't leak into the content under
+    // the menu. The selection controller only PAUSES (it must keep the current
+    // selection — the menu's Copy Selection offers it — and clearing it the
+    // instant the menu opens would hide what is about to be copied).
+    const viewportInteractive =
+      !uiState.dialogsVisible && contextMenuOpen === null;
 
     return (
       <OverflowProvider>
@@ -505,7 +519,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
           // leaking into the new dataset (#9305 review R18-1).
           key={sessionStats.sessionId}
           ref={scrollRef}
-          hasFocus={!uiState.dialogsVisible}
+          hasFocus={viewportInteractive}
           data={allVirtualItems}
           renderItem={renderVirtualItem}
           estimatedItemHeight={virtualEstimatedItemHeight}
@@ -520,6 +534,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
         />
         <TextSelectionController
           isActive={!uiState.dialogsVisible}
+          eventsPaused={contextMenuOpen !== null}
           getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
           getAdditionalSelectableRects={() =>
             footerRef?.current
@@ -536,6 +551,15 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
           hitTestScrollbar={(location) =>
             scrollRef.current?.hitTestScrollbar(location) ?? false
           }
+          selectionQueryRef={selectionQueryRef}
+        />
+        <ContentMouseController
+          isActive={!uiState.dialogsVisible}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
+          selectionQueryRef={selectionQueryRef}
         />
         <ShowMoreLines constrainHeight={uiState.constrainHeight} />
       </OverflowProvider>
