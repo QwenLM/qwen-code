@@ -82,6 +82,8 @@ jobs:
       is_preview: '${{ steps.vars.outputs.is_preview }}'
       is_dry_run: '${{ steps.vars.outputs.is_dry_run }}'
       reuse_validation: '${{ steps.promotion.outputs.reuse_validation }}'
+      version_refusal: '${{ steps.version.outputs.version_refusal }}'
+      promotion_refusal: '${{ steps.promotion.outputs.promotion_refusal }}'
 
     steps:
       # Shared ECS runners can retain root-owned files from an earlier
@@ -393,7 +395,20 @@ jobs:
             fi
           fi
 
-          VERSION_JSON=$(node scripts/get-release-version.js "${VERSION_ARGS[@]}")
+          VERSION_STATUS=0
+          VERSION_JSON=$(node scripts/get-release-version.js "${VERSION_ARGS[@]}") || VERSION_STATUS=$?
+          if [[ "${VERSION_STATUS}" -eq 3 ]]; then
+            # Exit 3 is the decisive prepare-time "already shipped" refusal
+            # (a re-dispatched promotion whose version a first attempt
+            # published before failing). It is a correct outcome, not a
+            # release failure: mark it so notify_failure skips the
+            # release-failed issue and autofix dispatch, then fail the job.
+            echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+          if [[ "${VERSION_STATUS}" -ne 0 ]]; then
+            exit "${VERSION_STATUS}"
+          fi
           echo "RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .releaseTag)" >> "$GITHUB_OUTPUT"
           echo "RELEASE_VERSION=$(echo "$VERSION_JSON" | jq -r .releaseVersion)" >> "$GITHUB_OUTPUT"
           echo "NPM_TAG=$(echo "$VERSION_JSON" | jq -r .npmTag)" >> "$GITHUB_OUTPUT"
@@ -1360,12 +1375,15 @@ jobs:
       - 'integration_none'
       - 'integration_docker'
       - 'publish'
-    # The push-time guard's decisive "already shipped" refusal
-    # (version_refusal) is a correct outcome, not a release failure: the
-    # version shipped via another attempt, or partially, so filing a
-    # "Release Failed" issue and dispatching autofix would chase a release
-    # that did not fail. Genuine publish failures — including the guard's
-    # fail-closed probe errors — still notify.
+    # A decisive refusal is a correct outcome, not a release failure, so it
+    # must not file a "Release Failed" issue and dispatch autofix: the
+    # push-time guard's "already shipped" refusal (publish's
+    # version_refusal) means the version shipped via another attempt, or
+    # partially; prepare's version_refusal (the same refusal decided before
+    # validation) and promotion_refusal (the promotion gate's deterministic
+    # evidence refusal) mean no code change can alter the outcome. Genuine
+    # failures — including the guards' fail-closed probe errors, which carry
+    # no refusal marker — still notify.
     if: |-
       ${{
         always() &&
@@ -1374,7 +1392,11 @@ jobs:
           github.event.inputs.dry_run != 'true'
         ) &&
         (
-          needs.prepare.result == 'failure' ||
+          (
+            needs.prepare.result == 'failure' &&
+            needs.prepare.outputs.version_refusal != 'true' &&
+            needs.prepare.outputs.promotion_refusal != 'true'
+          ) ||
           needs.quality.result == 'failure' ||
           needs.integration_none.result == 'failure' ||
           needs.integration_docker.result == 'failure' ||

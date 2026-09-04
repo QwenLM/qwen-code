@@ -41,6 +41,22 @@ const MAX_RUN_PAGES = 5;
 const RUNS_PER_PAGE = 100;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Error code for a deterministic evidence refusal: the gate decided against
+ * this nightly based on recorded state (no matching validated run, expired
+ * or conflicting evidence, a tag/release/npm shape that is not a published
+ * nightly). Retrying cannot change the outcome, so `runCli` marks the step
+ * failure as a refusal and the workflow keeps it out of the release-failed
+ * notification — probe failures carry no code and stay notifiable.
+ */
+const PROMOTION_REFUSED = 'PROMOTION_REFUSED';
+
+function promotionRefusal(message) {
+  const error = new Error(message);
+  error.code = PROMOTION_REFUSED;
+  return error;
+}
+
 function exec(command, args) {
   return execFileSync(command, args, { encoding: 'utf8' }).trim();
 }
@@ -82,14 +98,14 @@ function assertPublishedOnNpm(version, run) {
   } catch (error) {
     const text = `${error?.stdout ?? ''}\n${error?.stderr ?? ''}\n${error?.message ?? ''}`;
     if (text.includes('E404')) {
-      throw new Error(`${version} is not published on npm`);
+      throw promotionRefusal(`${version} is not published on npm`);
     }
     throw new Error(
       `Cannot verify ${version} on npm: ${firstLine(text) ?? 'npm view failed'}`,
     );
   }
   if (parseJson(output, 'npm') !== version) {
-    throw new Error(`${version} is not published on npm`);
+    throw promotionRefusal(`${version} is not published on npm`);
   }
 }
 
@@ -104,20 +120,24 @@ function resolveTaggedSource(parsed, repository, run) {
     'GitHub tag',
   );
   if (tag.object?.type !== 'commit' || !tag.object.sha) {
-    throw new Error(`${parsed.nightlyTag} is not a lightweight commit tag`);
+    throw promotionRefusal(
+      `${parsed.nightlyTag} is not a lightweight commit tag`,
+    );
   }
   const releaseCommit = parseJson(
     run('gh', ['api', `repos/${repository}/commits/${tag.object.sha}`]),
     'GitHub release commit',
   );
   if (releaseCommit.parents?.length !== 1 || !releaseCommit.parents[0]?.sha) {
-    throw new Error(
+    throw promotionRefusal(
       `${parsed.nightlyTag} must point to a release commit with exactly one parent`,
     );
   }
   const subject = releaseCommit.commit?.message?.split('\n', 1)[0];
   if (subject !== `chore(release): ${parsed.nightlyTag}`) {
-    throw new Error(`${parsed.nightlyTag} does not point to a release commit`);
+    throw promotionRefusal(
+      `${parsed.nightlyTag} does not point to a release commit`,
+    );
   }
   return releaseCommit.parents[0].sha;
 }
@@ -147,7 +167,7 @@ function listCandidateRuns(repository, publishedAtMs, run) {
     }
   }
   if (runs.length < total) {
-    throw new Error(
+    throw promotionRefusal(
       `Found ${total} completed Release runs between ${from} and ${to}, more than the ${MAX_RUN_PAGES * RUNS_PER_PAGE} this check pages through; the evidence search would be incomplete rather than fail-closed`,
     );
   }
@@ -268,7 +288,9 @@ export function verifyNightlyPromotion(
     release.isPrerelease !== true ||
     !release.publishedAt
   ) {
-    throw new Error(`${parsed.nightlyTag} is not a published prerelease`);
+    throw promotionRefusal(
+      `${parsed.nightlyTag} is not a published prerelease`,
+    );
   }
 
   assertPublishedOnNpm(parsed.nightlyVersion, run);
@@ -347,7 +369,7 @@ export function verifyNightlyPromotion(
     rejections.length > 0
       ? ` Rejected: ${rejections.join('; ')}.`
       : ` No completed Release run published ${parsed.nightlyTag}.`;
-  throw new Error(
+  throw promotionRefusal(
     `${parsed.nightlyTag} has no matching successful Release run with every required validation job.${detail}`,
   );
 }
@@ -387,14 +409,32 @@ export function reportPromotion(result, env = process.env) {
   }
 }
 
-export function runCli(args = process.argv.slice(2)) {
+/**
+ * Mark the step failure as a decisive refusal for the workflow's failure
+ * notifier: a deterministic evidence refusal is a correct outcome, not a
+ * release failure, so it must not open a "Release Failed" issue or
+ * dispatch autofix. Probe failures carry no marker and stay notifiable.
+ */
+export function reportRefusal(env = process.env) {
+  if (env.GITHUB_OUTPUT) {
+    appendFileSync(env.GITHUB_OUTPUT, 'promotion_refusal=true\n');
+  }
+}
+
+export function runCli(args = process.argv.slice(2), env = process.env) {
   try {
     reportPromotion(
-      verifyNightlyPromotion(args[0], process.env.GITHUB_REPOSITORY),
+      verifyNightlyPromotion(args[0], env.GITHUB_REPOSITORY),
+      env,
     );
     return 0;
   } catch (error) {
-    console.error(`::error::${error.message}`);
+    // stdout, not stderr: the runner parses workflow commands from
+    // stdout only, so ::error:: on stderr would never annotate.
+    console.log(`::error::${error.message}`);
+    if (error.code === PROMOTION_REFUSED) {
+      reportRefusal(env);
+    }
     return 1;
   }
 }

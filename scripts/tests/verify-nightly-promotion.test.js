@@ -4,13 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   REQUIRED_JOBS,
   reportPromotion,
+  runCli,
   verifyNightlyPromotion,
 } from '../verify-nightly-promotion.js';
+
+vi.mock('node:child_process');
 
 const nightlyVersion = '0.22.4-nightly.20260903.abcdef1234';
 const nightlyTag = `v${nightlyVersion}`;
@@ -260,5 +264,80 @@ describe('reportPromotion', () => {
     vi.mocked(appendFileSync).mockClear();
     reportPromotion(verify(), {});
     expect(vi.mocked(appendFileSync)).not.toHaveBeenCalled();
+  });
+});
+
+describe('runCli', () => {
+  const writtenTo = (name) =>
+    vi
+      .mocked(appendFileSync)
+      .mock.calls.filter(([path]) => path === name)
+      .map(([, body]) => body)
+      .join('');
+
+  beforeEach(() => {
+    vi.mocked(appendFileSync).mockClear();
+    vi.stubEnv('GITHUB_REPOSITORY', 'QwenLM/qwen-code');
+    vi.stubEnv('GITHUB_OUTPUT', 'out');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  const drive = (options) => {
+    // Build one runner so its `lastTagLookup` closure state persists across
+    // every gh/npm call in a single promotion check, exactly as the injected
+    // runner does in the verifyNightlyPromotion suite.
+    const run = runner(options);
+    return vi
+      .mocked(execFileSync)
+      .mockImplementation((command, args) => run(command, args));
+  };
+
+  it('reports the verdict through reportPromotion and exits 0', () => {
+    // Entry-point witness for the glue the prepare step invokes: the
+    // verdict must reach the step outputs through reportPromotion. If it
+    // regresses to printing raw JSON, the step exits 0 writing no outputs
+    // and release_sha silently falls back to the dispatch HEAD.
+    drive();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli([nightlyTag])).toBe(0);
+    expect(writtenTo('out').split('\n')).toEqual([
+      `source_sha=${sourceSha}`,
+      'reuse_validation=true',
+      '',
+    ]);
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+
+  it('marks deterministic evidence refusals for the failure notifier', () => {
+    drive({ artifactExpired: true });
+    // stdout, not stderr: the runner parses workflow commands from stdout
+    // only, so ::error:: on stderr would never annotate the Checks UI.
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli([nightlyTag])).toBe(1);
+    expect(logSpy.mock.calls[0][0]).toContain('::error::');
+    expect(logSpy.mock.calls[0][0]).toContain(
+      'no matching successful Release run',
+    );
+    // The marker is what keeps this correct refusal out of the
+    // release-failed issue and autofix dispatch; the step still fails.
+    expect(writtenTo('out')).toBe('promotion_refusal=true\n');
+  });
+
+  it('leaves probe failures unmarked so they still notify', () => {
+    drive({ npm: 'unreachable' });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli([nightlyTag])).toBe(1);
+    expect(writtenTo('out')).not.toContain('promotion_refusal=true');
+  });
+
+  it('leaves usage errors unmarked', () => {
+    drive();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli(['bogus'])).toBe(1);
+    expect(writtenTo('out')).toBe('');
   });
 });

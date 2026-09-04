@@ -790,6 +790,52 @@ describe('getVersion', () => {
       previousReleaseTag: 'v0.6.1',
     });
   });
+
+  it('runCli exits 3 when the promoted version has already shipped', () => {
+    // prepare's "Get the version" step keys its version_refusal output on
+    // this exit code: a re-dispatched promotion whose version a first
+    // attempt published must fail as the decisive, benign refusal (3), not
+    // as an uncaught exception (1) that opens a release-failed issue.
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('--tag=latest')) return '0.6.1';
+      if (command.startsWith('npm view') && command.endsWith('version')) {
+        return '0.7.0';
+      }
+      return mockExecSync(command);
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(
+      runCli({
+        type: 'promote-nightly',
+        promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+      }),
+    ).toBe(3);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('::error::Version 0.7.0 has already shipped'),
+    );
+  });
+
+  it('refuses an explicit promotion version equal to the published latest', () => {
+    // The retrograde check uses strict less-than, so a version equal to
+    // latest passes it; only the prepare-time assertVersionUnreleased guard
+    // catches the equality.
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command.includes('--tag=latest')) return '0.9.0';
+      if (command.startsWith('npm view') && command.endsWith('version')) {
+        return '0.9.0';
+      }
+      return mockExecSync(command);
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(() =>
+      getVersion({
+        type: 'promote-nightly',
+        promote_nightly_version: 'v0.8.0-nightly.20250916.abcdef1',
+        promote_nightly_stable_version: '0.9.0',
+      }),
+    ).toThrow(/already shipped/);
+  });
 });
 
 describe('assertVersionUnreleased', () => {

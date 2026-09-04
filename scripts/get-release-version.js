@@ -665,7 +665,20 @@ export function runCli(args) {
     }
     return 0;
   }
-  console.log(JSON.stringify(getVersion(args), null, 2));
+  let result;
+  try {
+    result = getVersion(args);
+  } catch (error) {
+    // The JSON-dispatch path honors the same codes as the guard branch:
+    // the prepare-time "already shipped" refusal (a re-dispatched
+    // promotion whose version a first attempt published before failing)
+    // exits 3 so the workflow marks it and keeps the benign outcome out
+    // of the release-failed notification; probe and usage failures exit
+    // 2; 1 stays reserved for uncaught errors.
+    console.log(`::error::${error.message}`);
+    return error.code === 'VERSION_SHIPPED' ? 3 : 2;
+  }
+  console.log(JSON.stringify(result, null, 2));
   return 0;
 }
 
