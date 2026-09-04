@@ -4102,6 +4102,548 @@ describe('SessionTranscriptReader', () => {
       expect(page.hasMore).toBe(true);
     });
   });
+
+  describe('turn navigation', () => {
+    function turnResult(
+      uuid: string,
+      parentUuid: string,
+      promptId: string,
+    ): ChatRecord {
+      return {
+        ...record(uuid, parentUuid, ''),
+        type: 'system',
+        subtype: 'turn_result',
+        message: undefined,
+        systemPayload: {
+          promptId,
+          state: 'completed',
+          endedAt: RECORD_BASE_MS,
+        },
+      };
+    }
+
+    function scheduledTurn(): ChatRecord {
+      return {
+        ...record('uc1', 'a1', 'model schedule payload'),
+        subtype: 'cron',
+        systemPayload: { displayText: 'Scheduled review' },
+      } as ChatRecord;
+    }
+
+    it('builds stable sparse pages and projects only public previews', async () => {
+      const attachmentToken = '@attachment:///file-1';
+      const user = {
+        ...record('u1', null, 'model-facing prompt'),
+        systemPayload: {
+          displayText: `Visible prompt\n\n${attachmentToken}`,
+          hookContext: 'private hook context',
+          attachmentReferences: [{ type: 'resource', attachmentId: 'file-1' }],
+        },
+      } as ChatRecord;
+      const realtime = {
+        ...record('ur1', 'u1', 'spoken update'),
+        subtype: 'realtime_message',
+      } as ChatRecord;
+      const realtimeAssistant = {
+        ...record('art1', 'ur1', 'realtime reply'),
+        subtype: 'realtime_message',
+      } as ChatRecord;
+      const assistant = {
+        ...record('a1', 'art1', ''),
+        message: {
+          role: 'model',
+          parts: [
+            null,
+            { text: 'private reasoning', thought: true },
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'run_shell_command',
+                args: { command: 'secret' },
+              },
+            },
+            { text: 'Public answer' },
+          ],
+        },
+      } as unknown as ChatRecord;
+      const notification = {
+        ...record('un1', 'um1', 'background notice'),
+        subtype: 'notification',
+      } as ChatRecord;
+      const goalRuntime = {
+        ...record('ug1', 'tr1', 'private goal runtime'),
+        subtype: 'goal_runtime',
+      } as ChatRecord;
+      const midTurn = {
+        ...record('um1', 'ug1', 'steering message'),
+        subtype: 'mid_turn_user_message',
+      } as ChatRecord;
+      const scheduled = {
+        ...record('uc1', 'un1', 'model schedule payload'),
+        subtype: 'cron',
+        systemPayload: { displayText: 'Scheduled review' },
+      } as ChatRecord;
+      const scheduledAssistant = record('a2', 'uc1', 'Scheduled result');
+      const empty = {
+        ...record('u2', 'tr2', ''),
+        message: { role: 'user', parts: [] },
+      } as ChatRecord;
+      const attachmentOnly = {
+        ...record('u3', 'u2', ''),
+        message: {
+          role: 'user',
+          parts: [
+            {
+              inlineData: { mimeType: 'image/png', data: 'AA==' },
+            },
+          ],
+        },
+      } as ChatRecord;
+      await writeRecords([
+        user,
+        realtime,
+        realtimeAssistant,
+        assistant,
+        turnResult('tr1', 'a1', 'prompt-1'),
+        goalRuntime,
+        midTurn,
+        notification,
+        scheduled,
+        scheduledAssistant,
+        turnResult('tr2', 'a2', 'prompt-2'),
+        empty,
+        attachmentOnly,
+      ]);
+
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const tail = await reader.readTurnIndexPage(sessionId, { limit: 2 });
+
+      expect(tail.totalTurns).toBe(4);
+      expect(tail.start).toBe(2);
+      expect(tail.turns).toEqual([
+        expect.objectContaining({
+          ordinal: 2,
+          turnId: 'uc1',
+          kind: 'scheduled',
+          promptId: 'prompt-2',
+          label: 'Scheduled review',
+          detail: 'Scheduled result',
+        }),
+        expect.objectContaining({
+          ordinal: 3,
+          turnId: 'u3',
+          kind: 'prompt',
+          label: 'Prompt',
+        }),
+      ]);
+
+      const head = await reader.readTurnIndexPage(sessionId, {
+        snapshot: tail.snapshot,
+        start: 0,
+        limit: 2,
+      });
+      expect(head.turns).toEqual([
+        expect.objectContaining({
+          ordinal: 0,
+          turnId: 'u1',
+          kind: 'prompt',
+          promptId: 'prompt-1',
+          label: 'Visible prompt',
+          detail: 'Public answer',
+        }),
+        expect.objectContaining({
+          ordinal: 1,
+          turnId: 'ur1',
+          kind: 'realtime',
+          label: 'spoken update',
+          detail: 'realtime reply',
+        }),
+      ]);
+      expect(JSON.stringify(head.turns)).not.toContain('secret');
+      expect(JSON.stringify(head.turns)).not.toContain('private');
+      expect(JSON.stringify(head.turns)).not.toContain(attachmentToken);
+      expect(head.turns[1]).not.toHaveProperty('promptId');
+    });
+
+    it('keeps snapshots stable after append and a cold-cache rebuild', async () => {
+      const filePath = await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+        record('u2', 'a1', 'second'),
+        record('a2', 'u2', 'answer two'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const first = await reader.readTurnIndexPage(sessionId);
+      await fs.appendFile(
+        filePath,
+        `${JSON.stringify(record('u3', 'a2', 'third'))}\n`,
+      );
+      resetSessionTranscriptIndexCacheForTest();
+
+      const frozen = await reader.readTurnIndexPage(sessionId, {
+        snapshot: first.snapshot,
+        start: 0,
+      });
+      const latest = await reader.readTurnIndexPage(sessionId);
+      expect(frozen.totalTurns).toBe(2);
+      expect(latest.totalTurns).toBe(3);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'u2',
+        snapshot: first.snapshot,
+        limit: 2,
+      });
+      expect(anchored.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+      expect(anchored.targetRecordId).toBe('u2');
+      expect(anchored.hasOlder).toBe(true);
+      expect(anchored.hasMore).toBe(false);
+
+      await expect(
+        reader.readPage(sessionId, {
+          atRecordId: 'a1',
+          snapshot: first.snapshot,
+        }),
+      ).rejects.toMatchObject({
+        name: 'InvalidSessionTranscriptTurnAnchorError',
+      });
+      await expect(
+        reader.readPage(sessionId, { atRecordId: 'u1' }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+    });
+
+    it('continues forward from an anchored page inside the frozen snapshot', async () => {
+      await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+        record('u2', 'a1', 'second'),
+        record('a2', 'u2', 'answer two'),
+        record('u3', 'a2', 'third'),
+        record('a3', 'u3', 'answer three'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'u2',
+        snapshot: index.snapshot,
+        limit: 2,
+      });
+
+      expect(anchored.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+      expect(anchored.hasMore).toBe(true);
+      expect(anchored.nextCursorState).toBeDefined();
+
+      const continued = await reader.readPage(sessionId, {
+        cursor: encodeCursor(anchored.nextCursorState!),
+        limit: 2,
+      });
+      expect(continued.records.map((item) => item.uuid)).toEqual(['u3', 'a3']);
+      expect(continued.hasMore).toBe(false);
+    });
+
+    it('rejects conflicting snapshot-bound transcript anchors', async () => {
+      await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+        record('u2', 'a1', 'second'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+      const first = await reader.readPage(sessionId, { limit: 1 });
+      const cursor = encodeCursor(first.nextCursorState!);
+
+      await expect(
+        reader.readPage(sessionId, {
+          cursor,
+          atRecordId: 'u2',
+          snapshot: index.snapshot,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readPage(sessionId, {
+          atRecordId: 'u2',
+          beforeRecordId: 'u1',
+          snapshot: index.snapshot,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readPage(sessionId, { snapshot: index.snapshot }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+    });
+
+    it('rejects snapshots minted for another session', async () => {
+      await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+      const otherSessionId = '550e8400-e29b-41d4-a716-446655440001';
+      await writeRecords(
+        [
+          record('other-u1', null, 'other first'),
+          record('other-a1', 'other-u1', 'other answer'),
+        ],
+        otherSessionId,
+      );
+
+      await expect(
+        reader.readTurnIndexPage(otherSessionId, {
+          snapshot: index.snapshot,
+          start: 0,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readPage(otherSessionId, {
+          atRecordId: 'other-u1',
+          snapshot: index.snapshot,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+    });
+
+    it('expands an anchored scheduled turn to a safe replay boundary', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        toolCallRecord('a1', 'u1', 'call-1'),
+        scheduledTurn(),
+        toolResultRecord('r1', 'uc1', 'call-1'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'uc1',
+        snapshot: index.snapshot,
+        limit: 2,
+      });
+
+      expect(anchored.records.map((item) => item.uuid)).toEqual([
+        'a1',
+        'uc1',
+        'r1',
+      ]);
+      expect(anchored.targetRecordId).toBe('uc1');
+      expect(anchored.hasOlder).toBe(true);
+    });
+
+    it('keeps an anchored page bounded when safe expansion exceeds its budget', async () => {
+      await writeRecords([
+        record('u1', null, 'first prompt'),
+        toolCallRecord('a1', 'u1', 'call-1'),
+        scheduledTurn(),
+        toolResultRecord('r1', 'uc1', 'call-1'),
+      ]);
+      setSessionTranscriptExpandedPageBytesForTest(1);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'uc1',
+        snapshot: index.snapshot,
+        limit: 2,
+        maxBytes: 1024,
+      });
+
+      expect(anchored.records.map((item) => item.uuid)).toEqual(['uc1', 'r1']);
+      expect(anchored.targetRecordId).toBe('uc1');
+      expect(anchored.hasOlder).toBe(true);
+    });
+
+    it('reports no older records when boundary expansion reaches file head', async () => {
+      await writeRecords([
+        toolCallRecord('a1', 'u0', 'call-1'),
+        scheduledTurn(),
+        toolResultRecord('r1', 'uc1', 'call-1'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const index = await reader.readTurnIndexPage(sessionId);
+
+      const anchored = await reader.readPage(sessionId, {
+        atRecordId: 'uc1',
+        snapshot: index.snapshot,
+        limit: 1,
+      });
+
+      expect(anchored.records.map((item) => item.uuid)).toEqual(['a1', 'uc1']);
+      expect(anchored.hasOlder).toBe(false);
+    });
+
+    it('supports an empty frozen snapshot and rejects tampering', async () => {
+      await writeRawTranscript('');
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readTurnIndexPage(sessionId);
+
+      expect(page).toMatchObject({ totalTurns: 0, start: 0, turns: [] });
+      const tampered = `${page.snapshot[0] === 'A' ? 'B' : 'A'}${page.snapshot.slice(1)}`;
+      await expect(
+        reader.readTurnIndexPage(sessionId, { snapshot: tampered }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      const decoded = JSON.parse(
+        Buffer.from(page.snapshot, 'base64url').toString('utf8'),
+      ) as Record<string, unknown>;
+      decoded['snapshotSize'] = (decoded['snapshotSize'] as number) + 1;
+      const forged = Buffer.from(JSON.stringify(decoded), 'utf8').toString(
+        'base64url',
+      );
+      await expect(
+        reader.readTurnIndexPage(sessionId, { snapshot: forged }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readTurnIndexPage(sessionId, { start: 0 }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+      await expect(
+        reader.readTurnIndexPage(sessionId, {
+          snapshot: page.snapshot,
+          start: 1,
+        }),
+      ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
+    });
+
+    it('rejects a frozen turn-index snapshot after its leaf is replaced', async () => {
+      const filePath = await writeRecords([
+        record('u1', null, 'first'),
+        record('a1', 'u1', 'answer one'),
+      ]);
+      const reader = new SessionTranscriptReader(workspaceDir);
+      const page = await reader.readTurnIndexPage(sessionId);
+      const original = await fs.readFile(filePath, 'utf8');
+      await fs.writeFile(
+        filePath,
+        original.replace('"uuid":"a1"', '"uuid":"a2"'),
+        'utf8',
+      );
+      resetSessionTranscriptIndexCacheForTest();
+
+      await expect(
+        reader.readTurnIndexPage(sessionId, {
+          snapshot: page.snapshot,
+          start: 0,
+        }),
+      ).rejects.toBeInstanceOf(SessionTranscriptSnapshotUnavailableError);
+    });
+
+    it('caps navigation labels and details by Unicode code points', async () => {
+      await writeRecords([
+        record('u1', null, '🧭'.repeat(200)),
+        record('a1', 'u1', '🧩'.repeat(300)),
+      ]);
+
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId);
+      const turn = page.turns[0]!;
+
+      expect(Array.from(turn.label)).toHaveLength(160);
+      expect(turn.label.endsWith('…')).toBe(true);
+      expect(Array.from(turn.detail ?? '')).toHaveLength(240);
+      expect(turn.detail?.endsWith('…')).toBe(true);
+    });
+
+    it('does not turn a fragmented control-only user record into navigation', async () => {
+      const first = {
+        ...record('u1', null, ''),
+        message: { role: 'user', parts: [] },
+      } as ChatRecord;
+      const contextOnly = {
+        ...record('u1', null, ''),
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text: '<qwen:user-prompt-submit-context>\nprivate\n</qwen:user-prompt-submit-context>',
+            },
+          ],
+        },
+      } as ChatRecord;
+      await writeRecords([
+        first,
+        contextOnly,
+        record('u2', 'u1', 'visible prompt'),
+      ]);
+
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId);
+
+      expect(page.totalTurns).toBe(1);
+      expect(page.turns).toEqual([
+        expect.objectContaining({ turnId: 'u2', label: 'visible prompt' }),
+      ]);
+    });
+
+    it('omits control-context parts from a mixed visible label', async () => {
+      const mixed = {
+        ...record('u1', null, ''),
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text: '<qwen:user-prompt-submit-context>\nprivate context\n</qwen:user-prompt-submit-context>',
+            },
+            { text: 'visible prompt' },
+          ],
+        },
+      } as ChatRecord;
+      await writeRecords([mixed]);
+
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId);
+
+      expect(page.turns).toEqual([
+        expect.objectContaining({ turnId: 'u1', label: 'visible prompt' }),
+      ]);
+      expect(JSON.stringify(page.turns)).not.toContain('private context');
+    });
+
+    it('does not use control-only display text as navigation', async () => {
+      const context =
+        '<qwen:user-prompt-submit-context>\nprivate context\n</qwen:user-prompt-submit-context>';
+      const ordinary = {
+        ...record('u1', null, context),
+        systemPayload: { displayText: context },
+      } as ChatRecord;
+      const scheduled = {
+        ...record('u2', 'u1', context),
+        subtype: 'cron',
+        systemPayload: { displayText: context },
+      } as ChatRecord;
+      await writeRecords([ordinary, scheduled]);
+
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId);
+
+      expect(page.turns).toEqual([]);
+    });
+
+    it('omits generated attachment tokens without display metadata', async () => {
+      const token = '@attachment:///file-1';
+      const attachment = {
+        ...record('u1', null, token),
+        systemPayload: {
+          attachmentReferences: [
+            {
+              type: 'resource',
+              attachmentId: 'file-1',
+              mimeType: 'text/plain',
+              size: 10,
+            },
+          ],
+        },
+      } as ChatRecord;
+      await writeRecords([attachment]);
+
+      const page = await new SessionTranscriptReader(
+        workspaceDir,
+      ).readTurnIndexPage(sessionId);
+
+      expect(page.turns).toEqual([
+        expect.objectContaining({ turnId: 'u1', label: 'Prompt' }),
+      ]);
+      expect(JSON.stringify(page.turns)).not.toContain(token);
+    });
+  });
 });
 
 describe('isReplayTurnStartType', () => {
