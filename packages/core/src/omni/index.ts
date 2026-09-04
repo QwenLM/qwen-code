@@ -212,9 +212,11 @@ export interface OmniMediaDelivery {
    * primary media Part and before any transcripts. */
   additionalMedia?: OmniAdditionalMediaDelivery[];
   /** Opaque session handle for the SOURCE media (M §5.2), present iff
-   * media memory recorded it. Consumers disclose it next to the delivered
-   * content so the model can reference the resource in recall requests —
-   * the handle stands in for the path the model must never see. */
+   * media memory recorded it. Consumers disclose a reference next to the
+   * delivered content so the model can name the resource in recall requests:
+   * the handle for path-less media (which stands in for a path the model
+   * cannot see), or — for a model-visible local file — its absolute path,
+   * which recall reverses back to this handle (see `formatResourcePathText`). */
   resourceId?: string;
 }
 

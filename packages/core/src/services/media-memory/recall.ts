@@ -12,6 +12,7 @@ import type {
   OmniMemoryRecallKind,
 } from './config.js';
 import type { MediaResourceRegistry } from './registry.js';
+import { resolveMediaReference } from './registry.js';
 import { MediaMemoryStore } from './store.js';
 import type {
   MediaChannel,
@@ -560,9 +561,11 @@ export class MediaMemoryRecallService {
    * rejects the whole request.
    *
    * A model-visible local source is annotated with its ABSOLUTE PATH rather
-   * than a handle, and the model passes that path here. Each identifier is
-   * resolved as a handle first (the common case), then as a session-bound
-   * fileRef (`resolveByFileRef`) — so the displayed path recalls exactly as
+   * than a handle, and the model passes that path here. `resolveMediaReference`
+   * resolves each identifier as a handle first (the common case), then as a
+   * session-bound fileRef — unescaping the displayed path so a native Windows
+   * path or a `：`-bearing name (which arrives escaped) still matches the raw
+   * `fileRef` the registry stores. So the displayed path recalls exactly as
    * the handle would. An identifier that is neither still rejects the whole
    * request. */
   private resolveBindings(
@@ -584,13 +587,13 @@ export class MediaMemoryRecallService {
       NonNullable<ReturnType<MediaResourceRegistry['resolve']>>
     > = [];
     for (const resourceId of resourceIds) {
-      const binding =
-        this.registry.resolve(resourceId) ??
-        this.registry.resolveByFileRef(resourceId);
+      const binding = resolveMediaReference(this.registry, resourceId);
       if (!binding) {
         throw new MediaMemoryRecallRejection(
           'unknown_resource',
-          `resourceId ${resourceId} was not issued in this session`,
+          `reference ${resourceId} matches no media delivered this session ` +
+            `(neither a session handle nor the path of a file read this ` +
+            `session)`,
         );
       }
       if (seen.has(binding.resourceId)) continue;

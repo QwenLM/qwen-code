@@ -610,18 +610,23 @@ describe('evaluateMediaPolicyToolCall', () => {
   });
 
   describe('resourceId input resolution (M §5.2)', () => {
+    const bindingFor = (id: string, fileRef: string) => ({
+      resourceId: id,
+      fileId: 'f1',
+      fileVersionId: 'v1',
+      rootFileId: 'f1',
+      fileRef,
+      mediaType: 'image' as const,
+    });
     const registryWith = (bindings: Record<string, string>) => ({
       resolve: (id: string) =>
-        bindings[id] !== undefined
-          ? {
-              resourceId: id,
-              fileId: 'f1',
-              fileVersionId: 'v1',
-              rootFileId: 'f1',
-              fileRef: bindings[id],
-              mediaType: 'image' as const,
-            }
-          : undefined,
+        bindings[id] !== undefined ? bindingFor(id, bindings[id]) : undefined,
+      // Reverse lookup by locator — lets the gate accept the absolute PATH the
+      // annotation shows for a model-visible local file (same as active recall).
+      resolveByFileRef: (ref: string) => {
+        const id = Object.keys(bindings).find((k) => bindings[k] === ref);
+        return id ? bindingFor(id, ref) : undefined;
+      },
     });
     const enabledConfig = (bindings: Record<string, string>) => ({
       ...configWith({
@@ -643,6 +648,23 @@ describe('evaluateMediaPolicyToolCall', () => {
       });
     });
 
+    it('resolves the absolute PATH shown for a local file (path form) to inputPath', () => {
+      // A model-visible local file is annotated with its path, not a handle.
+      // A model that puts that path in resourceId (following the stale schema
+      // text) must still resolve — the gate reverses it via resolveByFileRef,
+      // the same as active recall — rather than burning a turn on rejection.
+      const result = evaluateMediaPolicyToolCall({
+        config: enabledConfig({ 'media-1-ab': '/media/movie.mkv' }),
+        tool: policyTool(),
+        args: { resourceId: '/media/movie.mkv', outputDir: '/out' },
+        executionOrigin: { kind: 'model' },
+      });
+      expect(result).toEqual({
+        outcome: 'pass',
+        args: { inputPath: '/media/movie.mkv', outputDir: '/out' },
+      });
+    });
+
     it('rejects a handle this session never issued', () => {
       const result = evaluateMediaPolicyToolCall({
         config: enabledConfig({}),
@@ -655,7 +677,7 @@ describe('evaluateMediaPolicyToolCall', () => {
         reason: 'invalid_params',
       });
       expect((result as { message: string }).message).toContain(
-        'not issued in this session',
+        'matches no media delivered this session',
       );
     });
 

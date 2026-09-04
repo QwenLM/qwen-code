@@ -184,7 +184,7 @@ describe('MediaMemoryRecallService — request validation', () => {
         resourceIds: [resourceId, 'media-9-deadbeef'],
         query: 'anything',
       }),
-    ).rejects.toThrow(/not issued in this session/);
+    ).rejects.toThrow(/matches no media delivered this session/);
   });
 
   it('resolves the ABSOLUTE PATH shown for a model-visible local source', async () => {
@@ -215,19 +215,47 @@ describe('MediaMemoryRecallService — request validation', () => {
 
   it('deduplicates a handle and the path form of the same resource', async () => {
     // The handle and the path resolve to ONE binding; recall must treat the
-    // pair as a single resource, not push duplicate gaps/advice for it.
+    // pair as a single resource. `result.files` collapses by version no
+    // matter what (it is a per-version map), so the dedup this asserts is on
+    // the per-BINDING outputs — gaps and the follow-up advice derived from
+    // them — which WOULD duplicate if resolveBindings kept both identifiers.
     const source = await recognizeMovie();
+    await commitDegrade(source); // leaves a speech_text gap on this resource
     const resourceId = bindSource(source);
-    const result = await recallService().recall({
+
+    const result = await recallService(recallConfig(), {
+      advise: ({ resourceId: rid, gap }) =>
+        gap.reason === 'not_processed' && gap.channels.includes('speech_text')
+          ? [
+              {
+                toolName: 'omni_transcribe',
+                resourceId: rid,
+                arguments: {},
+                reason: 'speech has not been transcribed',
+              },
+            ]
+          : [],
+    }).recall({
       resourceIds: [resourceId, moviePath],
       query: 'what happens in the movie',
     });
+
     expect(result.files).toEqual([
       {
         fileId: source.fileId,
         fileVersionId: source.fileVersionId,
         current: true,
         mediaType: 'video',
+      },
+    ]);
+    // One binding → one gap and one advice, not two of each.
+    expect(result.gaps).toHaveLength(1);
+    expect(result.nextPolicyActions).toEqual([
+      {
+        toolName: 'omni_transcribe',
+        resourceId,
+        arguments: {},
+        reason: 'speech has not been transcribed',
       },
     ]);
   });
@@ -240,7 +268,7 @@ describe('MediaMemoryRecallService — request validation', () => {
         resourceIds: [resourceId, '/not/a/bound/path.mkv'],
         query: 'anything',
       }),
-    ).rejects.toThrow(/not issued in this session/);
+    ).rejects.toThrow(/matches no media delivered this session/);
   });
 });
 

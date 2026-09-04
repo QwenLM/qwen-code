@@ -266,6 +266,82 @@ describe('exportOmniTrajectory', () => {
     });
   });
 
+  it('does NOT consume prefixed prose that is not an absolute path', async () => {
+    // A user line that merely opens with the resource prefix (a paste, or an
+    // @-mentioned document whose first line is 【媒体资源】清单) is ordinary
+    // prose: it must stay in request.text and never fabricate a media entry
+    // that could pull an unrelated file's closure into the export.
+    await seedUnrelatedMemory(); // a file whose locator is 'unrelated.png'
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        timestamp: '2026-08-13T00:00:00.000Z',
+        message: {
+          parts: [{ text: '【媒体资源】清单' }, { text: '请分析' }],
+        },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turn = records.find((r) => r.kind === 'turn') as
+      | OmniTrajectoryTurnRecord
+      | undefined;
+    expect(turn).toBeDefined();
+    expect(turn!.request.media).toEqual([]);
+    expect(turn!.request.text).toContain('【媒体资源】清单');
+    // No phantom entry, so the unrelated file is not dragged into the export.
+    const files = records.filter((r) => r.kind === 'file');
+    expect(files).toHaveLength(0);
+  });
+
+  it('preserves a trailing-whitespace filename in the PATH form', async () => {
+    // A filename may legally END in whitespace (POSIX). The path form carries
+    // it at the end of the annotation part; a full trim on export would
+    // truncate the name, so the media entry would no longer match the file
+    // record's local locator and the file (plus its closure) would drop out.
+    const memory = new MediaMemoryService(omniRootDir);
+    await memory.recordFileRecognized({
+      fileRef: '/movies/film.mkv ',
+      sha256: 'a'.repeat(64),
+      mediaType: 'video',
+      metadata: { durationMs: 5000 },
+      sizeBytes: 100,
+      mimeType: 'video/x-matroska',
+      origin: 'user',
+      source: { protocol: 'local', locator: 'film.mkv ' },
+      recognition: {
+        ingestionConfigHash: '',
+        detectorVersion: 'omni-sniff-ffprobe/1',
+        probeStatus: 'complete',
+      },
+    });
+    await writeTranscript([
+      transcriptLine({
+        type: 'user',
+        timestamp: '2026-08-13T00:00:00.000Z',
+        message: {
+          parts: [{ text: formatResourcePathText('/movies/film.mkv ') }],
+        },
+      }),
+    ]);
+
+    const records = await exportOmniTrajectory({ omniRootDir, transcriptPath });
+    const turn = records.find((r) => r.kind === 'turn') as
+      | OmniTrajectoryTurnRecord
+      | undefined;
+    // Trailing space preserved, so the name matches the file's local locator.
+    expect(turn!.request.media).toEqual([
+      { name: 'film.mkv ', disclosures: [], transcripts: [] },
+    ]);
+    const files = records.filter(
+      (r): r is OmniTrajectoryFileRecord => r.kind === 'file',
+    );
+    expect(files.find((f) => f.origin === 'user')?.source).toEqual({
+      protocol: 'local',
+      locator: 'film.mkv ',
+    });
+  });
+
   it('preserves model-emitted tool arguments verbatim (no scrubbing)', async () => {
     // The gate explicitly permits a model-authored inputPath (exactly one
     // of inputPath|resourceId); the recorded assistant turn predates the

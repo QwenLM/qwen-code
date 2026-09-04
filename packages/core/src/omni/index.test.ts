@@ -386,6 +386,26 @@ describe('readMediaViaOmniDelivery result shape', () => {
     expect(registry.resolveByFileRef(filePath)).toMatchObject({
       mediaType: 'image',
     });
+    // The emitted part must be CONSUMABLE by both grammar readers, not merely
+    // contain the right substrings: a writer change that kept the substrings
+    // but broke the grammar (e.g. an unescaped separator) would leave both
+    // consumers dropping the annotation while these substring checks stayed
+    // green. So round-trip it through the actual parsers.
+    const { parseResourcePathText, parseResourceHandleText } = await import(
+      './disclosure.js'
+    );
+    const { extractRequestResourceIds } = await import(
+      './memory-side-query.js'
+    );
+    expect(parseResourcePathText(handleText)).toBe(filePath);
+    expect(parseResourceHandleText(handleText)).toBeUndefined();
+    const registered = registry.resolveByFileRef(filePath)!;
+    expect(
+      extractRequestResourceIds(
+        { getOmniMediaResourceRegistry: () => registry } as unknown as Config,
+        [{ text: handleText }],
+      ),
+    ).toEqual([registered.resourceId]);
     expect(parts[1]!['text']).toContain('zoom_image');
     expect(parts[2]).toHaveProperty('fileData');
   });

@@ -109,7 +109,11 @@ const debugLogger = createDebugLogger('omni:export');
 export interface OmniTrajectoryMediaAnnotation {
   /** Display name from the annotation (basename or URL base). */
   name: string;
-  /** Session handle, when a 【媒体资源】 annotation was present. */
+  /** Session handle — set only when a 【媒体资源】 annotation showed the HANDLE
+   * form (path-less media). The path form (model-visible local media) leaves
+   * this unset: it shows the absolute path, and the exporter is a pure reader
+   * with no live registry, so the entry is keyed by the path basename instead.
+   * A present annotation therefore does NOT imply a resourceId. */
   resourceId?: string;
   disclosures: string[];
   /** Omission notice text, when the transport guard withheld the bytes. */
@@ -251,10 +255,12 @@ function functionCallOfPart(
   };
 }
 
+/** Remove every `<system-reminder>…</system-reminder>` block. Does NOT trim:
+ * callers decide, because a path-form annotation carries a whitespace-sensitive
+ * filename at the END and a full trim would truncate it (see
+ * `consumeRecordParts`). */
 function stripSystemReminders(text: string): string {
-  return text
-    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
-    .trim();
+  return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '');
 }
 
 interface TurnAccumulator {
@@ -359,10 +365,17 @@ function consumeRecordParts(
     // Reminders are harness plumbing, never annotation carriers — strip
     // them BEFORE annotation matching so a reminder quoting an
     // annotation line cannot be harvested as one.
-    const text = stripSystemReminders(raw);
-    if (!text) continue;
-    if (consumeAnnotationPart(turn, text)) continue;
-    if (collectProse) turn.requestTexts.push(text);
+    const withoutReminders = stripSystemReminders(raw);
+    // Annotation matching left-trims only: the path form carries the file's
+    // ABSOLUTE PATH at the end of the part, and a filename may legally end in
+    // whitespace (POSIX), so a full trim would truncate the name — dropping the
+    // media entry and, with it, the file's memory closure from the export.
+    const forAnnotation = withoutReminders.replace(/^\s+/, '');
+    if (consumeAnnotationPart(turn, forAnnotation)) continue;
+    // Prose: safe to fully trim.
+    const prose = withoutReminders.trim();
+    if (!prose) continue;
+    if (collectProse) turn.requestTexts.push(prose);
   }
 }
 

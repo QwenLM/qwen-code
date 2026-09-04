@@ -196,11 +196,36 @@ export function formatResourcePathText(absolutePath: string): string {
 }
 
 /**
+ * True when `p` has the shape of an absolute filesystem path on any OS —
+ * POSIX (`/…`), a Windows drive (`C:\…` / `C:/…`), or a Windows UNC
+ * (`\\host\share`). Deliberately platform-INDEPENDENT: a trajectory captured
+ * on one OS is parsed on another, so `node:path.isAbsolute` (which only
+ * recognizes the host's grammar) is the wrong test. Used to keep
+ * {@link parseResourcePathText} from consuming ordinary prose that merely
+ * starts with the resource prefix — `formatResourcePathText` is only ever
+ * handed an absolute path.
+ */
+export function isAbsolutePathLike(p: string): boolean {
+  return (
+    p.startsWith('/') || // POSIX
+    /^[A-Za-z]:[\\/]/.test(p) || // Windows drive
+    p.startsWith('\\\\') // Windows UNC (unescaped)
+  );
+}
+
+/**
  * Extract the absolute path from a path-form resource annotation emitted by
  * {@link formatResourcePathText}, or undefined for any other text —
  * including the handle form, which is disambiguated by its unescaped
  * `：<resourceId>` separator (absolute paths never contain the full-width
  * colon unescaped, and any that did would have been escaped by the writer).
+ *
+ * The payload must ALSO look like an absolute path ({@link isAbsolutePathLike}):
+ * `formatResourcePathText` only ever emits one, and the guard stops ordinary
+ * prose that merely opens with the resource prefix (a pasted `【媒体资源】清单`
+ * line, an `@`-mentioned document whose first line starts with it) from being
+ * mistaken for an annotation — which would delete it from exported request
+ * text and fabricate a phantom media entry.
  */
 export function parseResourcePathText(text: string): string | undefined {
   if (!text.startsWith(OMNI_RESOURCE_HANDLE_TEXT_PREFIX)) return undefined;
@@ -208,5 +233,6 @@ export function parseResourcePathText(text: string): string | undefined {
   // An unescaped separator marks the handle form (<name>：<resourceId>); the
   // path form has none.
   if (splitAnnotationBody(body) !== undefined) return undefined;
-  return unescapeAnnotationName(body);
+  const path = unescapeAnnotationName(body);
+  return isAbsolutePathLike(path) ? path : undefined;
 }

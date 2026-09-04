@@ -148,7 +148,11 @@ export class OmniRecallMediaMemoryTool extends BaseDeclarativeTool<
         properties: {
           resourceIds: {
             type: 'array',
-            items: { type: 'string', minLength: 1, maxLength: 256 },
+            // maxLength admits a full absolute path (the path form), not just
+            // a ~16-char media-<n>-<hex> handle — an over-long bound would let
+            // Ajv reject the very path the annotation displayed, before
+            // resolution, with no shorter identifier to retry.
+            items: { type: 'string', minLength: 1, maxLength: 4096 },
             minItems: 1,
             description:
               'Resource references to consult, each taken from a 【媒体资源】 ' +
@@ -215,7 +219,7 @@ export class OmniRecallMediaMemoryTool extends BaseDeclarativeTool<
       this.config.getOmniMemoryConfig()?.recall.active.maxFilesPerCall;
     if (maxFiles !== undefined && params.resourceIds.length > maxFiles) {
       return (
-        `resourceIds lists ${params.resourceIds.length} handles; at most ` +
+        `resourceIds lists ${params.resourceIds.length} references; at most ` +
         `${maxFiles} may be consulted per call ` +
         `(omni.memory.recall.active.maxFilesPerCall). Split the request.`
       );

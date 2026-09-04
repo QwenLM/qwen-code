@@ -237,6 +237,34 @@ describe('omni memory sideQuery selector', () => {
         resourceId,
       ]);
     });
+
+    it('resolves a path form when trailing whitespace is only line formatting', async () => {
+      // Here the FILENAME does not end in whitespace, but the embedded line
+      // carries trailing spaces (formatting). The left-trimmed candidate keeps
+      // them and misses the exact-equality resolveByFileRef; the fully-trimmed
+      // fallback is what resolves it — so this pins that second candidate.
+      const resourceId = await recordAndBind(); // fileRef = <tmp>/pic.png
+      const annotation = formatResourcePathText(path.join(tmpDir, 'pic.png'));
+      const parts = [{ text: `context\n   ${annotation}   \nmore` }];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        resourceId,
+      ]);
+    });
+
+    it('resolves a path to the LATEST version bound at that locator', async () => {
+      // Two versions of one file at the same path (re-read after an edit) mint
+      // distinct handles — exercised via the `sha256` parameter. A path names
+      // the file, not a version, so passive recall must key on the version the
+      // model currently sees (the latest), not the first ever bound.
+      const fileRef = path.join(tmpDir, 'pic.png');
+      const first = await recordAndBindFileRef(fileRef, 'a'.repeat(64));
+      const second = await recordAndBindFileRef(fileRef, 'b'.repeat(64));
+      expect(second).not.toBe(first);
+      const parts = [{ text: formatResourcePathText(fileRef) }];
+      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+        second,
+      ]);
+    });
   });
 
   describe('runOmniMemorySideQuery', () => {
@@ -328,6 +356,38 @@ describe('omni memory sideQuery selector', () => {
       // The reminder itself is stripped, not forwarded.
       expect(seenRequest).not.toContain('system-reminder');
       expect(seenRequest).not.toContain('/x/y.ts');
+    });
+
+    it('never forwards a local media path to the selector (path form)', async () => {
+      // A model-visible local file is annotated with its ABSOLUTE PATH. The
+      // selector judges relevance from the question alone and must not receive
+      // the path (home dir, OS username, project layout) — §17.5 "selector 不
+      // 接收原始媒体、大文本或本地路径". The path form put it into the selector call.
+      const fileRef = path.join(tmpDir, 'pic.png');
+      await recordAndBindFileRef(fileRef);
+      let seenRequest = '';
+      runSideQueryMock.mockImplementation((async (
+        _config: unknown,
+        options: { contents: Content[] },
+      ) => {
+        const payload = JSON.parse(
+          (options.contents[0]!.parts![0] as { text: string }).text,
+        );
+        seenRequest = payload.request;
+        return { entryIds: [] };
+      }) as never);
+
+      await runOmniMemorySideQuery({
+        config: sideQueryConfig(),
+        requestParts: [
+          { text: 'what is in this picture?' },
+          { text: formatResourcePathText(fileRef) },
+        ],
+      });
+
+      expect(seenRequest).toContain('what is in this picture?');
+      expect(seenRequest).not.toContain(fileRef);
+      expect(seenRequest).not.toContain(tmpDir);
     });
 
     it('degrades to an empty recall with a reason when the selector fails', async () => {

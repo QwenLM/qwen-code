@@ -100,4 +100,29 @@ describe('resource annotation forms', () => {
     expect(parseResourcePathText('just some text')).toBeUndefined();
     expect(parseResourceHandleText('just some text')).toBeUndefined();
   });
+
+  it('does NOT consume prefixed prose that is not an absolute path', () => {
+    // Ordinary text that merely begins with the resource prefix — a pasted
+    // line, an @-mentioned document whose first line is `【媒体资源】清单` — must
+    // not be mistaken for a path annotation, or the exporter would delete it
+    // from request text and fabricate a phantom media entry keyed on it.
+    expect(parseResourcePathText('【媒体资源】清单')).toBeUndefined();
+    expect(parseResourcePathText('【媒体资源】see attached')).toBeUndefined();
+    expect(
+      parseResourcePathText('【媒体资源】relative/path.mp4'),
+    ).toBeUndefined();
+    expect(parseResourceHandleText('【媒体资源】清单')).toBeUndefined();
+  });
+
+  it('accepts absolute paths on any OS shape (POSIX / Windows drive / UNC)', () => {
+    for (const p of [
+      '/movies/film.mkv',
+      'C:\\Users\\jane\\clip.mp4',
+      'D:/media/clip.mp4',
+      '\\\\host\\share\\clip.mp4',
+    ]) {
+      const text = formatResourcePathText(p);
+      expect(parseResourcePathText(text)).toBe(p);
+    }
+  });
 });

@@ -304,8 +304,10 @@ export class OmniClipVideoTool extends BaseMediaPolicyTool<ClipVideoParams> {
           outputDir: {
             type: 'string',
             description:
-              'Optional absolute directory to write the clip into. ' +
-              "Defaults to the source video's own directory when omitted.",
+              'Optional absolute directory to write the clip into; when ' +
+              'provided it must already exist (it is not created ' +
+              "automatically). Defaults to the source video's own directory " +
+              'when omitted.',
           },
           ...TUNABLE_SCHEMA_PROPERTIES,
         },

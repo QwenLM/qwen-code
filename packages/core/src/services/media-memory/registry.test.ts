@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { MediaResourceRegistry } from './registry.js';
+import { MediaResourceRegistry, resolveMediaReference } from './registry.js';
 
 const BINDING = {
   fileId: 'f-movie',
@@ -80,11 +80,73 @@ describe('MediaResourceRegistry', () => {
     expect(registry.resolveByFileRef(BINDING.fileRef)).toBe(second);
   });
 
+  it('resolveByFileRef follows a revert to previously-seen bytes', () => {
+    // Read bytes A (v-1), edit to B and re-read (v-2), then revert to A and
+    // read again. The third read re-delivers v-1 (its versionId is a
+    // deterministic function of content), so `bind` must refresh v-1's
+    // recency: the model is now looking at A again, so the path must resolve
+    // to v-1, NOT the superseded v-2. Without the recency refresh, byVersionId
+    // stays in first-mint order [v-1, v-2] and the path wrongly resolves v-2,
+    // mis-attributing any subsequent policy execution to stale bytes.
+    const registry = new MediaResourceRegistry();
+    const vA = registry.bind({ ...BINDING, fileVersionId: 'v-movie-1' });
+    registry.bind({ ...BINDING, fileVersionId: 'v-movie-2' });
+    const vAagain = registry.bind({ ...BINDING, fileVersionId: 'v-movie-1' });
+    expect(vAagain).toBe(vA); // idempotent: same handle
+    expect(registry.resolveByFileRef(BINDING.fileRef)).toBe(vA);
+  });
+
   it('never resolves a handle it did not issue', () => {
     const registry = new MediaResourceRegistry();
     registry.bind(BINDING);
     expect(registry.resolve('media-1-deadbeef')).toBeUndefined();
     expect(registry.resolve('/movies/breaking-surface.mkv')).toBeUndefined();
     expect(registry.resolveVersion('v-unknown')).toBeUndefined();
+  });
+});
+
+describe('resolveMediaReference', () => {
+  const WINDOWS_BINDING = {
+    fileId: 'f-win',
+    fileVersionId: 'v-win-1',
+    rootFileId: 'f-win',
+    fileRef: 'C:\\Users\\jane\\clip.mp4',
+    mediaType: 'video' as const,
+  };
+
+  it('resolves the opaque handle form verbatim', () => {
+    const registry = new MediaResourceRegistry();
+    const bound = registry.bind(BINDING);
+    expect(resolveMediaReference(registry, bound.resourceId)).toBe(bound);
+  });
+
+  it('resolves the unescaped absolute-path form (POSIX)', () => {
+    const registry = new MediaResourceRegistry();
+    const bound = registry.bind(BINDING);
+    expect(resolveMediaReference(registry, BINDING.fileRef)).toBe(bound);
+  });
+
+  it('resolves an ESCAPED path the way the annotation displays it (Windows)', () => {
+    // A native Windows path is shown to the model through the annotation's
+    // escaping (escapeAnnotationName doubles every backslash). A model that
+    // echoes the DISPLAYED string back passes the escaped form; the registry
+    // stores the raw fileRef. resolveMediaReference must unescape so the two
+    // meet — otherwise every Windows local media loses its recall identity.
+    const registry = new MediaResourceRegistry();
+    const bound = registry.bind(WINDOWS_BINDING);
+    const displayed = 'C:\\\\Users\\\\jane\\\\clip.mp4'; // escaped form
+    expect(registry.resolveByFileRef(displayed)).toBeUndefined(); // raw miss
+    expect(resolveMediaReference(registry, displayed)).toBe(bound);
+    // A model that already unescaped it must also work.
+    expect(resolveMediaReference(registry, WINDOWS_BINDING.fileRef)).toBe(
+      bound,
+    );
+  });
+
+  it('returns undefined for a reference that is neither form', () => {
+    const registry = new MediaResourceRegistry();
+    registry.bind(BINDING);
+    expect(resolveMediaReference(registry, 'media-9-deadbeef')).toBeUndefined();
+    expect(resolveMediaReference(registry, '/not/bound.mp4')).toBeUndefined();
   });
 });

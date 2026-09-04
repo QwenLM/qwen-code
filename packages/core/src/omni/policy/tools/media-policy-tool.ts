@@ -50,21 +50,25 @@ export interface MediaPolicyIoParams {
 /** JSON-schema fragments for the shared io parameters. `resourceId` is
  * the model-facing alternative to `inputPath` (memory design M §5.2):
  * the model references delivered media by its opaque session handle and
- * the call gate resolves the handle to the real locator — it never
- * appears in the arguments an invocation is built with. */
+ * the call gate resolves the handle to the real locator. (A 【媒体资源】
+ * annotation for a model-visible local file shows the ABSOLUTE PATH instead
+ * of a handle — that goes in `inputPath`; the gate also accepts it as a
+ * `resourceId` and reverses it, but `inputPath` is the direct route.) */
 export const MEDIA_POLICY_IO_SCHEMA_PROPERTIES = {
   inputPath: {
     type: 'string',
     description:
-      'Absolute path of the source media file. Provide exactly one of ' +
-      'inputPath or resourceId.',
+      'Absolute path of the source media file — including the path shown ' +
+      'in a 【媒体资源】 annotation for a local file you read. Provide ' +
+      'exactly one of inputPath or resourceId.',
   },
   resourceId: {
     type: 'string',
     description:
-      'Opaque session media handle (from a 【媒体资源】 annotation or a ' +
-      'recall result) naming the source media. Provide exactly one of ' +
-      'inputPath or resourceId.',
+      'Opaque session media handle (the media-<n>-<hex> form from a ' +
+      '【媒体资源】 annotation or a recall result) naming the source media. ' +
+      'When the annotation instead shows an absolute path, pass that path ' +
+      'as inputPath. Provide exactly one of inputPath or resourceId.',
   },
   outputDir: {
     type: 'string',
