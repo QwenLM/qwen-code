@@ -63,6 +63,7 @@ function observeLlmStream(
  */
 export class LlmContentGenerator implements ContentGenerator {
   private readonly googleGenAI: GoogleGenAI;
+  private readonly clientBaseUrl?: string;
   private readonly contentGeneratorConfig?: ContentGeneratorConfig;
   private readonly cliConfig?: Config;
   // Latch so the effort-clamp warning fires once per generator lifetime
@@ -98,13 +99,16 @@ export class LlmContentGenerator implements ContentGenerator {
       : options;
 
     this.googleGenAI = new GoogleGenAI(finalOptions);
+    this.clientBaseUrl = finalOptions.httpOptions?.baseUrl;
     this.contentGeneratorConfig = contentGeneratorConfig;
     this.cliConfig = cliConfig;
   }
 
   private buildHttpOptions(httpOptions?: HttpOptions): HttpOptions | undefined {
     const destination =
-      httpOptions?.baseUrl ?? this.contentGeneratorConfig?.baseUrl;
+      httpOptions?.baseUrl ??
+      this.clientBaseUrl ??
+      this.contentGeneratorConfig?.baseUrl;
     if (!this.cliConfig || !destination) return httpOptions;
 
     const sessionHeaders = buildSessionIdHeaders(this.cliConfig, destination);

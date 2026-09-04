@@ -589,6 +589,26 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(client).toBeDefined();
     });
 
+    it('installs session ID injection on the runtime fetch', async () => {
+      const runtimeFetch = vi.fn(
+        async (_input: string | URL | Request, _init?: RequestInit) =>
+          new Response(),
+      );
+      vi.mocked(buildRuntimeFetchOptions).mockReturnValue({
+        fetch: runtimeFetch,
+      });
+
+      const client = provider.buildClient() as unknown as {
+        config: { fetch: typeof fetch };
+      };
+      await client.config.fetch(
+        'https://routify-pub.alibaba-inc.com/protocol/openai/v1',
+      );
+
+      const headers = new Headers(runtimeFetch.mock.calls[0][1]?.headers);
+      expect(headers.get('session_id')).toBe('test-session-id');
+    });
+
     it('should use default timeout and maxRetries when not provided', () => {
       mockContentGeneratorConfig.timeout = undefined;
       mockContentGeneratorConfig.maxRetries = undefined;

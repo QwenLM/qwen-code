@@ -18,7 +18,7 @@ import {
   clampReasoningEffort,
 } from '../../reasoning-effort.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
-import { wrapFetchWithSessionId } from '../../outbound-session-id.js';
+import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 
 const debugLogger = createDebugLogger('DefaultOpenAICompatibleProvider');
 
@@ -121,8 +121,6 @@ export class DefaultOpenAICompatibleProvider
       'openai',
       this.cliConfig.getProxy(),
     );
-    const baseFetch =
-      (runtimeOptions?.fetch as typeof fetch | undefined) ?? globalThis.fetch;
     return new OpenAI({
       apiKey,
       baseURL: baseUrl,
@@ -130,7 +128,7 @@ export class DefaultOpenAICompatibleProvider
       maxRetries,
       defaultHeaders,
       ...(runtimeOptions || {}),
-      fetch: wrapFetchWithSessionId(baseFetch, this.cliConfig),
+      fetch: buildSessionAwareFetch(runtimeOptions?.fetch, this.cliConfig),
     });
   }
 

@@ -395,14 +395,18 @@ Verify both flags when wiring an ARMS+DashScope correlation setup:
 
 ### Routify session affinity
 
-HTTPS requests to `routify.alibaba-inc.com`,
-`routify-online.alibaba-inc.com`, and `routify-pub.alibaba-inc.com` include the
-current Qwen Code session ID in the `session_id` header. Routify's ModelRouter
-uses this value for session affinity and traffic marking. This behavior is not
-controlled by `telemetry.enabled` or `outboundCorrelation.*`.
+Qwen Code's LLM requests through the OpenAI-compatible, DashScope, Anthropic,
+Gemini, and Vertex provider paths include the current Qwen Code session ID in
+the `session_id` header when addressed directly to `routify.alibaba-inc.com`,
+`routify-online.alibaba-inc.com`, or `routify-pub.alibaba-inc.com`. Routify's
+ModelRouter uses this value for session affinity and traffic marking. This
+behavior is not controlled by `telemetry.enabled` or
+`outboundCorrelation.*`.
 
-The match is deliberately narrow: subdomains, other `alibaba-inc.com` hosts,
-and all other LLM endpoints do not receive the header.
+The initial destination match is deliberately narrow: Qwen Code does not
+attach the header to subdomains, other `alibaba-inc.com` hosts, or other LLM
+endpoints. The standard fetch redirect behavior still applies after that
+match, so a Routify response can forward the header by redirecting the request.
 
 The session ID is read for every request, so a new session created by
 `/clear` gets a new affinity value without rebuilding the SDK client. Gemini

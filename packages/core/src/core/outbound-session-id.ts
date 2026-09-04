@@ -65,13 +65,22 @@ export function wrapFetchWithSessionId<TFetch>(
     const sessionId = sessionHeaders[SESSION_ID_HEADER];
     if (!sessionId) return fetchLike(input, init);
 
-    const headers = new Headers(init?.headers);
-    if (init?.headers === undefined && input instanceof Request) {
-      input.headers.forEach((value, key) => headers.set(key, value));
-    }
+    const headers = new Headers(
+      input instanceof Request ? input.headers : undefined,
+    );
+    new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
     headers.set(SESSION_ID_HEADER, sessionId);
     return fetchLike(input, { ...init, headers });
   };
 
   return wrapped as TFetch;
+}
+
+export function buildSessionAwareFetch(
+  runtimeFetch: unknown,
+  config: Config,
+): typeof globalThis.fetch {
+  const baseFetch =
+    (runtimeFetch as typeof globalThis.fetch | undefined) ?? globalThis.fetch;
+  return wrapFetchWithSessionId(baseFetch, config);
 }

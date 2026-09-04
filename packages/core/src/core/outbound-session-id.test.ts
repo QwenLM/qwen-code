@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
+  buildSessionAwareFetch,
   buildSessionIdHeaders,
   SESSION_ID_HEADER,
   wrapFetchWithSessionId,
@@ -105,6 +106,45 @@ describe('outbound session ID', () => {
 
     const headers = new Headers(baseFetch.mock.calls[0][1]?.headers);
     expect(headers.get('authorization')).toBe('Bearer token');
+    expect(headers.get(SESSION_ID_HEADER)).toBe('session-1');
+  });
+
+  it('merges Request and init headers before adding the session ID', async () => {
+    const baseFetch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(),
+    );
+    const wrappedFetch = wrapFetchWithSessionId(baseFetch, config());
+
+    await wrappedFetch(
+      new Request('https://routify-pub.alibaba-inc.com/protocol/openai/v1', {
+        headers: {
+          Authorization: 'Bearer token',
+          'X-Shared': 'request',
+        },
+      }),
+      { headers: { 'X-Extra': 'value', 'X-Shared': 'init' } },
+    );
+
+    const headers = new Headers(baseFetch.mock.calls[0][1]?.headers);
+    expect(headers.get('authorization')).toBe('Bearer token');
+    expect(headers.get('x-extra')).toBe('value');
+    expect(headers.get('x-shared')).toBe('init');
+    expect(headers.get(SESSION_ID_HEADER)).toBe('session-1');
+  });
+
+  it('wraps a supplied runtime fetch with session ID injection', async () => {
+    const runtimeFetch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(),
+    );
+    const sessionAwareFetch = buildSessionAwareFetch(runtimeFetch, config());
+
+    await sessionAwareFetch(
+      'https://routify-pub.alibaba-inc.com/protocol/openai/v1',
+    );
+
+    const headers = new Headers(runtimeFetch.mock.calls[0][1]?.headers);
     expect(headers.get(SESSION_ID_HEADER)).toBe('session-1');
   });
 });

@@ -4,7 +4,7 @@
 
 Qwen Code attaches its current session ID as the `session_id` HTTP header only when the outbound LLM request hostname is one of the three Routify endpoints documented by ModelRouter: `routify.alibaba-inc.com`, `routify-online.alibaba-inc.com`, or `routify-pub.alibaba-inc.com`.
 
-The behavior is intentionally not configurable. Subdomains, other `alibaba-inc.com` hosts, and every non-Routify provider remain unchanged.
+The behavior is intentionally not configurable. Qwen Code does not attach the header to subdomains, other `alibaba-inc.com` hosts, or non-Routify providers. Standard fetch redirect behavior applies after the initial destination check, so a Routify response can forward the header by redirecting the request.
 
 ## Motivation
 
@@ -33,4 +33,4 @@ Non-LLM traffic, other domains, MCP requests, tool fetches, subprocesses, `trace
 
 ## Verification
 
-Unit tests cover exact-host and HTTPS matching, rejection of lookalike hosts, invalid URLs, preservation of existing headers, `Request` inputs, custom-header precedence, empty values, and session rotation. Provider tests verify every SDK client construction path installs the correlation layer, and Gemini tests verify that successive requests observe a changed session ID.
+Unit tests cover exact-host and HTTPS matching, rejection of lookalike hosts, invalid URLs, preservation and precedence of combined `Request` and init headers, empty values, session rotation, and the shared runtime-fetch wrapper. Provider tests verify the OpenAI-compatible construction paths install a working correlation layer, and Gemini tests cover constructor destinations, generation, embedding, and successive requests observing a changed session ID.
