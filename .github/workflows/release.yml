@@ -84,6 +84,11 @@ jobs:
       reuse_validation: '${{ steps.promotion.outputs.reuse_validation }}'
       version_refusal: '${{ steps.version.outputs.version_refusal }}'
       promotion_refusal: '${{ steps.promotion.outputs.promotion_refusal }}'
+      # Deterministic input refusals decided by the vars step (the mode
+      # and ref guards) fire before the promotion step exists, so they
+      # carry their own marker; notify_failure treats it like the other
+      # refusal markers.
+      input_refusal: '${{ steps.vars.outputs.input_refusal }}'
 
     steps:
       # Shared ECS runners can retain root-owned files from an earlier
@@ -260,6 +265,11 @@ jobs:
         run: |-
           if [[ -n "${PROMOTE_NIGHTLY}" && ( "${CREATE_NIGHTLY_RELEASE}" == "true" || "${CREATE_PREVIEW_RELEASE}" == "true" ) ]]; then
             echo "::error::promote_nightly cannot be combined with nightly or preview release mode"
+            # Deterministic input refusal: mark it so notify_failure skips
+            # the release-failed issue and autofix dispatch, then fail the
+            # job. This guard fires before the promotion step exists, so
+            # the marker rides the prepare input_refusal output.
+            echo "input_refusal=true" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
 
@@ -268,6 +278,8 @@ jobs:
           # ignored: refuse it rather than release a different revision.
           if [[ -n "${PROMOTE_NIGHTLY}" && -n "${REF_INPUT}" && "${REF_INPUT}" != "main" ]]; then
             echo "::error::promote_nightly ignores the ref input; leave it at the default ('main'). The source revision is taken from the nightly tag."
+            # Deterministic input refusal; see the mode guard above.
+            echo "input_refusal=true" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
 
@@ -315,6 +327,9 @@ jobs:
         run: |-
           if [[ "${FORCE_SKIP_TESTS}" == "true" ]]; then
             echo "::error::promote_nightly cannot be combined with force_skip_tests"
+            # Deterministic input refusal; this step's id feeds prepare's
+            # promotion_refusal output, so mark it before failing.
+            echo "promotion_refusal=true" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
           # The script writes source_sha, reuse_validation, the evidence
@@ -397,12 +412,14 @@ jobs:
 
           VERSION_STATUS=0
           VERSION_JSON=$(node scripts/get-release-version.js "${VERSION_ARGS[@]}") || VERSION_STATUS=$?
-          if [[ "${VERSION_STATUS}" -eq 3 ]]; then
+          if [[ "${VERSION_STATUS}" -eq 3 || "${VERSION_STATUS}" -eq 4 ]]; then
             # Exit 3 is the decisive prepare-time "already shipped" refusal
             # (a re-dispatched promotion whose version a first attempt
-            # published before failing). It is a correct outcome, not a
-            # release failure: mark it so notify_failure skips the
-            # release-failed issue and autofix dispatch, then fail the job.
+            # published before failing); exit 4 is a deterministic
+            # version-input refusal (a malformed or retrograde explicit
+            # version). Both are correct outcomes, not release failures:
+            # mark them so notify_failure skips the release-failed issue
+            # and autofix dispatch, then fail the job.
             echo "version_refusal=true" >> "${GITHUB_OUTPUT}"
             exit 1
           fi
@@ -1380,8 +1397,11 @@ jobs:
     # push-time guard's "already shipped" refusal (publish's
     # version_refusal) means the version shipped via another attempt, or
     # partially; prepare's version_refusal (the same refusal decided before
-    # validation) and promotion_refusal (the promotion gate's deterministic
-    # evidence refusal) mean no code change can alter the outcome. Genuine
+    # validation, plus a malformed/retrograde explicit version),
+    # promotion_refusal (the promotion gate's deterministic evidence and
+    # input refusals, including an already-promoted source or a malformed
+    # nightly tag) and input_refusal (the vars step's mode/ref input
+    # guards) mean no code change can alter the outcome. Genuine
     # failures — including the guards' fail-closed probe errors, which carry
     # no refusal marker — still notify.
     if: |-
@@ -1395,7 +1415,8 @@ jobs:
           (
             needs.prepare.result == 'failure' &&
             needs.prepare.outputs.version_refusal != 'true' &&
-            needs.prepare.outputs.promotion_refusal != 'true'
+            needs.prepare.outputs.promotion_refusal != 'true' &&
+            needs.prepare.outputs.input_refusal != 'true'
           ) ||
           needs.quality.result == 'failure' ||
           needs.integration_none.result == 'failure' ||

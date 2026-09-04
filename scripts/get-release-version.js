@@ -392,6 +392,21 @@ function getLatestStableReleaseTag() {
 }
 
 /**
+ * Error code for a deterministic version-input refusal: the explicit
+ * `version` input is malformed or retrograde, an outcome no retry or code
+ * change can alter. `runCli` maps it to a dedicated exit code the workflow
+ * marks as version_refusal, keeping the operator typo out of the
+ * release-failed notification; probe failures carry no code and exit 2.
+ */
+const USAGE_REFUSED = 'USAGE_REFUSED';
+
+function usageRefusal(message) {
+  const error = new Error(message);
+  error.code = USAGE_REFUSED;
+  return error;
+}
+
+/**
  * A nightly tag names the source revision to promote; it does NOT name the
  * stable version to publish. Its numeric base comes from main's
  * package.json (see getNightlyVersion), which the ordinary stable path
@@ -413,7 +428,15 @@ function promoteNightlyVersion(args) {
       /^v/,
       '',
     );
-    validateVersion(releaseVersion, 'X.Y.Z', 'version (with promote_nightly)');
+    try {
+      validateVersion(
+        releaseVersion,
+        'X.Y.Z',
+        'version (with promote_nightly)',
+      );
+    } catch (error) {
+      throw usageRefusal(error.message);
+    }
   } else if (hasLatest) {
     releaseVersion = semver.inc(latestStable, 'minor');
   } else {
@@ -423,7 +446,7 @@ function promoteNightlyVersion(args) {
   }
 
   if (hasLatest && semver.lt(releaseVersion, latestStable)) {
-    throw new Error(
+    throw usageRefusal(
       `Promoted stable version ${releaseVersion} is lower than published latest ${latestStable}. Refusing retrograde baseline.`,
     );
   }
@@ -649,9 +672,10 @@ export function getVersion(options = {}) {
  * the push-time guard; anything else prints the version JSON. Returns the
  * exit code. Guard codes: 0 = unreleased, 3 = already shipped (a decisive,
  * benign refusal the workflow marks to skip the release-failed
- * notification), 2 = probe or usage failure. 1 is never returned on
- * purpose: node exits 1 on uncaught errors, and those must stay on the
- * real-failure path.
+ * notification), 4 = a deterministic version-input refusal on the
+ * JSON-dispatch path (likewise marked by the workflow), 2 = probe failure.
+ * 1 is never returned on purpose: node exits 1 on uncaught errors, and
+ * those must stay on the real-failure path.
  */
 export function runCli(args) {
   if (args['assert-unreleased'] !== undefined) {
@@ -673,10 +697,19 @@ export function runCli(args) {
     // the prepare-time "already shipped" refusal (a re-dispatched
     // promotion whose version a first attempt published before failing)
     // exits 3 so the workflow marks it and keeps the benign outcome out
-    // of the release-failed notification; probe and usage failures exit
-    // 2; 1 stays reserved for uncaught errors.
+    // of the release-failed notification. A deterministic version-input
+    // refusal (malformed or retrograde explicit version) exits 4 so the
+    // workflow marks it the same way instead of opening a release-failed
+    // issue on an operator typo; probe failures exit 2; 1 stays reserved
+    // for uncaught errors.
     console.log(`::error::${error.message}`);
-    return error.code === 'VERSION_SHIPPED' ? 3 : 2;
+    if (error.code === 'VERSION_SHIPPED') {
+      return 3;
+    }
+    if (error.code === USAGE_REFUSED) {
+      return 4;
+    }
+    return 2;
   }
   console.log(JSON.stringify(result, null, 2));
   return 0;

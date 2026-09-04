@@ -35,6 +35,10 @@ function runner({
   totalRuns = 1,
   fullWindowRuns = 0,
   workflowShaByRef = { [runHeadSha]: 'wf1', [currentSha]: 'wf1' },
+  // Stable releases the already-promoted scan can find; each resolves to
+  // a release commit whose single parent is stableReleaseParent.
+  stableReleases = [],
+  stableReleaseParent = otherSha,
 } = {}) {
   let lastTagLookup = '';
   const fullWindowPages = [];
@@ -48,10 +52,22 @@ function runner({
     }
     if (joined.includes(`commits/${releaseCommitSha}`)) {
       const tagged = /git\/ref\/tags\/(\S+)/.exec(lastTagLookup)?.[1];
+      // A plain vX.Y.Z tag lookup belongs to the already-promoted scan;
+      // nightly-shaped tags belong to the promotion being verified.
+      const stableLookup = /^v\d+\.\d+\.\d+$/.test(tagged ?? '');
       return JSON.stringify({
-        parents: [{ sha: taggedParent }],
+        parents: [{ sha: stableLookup ? stableReleaseParent : taggedParent }],
         commit: { message: `chore(release): ${tagged}` },
       });
+    }
+    if (joined.includes('repos/QwenLM/qwen-code/releases?')) {
+      return JSON.stringify(
+        stableReleases.map((tagName) => ({
+          tag_name: tagName,
+          prerelease: false,
+          draft: false,
+        })),
+      );
     }
     if (joined.includes('release view')) {
       return JSON.stringify({
@@ -157,6 +173,26 @@ describe('verifyNightlyPromotion', () => {
       validationRunId: 42,
       warnings: [],
     });
+  });
+
+  it('refuses a nightly whose source already shipped as a stable release', () => {
+    // Re-dispatch of an already-promoted nightly with an empty `version`
+    // input (npm `latest` caught up to the shipped stable): the version
+    // step would derive a fresh next-minor from the moved latest and every
+    // later guard would pass again, so the double promotion must fail
+    // closed here, where the evidence lives — before the version step.
+    expect(() =>
+      verify({
+        stableReleases: ['v0.23.0'],
+        stableReleaseParent: sourceSha,
+      }),
+    ).toThrow('the nightly was already promoted');
+  });
+
+  it('promotes when the stable release was built on another source', () => {
+    const result = verify({ stableReleases: ['v0.23.0'] });
+    expect(result.sourceSha).toBe(sourceSha);
+    expect(result.warnings).toEqual([]);
   });
 
   it('takes the source from the recorded artifact, not the tag name', () => {
@@ -382,8 +418,10 @@ describe('runCli', () => {
 
   it('marks deterministic evidence refusals for the failure notifier', () => {
     drive({ artifactExpired: true });
-    // stdout, not stderr: the runner parses workflow commands from stdout
-    // only, so ::error:: on stderr would never annotate the Checks UI.
+    // The Actions runner parses workflow commands from both stdout and
+    // stderr (actions/runner's ScriptHandler wires each stream to its own
+    // command-parsing OutputManager), so ::error:: annotates from either;
+    // this pin keeps the stdout emitter working.
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(runCli([nightlyTag])).toBe(1);
     expect(logSpy.mock.calls[0][0]).toContain('::error::');
@@ -395,6 +433,28 @@ describe('runCli', () => {
     expect(writtenTo('out')).toBe('promotion_refusal=true\n');
   });
 
+  it('marks an already-promoted source refusal for the failure notifier', () => {
+    drive({ stableReleases: ['v0.23.0'], stableReleaseParent: sourceSha });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli([nightlyTag])).toBe(1);
+    expect(logSpy.mock.calls[0][0]).toContain('::error::');
+    expect(logSpy.mock.calls[0][0]).toContain('already promoted');
+    expect(writtenTo('out')).toBe('promotion_refusal=true\n');
+  });
+
+  it('marks a malformed promote_nightly input as a refusal', () => {
+    // A deterministic input-shape failure: no retry or code change can make
+    // a typo parse, so it carries the refusal marker exactly like an
+    // evidence refusal and stays out of the release-failed issue; the step
+    // still fails with exit 1, and the ::error:: still surfaces the typo.
+    drive();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runCli(['bogus'])).toBe(1);
+    expect(logSpy.mock.calls[0][0]).toContain('::error::');
+    expect(logSpy.mock.calls[0][0]).toContain('Invalid nightly version');
+    expect(writtenTo('out')).toBe('promotion_refusal=true\n');
+  });
+
   it('leaves probe failures unmarked so they still notify', () => {
     drive({ npm: 'unreachable' });
     vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -402,10 +462,12 @@ describe('runCli', () => {
     expect(writtenTo('out')).not.toContain('promotion_refusal=true');
   });
 
-  it('leaves usage errors unmarked', () => {
+  it('leaves environment failures unmarked so they still notify', () => {
     drive();
     vi.spyOn(console, 'log').mockImplementation(() => {});
-    expect(runCli(['bogus'])).toBe(1);
+    // No GITHUB_REPOSITORY in the explicit env: a configuration failure,
+    // not a deterministic refusal, stays unmarked and notifiable.
+    expect(runCli([nightlyTag], { GITHUB_OUTPUT: 'out' })).toBe(1);
     expect(writtenTo('out')).toBe('');
   });
 });

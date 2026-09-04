@@ -51,6 +51,14 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 const PROMOTION_REFUSED = 'PROMOTION_REFUSED';
 
+/**
+ * Pages of the releases API scanned while looking for a stable release
+ * built on the tagged source. The cap keeps the probe bounded; exceeding
+ * it refuses fail-closed, like the run-window paging cap above.
+ */
+const MAX_STABLE_RELEASE_PAGES = 10;
+const RELEASES_PER_PAGE = 100;
+
 function promotionRefusal(message) {
   const error = new Error(message);
   error.code = PROMOTION_REFUSED;
@@ -140,6 +148,83 @@ function resolveTaggedSource(parsed, repository, run) {
     );
   }
   return releaseCommit.parents[0].sha;
+}
+
+/**
+ * Refuse a second promotion of the same source. Once a stable release
+ * exists whose release commit's single parent is the tagged source SHA,
+ * this nightly already shipped as stable; a re-dispatch — with an empty
+ * `version` input, which derives a brand-new next-minor after the moved
+ * `latest` dist-tag — would otherwise pass every guard again and publish
+ * an unintended extra stable release from an already-promoted nightly.
+ * The check runs here, before the version step, so the refusal carries
+ * PROMOTION_REFUSED and stays out of the release-failed notification.
+ */
+function assertSourceNotAlreadyPromoted(taggedSourceSha, repository, run) {
+  for (let page = 1; page <= MAX_STABLE_RELEASE_PAGES; page += 1) {
+    const releases = parseJson(
+      run('gh', [
+        'api',
+        `repos/${repository}/releases?per_page=${RELEASES_PER_PAGE}&page=${page}`,
+      ]),
+      'GitHub releases',
+    );
+    if (!Array.isArray(releases)) {
+      throw new Error('Releases response is not an array');
+    }
+    for (const release of releases) {
+      // Only stable releases can be a promotion of this source; nightly
+      // and preview releases are prereleases, and the tag shape filters
+      // any release that is not an exact X.Y.Z stable tag.
+      if (
+        release.prerelease ||
+        release.draft ||
+        !/^v\d+\.\d+\.\d+$/.test(release.tag_name ?? '')
+      ) {
+        continue;
+      }
+      const ref = parseJson(
+        run('gh', [
+          'api',
+          `repos/${repository}/git/ref/tags/${release.tag_name}`,
+        ]),
+        'GitHub tag',
+      );
+      let releaseCommitSha;
+      if (ref.object?.type === 'commit') {
+        releaseCommitSha = ref.object.sha;
+      } else if (ref.object?.type === 'tag') {
+        const annotated = parseJson(
+          run('gh', ['api', `repos/${repository}/git/tags/${ref.object.sha}`]),
+          'GitHub annotated tag',
+        );
+        if (annotated.object?.type !== 'commit') continue;
+        releaseCommitSha = annotated.object.sha;
+      } else {
+        continue;
+      }
+      const releaseCommit = parseJson(
+        run('gh', ['api', `repos/${repository}/commits/${releaseCommitSha}`]),
+        'GitHub release commit',
+      );
+      const subject = releaseCommit.commit?.message?.split('\n', 1)[0];
+      if (
+        releaseCommit.parents?.length === 1 &&
+        releaseCommit.parents[0]?.sha === taggedSourceSha &&
+        subject === `chore(release): ${release.tag_name}`
+      ) {
+        throw promotionRefusal(
+          `${release.tag_name} is a stable release built on this source; the nightly was already promoted`,
+        );
+      }
+    }
+    if (releases.length < RELEASES_PER_PAGE) {
+      return;
+    }
+  }
+  throw promotionRefusal(
+    `Found more stable releases than the ${MAX_STABLE_RELEASE_PAGES * RELEASES_PER_PAGE} this check scans; the already-promoted search would be incomplete rather than fail-closed`,
+  );
 }
 
 function listCandidateRuns(repository, publishedAtMs, run) {
@@ -268,8 +353,18 @@ export function verifyNightlyPromotion(
   if (!repository) {
     throw new Error('GITHUB_REPOSITORY is required');
   }
-  const parsed = parseNightlyVersion(input);
+  let parsed;
+  try {
+    parsed = parseNightlyVersion(input);
+  } catch (error) {
+    // A malformed promote_nightly input is a deterministic refusal: no
+    // retry or code change can make the same input parse, so it carries
+    // the refusal marker exactly like an evidence refusal instead of
+    // opening a release-failed issue on an operator typo.
+    throw promotionRefusal(error.message);
+  }
   const taggedSourceSha = resolveTaggedSource(parsed, repository, run);
+  assertSourceNotAlreadyPromoted(taggedSourceSha, repository, run);
 
   const release = parseJson(
     run('gh', [
@@ -429,8 +524,10 @@ export function runCli(args = process.argv.slice(2), env = process.env) {
     );
     return 0;
   } catch (error) {
-    // stdout, not stderr: the runner parses workflow commands from
-    // stdout only, so ::error:: on stderr would never annotate.
+    // The Actions runner parses workflow commands from both stdout and
+    // stderr (actions/runner's ScriptHandler wires each stream to its own
+    // command-parsing OutputManager), so ::error:: annotates from either;
+    // stdout is the convention picked here.
     console.log(`::error::${error.message}`);
     if (error.code === PROMOTION_REFUSED) {
       reportRefusal(env);
