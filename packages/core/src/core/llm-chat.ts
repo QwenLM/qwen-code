@@ -628,7 +628,16 @@ function hasDisplayableStreamOutput(
   const candidate = response.candidates?.[0];
   return (
     candidate?.content?.parts?.some(
-      (part) => !part.thought && Object.keys(part).length > 0,
+      (part) =>
+        !part.thought &&
+        (Boolean(part.text?.trim()) ||
+          Object.keys(part).some(
+            (key) =>
+              key !== 'text' &&
+              key !== 'thought' &&
+              key !== 'thoughtSignature' &&
+              key !== 'partMetadata',
+          )),
     ) === true ||
     candidate?.citationMetadata?.citations?.some(
       (citation) => citation.uri !== undefined,
@@ -4871,15 +4880,23 @@ export class LlmChat {
               truncatedModelIndex,
             );
             const truncatedDeferredRecords = [...self.deferredMaxTokensRecords];
+            let yieldedVisibleEscalatedOutput = false;
             const restoreTruncatedTurnOnAbort = () => {
               if (
                 truncatedModelContent?.role !== 'model' ||
-                self.history.includes(truncatedModelContent) ||
-                (escalatedCommittedModelContent !== undefined &&
-                  self.history.includes(escalatedCommittedModelContent))
+                self.history.includes(truncatedModelContent)
               ) {
                 self.settleDeferredMaxTokensRecords();
                 return makeRecoveryRedisplayEvents();
+              }
+              if (
+                escalatedCommittedModelContent !== undefined &&
+                self.history.includes(escalatedCommittedModelContent)
+              ) {
+                self.settleDeferredMaxTokensRecords();
+                return yieldedVisibleEscalatedOutput
+                  ? []
+                  : makeRecoveryRedisplayEvents();
               }
               const prefixSurvives = truncatedHistoryPrefix.every(
                 (entry, index) => self.history[index] === entry,
@@ -4901,7 +4918,13 @@ export class LlmChat {
                 self.recoveryDisplayContent = truncatedModelContent;
               }
               self.settleDeferredMaxTokensRecords();
-              return makeRecoveryRedisplayEvents();
+              const redisplayEvents = makeRecoveryRedisplayEvents();
+              return yieldedVisibleEscalatedOutput
+                ? ([
+                    { type: StreamEventType.RETRY },
+                    ...redisplayEvents,
+                  ] satisfies InvalidStreamRetryEvent[])
+                : redisplayEvents;
             };
             let escalatedVisibleParts: Part[] = [];
             let escalatedVisibleTokens:
@@ -5000,6 +5023,7 @@ export class LlmChat {
                   escalatedVisibleParts = [];
                   escalatedVisibleTokens = undefined;
                   escalatedAttemptCommitted = false;
+                  yieldedVisibleEscalatedOutput = false;
                   return {
                     requestContents,
                     params: escalatedParams,
@@ -5063,6 +5087,9 @@ export class LlmChat {
                     recoveryFinishReason = fr;
                   }
                   yield event;
+                  yieldedVisibleEscalatedOutput ||= hasDisplayableStreamOutput(
+                    event.value,
+                  );
                 }
               }
             } catch (escalationError) {
@@ -7202,7 +7229,7 @@ export class LlmChat {
           .trim();
         const hasAbandonedNonTextPart =
           normalized.consolidatedHistoryParts.some(
-            (part) => !isPlainTextPart(part),
+            (part) => !isPlainTextPart(part) && Object.keys(part).length > 0,
           );
         if (
           abandonedText ||

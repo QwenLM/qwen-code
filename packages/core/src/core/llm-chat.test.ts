@@ -15144,6 +15144,33 @@ describe('LlmChat', async () => {
       },
     );
 
+    it('does not persist an abandoned empty-object terminal turn', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const response = (async function* () {
+        yield makeChunk([{} as Part], 'STOP');
+        await new Promise<void>(() => undefined);
+      })();
+      const internalChat = recordingChat as unknown as {
+        processStreamResponse(
+          model: string,
+          stream: AsyncGenerator<GenerateContentResponse>,
+          routeKey: string,
+        ): AsyncGenerator<GenerateContentResponse>;
+      };
+      const iterator = internalChat.processStreamResponse(
+        'test-model',
+        response,
+        'test-route',
+      );
+
+      await iterator.next();
+      await iterator.return?.(undefined);
+
+      expect(recordingChat.getHistory()).toEqual([]);
+      expect(recordAssistantTurn).not.toHaveBeenCalled();
+    });
+
     it.each([
       ['inline data', { inlineData: { mimeType: 'image/png', data: 'AAAA' } }],
       [
@@ -15302,10 +15329,11 @@ describe('LlmChat', async () => {
         { message: 'essay' },
         'escalation-terminal-abort',
       );
+      const delivered: StreamEvent[] = [];
       await expect(
         (async () => {
-          for await (const _event of stream) {
-            // consume
+          for await (const event of stream) {
+            delivered.push(event);
           }
         })(),
       ).rejects.toBe(abortError);
@@ -15319,9 +15347,21 @@ describe('LlmChat', async () => {
       );
       expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
       expect(recordedText(recordAssistantTurn)).toBe('visible escalation');
+      const deliveredText = delivered
+        .flatMap((event) =>
+          event.type === StreamEventType.CHUNK
+            ? (event.value.candidates?.[0]?.content?.parts ?? [])
+            : [],
+        )
+        .map((part) => part.text ?? '')
+        .join('');
+      expect(deliveredText.split('visible escalation')).toHaveLength(2);
     });
 
-    it('does not preserve an empty-object recovery chunk as visible output', async () => {
+    it.each([
+      ['empty-object', {} as Part],
+      ['empty-text', { text: '' }],
+    ])('does not preserve %s recovery output', async (_name, part) => {
       vi.useFakeTimers();
       try {
         let callIndex = 0;
@@ -15331,7 +15371,7 @@ describe('LlmChat', async () => {
           callIndex++;
           return callIndex === 1
             ? makeStream([makeChunk([{ text: 'partial' }], 'MAX_TOKENS')])
-            : makeStream([makeChunk([{} as Part])]);
+            : makeStream([makeChunk([part])]);
         });
 
         const stream = await chat.sendMessageStream(
