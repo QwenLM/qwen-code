@@ -351,6 +351,11 @@ beforeAll(async () => {
       // the Stop Guard flow below.
       '--workspace',
       workspaceDir,
+      // Same 60s initialize budget the shared daemon harness passes:
+      // the 10s default trips on loaded macOS CI runners when these
+      // tests restart or re-attach a daemon child (#11043).
+      '--initialize-timeout-ms',
+      '60000',
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
