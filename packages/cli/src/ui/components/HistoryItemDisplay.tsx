@@ -32,7 +32,7 @@ import {
   SuccessMessage,
   AwayRecapMessage,
 } from './messages/StatusMessages.js';
-import { Box, Text } from 'ink';
+import { Box, Text, useStdout } from 'ink';
 import { theme } from '../semantic-colors.js';
 import {
   MarkdownDisplay,
@@ -65,7 +65,10 @@ import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import { useMouseTrackingEnabled } from '../hooks/use-mouse-tracking-enabled.js';
+import { useContextMenu } from '../context-menu/ContextMenuContext.js';
 import type { MouseEvent } from '../utils/mouse.js';
+import { hyperlinkAtCell } from '../utils/hyperlink-at.js';
+import { getScreenBuffer } from '../selection/screen-buffer.js';
 import {
   measureElementPosition,
   layoutRowForEvent,
@@ -127,12 +130,16 @@ const ClickableThinkMessage: React.FC<{
   const ref = useRef<DOMElement>(null);
   const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
+  const { stdout } = useStdout();
   const settings = useSettings();
   const mouseTrackingEnabled = useMouseTrackingEnabled();
   const clickable =
     useVirtualViewport(settings.merged.ui?.useTerminalBuffer) &&
     mouseTrackingEnabled;
-  const isActive = !isPending;
+  // Quiet while the context menu owns the pointer so a click on the menu
+  // overlay can't also toggle the thought underneath it.
+  const { menu: contextMenu } = useContextMenu();
+  const isActive = !isPending && contextMenu === null;
 
   useMouseEvents(
     useCallback(
@@ -169,10 +176,20 @@ const ClickableThinkMessage: React.FC<{
         const press = pressRef.current;
         pressRef.current = null;
         if (isInside && press?.col === event.col && press.row === event.row) {
-          onToggle();
+          // 鼠标事件广播给所有订阅者：单击落在 OSC 8 链接上时，
+          // ContentMouseController 负责打开链接，这里不再切换折叠，
+          // 否则一次单击会既折叠思考块又打开链接。
+          const url = hyperlinkAtCell(
+            getScreenBuffer(stdout)?.frame ?? null,
+            col,
+            row,
+          );
+          if (!url) {
+            onToggle();
+          }
         }
       },
-      [onToggle, terminalHeight],
+      [onToggle, terminalHeight, stdout],
     ),
     { isActive },
   );
