@@ -1109,8 +1109,11 @@ jobs:
           # planted directory holding a permission-resistant child makes
           # rm -rf exit 1 (-f does not suppress EACCES) and would silently
           # skip the cleanups after it. The kill itself tolerates an
-          # already-reaped watcher (salvage arming exits it on the spot).
-          trap '[ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null || true; "${QWEN_CI_REAL_RM:-rm}" -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
+          # already-reaped watcher (salvage arming exits it on the spot),
+          # and the wait spans a ceding watcher's TERM-immune wind-down
+          # (<= 15s) so the group KILL it owes lands before the step exits
+          # (R30-1).
+          trap '[ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }; "${QWEN_CI_REAL_RM:-rm}" -rf "$LOG_PATH" 2>/dev/null || true; [ -z "$PROXY_BIN" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "$PROXY_BIN" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SALVAGE_DIR}" 2>/dev/null || true; [ -z "${SUPERSEDE_KILL_DIR:-}" ] || "${QWEN_CI_REAL_RM:-rm}" -rf "${SUPERSEDE_KILL_DIR}" 2>/dev/null || true' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "CI_BOT_PAT secret is required for Qwen PR review."
@@ -2035,6 +2038,18 @@ jobs:
                 echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in (compose_seen=${compose_seen}) — finishing and posting against reviewed head ${EXPECTED_HEAD_SHA} (#10110)"
                 return 0
               fi
+              # From here to the return this watcher must finish: every
+              # reaper — the EXIT trap on a cede or fail(), the retry
+              # branch, the post-loop reap — TERMs it and waits, and a TERM
+              # landing inside the wind-down below retired the group KILL,
+              # the only signal a TERM-resistant tree member answers; that
+              # member then outlived the step on the shared runner holding
+              # the job's credentials (R30-1). Ignore TERM for the rest of
+              # the one-shot: the sleep and the kill inherit the ignore, the
+              # wind-down is bounded (15s), and the reapers' wait spans it.
+              # The polling phase above stays TERM-killable, so a normal
+              # step end still reaps the watcher at once.
+              trap '' TERM
               write_signal "$SUPERSEDE_FILE" "$live_head" || true
               if [ -n "${SUPERSEDE_KILL_DIR:-}" ]; then
                 write_signal "${SUPERSEDE_KILL_DIR}/killed" "$live_head" || true

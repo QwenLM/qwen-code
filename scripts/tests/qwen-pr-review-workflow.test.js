@@ -4711,6 +4711,10 @@ describe('review supersede salvage (#10110)', () => {
     // Signal real processes through a real pkill to measure the CEDE kill's
     // scope (R23-2) instead of logging its arguments to a stub.
     realCedeKill = false,
+    // Background the watcher and reap it (TERM + wait) the moment it has
+    // written the supersede file — i.e. inside its wind-down, with a real
+    // 3s wind-down sleep — the shape every production reaper has (R30-1).
+    reapMidWindDown = false,
   } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'review-watcher-'));
     // Stubs and logs live OUTSIDE SALVAGE_DIR: the delete variant removes it
@@ -4767,16 +4771,18 @@ describe('review supersede salvage (#10110)', () => {
       // the (N+1)th sleep fails and `while sleep ...; do` ends clean.
       write(
         'sleep',
-        sleepFailAfter === null
-          ? '#!/bin/bash\nexit 0\n'
-          : [
-              '#!/bin/bash',
-              `count_file="${side}/sleep-count"`,
-              'n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))',
-              'echo "$n" > "$count_file"',
-              `[ "$n" -le ${sleepFailAfter} ] || exit 1`,
-              'exit 0',
-            ].join('\n') + '\n',
+        reapMidWindDown
+          ? '#!/bin/bash\nif [ "${1:-}" = "15" ]; then exec /bin/sleep 3; fi\nexit 0\n'
+          : sleepFailAfter === null
+            ? '#!/bin/bash\nexit 0\n'
+            : [
+                '#!/bin/bash',
+                `count_file="${side}/sleep-count"`,
+                'n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))',
+                'echo "$n" > "$count_file"',
+                `[ "$n" -le ${sleepFailAfter} ] || exit 1`,
+                'exit 0',
+              ].join('\n') + '\n',
       );
       write(
         'gh',
@@ -4936,7 +4942,20 @@ describe('review supersede salvage (#10110)', () => {
         `SALVAGE_DIR="${dir}"; SUPERSEDE_FILE="${dir}/superseded"`,
         `QWEN_CI_REVIEW_SALVAGE_OK_FILE="${dir}/salvage-ok"; COMPOSED_ARTIFACT="${dir}/composed.json"`,
         cedeKill.prelude,
-        'supersede_watcher',
+        reapMidWindDown
+          ? [
+              'supersede_watcher &',
+              'WATCHER_PID=$!',
+              // The supersede file is the first write of the cede branch,
+              // after the TERM ignore: once it exists the watcher is in its
+              // wind-down and this TERM lands mid-sleep.
+              'i=0; while [ ! -f "$SUPERSEDE_FILE" ] && [ "$i" -lt 200 ]; do /bin/sleep 0.05; i=$(( i + 1 )); done',
+              't0=$SECONDS',
+              'kill "$WATCHER_PID" 2>/dev/null || true',
+              'wait "$WATCHER_PID" 2>/dev/null || true',
+              'echo "REAP seconds=$(( SECONDS - t0 ))"',
+            ].join('\n')
+          : 'supersede_watcher',
         cedeKill.epilogue,
       ]
         .filter((part) => part !== '')
@@ -5006,7 +5025,9 @@ describe('review supersede salvage (#10110)', () => {
         stdout,
       );
       const dead = (state) => state === 'gone' || state === 'Z';
+      const reap = /REAP seconds=(\d+)/.exec(stdout);
       return {
+        reapSeconds: reap ? Number(reap[1]) : null,
         marker: readOr('salvage-ok'),
         movedTo: readOr('moved-to'),
         superseded: readOr('superseded'),
@@ -5472,6 +5493,28 @@ describe('review supersede salvage (#10110)', () => {
       expect(r.attemptTreeKilled).toBe(true);
       expect(r.concurrentRunAlive).toBe(true);
       expect(r.superseded).toBe('head-b');
+    },
+  );
+
+  it.skipIf(!realPkillPath || !realPgrepPath)(
+    'finishes the group KILL when a reaper TERMs the watcher mid-wind-down (replayed watcher)',
+    () => {
+      // R30-1: every reaper — the EXIT trap on a cede or fail(), the retry
+      // branch, the post-loop reap — TERMs the one-shot watcher and waits.
+      // A TERM landing inside the 15s wind-down ended the watcher before
+      // its group KILL, the only signal the TERM-resistant tree member
+      // answers, and that member outlived the step on the shared runner
+      // holding the job's credentials. The wind-down ignores TERM now, so
+      // the reaper's wait spans it (the 3s stub sleep here) and the KILL
+      // lands before the reaper continues; the concurrent run stays
+      // untouched (R23-2). Mutation: dropping the `trap '' TERM` makes the
+      // reap return at once with the tree member alive.
+      const r = runWatcher({ realCedeKill: true, reapMidWindDown: true });
+      expect(r.superseded).toBe('head-b');
+      expect(r.reapSeconds).toBeGreaterThanOrEqual(2);
+      expect(r.ownAttemptKilled).toBe(true);
+      expect(r.attemptTreeKilled).toBe(true);
+      expect(r.concurrentRunAlive).toBe(true);
     },
   );
 
@@ -6541,7 +6584,20 @@ describe('review supersede salvage (#10110)', () => {
     // a later job's review of the same PR.
     expect(run).toContain('BUDGET_SECONDS + 1800');
     expect(run).toContain(
-      '[ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null || true',
+      '[ -z "${WATCHER_PID:-}" ] || { kill "${WATCHER_PID}" 2>/dev/null || true; wait "${WATCHER_PID}" 2>/dev/null || true; }',
+    );
+    // R30-1: the CEDE wind-down ignores TERM so a reaper's kill+wait spans
+    // it and the group KILL lands; the polling phase before the decision
+    // stays killable (the ignore sits inside the cede branch, after the
+    // KEEP return and before the first signal write).
+    const watcher = watcherSource();
+    const ignoreAt = watcher.indexOf("trap '' TERM");
+    expect(ignoreAt).toBeGreaterThan(-1);
+    expect(ignoreAt).toBeGreaterThan(
+      watcher.indexOf('salvage_eligible "$elapsed"'),
+    );
+    expect(ignoreAt).toBeLessThan(
+      watcher.indexOf('write_signal "$SUPERSEDE_FILE"'),
     );
   });
 
