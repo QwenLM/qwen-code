@@ -940,6 +940,29 @@ describe('EnhancedMarkdownTable', () => {
     expect(document.getSelection()?.toString()).toBe('Alpha');
   });
 
+  it('scopes select-all when the key value is uppercase on a non-KeyA code', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const dialog = cellDialog();
+    // AZERTY puts the `a` character on physical `KeyQ`, and Caps Lock makes it
+    // uppercase, so neither the code clause nor a strict `=== 'a'` would match.
+    const event = new KeyboardEvent('keydown', {
+      key: 'A',
+      code: 'KeyQ',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      dialog!.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.getSelection()?.toString()).toBe('Alpha');
+  });
+
   it('leaves select-all to the browser when the dialog is inside a shadow root', () => {
     const container = renderTable('en', { shadowPortal: true });
 
