@@ -42,6 +42,7 @@ export default tseslint.config(
     ignores: [
       'node_modules/*',
       'packages/**/dist/**',
+      'packages/web-templates/src/generated/**',
       'integrations/**/dist/**',
       'bundle/**',
       'package/bundle/**',
