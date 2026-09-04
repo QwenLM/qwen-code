@@ -123,7 +123,11 @@ export async function applyOutputStyleSelection(
         ? ` ${t(
             'It is saved but has no effect in this session because the system prompt is replaced (--system-prompt or QWEN_SYSTEM_MD).',
           )}`
-        : ` ${t('It is saved but Learning is skipped in headless runs.')}`;
+        : style.source === 'project' && !config.isTrustedFolder()
+          ? ` ${t(
+              'It is saved but does not apply while this workspace is untrusted.',
+            )}`
+          : ` ${t('It is saved but Learning is skipped in headless runs.')}`;
   }
   // The scope is fixed by who owns the key — redirecting the write would be
   // shadowed by the workspace value — so a name the other readers of the file

@@ -391,6 +391,33 @@ describe('outputStyleCommand', () => {
     );
   });
 
+  it('reports why a project style is inactive after trust is revoked', async () => {
+    const projectStyle = { ...CUSTOM_STYLE, source: 'project' as const };
+    mockedLoadCatalog.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+      projectStyle,
+    ]);
+    const isTrustedFolder = vi
+      .fn()
+      .mockReturnValueOnce(true)
+      .mockReturnValue(false);
+    (
+      context.services.config as unknown as {
+        isTrustedFolder: ReturnType<typeof vi.fn>;
+      }
+    ).isTrustedFolder = isTrustedFolder;
+
+    const res = await outputStyleCommand.action!(context, 'Reviewer');
+
+    expect((res as { content: string }).content).toContain(
+      'does not apply while this workspace is untrusted',
+    );
+    expect((res as { content: string }).content).not.toContain(
+      'Learning is skipped in headless runs',
+    );
+    expect(setOutputStyle).toHaveBeenCalledWith(projectStyle);
+  });
+
   it('reports an effective style in a non-interactive run', async () => {
     setOutputStyle(getBuiltInOutputStyle('Concise'));
 
