@@ -752,7 +752,7 @@ qwen sessions list --json | jq .
 
 #### `qwen --bg "<prompt>"`
 
-Experimental. Runs a prompt as a background session and returns immediately, printing the session id.
+Experimental. Runs a prompt as a background session and returns once the worker has started, printing the session id.
 
 The session is owned by a supervisor process that outlives the shell you started it from, so closing that terminal does not stop the work. `qwen sessions ps` lists it, and says whether it is `working` or has stopped to ask you something. It is a full Qwen Code session, so — when `agents.crossSessionMessaging` is on — it also appears in another session's `list_agents` and can be addressed with `send_message` (see [Messaging Another Running Session](#6-messaging-another-running-session)).
 
