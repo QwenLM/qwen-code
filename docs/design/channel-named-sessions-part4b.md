@@ -26,8 +26,8 @@ backed by the reviewer-run real-daemon verification on #10643 (Reviewer Plan
 15/15, tamper matrix 17/17). This design satisfies the six transfer
 requirements element by element. It also deletes nothing: the one destructive
 candidate identified during this design's review (orphan-reap worktree
-cleanup) was moved out to a follow-up, keeping this part's contract literally
-"no deletion".
+cleanup) was moved out to follow-up issue #11024, keeping this part's
+contract literally "no deletion".
 
 ## Decision
 
@@ -89,8 +89,8 @@ Re-scoped during this design's review, with reasons recorded in
 "Disposition of standing Part 4A findings":
 
 - Orphan-reap worktree cleanup (yiliang114 on `session-archive.ts:656`,
-  deferred to Part 4B on #10643) moves to a follow-up tracking issue. It is
-  the only file-deleting path in the series; its correct placement raised a
+  deferred to Part 4B on #10643) moves to follow-up issue #11024. It is the
+  only file-deleting path in the series; its correct placement raised a
   protocol interaction with reset itself (a freshly transferred `S_new`
   legitimately satisfies every cleanup condition during the exact window the
   superseded redirect exists to heal); and nothing about `/clear` needs it.
@@ -122,7 +122,7 @@ Re-scoped during this design's review, with reasons recorded in
 
 - Deleting any file, directory, worktree, or branch. The orphan-reap
   cleanup and the sibling `POST /sessions/delete` worktree leak are tracked
-  in the follow-up issue named in the disposition section.
+  in follow-up issue #11024.
 - Deleting a task or its registry record. Task purge is a separate feature;
   names of closed tasks remain occupied, as in Part 2.
 - Automatic merge-back, push, rebase, or conflict resolution for worktree
@@ -230,8 +230,8 @@ dispositions — none is silently dropped:
 | R8-3 (reattach guard misreads a legitimately exited worktree)                                                                                      | permanent "lost durable worktree identity" loop after `exit_worktree` + restart                      | Standalone fix PR: heal on a resume response carrying no `worktree` object; keep failing closed on a contradictory attestation                                                                       |
 | R1-1 (exclusive marker create leaks an empty file on write failure)                                                                                | path wedged with `EEXIST`                                                                            | Standalone fix PR: unlink on failure                                                                                                                                                                 |
 | F3 (`/session new --worktree` without a name)                                                                                                      | misleading name-validation message                                                                   | Standalone fix PR: return the usage line                                                                                                                                                             |
-| yiliang114 reap-path leak (`session-archive.ts:656`)                                                                                               | orphan session deletion leaks worktree + branch                                                      | **Follow-up issue** (see below), not this part                                                                                                                                                       |
-| `SessionRouter.ts:487` (generic load paths feed the persisted worktree cwd to the daemon; cold-start `restoreSessions` drops worktree-task routes) | deferred Critical, fails-closed, new-surface; its full text is truncated in the #10643 review record | **Follow-up issue**, investigated there first because its truncated record must be reproduced before it can be designed against                                                                      |
+| yiliang114 reap-path leak (`session-archive.ts:656`)                                                                                               | orphan session deletion leaks worktree + branch                                                      | **Follow-up issue #11024** (see below), not this part                                                                                                                                                |
+| `SessionRouter.ts:487` (generic load paths feed the persisted worktree cwd to the daemon; cold-start `restoreSessions` drops worktree-task routes) | deferred Critical, fails-closed, new-surface; its full text is truncated in the #10643 review record | **Follow-up issue #11024**, investigated there first because its truncated record must be reproduced before it can be designed against                                                               |
 
 The R8-1 row needs one distinction spelled out in its own PR, because the
 create route deliberately does the opposite two blocks away: relocation
@@ -242,9 +242,9 @@ logs it. The outer catch is different in kind, not a relaxation of that rule:
 under `!spawnCompleted` no session exists, so nothing can own the checkout,
 whereas both inner handlers may still have a live session inside it.
 
-The follow-up issue for the last two rows also carries the reap-cleanup
-requirements gathered during this design's review, so they survive contact
-with implementation there rather than being re-derived:
+Issue #11024 (the follow-up for the last two rows) also carries the
+reap-cleanup requirements gathered during this design's review, so they
+survive contact with implementation there rather than being re-derived:
 
 - Place the deletion at the reap call site, as the create route does, never
   inside the shared `deleteDaemonSessionIfOrphan` primitive — the primitive's
@@ -1025,8 +1025,8 @@ Rejected during this design's review. It is the only file-deleting path in
 the series, and review showed its correct shape (call-site placement,
 `kind === 'removed'` gating, supersede-link refusal, the safe-delete branch
 invariant) needs a dedicated review cycle rather than riding beside a part
-whose contract is "no deletion". It is fully specified in the follow-up
-issue named in the disposition section.
+whose contract is "no deletion". It is fully specified in follow-up issue
+#11024.
 
 ## Exit criteria
 
@@ -1040,6 +1040,6 @@ deletes a file.
 
 Issue #10103 closes when the above holds **and** the dispositions in the
 table are satisfied: the standalone fix PR (R8-1, R8-3, R1-1, F3) merged, and
-the follow-up issue (reap cleanup, the sibling delete path, and the
+follow-up issue #11024 (reap cleanup, the sibling delete path, and the
 `SessionRouter.ts:487` investigation) resolved or explicitly accepted by a
 maintainer.
