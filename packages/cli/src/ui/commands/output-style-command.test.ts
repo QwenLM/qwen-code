@@ -15,11 +15,13 @@ import { type CommandContext } from './types.js';
 import { outputStyleCommand } from './output-style-command.js';
 import { SettingScope } from '../../config/settings.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
+import { t } from '../../i18n/index.js';
 
 // t() returns the key verbatim so assertions can match on the key text.
 vi.mock('../../i18n/index.js', () => ({
   t: vi.fn((key: string) => key),
 }));
+const mockedT = vi.mocked(t);
 
 // The catalog is read from disk; substitute a fixed one so the test never
 // depends on the developer's own ~/.qwen/output-styles.
@@ -46,6 +48,7 @@ describe('outputStyleCommand', () => {
   let context: CommandContext;
 
   beforeEach(() => {
+    mockedT.mockClear();
     mockedLoadCatalog.mockReset();
     mockedLoadCatalog.mockResolvedValue([
       ...BUILT_IN_OUTPUT_STYLES,
@@ -105,6 +108,14 @@ describe('outputStyleCommand', () => {
     expect(mockedLoadCatalog).toHaveBeenCalledWith({ projectRoot: '/repo' });
     expect((res as { content: string }).content).toContain(
       'Available: {{styles}}',
+    );
+    // The key text is the same whether the list is the catalog or the
+    // built-ins, so the interpolated names are what pins the catalog.
+    expect(mockedT).toHaveBeenCalledWith(
+      expect.stringContaining('Available:'),
+      {
+        styles: 'Concise, Proactive, Explanatory, Learning, Reviewer',
+      },
     );
   });
 
@@ -220,6 +231,12 @@ describe('outputStyleCommand', () => {
     );
   });
 
+  it('describes custom styles as selectable, like the argumentHint does', () => {
+    // A closed built-in-only enumeration would contradict the hint on the
+    // same object, which offers `<custom>`.
+    expect(outputStyleCommand.description).toContain('custom style');
+  });
+
   it('persists back to a trusted workspace that owns the setting', async () => {
     context.services.settings = {
       setValue,
@@ -236,6 +253,74 @@ describe('outputStyleCommand', () => {
       'Learning',
       undefined,
       { throwOnWriteFailure: true },
+    );
+  });
+
+  it('warns that a personal style written to the shared workspace file will not resolve for others', async () => {
+    context.services.settings = {
+      setValue,
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: { general: { outputStyle: 'Concise' } } },
+    } as never;
+
+    const res = await outputStyleCommand.action!(context, 'Reviewer');
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'general.outputStyle',
+      'Reviewer',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    expect((res as { content: string }).content).toContain(
+      'will not resolve for anyone else who reads the project settings file',
+    );
+  });
+
+  it('warns that a project style written to user settings will not resolve elsewhere', async () => {
+    mockedLoadCatalog.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+      { ...CUSTOM_STYLE, source: 'project' },
+    ]);
+
+    const res = await outputStyleCommand.action!(context, 'Reviewer');
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'general.outputStyle',
+      'Reviewer',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    expect((res as { content: string }).content).toContain(
+      'will not resolve in other projects that read your user settings',
+    );
+  });
+
+  it('does not warn when the style resolves for every reader of the target file', async () => {
+    context.services.settings = {
+      setValue,
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: { general: { outputStyle: 'Concise' } } },
+    } as never;
+
+    const builtIn = await outputStyleCommand.action!(context, 'Learning');
+    expect((builtIn as { content: string }).content).not.toContain(
+      'will not resolve',
+    );
+
+    // A user style in user settings is the matching pair, so it is silent too.
+    context.services.settings = {
+      setValue,
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+    } as never;
+    const userStyle = await outputStyleCommand.action!(context, 'Reviewer');
+    expect((userStyle as { content: string }).content).not.toContain(
+      'will not resolve',
     );
   });
 

@@ -25,7 +25,7 @@ export const outputStyleCommand: SlashCommand = {
   name: 'output-style',
   get description() {
     return t(
-      'Choose the output style that shapes how responses are written ({{styles}}).',
+      'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).',
       { styles: OUTPUT_STYLE_LIST },
     );
   },

@@ -55,9 +55,14 @@ export function OutputStyleDialog({
 
   // Unlike /effort, "no style configured" genuinely is the first entry
   // (default), so pre-selecting index 0 in that case tells the truth.
+  // The name is matched case-insensitively, like every other style lookup:
+  // the level that wins can change its casing between startup and open (a
+  // project `name: reviewer` over a user-level `Reviewer`), and an exact
+  // compare would then mark `default` as active and let one Enter persist it.
+  const activeName = currentStyleName?.toLowerCase();
   const initialIndex = Math.max(
     0,
-    items.findIndex((item) => item.value === currentStyleName),
+    items.findIndex((item) => item.value.toLowerCase() === activeName),
   );
 
   useKeypress(

@@ -21,6 +21,14 @@ import {
 
 const debugLogger = createDebugLogger('OUTPUT_STYLE_COMMAND');
 
+function containsStyle(
+  styles: readonly OutputStyleDefinition[],
+  name: string,
+): boolean {
+  const wanted = name.toLowerCase();
+  return styles.some((style) => style.name.toLowerCase() === wanted);
+}
+
 interface UseOutputStyleCommandReturn {
   isOutputStyleDialogOpen: boolean;
   /** The styles the open dialog offers; loaded from disk when it opens. */
@@ -94,6 +102,16 @@ export const useOutputStyleCommand = (
       }
       if (openGenerationRef.current !== generation) {
         return;
+      }
+      // The catalog is re-read on every open and skips a file it cannot parse,
+      // so the active style can be absent from it (renamed, edited into an
+      // invalid state, grown past the size cap) while the session still runs
+      // it. Offering the live definition keeps the pre-selection truthful and
+      // keeps the row selectable; without it the dialog would highlight
+      // `default` and one Enter would persist that over the user's setting.
+      const activeStyle = config.getOutputStyle();
+      if (activeStyle && !containsStyle(choices, activeStyle.name)) {
+        choices = [...choices, activeStyle];
       }
       choicesRef.current = choices;
       setOutputStyleChoices(choices);

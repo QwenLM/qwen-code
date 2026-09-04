@@ -91,8 +91,11 @@ export async function applyOutputStyleSelection(
       t('Project output style settings are not available in this session.'),
     );
   }
+  const scope = workspaceOwnsOutputStyle
+    ? SettingScope.Workspace
+    : SettingScope.User;
   settings.setValue(
-    workspaceOwnsOutputStyle ? SettingScope.Workspace : SettingScope.User,
+    scope,
     'general.outputStyle',
     style ? style.name : 'default',
     undefined,
@@ -121,6 +124,20 @@ export async function applyOutputStyleSelection(
             'It is saved but has no effect in this session because the system prompt is replaced (--system-prompt or QWEN_SYSTEM_MD).',
           )}`
         : ` ${t('It is saved but Learning is skipped in headless runs.')}`;
+  }
+  // The scope is fixed by who owns the key — redirecting the write would be
+  // shadowed by the workspace value — so a name the other readers of the file
+  // being written cannot resolve is flagged rather than moved.
+  if (scope === SettingScope.Workspace && style.source === 'user') {
+    message += ` ${t(
+      '{{name}} is a personal style, so it will not resolve for anyone else who reads the project settings file it was written to.',
+      { name: style.name },
+    )}`;
+  } else if (scope === SettingScope.User && style.source === 'project') {
+    message += ` ${t(
+      '{{name}} is a project style, so it will not resolve in other projects that read your user settings.',
+      { name: style.name },
+    )}`;
   }
   return message;
 }

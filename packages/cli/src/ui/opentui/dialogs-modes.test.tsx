@@ -194,6 +194,39 @@ describe('OpenTuiOutputStyleDialog', () => {
     ).not.toContain('● default');
   });
 
+  it('labels a project style with its own source and leaves built-ins unlabelled', async () => {
+    // The row's source is the picker's only trust-relevant provenance: a
+    // prompt read from the workspace must not read as the user's own.
+    const project: OutputStyleDefinition = {
+      name: 'TeamVoice',
+      description: 'Team style from the workspace',
+      source: 'project',
+      prompt: 'Speak for the team.',
+      keepCodingInstructions: true,
+    };
+    mocks.loadSessionOutputStyles.mockResolvedValue([
+      ...BUILT_IN_OUTPUT_STYLES,
+      project,
+    ]);
+    const harness = createHarness();
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByText('TeamVoice')).not.toBeNull());
+    expect(screen.getByText('TeamVoice').parentElement?.textContent).toContain(
+      '(project)',
+    );
+    expect(
+      screen.getByText('Concise').parentElement?.textContent,
+    ).not.toContain('(');
+  });
+
   it('keeps the configured style selected while a system prompt override is active', async () => {
     const harness = createHarness({
       current: CONCISE,
@@ -538,11 +571,12 @@ describe('OpenTuiOutputStyleDialog', () => {
       />,
     );
 
-    await waitFor(() => expect(screen.queryByText('reviewer')).not.toBeNull());
+    await waitFor(() =>
+      expect(screen.getByText('reviewer').parentElement?.textContent).toContain(
+        '● reviewer',
+      ),
+    );
     expect(screen.getAllByText('reviewer')).toHaveLength(1);
     expect(screen.queryByText('Reviewer')).toBeNull();
-    expect(screen.getByText('reviewer').parentElement?.textContent).toContain(
-      '● reviewer',
-    );
   });
 });

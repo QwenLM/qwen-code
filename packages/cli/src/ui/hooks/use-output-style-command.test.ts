@@ -88,6 +88,65 @@ describe('useOutputStyleCommand', () => {
     expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE);
   });
 
+  it('re-reads the catalog on every open', async () => {
+    // A style file added, edited or removed mid-session must show up on the
+    // next open, so the read cannot be memoised across opens.
+    const { result } = renderHook(() =>
+      useOutputStyleCommand(settings, config),
+    );
+
+    act(() => result.current.openOutputStyleDialog());
+    await waitFor(() =>
+      expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE),
+    );
+    await act(async () => result.current.handleOutputStyleSelect(undefined));
+    act(() => result.current.openOutputStyleDialog());
+    await waitFor(() =>
+      expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE),
+    );
+
+    expect(mockedLoadCatalog).toHaveBeenCalledTimes(2);
+  });
+
+  it('offers an active style the catalog no longer carries', async () => {
+    // The catalog skips a file it cannot read or parse, so the running style
+    // can be missing from it. Dropping the row would pre-select `default` and
+    // let one Enter persist that over the user's setting.
+    mockedLoadCatalog.mockResolvedValue([...BUILT_IN_OUTPUT_STYLES]);
+    config.getOutputStyle = vi.fn().mockReturnValue(CUSTOM_STYLE);
+    const { result } = renderHook(() =>
+      useOutputStyleCommand(settings, config, addItem),
+    );
+
+    act(() => result.current.openOutputStyleDialog());
+    await waitFor(() =>
+      expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE),
+    );
+
+    // The row the dialog shows must also resolve when it is selected.
+    await act(async () => result.current.handleOutputStyleSelect('Reviewer'));
+    expect(setOutputStyle).toHaveBeenCalledWith(CUSTOM_STYLE);
+  });
+
+  it('does not duplicate an active style the catalog spells differently', async () => {
+    config.getOutputStyle = vi
+      .fn()
+      .mockReturnValue({ ...CUSTOM_STYLE, name: 'reviewer' });
+    const { result } = renderHook(() =>
+      useOutputStyleCommand(settings, config),
+    );
+
+    act(() => result.current.openOutputStyleDialog());
+    await waitFor(() =>
+      expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE),
+    );
+
+    expect(result.current.outputStyleChoices).toEqual([
+      ...BUILT_IN_OUTPUT_STYLES,
+      CUSTOM_STYLE,
+    ]);
+  });
+
   it('reports a catalog read failure and closes without a selection', async () => {
     mockedLoadCatalog.mockRejectedValue(new Error('EACCES'));
     config.getOutputStyle = vi.fn().mockReturnValue(CUSTOM_STYLE);
@@ -228,6 +287,32 @@ describe('useOutputStyleCommand', () => {
     expect(result.current.outputStyleChoices).toEqual([]);
   });
 
+  it('stays closed and silent when a dismissed open fails its load afterwards', async () => {
+    let failLoad: (() => void) | undefined;
+    mockedLoadCatalog.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failLoad = () => reject(new Error('EACCES'));
+        }),
+    );
+
+    const { result } = renderHook(() =>
+      useOutputStyleCommand(settings, config, addItem),
+    );
+    act(() => result.current.openOutputStyleDialog());
+    await act(async () => result.current.handleOutputStyleSelect(undefined));
+    expect(result.current.isOutputStyleDialogOpen).toBe(false);
+
+    await act(async () => {
+      failLoad?.();
+      await Promise.resolve();
+    });
+
+    // The read the user walked away from must not report into the chat.
+    expect(addItem).not.toHaveBeenCalled();
+    expect(result.current.isOutputStyleDialogOpen).toBe(false);
+  });
+
   it('ignores the first catalog when a second open resolves sooner', async () => {
     const staleStyle: OutputStyleDefinition = {
       ...CUSTOM_STYLE,
@@ -261,6 +346,9 @@ describe('useOutputStyleCommand', () => {
     expect(result.current.isOutputStyleDialogOpen).toBe(true);
     expect(result.current.outputStyleChoices).toContainEqual(CUSTOM_STYLE);
     expect(result.current.outputStyleChoices).not.toContainEqual(staleStyle);
+    // Both opens issued their own read: the winner is the last invoked, not
+    // whichever read happened to come back first.
+    expect(mockedLoadCatalog).toHaveBeenCalledTimes(2);
   });
 
   it('cancels without mutating config or settings on undefined', async () => {
