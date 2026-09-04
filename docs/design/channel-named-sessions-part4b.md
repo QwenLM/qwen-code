@@ -178,6 +178,11 @@ Re-scoped during this design's review, with reasons recorded in
   `getSessionSummary`'s `hasActivePrompt` and `pendingInteractionCount` both
   read it as quiescent. The same invisibility exists in the coalesced-restore
   waiter branch (R8-2).
+- The restore _response_'s `hasActivePrompt` is a separate computation from
+  the summary's: `restorePromptAdmitted || promptActive || goalTurnActive`.
+  The restore route reads that response object, not `getSessionSummary`. The
+  distinction matters for this part because a parked prompt must keep reading
+  `false` there — see "Deferred-prompt visibility".
 - The restore route's `hasUnlocatedRestoredPrompt` branch (active prompt, no
   attachment, no recorded cwd) is therefore **not** the deferred-prompt
   shape: a parked prompt reads `hasActivePrompt: false` and flows through
@@ -200,8 +205,15 @@ Re-scoped during this design's review, with reasons recorded in
   `atomicWriteFile` with `noFollow: true` (an atomic replace that substitutes
   a regular file for whatever occupies the path, never following a swapped-in
   symlink), `renameWithRetry` (EPERM/EACCES backoff for Windows),
-  `flush`, and an `assertCanCommit` hook invoked up to the rename commit
-  point.
+  `flush`, and an `assertCanCommit` hook invoked immediately before the
+  rename commit.
+- Two `atomicWriteFile` paths do **not** go through that rename, and both
+  matter for a marker: an ownership-preserving fast path that writes the
+  existing target in place — non-atomic, and symlink-following at write time —
+  when the target's `uid` differs from the process's effective uid, and an
+  `EXDEV` fallback that unlinks before an exclusive create. The `assertCanCommit`
+  hook is synchronous (`() => void`), so it cannot await the async strict
+  marker read.
 
 ## Disposition of standing Part 4A findings
 
@@ -209,17 +221,26 @@ Part 4A merged on a `land-with-residual-risk` recommendation under the
 repository's five-round rule, so review findings stood at merge. Their
 dispositions — none is silently dropped:
 
-| Finding                                                                                                                                            | Shape                                                                                                | Disposition                                                                                                                          |
-| -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| R3-2 / chiga0 F1 + yiliang114 (missing marker bricks the task)                                                                                     | restore fails closed with no recovery path                                                           | **This part**: typed `worktree_marker_missing` restore signal plus marker recreation through reset                                   |
-| chiga0 F2 / R1-2 + yiliang114 (under-attested active-prompt restore)                                                                               | branch never attests `persisted-v1`                                                                  | **This part**: the branch is removed so the shape fails closed (see "Deferred-prompt restore attestation")                           |
-| R8-2 (deferred prompt invisible to the coalesced restore)                                                                                          | waiter hangs or 500s a healthy session                                                               | **This part**: the bridge surfaces deferred restore-prompt state; the coalescer and this part's quiescence both consume it           |
-| R8-1 (create rollback `!spawnCompleted` gate orphans the worktree)                                                                                 | permanent orphan when post-spawn cleanup is inconclusive                                             | Standalone fix PR: remove the worktree in that block regardless of the orphan-delete outcome, exactly as the finding's suggested fix |
-| R8-3 (reattach guard misreads a legitimately exited worktree)                                                                                      | permanent "lost durable worktree identity" loop after `exit_worktree` + restart                      | Standalone fix PR: heal on a resume response carrying no `worktree` object; keep failing closed on a contradictory attestation       |
-| R1-1 (exclusive marker create leaks an empty file on write failure)                                                                                | path wedged with `EEXIST`                                                                            | Standalone fix PR: unlink on failure                                                                                                 |
-| F3 (`/session new --worktree` without a name)                                                                                                      | misleading name-validation message                                                                   | Standalone fix PR: return the usage line                                                                                             |
-| yiliang114 reap-path leak (`session-archive.ts:656`)                                                                                               | orphan session deletion leaks worktree + branch                                                      | **Follow-up issue** (see below), not this part                                                                                       |
-| `SessionRouter.ts:487` (generic load paths feed the persisted worktree cwd to the daemon; cold-start `restoreSessions` drops worktree-task routes) | deferred Critical, fails-closed, new-surface; its full text is truncated in the #10643 review record | **Follow-up issue**, investigated there first because its truncated record must be reproduced before it can be designed against      |
+| Finding                                                                                                                                            | Shape                                                                                                | Disposition                                                                                                                                                                                          |
+| -------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R3-2 / chiga0 F1 + yiliang114 (missing marker bricks the task)                                                                                     | restore fails closed with no recovery path                                                           | **This part**: typed `worktree_marker_missing` restore signal plus marker recreation through reset                                                                                                   |
+| chiga0 F2 / R1-2 + yiliang114 (under-attested active-prompt restore)                                                                               | branch never attests `persisted-v1`                                                                  | **This part**: the branch is removed so the shape fails closed (see "Deferred-prompt restore attestation")                                                                                           |
+| R8-2 (deferred prompt invisible to the coalesced restore)                                                                                          | waiter hangs or 500s a healthy session                                                               | **This part**: the bridge surfaces deferred restore-prompt state; the coalescer and this part's quiescence both consume it                                                                           |
+| R8-1 (create rollback `!spawnCompleted` gate orphans the worktree)                                                                                 | permanent orphan when post-spawn cleanup is inconclusive                                             | Standalone fix PR: remove the worktree in that block regardless of the orphan-delete outcome, per the finding's suggested fix — and state why that block differs from its two neighbours (see below) |
+| R8-3 (reattach guard misreads a legitimately exited worktree)                                                                                      | permanent "lost durable worktree identity" loop after `exit_worktree` + restart                      | Standalone fix PR: heal on a resume response carrying no `worktree` object; keep failing closed on a contradictory attestation                                                                       |
+| R1-1 (exclusive marker create leaks an empty file on write failure)                                                                                | path wedged with `EEXIST`                                                                            | Standalone fix PR: unlink on failure                                                                                                                                                                 |
+| F3 (`/session new --worktree` without a name)                                                                                                      | misleading name-validation message                                                                   | Standalone fix PR: return the usage line                                                                                                                                                             |
+| yiliang114 reap-path leak (`session-archive.ts:656`)                                                                                               | orphan session deletion leaks worktree + branch                                                      | **Follow-up issue** (see below), not this part                                                                                                                                                       |
+| `SessionRouter.ts:487` (generic load paths feed the persisted worktree cwd to the daemon; cold-start `restoreSessions` drops worktree-task routes) | deferred Critical, fails-closed, new-surface; its full text is truncated in the #10643 review record | **Follow-up issue**, investigated there first because its truncated record must be reproduced before it can be designed against                                                                      |
+
+The R8-1 row needs one distinction spelled out in its own PR, because the
+create route deliberately does the opposite two blocks away: relocation
+failure removes the checkout "only when the session was definitively removed"
+(a bridge timeout is caller-facing; relocation may still land), and the
+post-relocation persistence failure preserves on an inconclusive delete and
+logs it. The outer catch is different in kind, not a relaxation of that rule:
+under `!spawnCompleted` no session exists, so nothing can own the checkout,
+whereas both inner handlers may still have a live session inside it.
 
 The follow-up issue for the last two rows also carries the reap-cleanup
 requirements gathered during this design's review, so they survive contact
@@ -343,12 +364,24 @@ Typed failures (4xx, bounded, no paths or stack traces):
 ### Deferred-prompt visibility (R8-2)
 
 The bridge learns to surface a parked deferred restore prompt: a non-empty
-`entry.deferredRestoreAskUserQuestionPrompts` counts as an active prompt
-everywhere the active state is computed — the coalesced-restore waiter branch
-(R8-2's report) and `getSessionSummary`'s `hasActivePrompt`. One shared
+`entry.deferredRestoreAskUserQuestionPrompts` counts as a prompt in progress
+for exactly two consumers — the coalesced-restore waiter branch (R8-2's
+report) and `getSessionSummary`'s `hasActivePrompt`, which is what this part's
+quiescence precondition and the Channel's `isBusy` fallback read. One shared
 visibility fix closes both the reported waiter hang/`CdWhilePromptActiveError`
-and this part's quiescence blind spot, and keeps a single definition of
-"prompt in progress" for every future consumer.
+and this part's quiescence blind spot.
+
+The fix stops there deliberately. It must **not** feed the restore
+_response_'s `hasActivePrompt`, which is computed separately as
+`restorePromptAdmitted || promptActive || goalTurnActive` and is the value the
+restore route reads. Widening it there would interact with the branch removal
+below: a deferred worktree restore would start reporting an active prompt,
+fall into the `else if (session.hasActivePrompt)` check with no recorded cwd,
+and fail closed with `Active session is outside its worktree` — breaking the
+deferred-restore path that works today and that #10643's reviewer verified end
+to end. The two fixes are only compatible while the response value stays
+unchanged, so "prompt in progress" is deliberately not unified across both
+computations.
 
 ### Preconditions (all fail closed)
 
@@ -417,7 +450,11 @@ instead of piling up replacement sessions.
 Ordered steps, with the crash behavior of each:
 
 0. Preconditions pass; arm the reset-pending barrier on `S_old`.
-   Crash/failure anywhere after this point clears the barrier.
+   Every non-crash failure or compensation path clears the barrier
+   explicitly. A crash clears nothing — the barrier is in-memory bridge
+   state and is discarded with the process, deliberately non-durable:
+   durability of a mid-transfer state lives entirely in the marker and the
+   sidecar pair, which the resume path reads.
 1. Spawn `S_new` in the root workspace with the same thread-scope and source
    metadata conventions as a fresh worktree creation, minus worktree
    creation. No branch, no directory, no slug allocation.
@@ -479,7 +516,15 @@ blind overwrite:
 1. Strict-read the marker. Require `valid` with `sessionId ===
 expectedOwner`, or `missing` when `expectedOwner === null` (the recovery
    hatch). Any `invalid` state or owner mismatch fails closed.
-2. Commit by shape:
+2. Refuse when the marker's `uid` differs from the daemon's effective uid.
+   This is what keeps `atomicWriteFile` on its rename path: its
+   ownership-preserving fast path would otherwise write the marker in place,
+   non-atomically and following a symlink swapped in after the check, and a
+   crash mid-write would leave a truncated marker — which the strict reader
+   reports as `invalid`, and an `invalid` marker is never auto-recovered.
+   Failing closed on a foreign-owned marker is the same fail-closed shape as
+   any other ambiguous ownership.
+3. Commit by shape:
    - `valid` naming `expectedOwner`: rewrite through the existing
      `atomicWriteFile` with `noFollow: true`, whose rename atomically
      replaces whatever occupies the path — including a symlink swapped in
@@ -487,26 +532,35 @@ expectedOwner`, or `missing` when `expectedOwner === null` (the recovery
      `renameWithRetry` covers the Windows EPERM/EACCES shape. The
      `assertCanCommit` hook re-reads the marker and re-checks the owner
      immediately before the rename commit, closing the window between the
-     opening strict read and the commit.
+     opening strict read and the commit. Because that hook is synchronous
+     (`() => void`), the re-check uses a new synchronous no-follow strict
+     reader alongside the async one in the core worktree service — same
+     checks, same three-state result. `atomicFileWrite.ts` itself is reused
+     unchanged.
    - `missing`: commit through the existing
      `createWorktreeSessionMarkerExclusive`. `O_EXCL` _is_ the
      compare-and-swap against absence: a concurrent transfer that gets there
      first turns this create into `EEXIST`, which fails closed.
-3. `atomicWriteFile`'s temporary file is a sibling named
+4. `atomicWriteFile`'s temporary file is a sibling named
    `.qwen-session.<hex>.tmp`. The transfer adds a `.qwen-session.*.tmp` rule
    beside the marker's existing `info/exclude` line so a crashed transfer's
    leftover temp file — which carries a session ID — cannot be staged by a
    task-local `git add -A`. The glob widens the repository's shared exclude
    in the main checkout as well; that widening is accepted deliberately (the
    pattern matches only transfer temp siblings of the marker), as Part 4A
-   already accepted for the marker rule itself.
+   already accepted for the marker rule itself. The sibling placement also
+   keeps the temp file on the marker's own filesystem, so `atomicWriteFile`'s
+   `EXDEV` fallback — which unlinks before creating, the ownerless window
+   rejected below — is unreachable here.
 
 Either commit shape leaves the old marker fully intact or the complete new
 content — never a partial file, so the strict reader never sees a truncated
-marker from this primitive. Two concurrent transfers targeting one worktree
-cannot both win: the worktree-keyed lock serializes them, and the
-second-place finisher's owner re-check (or `O_EXCL` create) fails closed
-regardless.
+marker from this primitive. That holds because the foreign-uid refusal
+excludes the in-place write path and the sibling temp excludes the `EXDEV`
+path, leaving the rename and the exclusive create as the only commits. Two
+concurrent transfers targeting one worktree cannot both win: the
+worktree-keyed lock serializes them, and the second-place finisher's owner
+re-check (or `O_EXCL` create) fails closed regardless.
 
 ### Sidecar schema addition
 
@@ -577,6 +631,9 @@ inverted:
   `goalTurnActive`, so it reads `hasActivePrompt: false` and flows through
   the `else` branch — which already relocates, requires the returned path to
   match, and attests `persisted-v1`. The deferred shape was never broken.
+  (This is why the R8-2 visibility fix deliberately stops short of the
+  restore response value: widening it there would push this working shape
+  into the fail-closed branch below.)
 - The branch is entered only when a cold-restored session genuinely has a
   live prompt (`hasActivePrompt && !attached && currentCwd === undefined`).
   Relocating there is impossible: `changeSessionCwd` chains onto the prompt
@@ -719,10 +776,13 @@ Bounded messages, no paths, session IDs, or daemon bodies:
 
 1. Bridge deferred-prompt visibility (R8-2): one shared definition of
    prompt-in-progress covering the parked map, consumed by the coalescer and
-   `getSessionSummary`; the reset-pending barrier primitive (set, refuse
+   `getSessionSummary` — and explicitly not by the restore response's
+   `hasActivePrompt`; the reset-pending barrier primitive (set, refuse
    admission, clear); the attach-severing and worktree-association clearing
    surfaces the transfer's step 6 needs.
-2. Core marker primitive: `transferWorktreeSessionMarkerOwner` with the
+2. Core marker primitive: a synchronous no-follow strict marker reader beside
+   the async one (for the `assertCanCommit` re-check), then
+   `transferWorktreeSessionMarkerOwner` with the foreign-uid refusal and the
    compare-and-swap commit shapes, and strict-reader tests for every crash
    window.
 3. Daemon route `POST /session/:id/worktree-reset`: worktree-keyed
@@ -742,7 +802,8 @@ Bounded messages, no paths, session IDs, or daemon bodies:
 - `packages/acp-bridge/src/bridge.ts` and `bridgeTypes.ts` (deferred-prompt
   visibility in the summary and coalescer, the reset-pending barrier, attach
   severing, worktree-association clearing)
-- `packages/core/src/services/gitWorktreeService.ts` (transfer primitive)
+- `packages/core/src/services/gitWorktreeService.ts` (transfer primitive,
+  synchronous strict marker reader)
 - `packages/core/src/services/worktreeSessionService.ts` (`supersededBy`,
   `supersedes`)
 - `packages/core/src/utils/atomicFileWrite.ts` (reuse only; no change
@@ -805,6 +866,9 @@ implementation and is not committed.
 - Controlled failure at steps 4–5 compensates to the exact pre-reset state.
 - Marker transfer never follows a swapped-in symlink, never leaves a partial
   or empty marker, and re-reads the owner at the commit point.
+- A marker owned by a different uid than the daemon is refused rather than
+  written in place, so `atomicWriteFile`'s non-atomic ownership-preserving
+  path is never selected for a marker.
 - The worktree directory, its files (tracked, modified, untracked), and its
   branch are byte-identical across reset; only the marker content changes.
 
@@ -821,6 +885,10 @@ implementation and is not committed.
   `getSessionSummary` and the coalescer; the R8-2 concurrent-restore probe
   (waiter observes the deferred state, no `CdWhilePromptActiveError` 500) is
   reproduced as a regression test.
+- The same visibility fix leaves a deferred worktree restore reaching
+  `persisted-v1` through the relocating branch — asserted directly, so a
+  later widening of the restore response's `hasActivePrompt` fails the test
+  instead of silently failing the restore.
 - Superseded restore pre-empts the bridge load and carries the replacement
   ID; the interrupted sub-case carries `worktree_reset_interrupted`.
 - Capability absent: the bridge rejects before the factory runs; old-daemon
