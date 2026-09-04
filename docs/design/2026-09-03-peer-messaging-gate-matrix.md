@@ -75,7 +75,9 @@ without the user approving it by hand.
 **Tighten-only workspace values.** The two keys move from
 `WORKSPACE_RESTRICTED_SETTINGS` to a new `WORKSPACE_TIGHTEN_ONLY_SETTINGS`
 beside it, each with a `strictness` function (`accept` < unset < `hold` <
-`refuse`; `true` < `false` = unset; anything unrecognized ranks strictest).
+`refuse`; `true` < `false` = unset). Unrecognized values rank by the
+fail-closed behavior their reader applies: inbound messages are held, and
+messaging is off.
 At merge time a trusted workspace's value is kept only when it is strictly
 stricter than the value User or SystemDefaults set (the stricter of the
 two if both do), or than the feature's default when neither does. Equal
@@ -85,10 +87,10 @@ it sets the key the workspace value is dropped and the warning names
 System. The same verdict function drives the strip and the warning, so
 they cannot disagree about a value.
 
-**Unrecognized values fail closed at every scope.** An unrecognized
-workspace value ranks strictest, so it is kept and reaches the readers,
-which already fail closed: the gate holds on `policy-unreadable`, and the
-switch is off for anything but `true`.
+**Unrecognized values fail closed at every scope.** The comparison uses
+those fail-closed outcomes, so an unrecognized workspace policy cannot
+replace a stricter `refuse`, while it can still replace `accept` and reach
+the gate as `policy-unreadable`. The switch is off for anything but `true`.
 
 **The hold cause names the scope.** The gate takes an optional
 `getPolicyScope` beside `getPolicySetting`; the CLI answers it from the
@@ -120,10 +122,6 @@ setting path.
   honored when the user set nothing, because parity delivers some
   messages and `hold` delivers none. A workspace that wants exactly the
   parity default has no value to write for it; unset is that value.
-- The serve routes' workspace write guard refuses the loosest value of a
-  tighten-only key up front instead of persisting an entry the merge
-  would always drop. Neither key is offered through those routes today
-  (`showInDialog` is off), so the guard is there for when one is.
 
 ## Files
 
@@ -132,11 +130,9 @@ setting path.
   entries, scope-aware `describeHoldCause`.
 - `packages/core/src/ipc/peer-send.ts` — `senderModeClass` delegates to
   `modeClass`.
-- `packages/cli/src/config/settingsUtils.ts` — `WORKSPACE_TIGHTEN_ONLY_SETTINGS`,
-  `isLoosestTightenOnlyValue`.
+- `packages/cli/src/config/settingsUtils.ts` — `WORKSPACE_TIGHTEN_ONLY_SETTINGS`.
 - `packages/cli/src/config/settings.ts` — `tightenOnlyVerdict`,
   `stripWorkspaceLoosenings`, the two warnings.
-- `packages/cli/src/serve/routes/workspace-settings.ts` — the write guard.
 - `packages/cli/src/peerMessaging/inbound-policy-scope.ts` — which scope
   the merged value came from.
 - `packages/cli/src/peerMessaging/peer-messaging.ts`,

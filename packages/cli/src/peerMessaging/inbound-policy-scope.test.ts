@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import { inboundPolicyScope } from './inbound-policy-scope.js';
 
-type Policy = 'accept' | 'hold' | 'refuse' | undefined;
+type Policy = unknown;
 
 /**
  * The merge itself is pinned in settings.test.ts; this helper only stands
@@ -21,6 +21,8 @@ function loaded(values: {
   workspace?: Policy;
   system?: Policy;
   systemDefaults?: Policy;
+  isTrusted?: boolean;
+  workspaceSettingsActive?: boolean;
 }): LoadedSettings {
   const file = (policy: Policy) => ({
     settings:
@@ -38,6 +40,8 @@ function loaded(values: {
         ? {}
         : { agents: { crossSessionInbound: values.merged } },
     forScope: (scope: SettingScope) => byScope[scope],
+    isTrusted: values.isTrusted ?? true,
+    workspaceSettingsActive: values.workspaceSettingsActive ?? true,
   } as unknown as LoadedSettings;
 }
 
@@ -96,5 +100,37 @@ describe('inboundPolicyScope', () => {
     expect(
       inboundPolicyScope(loaded({ merged: 'hold', systemDefaults: 'hold' })),
     ).toBe('system');
+  });
+
+  it('reports SystemDefaults when the workspace repeats its value', () => {
+    expect(
+      inboundPolicyScope(
+        loaded({
+          merged: 'hold',
+          workspace: 'hold',
+          systemDefaults: 'hold',
+        }),
+      ),
+    ).toBe('system');
+  });
+
+  it('does not attribute a raw untrusted workspace value', () => {
+    expect(
+      inboundPolicyScope(
+        loaded({ merged: 'hold', workspace: 'hold', isTrusted: false }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('matches an effective malformed workspace value after merge cloning', () => {
+    expect(
+      inboundPolicyScope(
+        loaded({
+          merged: { policy: 'hold' },
+          user: 'accept',
+          workspace: { policy: 'hold' },
+        }),
+      ),
+    ).toBe('workspace');
   });
 });

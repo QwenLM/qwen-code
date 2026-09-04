@@ -3951,8 +3951,8 @@ describe('Settings Loading and Merging', () => {
     });
 
     it('keeps an unrecognized workspace value so the reader fails closed', () => {
-      // Stripping it would let the user's looser value through in its
-      // place; kept, the gate holds on a value it cannot read.
+      // Both readers fail closed, so these values are stricter than the
+      // user's permissive values and remain effective.
       (mockFsExistsSync as Mock).mockReturnValue(true);
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -3980,6 +3980,81 @@ describe('Settings Loading and Merging', () => {
       expect(
         getSettingsWarnings(settings).some((w) => w.includes('would loosen')),
       ).toBe(false);
+    });
+
+    it('does not let an unrecognized workspace policy loosen a user refusal', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: { crossSessionInbound: 'refuse' },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: { crossSessionInbound: 'maybe' },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionInbound).toBe('refuse');
+      expect(
+        getSettingsWarnings(settings).find((warning) =>
+          warning.includes('agents.crossSessionInbound'),
+        ),
+      ).toContain('would loosen the User value');
+    });
+
+    it('lets a workspace refusal tighten an unrecognized user policy', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: { crossSessionInbound: 'maybe' },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: { crossSessionInbound: 'refuse' },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionInbound).toBe('refuse');
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('agents.crossSessionInbound'),
+        ),
+      ).toBe(false);
+    });
+
+    it('compares against SystemDefaults and names it in the warning', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemDefaultsPath())
+            return JSON.stringify({
+              agents: { crossSessionInbound: 'hold' },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              agents: { crossSessionInbound: 'accept' },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.agents?.crossSessionInbound).toBe('hold');
+      expect(
+        getSettingsWarnings(settings).find((warning) =>
+          warning.includes('agents.crossSessionInbound'),
+        ),
+      ).toContain('would loosen the SystemDefaults value');
     });
 
     it('drops every workspace value when the workspace is untrusted', () => {

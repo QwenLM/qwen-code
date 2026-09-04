@@ -25,6 +25,7 @@ import {
   startPeerInbox,
   trackSentPeerMessageForTest,
   type InboundPolicy,
+  type PolicyScope,
   type PeerFrame,
   type PeerInbox,
 } from '@qwen-code/qwen-code-core';
@@ -138,6 +139,7 @@ async function start(
     reassertSessionRecord?: () => Promise<void>;
     getPolicySetting?: () => InboundPolicy | undefined;
     getHeldExpiryMs?: () => number | null;
+    getPolicyScope?: () => PolicyScope | undefined;
   } = {},
 ): Promise<{
   messaging: PeerMessaging;
@@ -574,6 +576,22 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(submitted).toHaveLength(0);
     expect(m.getHeld()).toHaveLength(1);
     expect(m.getHeld()[0].cause).toBe('no-mode-asserted');
+  });
+
+  it('carries the configured policy scope through the session gate', async () => {
+    const { messaging: m } = await start(ApprovalMode.DEFAULT, {
+      getPolicySetting: () => 'hold',
+      getPolicyScope: () => 'workspace',
+    });
+    await send(
+      m.socketPath!,
+      peerFrame({ content: 'review me', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+
+    expect(m.getHeld()).toMatchObject([
+      { cause: 'explicit-setting', policyScope: 'workspace' },
+    ]);
   });
 
   it('holds a bypassing sender when the receiver prompts, until the receiver bypasses too', async () => {

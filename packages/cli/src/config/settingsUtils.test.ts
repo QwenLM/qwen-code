@@ -16,8 +16,6 @@ import {
   getDialogSettingKeys,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
   WORKSPACE_TIGHTEN_ONLY_SETTINGS,
-  WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS,
-  isLoosestTightenOnlyValue,
   // Business logic utilities
   TEST_ONLY,
   settingExistsInScope,
@@ -1041,11 +1039,14 @@ describe('setNestedProperty prototype-pollution guards', () => {
 
 describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
   it('lists the cross-session keys, and the restricted list no longer does', () => {
-    expect(WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS).toEqual([
+    const keys = WORKSPACE_TIGHTEN_ONLY_SETTINGS.map(
+      ({ section, key }) => `${section}.${key}`,
+    );
+    expect(keys).toEqual([
       'agents.crossSessionMessaging',
       'agents.crossSessionInbound',
     ]);
-    for (const key of WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS) {
+    for (const key of keys) {
       expect(WORKSPACE_RESTRICTED_SETTING_KEYS).not.toContain(key);
     }
   });
@@ -1061,11 +1062,21 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
     expect(new Set(ranks).size).toBe(ranks.length);
   });
 
-  it('ranks an unrecognized value strictest so it is kept and fails closed', () => {
-    for (const entry of WORKSPACE_TIGHTEN_ONLY_SETTINGS) {
-      expect(entry.strictness('definitely-not-a-value')).toBe(Infinity);
-      expect(entry.strictness({})).toBe(Infinity);
-    }
+  it('ranks unrecognized values by their fail-closed behavior', () => {
+    const inbound = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionInbound',
+    )!;
+    const messaging = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionMessaging',
+    )!;
+    expect(inbound.strictness('definitely-not-a-value')).toBe(
+      inbound.strictness('hold'),
+    );
+    expect(inbound.strictness({})).toBe(inbound.strictness('hold'));
+    expect(messaging.strictness('definitely-not-a-value')).toBe(
+      messaging.strictness(false),
+    );
+    expect(messaging.strictness({})).toBe(messaging.strictness(false));
   });
 
   it('ranks the switch off as stricter than on, and unset as off', () => {
@@ -1076,23 +1087,5 @@ describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
       messaging.strictness(false),
     );
     expect(messaging.strictness(undefined)).toBe(messaging.strictness(false));
-  });
-
-  it('names exactly the loosest value of each tighten-only key', () => {
-    expect(
-      isLoosestTightenOnlyValue('agents.crossSessionInbound', 'accept'),
-    ).toBe(true);
-    expect(
-      isLoosestTightenOnlyValue('agents.crossSessionInbound', 'hold'),
-    ).toBe(false);
-    expect(
-      isLoosestTightenOnlyValue('agents.crossSessionMessaging', true),
-    ).toBe(true);
-    expect(
-      isLoosestTightenOnlyValue('agents.crossSessionMessaging', false),
-    ).toBe(false);
-    expect(isLoosestTightenOnlyValue('tools.workflowsEnabled', true)).toBe(
-      false,
-    );
   });
 });

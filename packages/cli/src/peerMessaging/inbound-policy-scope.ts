@@ -5,6 +5,7 @@
  */
 
 import type { PolicyScope } from '@qwen-code/qwen-code-core';
+import { isDeepStrictEqual } from 'node:util';
 import { SettingScope, type LoadedSettings } from '../config/settings.js';
 
 /**
@@ -13,9 +14,9 @@ import { SettingScope, type LoadedSettings } from '../config/settings.js';
  * Only the wording of a hold cause depends on this: the gate reads the
  * merged value and decides from that alone. The scopes are checked in
  * the order the merge lets them win — System overrides everything, a
- * workspace value survives only when it is stricter than the user's, and
- * the user's value stands otherwise — so the answer is the scope whose
- * value is the one in force, not merely a scope that mentions the key.
+ * workspace value survives only when it is stricter than the operator
+ * values, and the user value stands otherwise — so the answer is the scope
+ * whose value is the one in force, not merely a scope that mentions the key.
  * SystemDefaults is reported as `system`: it is operator-provided too.
  */
 export function inboundPolicyScope(
@@ -27,12 +28,20 @@ export function inboundPolicyScope(
     settings.forScope(scope).settings.agents?.crossSessionInbound;
 
   if (valueIn(SettingScope.System) !== undefined) return 'system';
-  // A trusted workspace's value replaced the user's only when it differs
-  // from it; when both say the same thing the user's own setting is the
-  // honest thing to name.
-  if (valueIn(SettingScope.User) === merged) return 'user';
-  if (valueIn(SettingScope.Workspace) === merged) return 'workspace';
-  if (valueIn(SettingScope.User) !== undefined) return 'user';
-  if (valueIn(SettingScope.SystemDefaults) !== undefined) return 'system';
+  const user = valueIn(SettingScope.User);
+  const systemDefaults = valueIn(SettingScope.SystemDefaults);
+  const workspace = valueIn(SettingScope.Workspace);
+
+  if (isDeepStrictEqual(user, merged)) return 'user';
+  if (isDeepStrictEqual(systemDefaults, merged)) return 'system';
+  if (
+    settings.isTrusted &&
+    settings.workspaceSettingsActive &&
+    isDeepStrictEqual(workspace, merged)
+  ) {
+    return 'workspace';
+  }
+  if (user !== undefined) return 'user';
+  if (systemDefaults !== undefined) return 'system';
   return undefined;
 }

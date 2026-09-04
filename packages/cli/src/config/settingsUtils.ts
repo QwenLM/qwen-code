@@ -286,27 +286,20 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
  * scope stays the admin override: when it sets the key the workspace
  * value is dropped regardless.
  *
- * `strictness` ranks a value; higher is stricter. An unrecognized value
- * ranks strictest of all so it is kept rather than stripped: the readers
- * of both keys fail closed on a value they do not understand, and
- * stripping it would let a looser user value through in its place.
+ * `strictness` ranks the behavior a value produces; higher is stricter.
+ * An unrecognized value gets the rank of the fail-closed behavior its
+ * reader applies: messaging is off, and inbound messages are held.
  * `undefined` is ranked too, so a workspace value is compared against the
  * feature's own default when no operator scope sets the key.
  *
  * Like the list above, this is the one place that drives the merge-time
- * strip, the warning that reports it, and the write guard on the serve
- * routes.
+ * strip and the warning that reports it.
  */
 export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
   {
     section: 'agents',
     key: 'crossSessionMessaging',
-    strictness: (value: unknown): number =>
-      value === true
-        ? 0
-        : value === false || value === undefined
-          ? 1
-          : Infinity,
+    strictness: (value: unknown): number => (value === true ? 0 : 1),
   },
   {
     section: 'agents',
@@ -322,34 +315,13 @@ export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
             ? 2
             : value === 'refuse'
               ? 3
-              : Infinity,
+              : 2,
   },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;
   readonly strictness: (value: unknown) => number;
 }>;
-
-/** The tighten-only settings as flattened dotted keys. */
-export const WORKSPACE_TIGHTEN_ONLY_SETTING_KEYS: readonly string[] =
-  WORKSPACE_TIGHTEN_ONLY_SETTINGS.map(
-    ({ section, key }) => `${section}.${key}`,
-  );
-
-/**
- * True when `value` is the loosest a tighten-only key can be, i.e. a
- * value a workspace can never be honored for. Used to refuse the write
- * up front instead of persisting a dead entry.
- */
-export function isLoosestTightenOnlyValue(
-  dottedKey: string,
-  value: unknown,
-): boolean {
-  const entry = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
-    ({ section, key }) => `${section}.${key}` === dottedKey,
-  );
-  return entry !== undefined && entry.strictness(value) === 0;
-}
 
 /** The restricted settings as flattened dotted keys, e.g. `tools.workflowsEnabled`. */
 export const WORKSPACE_RESTRICTED_SETTING_KEYS: readonly string[] =
