@@ -63,7 +63,7 @@ import { createSessionOrganizationService } from './session-organization-helpers
 
 type StandaloneSubSessionService = Pick<
   StandaloneSessionService,
-  'createChildWithInitialPrompt' | 'resume' | 'continueSession' | 'delete'
+  'createChildWithInitialPrompt' | 'resume' | 'continueSession'
 >;
 
 const log = createDebugLogger('SUB_SESSION');
@@ -892,17 +892,6 @@ export function createSubSessionLauncher(
       spawnedSession = sub;
       const sessionId = sub.sessionId;
       if (info.model && sub.modelApplied === false) {
-        if (standalone) {
-          try {
-            await standaloneService!.delete([sessionId]);
-          } catch (cleanupError) {
-            log.debug(
-              'sub-session: standalone model-selection rollback failed',
-              sessionId,
-              cleanupError,
-            );
-          }
-        }
         throw new Error(`sub-session model selection failed: ${info.model}`);
       }
       if (isolatedWorkspace && !standalone) {
@@ -1188,18 +1177,33 @@ export function createSubSessionLauncher(
           }
         }
       } else if (spawnedSession !== undefined && !standalone) {
-        // Both guards are load-bearing. `.catch()` swallows the async
-        // rejection; the try/catch contains a SYNCHRONOUS throw. We are already
-        // inside the catch block, so an escaping throw here would replace `err`
-        // — the real launch failure — with the cleanup failure.
+        // Cleanup failures must not replace `err`, the real launch failure.
+        const sessionId = spawnedSession.sessionId;
+        let sessionClosed = false;
         try {
-          void bridge.closeSession(spawnedSession.sessionId).catch(() => {});
+          await bridge.closeSession(sessionId);
+          sessionClosed = true;
         } catch (closeErr) {
-          log.debug(
-            'sub-session: closeSession threw',
-            spawnedSession.sessionId,
-            closeErr,
-          );
+          log.debug('sub-session: closeSession threw', sessionId, closeErr);
+        }
+        if (sessionClosed && !promptDispatched) {
+          try {
+            const removeTranscript = () =>
+              new SessionService(boundWorkspace).removeSession(sessionId);
+            const transcriptRemoved = runtimeBaseDir
+              ? await Storage.runWithResolvedRuntimeBaseDir(
+                  runtimeBaseDir,
+                  removeTranscript,
+                )
+              : await removeTranscript();
+            if (transcriptRemoved) bridge.markSessionCatalogChanged();
+          } catch (cleanupError) {
+            log.debug(
+              'sub-session: transcript cleanup failed',
+              sessionId,
+              cleanupError,
+            );
+          }
         }
       }
       writeStderrLine(

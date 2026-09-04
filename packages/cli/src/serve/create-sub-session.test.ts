@@ -436,8 +436,9 @@ describe('sub-session launcher', () => {
   it('assigns the selected group inside the resolved runtime storage', async () => {
     const fake = makeFakeBridge();
     const runtimeBaseDir = '/tmp/scheduled-task-runtime';
+    let assignedRuntimeBaseDir: string | undefined;
     updateSessionOrganization.mockImplementationOnce(async () => {
-      expect(Storage.getRuntimeBaseDir()).toBe(runtimeBaseDir);
+      assignedRuntimeBaseDir = Storage.getRuntimeBaseDir();
     });
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
@@ -455,6 +456,7 @@ describe('sub-session launcher', () => {
     });
 
     expect(updateSessionOrganization).toHaveBeenCalledOnce();
+    expect(assignedRuntimeBaseDir).toBe(runtimeBaseDir);
   });
 
   it('still launches when scheduled-task group assignment fails', async () => {
@@ -509,9 +511,18 @@ describe('sub-session launcher', () => {
 
   it('rejects a scheduled-task run when its selected model is not applied', async () => {
     const fake = makeFakeBridge({ modelApplied: false });
+    const runtimeBaseDir = '/tmp/scheduled-task-runtime';
+    let transcriptRemovalRuntimeBaseDir: string | undefined;
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        transcriptRemovalRuntimeBaseDir = Storage.getRuntimeBaseDir();
+        return true;
+      });
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      runtimeBaseDir,
     });
 
     await expect(
@@ -527,6 +538,9 @@ describe('sub-session launcher', () => {
 
     expect(fake.closes).toEqual(['sub-1']);
     expect(fake.prompts).toEqual([]);
+    expect(removeSession).toHaveBeenCalledWith('sub-1');
+    expect(transcriptRemovalRuntimeBaseDir).toBe(runtimeBaseDir);
+    expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
   });
 
   it('routes a standalone caller through the managed standalone child service', async () => {
@@ -565,7 +579,6 @@ describe('sub-session launcher', () => {
       getBridge: () => fake.bridge,
       getStandaloneSessionService: () => ({
         createChildWithInitialPrompt,
-        delete: vi.fn(),
         resume: vi.fn(),
         continueSession: vi.fn(async (_sessionId, dispatch) =>
           dispatch({ bridge: fake.bridge } as never, 'caller-standalone'),
@@ -602,12 +615,11 @@ describe('sub-session launcher', () => {
     ]);
   });
 
-  it('deletes a standalone child when its selected model is not applied', async () => {
+  it('rejects a standalone child when its selected model is not applied', async () => {
     const fake = makeFakeBridge({
       callerSourceTypes: { 'caller-standalone': 'standalone' },
     });
     let childSessionId = '';
-    const deleteSessions = vi.fn(async () => ({}) as never);
     const createChildWithInitialPrompt = vi.fn(
       async (request: {
         sessionId: string;
@@ -640,7 +652,6 @@ describe('sub-session launcher', () => {
       getBridge: () => fake.bridge,
       getStandaloneSessionService: () => ({
         createChildWithInitialPrompt,
-        delete: deleteSessions,
         resume: vi.fn(),
         continueSession: vi.fn(),
       }),
@@ -656,7 +667,7 @@ describe('sub-session launcher', () => {
       }),
     ).rejects.toThrow(/model selection failed.*missing-model/i);
 
-    expect(deleteSessions).toHaveBeenCalledWith([childSessionId]);
+    expect(childSessionId).not.toBe('');
     expect(fake.prompts).toEqual([]);
   });
 
@@ -696,7 +707,6 @@ describe('sub-session launcher', () => {
       getBridge: () => fake.bridge,
       getStandaloneSessionService: () => ({
         createChildWithInitialPrompt,
-        delete: vi.fn(),
         resume: vi.fn(),
         continueSession: vi.fn(),
       }),
@@ -750,7 +760,6 @@ describe('sub-session launcher', () => {
             turn: Promise.reject(new Error('managed dispatch failed')),
           },
         }),
-        delete: vi.fn(),
         resume: vi.fn(),
         continueSession: vi.fn(),
       }),
@@ -839,7 +848,6 @@ describe('sub-session launcher', () => {
             },
           };
         },
-        delete: vi.fn(),
         resume,
         continueSession,
       }),

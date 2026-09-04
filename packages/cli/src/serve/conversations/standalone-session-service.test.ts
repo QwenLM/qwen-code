@@ -110,6 +110,7 @@ interface Harness {
   stageStandaloneDirectory: ReturnType<typeof vi.fn>;
   restoreStagedStandaloneDirectory: ReturnType<typeof vi.fn>;
   removeStagedStandaloneDirectory: ReturnType<typeof vi.fn>;
+  discardEmptyConversationDirectory: ReturnType<typeof vi.fn>;
   confirmStandaloneRootDurability: ReturnType<typeof vi.fn>;
   getWorkspaceProvidersStatus: ReturnType<typeof vi.fn>;
   assertExactRoot: ReturnType<typeof vi.fn>;
@@ -227,6 +228,7 @@ function createHarness(): Harness {
   }));
   const restoreStagedStandaloneDirectory = vi.fn(async () => identity);
   const removeStagedStandaloneDirectory = vi.fn(async () => undefined);
+  const discardEmptyConversationDirectory = vi.fn(async () => true);
   const confirmStandaloneRootDurability = vi.fn(async () => undefined);
   const assertExactRoot = vi.fn(async () => root);
   const lifecycle = new SessionArchiveCoordinator();
@@ -247,6 +249,7 @@ function createHarness(): Harness {
         identity,
         created: true,
       })),
+      discardEmptyConversationDirectory,
       inspectStandaloneDirectory,
       ensureStandaloneDirectory,
       inspectStandaloneDeletionPaths,
@@ -284,6 +287,7 @@ function createHarness(): Harness {
     stageStandaloneDirectory,
     restoreStagedStandaloneDirectory,
     removeStagedStandaloneDirectory,
+    discardEmptyConversationDirectory,
     confirmStandaloneRootDurability,
     getWorkspaceProvidersStatus,
     assertExactRoot,
@@ -1787,6 +1791,77 @@ describe('StandaloneSessionService', () => {
       undefined,
       expect.objectContaining({ promptId: 'prompt-child' }),
     );
+  });
+
+  it('rolls back a child before prompt admission when its model is not applied', async () => {
+    const childSessionId = '22222222-2222-4222-8222-222222222222';
+    const storageParentSessionId = sessionId.toUpperCase();
+    vi.spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(sessionId)
+      .mockResolvedValueOnce(storageParentSessionId)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(childSessionId)
+      .mockResolvedValueOnce(undefined);
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'active',
+    );
+    vi.spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValueOnce({ sourceType: 'standalone' })
+      .mockResolvedValue({
+        sourceType: 'standalone',
+        parentSessionId: storageParentSessionId,
+      });
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
+    const harness = createHarness();
+
+    await harness.service.createWithInitialPrompt({ sessionId }, 'parent task');
+    harness.bridge.getSessionSummary.mockReturnValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      sourceType: 'standalone',
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+    harness.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+      sessionId: childSessionId,
+      workspaceCwd: root.canonicalRoot,
+      attached: false,
+      sourceType: 'standalone',
+      sourcePersisted: true,
+      parentSessionPersisted: true,
+      modelApplied: false,
+    });
+    harness.bridge.sendPrompt.mockClear();
+
+    await expect(
+      harness.service.createChildWithInitialPrompt(
+        {
+          sessionId: childSessionId,
+          parentSessionId: sessionId,
+          promptId: 'prompt-child',
+          modelServiceId: 'missing-model',
+        },
+        'child task',
+      ),
+    ).rejects.toMatchObject({
+      code: 'model_selection_failed',
+      sessionId: childSessionId,
+    });
+
+    expect(harness.bridge.killSession).toHaveBeenCalledWith(childSessionId, {
+      requireZeroAttaches: true,
+    });
+    expect(removeSession).toHaveBeenCalledWith(childSessionId);
+    expect(harness.discardEmptyConversationDirectory).toHaveBeenCalledWith(
+      childSessionId,
+    );
+    expect(harness.bridge.sendPrompt).not.toHaveBeenCalled();
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalled();
   });
 
   it('returns an in-flight create without re-entering the runtime or storage', async () => {
