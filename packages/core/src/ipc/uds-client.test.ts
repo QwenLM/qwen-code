@@ -23,6 +23,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs/promises';
+import * as net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -76,6 +77,25 @@ async function probeBooleanWithError(code: string) {
   return probePeerSocket('/tmp/scripted.sock');
 }
 
+let staleSocketSequence = 0;
+
+async function leaveStaleSocket(socketPath: string): Promise<void> {
+  const livePath = path.join(
+    path.dirname(socketPath),
+    `.stale-${staleSocketSequence++}`,
+  );
+  const server = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(livePath, resolve);
+  });
+  try {
+    await fs.rename(livePath, socketPath);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
 let tmpDir: string;
 
 beforeEach(async () => {
@@ -110,7 +130,7 @@ describe.skipIf(isWindows)('probePeerSocket', () => {
   it('is false for a stale socket file left by a dead process', async () => {
     // A leftover inode stats fine; only the dial (ECONNREFUSED) says it is dead.
     const stale = path.join(tmpDir, 'stale.sock');
-    await fs.writeFile(stale, '');
+    await leaveStaleSocket(stale);
     expect(await probePeerSocket(stale)).toBe(false);
   });
 
@@ -168,7 +188,7 @@ describe.skipIf(isWindows)('probePeerSocketVerdict', () => {
     // A leftover inode stats fine; only the dial (ECONNREFUSED) says it is
     // dead, and this is the one verdict that licenses an unlink.
     const stale = path.join(tmpDir, 'stale.sock');
-    await fs.writeFile(stale, '');
+    await leaveStaleSocket(stale);
     expect(await probePeerSocketVerdict(stale)).toBe('dead');
   });
 

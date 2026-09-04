@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 /**
  * @license
  * Copyright 2026 Qwen

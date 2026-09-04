@@ -57,10 +57,12 @@ const UNALLOCATABLE_PID = 2_147_483_647;
 let tmpDir: string;
 let inbox: PeerInbox | null = null;
 let received: PeerFrame[];
+let shortTmpDirs: string[] = [];
 
 const isWindows = process.platform === 'win32';
 
 beforeEach(async () => {
+  shortTmpDirs = [];
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-inbox-'));
   received = [];
 });
@@ -73,6 +75,9 @@ afterEach(async () => {
   // XDG_RUNTIME_DIR into the next test's mkdtemp.
   vi.unstubAllEnvs();
   await fs.rm(tmpDir, { recursive: true, force: true });
+  await Promise.all(
+    shortTmpDirs.map((dir) => fs.rm(dir, { recursive: true, force: true })),
+  );
 });
 
 async function listen(name = 'a.sock'): Promise<PeerInbox> {
@@ -111,6 +116,40 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 30));
 }
 
+async function waitForRemoval(target: string): Promise<void> {
+  await vi.waitFor(
+    async () => {
+      await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+    { timeout: 2_000, interval: 10 },
+  );
+}
+
+async function makeShortTmpDir(prefix: string): Promise<string> {
+  const dir = await fs.mkdtemp(`/tmp/${prefix}`);
+  shortTmpDirs.push(dir);
+  return dir;
+}
+
+let staleSocketSequence = 0;
+
+async function leaveStaleSocket(socketPath: string): Promise<void> {
+  const livePath = path.join(
+    path.dirname(socketPath),
+    `.stale-${staleSocketSequence++}`,
+  );
+  const server = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(livePath, resolve);
+  });
+  try {
+    await fs.rename(livePath, socketPath);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
 describe.skipIf(isWindows)('startPeerInbox', () => {
   it('receives a frame written by the client', async () => {
     const started = await listen();
@@ -145,7 +184,7 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
   it('reclaims a socket file left behind by a crashed session', async () => {
     const dir = path.join(tmpDir, 'socks');
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, 'a.sock'), 'stale');
+    await leaveStaleSocket(path.join(dir, 'a.sock'));
 
     const started = await listen();
     await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'hi' }));
@@ -307,8 +346,9 @@ describe.skipIf(isWindows)('startPeerInbox', () => {
     // disappears with it. Every other failure test hands in an explicit
     // socketPath, so the candidate list has one entry and this path
     // through `startPeerInbox` is never walked.
-    const runtime = path.join(tmpDir, 'runtime-file');
-    const tmp = path.join(tmpDir, 'tmp-file');
+    const base = await makeShortTmpDir('qwen-inbox-blame-');
+    const runtime = path.join(base, 'runtime-file');
+    const tmp = path.join(base, 'tmp-file');
     await fs.writeFile(runtime, 'not a directory');
     await fs.writeFile(tmp, 'not a directory');
     vi.stubEnv('XDG_RUNTIME_DIR', runtime);
@@ -776,10 +816,10 @@ describe.skipIf(isWindows)('client errors', () => {
   it('reports ECONNREFUSED for a stale socket file', async () => {
     const started = await listen();
     const socketPath = started.socketPath;
-    // Close the server but leave the inode: a crashed session's leftovers.
+    // Recreate the closed server as a crashed session's stale socket inode.
     await started.close();
     inbox = null;
-    await fs.writeFile(socketPath, '');
+    await leaveStaleSocket(socketPath);
 
     await expect(
       sendPeerFrame(socketPath, buildUserFrame({ content: 'hi' })),
@@ -960,8 +1000,8 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     const live = path.join(dir, `${process.pid}.sock`);
     const self = path.join(dir, `${UNALLOCATABLE_PID - 1}.sock`);
     const foreign = path.join(dir, 'notes.sock');
-    for (const file of [dead, live, self, foreign])
-      await fs.writeFile(file, '');
+    await leaveStaleSocket(dead);
+    for (const file of [live, self, foreign]) await fs.writeFile(file, '');
 
     expect(await sweepOrphanSockets(dir, self)).toBe(1);
     expect(await fs.readdir(dir)).toEqual(
@@ -983,7 +1023,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     const sockets = Array.from({ length: SWEEP_BATCH_SIZE + 4 }, (_, index) =>
       path.join(dir, `${firstPid + index}.sock`),
     );
-    await Promise.all(sockets.map((socket) => fs.writeFile(socket, '')));
+    await Promise.all(sockets.map((socket) => leaveStaleSocket(socket)));
 
     // Below the fixture range, not inside it: a self path that lands on
     // one of the fixtures is skipped as this session's own socket, and
@@ -1027,16 +1067,16 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
   it('sweeps every batch when more than one batch of fallback directories accumulates', async () => {
     // One nonce directory per crashed session: 17+ of them span two
     // batches, and only a loop that visits every batch clears them all.
-    const parent = path.join(tmpDir, 'tmp');
+    const parent = await makeShortTmpDir('qwen-inbox-batches-');
     const ownDir = path.join(parent, `qwen-socks-${'f'.repeat(16)}`);
-    await fs.mkdir(ownDir, { recursive: true });
+    await fs.mkdir(ownDir);
     const dirs = Array.from({ length: SWEEP_BATCH_SIZE + 4 }, (_, index) =>
       path.join(parent, `qwen-socks-${index.toString(16).padStart(16, '0')}`),
     );
     await Promise.all(
       dirs.map(async (dir, index) => {
         await fs.mkdir(dir);
-        await fs.writeFile(path.join(dir, `${2_147_483_000 + index}.sock`), '');
+        await leaveStaleSocket(path.join(dir, `${2_147_483_000 + index}.sock`));
       }),
     );
 
@@ -1101,7 +1141,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
   it.skipIf(process.getuid?.() === 0)(
     'keeps a fallback directory whose probe could not reach a verdict',
     async () => {
-      const parent = path.join(tmpDir, 'tmp');
+      const parent = await makeShortTmpDir('qwen-inbox-unknown-');
       const dir = path.join(parent, `qwen-socks-${'a'.repeat(16)}`);
       await fs.mkdir(dir, { recursive: true });
       const live = path.join(dir, `${UNALLOCATABLE_PID}.sock`);
@@ -1124,7 +1164,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
   );
 
   it('removes dead-socket and old empty fallback directories, but keeps fresh empty directories', async () => {
-    const parent = path.join(tmpDir, 'tmp');
+    const parent = await makeShortTmpDir('qwen-inbox-dirs-');
     const nonce = (n: string) =>
       path.join(parent, `qwen-socks-${n.repeat(16)}`);
     const dead = nonce('a');
@@ -1134,7 +1174,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     const oldEmpty = nonce('e');
     for (const d of [dead, mixed, freshEmpty, own, oldEmpty])
       await fs.mkdir(d, { recursive: true });
-    await fs.writeFile(path.join(dead, `${UNALLOCATABLE_PID}.sock`), '');
+    await leaveStaleSocket(path.join(dead, `${UNALLOCATABLE_PID}.sock`));
     await fs.writeFile(path.join(mixed, `${UNALLOCATABLE_PID}.sock`), '');
     await fs.writeFile(path.join(mixed, 'keep.txt'), '');
     const old = new Date(Date.now() - 120_000);
@@ -1204,17 +1244,14 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     const runtime = path.join(tmpDir, 'runtime');
     const dir = path.join(runtime, 'qwen-socks');
     await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(path.join(dir, `${UNALLOCATABLE_PID}.sock`), '');
+    await leaveStaleSocket(path.join(dir, `${UNALLOCATABLE_PID}.sock`));
     vi.stubEnv('XDG_RUNTIME_DIR', runtime);
     try {
       const started = await startPeerInbox({ onFrame: () => {} });
       if (!started) throw new Error('inbox failed to start');
       inbox = started;
       expect(path.dirname(started.socketPath)).toBe(dir);
-      await settle();
-      await expect(
-        fs.stat(path.join(dir, `${UNALLOCATABLE_PID}.sock`)),
-      ).rejects.toThrow();
+      await waitForRemoval(path.join(dir, `${UNALLOCATABLE_PID}.sock`));
     } finally {
       vi.unstubAllEnvs();
     }
@@ -1236,8 +1273,8 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     await fs.mkdir(mine);
     const untouched = path.join(foreign, `${UNALLOCATABLE_PID}.sock`);
     const swept = path.join(mine, `${UNALLOCATABLE_PID}.sock`);
-    await fs.writeFile(untouched, '');
-    await fs.writeFile(swept, '');
+    await leaveStaleSocket(untouched);
+    await leaveStaleSocket(swept);
 
     const outside = await startPeerInbox({
       socketPath: path.join(foreign, 'a.sock'),
@@ -1250,8 +1287,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     if (!outside || !insideDir) throw new Error('inbox failed to start');
     inbox = insideDir;
     try {
-      await settle();
-      await expect(fs.stat(swept)).rejects.toThrow();
+      await waitForRemoval(swept);
       await expect(fs.stat(untouched)).resolves.toBeDefined();
     } finally {
       await outside.close();
@@ -1264,7 +1300,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
     const temp = await fs.mkdtemp('/tmp/qwen-inbox-bind-');
     const stale = path.join(temp, `qwen-socks-${'a'.repeat(16)}`);
     await fs.mkdir(stale, { recursive: true });
-    await fs.writeFile(path.join(stale, `${UNALLOCATABLE_PID}.sock`), '');
+    await leaveStaleSocket(path.join(stale, `${UNALLOCATABLE_PID}.sock`));
     vi.stubEnv('XDG_RUNTIME_DIR', runtime);
     vi.stubEnv('TMPDIR', temp);
     try {
@@ -1272,8 +1308,7 @@ describe.skipIf(isWindows)('orphan socket sweeps', () => {
       if (!started) throw new Error('inbox failed to start');
       inbox = started;
       expect(path.dirname(path.dirname(started.socketPath))).toBe(temp);
-      await settle();
-      await expect(fs.stat(stale)).rejects.toThrow();
+      await waitForRemoval(stale);
     } finally {
       vi.unstubAllEnvs();
       await fs.rm(temp, { recursive: true, force: true });
@@ -1539,7 +1574,7 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
     await fs.mkdir(path.dirname(stale), { recursive: true });
     // A socket file with nothing behind it, which is what a kill -9
     // leaves: bind must reclaim the name, not multiply it.
-    await fs.writeFile(stale, '');
+    await leaveStaleSocket(stale);
     const started = await startPeerInbox({
       socketPath: stale,
       onFrame: () => {},
@@ -1555,7 +1590,8 @@ describe.skipIf(isWindows)('PID-keyed path collisions', () => {
     const deadSibling = path.join(dir, `${UNALLOCATABLE_PID}-0123abcd.sock`);
     const liveSibling = path.join(dir, `${process.pid}-0123abcd.sock`);
     const malformed = path.join(dir, `${UNALLOCATABLE_PID}-XYZ.sock`);
-    for (const file of [deadSibling, liveSibling, malformed]) {
+    await leaveStaleSocket(deadSibling);
+    for (const file of [liveSibling, malformed]) {
       await fs.writeFile(file, '');
     }
 
