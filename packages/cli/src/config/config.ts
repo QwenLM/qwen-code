@@ -46,6 +46,7 @@ import {
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
+  resolvePathFromEnv,
   BUILT_IN_OUTPUT_STYLES,
   getBuiltInOutputStyle,
   stripAnsiAndControl,
@@ -166,6 +167,7 @@ export interface CliArgs {
   promptInteractive: string | undefined;
   systemPrompt: string | undefined;
   appendSystemPrompt: string | undefined;
+  appendSystemPromptFile: string | undefined;
   // Repeatable at runtime: yargs collects a repeated `--output-style` into an
   // array despite `type: 'string'`, so the declaration carries the honest
   // shape rather than leaving a reader to find out via `.trim is not a
@@ -625,6 +627,10 @@ export async function parseArguments(): Promise<CliArgs> {
           'append-system-prompt',
           DEFAULT_COMMAND_OPTIONS['append-system-prompt'],
         )
+        .option(
+          'append-system-prompt-file',
+          DEFAULT_COMMAND_OPTIONS['append-system-prompt-file'],
+        )
         .option('output-style', DEFAULT_COMMAND_OPTIONS['output-style'])
         .option('sandbox', DEFAULT_COMMAND_OPTIONS.sandbox)
         .option('sandbox-image', DEFAULT_COMMAND_OPTIONS['sandbox-image'])
@@ -987,6 +993,38 @@ export async function loadHierarchicalMemory(
     contextRuleExcludes,
     options,
   );
+}
+
+export function resolveAppendSystemPrompt(
+  inlinePrompt?: string,
+  filePath?: string,
+  envVar: string | undefined = process.env['QWEN_APPEND_SYSTEM_MD'],
+): string | undefined {
+  let fileContent: string | undefined;
+
+  if (filePath) {
+    const resolved = path.resolve(filePath);
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`missing append system prompt file '${resolved}'`);
+    }
+    fileContent = fs.readFileSync(resolved, 'utf8');
+  } else if (envVar) {
+    const resolution = resolvePathFromEnv(envVar);
+    if (resolution.value && !resolution.isDisabled && !resolution.isSwitch) {
+      if (!fs.existsSync(resolution.value)) {
+        throw new Error(
+          `missing append system prompt file '${resolution.value}'`,
+        );
+      }
+      fileContent = fs.readFileSync(resolution.value, 'utf8');
+    }
+  }
+
+  const parts = [inlinePrompt, fileContent].filter((part): part is string =>
+    Boolean(part?.trim()),
+  );
+
+  return parts.length > 0 ? parts.join('\n\n') : undefined;
 }
 
 /**
@@ -2125,7 +2163,10 @@ export async function loadCliConfig(
     debugMode,
     question,
     systemPrompt: argv.systemPrompt,
-    appendSystemPrompt: argv.appendSystemPrompt,
+    appendSystemPrompt: resolveAppendSystemPrompt(
+      argv.appendSystemPrompt,
+      argv.appendSystemPromptFile,
+    ),
     // Like every other settings-sourced option, the style setting is ignored
     // in --bare and --safe-mode; the explicit flag still applies.
     outputStyle: resolveOutputStyle(
