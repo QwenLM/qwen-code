@@ -245,6 +245,13 @@
   );
 }
 
+:global([data-transcript-render-mode='document']) .sessionTimelineViewport {
+  max-height: none;
+  overflow-y: visible;
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
 .sessionTimelineViewport.sessionTimelineViewport::-webkit-scrollbar {
   display: none !important;
   width: 0 !important;
