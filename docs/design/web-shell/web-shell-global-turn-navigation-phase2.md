@@ -340,15 +340,21 @@ Rules:
   carry that same snapshot; a refresh's tail page mints the new store
   snapshot, and retained pages keep theirs.
 - **Pages never overlap.** The seed page's `start` is server-chosen
-  (`max(0, totalTurns - limit)`, `session-transcript-reader.ts:2565`), so it
-  is aligned to no client grid. Older-page requests clamp to known coverage:
-  with `boundary` = the smallest ordinal already covered, request
+  (`max(0, totalTurns - min(limit, totalTurns))`,
+  `session-transcript-reader.ts:2565`) — note the inner `min`: any session
+  with at most `limit` durable turns is seeded at ordinal 0 immediately — so
+  the seed is aligned to no client grid. Older-page requests are issued **only
+  when `boundary > 0`**, where `boundary` = the smallest ordinal already
+  covered: `boundary == 0` means the oldest turn is retained and no older page
+  exists (the clamped `limit = boundary - start` would compute 0, a 400
+  `invalid_transcript_limit`), so no request is sent. Otherwise request
   `start = max(0, boundary - limit)` and shrink `limit` to `boundary - start`
   so the returned page butts exactly against the retained pages.
-  `ensurePage(ordinal)` computes the uncovered interval containing the ordinal
-  and requests the largest non-overlapping slice inside it. Ordinals are
-  frozen within a snapshot, so the grid is stable until a refresh — and a
-  refresh re-validates retained pages by identity before keeping anything.
+  `ensurePage(ordinal)` is a no-op when the ordinal is already covered;
+  otherwise it computes the uncovered interval containing the ordinal and
+  requests the largest non-overlapping slice inside it. Ordinals are frozen
+  within a snapshot, so the grid is stable until a refresh — and a refresh
+  re-validates retained pages by identity before keeping anything.
 - Tail refresh on prompt terminal is a **two-step merge**, because a refresh
   deliberately omits `snapshot` and therefore cannot choose its `start` — the
   response always covers the server-computed newest window
@@ -607,9 +613,11 @@ Provider/store unit tests (vitest + jsdom, extending the existing
 `MockDaemonSessionClient`):
 
 - turn-index store: seed newest-first; older-page fetch by `start` with the
-  non-overlap clamp (shrunk `limit` butting exactly against covered ordinals);
+  non-overlap clamp (shrunk `limit` butting exactly against covered ordinals)
+  and the `boundary == 0` no-request guard;
   `ensurePage(ordinal)` computing the largest non-overlapping slice of an
-  uncovered interval; snapshot pinning; the two-step tail merge — validation
+  uncovered interval and no-op'ing when the ordinal is covered; snapshot
+  pinning; the two-step tail merge — validation
   response never admitted, clamped fill lands on the grid, the
   `largest covered == totalTurns - 1` skip path, the `>` path routing to
   divergent, chunked fill when the uncovered tail exceeds one page;
