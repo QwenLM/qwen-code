@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { EOL } from 'node:os';
 import { promises as fsp } from 'node:fs';
 import { Box } from 'ink';
+import { render } from 'ink-testing-library';
 
 // Capture launches of the external editor so the full-plan viewer (#7001)
 // can be asserted without spawning a real editor process.
@@ -36,6 +37,7 @@ import type {
 import { IdeClient, ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import type { LoadedSettings } from '../../../config/settings.js';
+import { KeypressProvider } from '../../contexts/KeypressContext.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
 
 describe('ToolConfirmationMessage', () => {
@@ -623,24 +625,25 @@ describe('ToolConfirmationMessage', () => {
       const props = {
         confirmationDetails: editConfirmationDetails,
         config: mockConfig,
-        availableTerminalHeight: 30,
         contentWidth: 80,
       };
-      const { lastFrame, rerender } = renderWithProviders(
+      const tree = (height: number) => (
         <SettingsContext.Provider value={preferredEditorSettings}>
-          <ToolConfirmationMessage {...props} />
-        </SettingsContext.Provider>,
+          <KeypressProvider kittyProtocolEnabled={true}>
+            <ToolConfirmationMessage
+              {...props}
+              availableTerminalHeight={height}
+            />
+          </KeypressProvider>
+        </SettingsContext.Provider>
       );
+      const { lastFrame, rerender } = render(tree(30));
 
       expect(lastFrame()).toContain('Modify with external editor');
       expect(isEditorAvailableMock).toHaveBeenCalledWith('vscode');
       expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
 
-      rerender(
-        <SettingsContext.Provider value={preferredEditorSettings}>
-          <ToolConfirmationMessage {...props} availableTerminalHeight={31} />
-        </SettingsContext.Provider>,
-      );
+      rerender(tree(31));
       expect(lastFrame()).toContain('Modify with external editor');
       expect(isEditorAvailableMock).toHaveBeenCalledTimes(1);
     });
