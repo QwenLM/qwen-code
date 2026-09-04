@@ -1238,6 +1238,20 @@ describe('runCliEntry', () => {
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
+    it('bounces a launch whose LAST positional is the help word', async () => {
+      // yargs matches its builtin `help` on the LAST positional, so the
+      // bounce reads both slots; `['help', '--bg']` above is bounced by
+      // the first-positional clause alone and never witnesses the
+      // second. A first positional the parser does not honor as a
+      // command entrance still bounces when the last one is `help` —
+      // removing the lastPositionalArg clause (or mutating HELP_COMMAND)
+      // dispatches this launch as the prompt `audit help`.
+      await runCliEntry(['audit', 'help', BACKGROUND_FLAG]);
+
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
     it('dispatches a flag-led prompt ending in the word help', async () => {
       // The help-word bounce serves positional-led launches, where yargs
       // matches `help` as a command entrance. A flag-led launch has no
