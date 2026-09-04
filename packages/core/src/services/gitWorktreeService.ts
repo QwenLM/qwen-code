@@ -116,6 +116,9 @@ export async function createWorktreeSessionMarkerExclusive(
     nodeFs.constants.O_CREAT |
     nodeFs.constants.O_EXCL |
     (nodeFs.constants.O_NOFOLLOW ?? 0);
+  // `fs.open` with O_EXCL throws before anything is created when a path
+  // already exists, so it stays outside the try: only a failure past this
+  // point has a file of ours to remove.
   const handle = await fs.open(markerPath, flags, 0o600);
   try {
     const before = await handle.stat();
@@ -139,8 +142,14 @@ export async function createWorktreeSessionMarkerExclusive(
     ) {
       throw new Error('Worktree session marker identity changed');
     }
-  } finally {
     await handle.close();
+  } catch (error) {
+    // The O_EXCL open created this file, so it is ours to remove: never
+    // leave the empty or half-verified shell behind, or every later create
+    // wedges on EEXIST and the strict reader reports an invalid owner.
+    await handle.close().catch(() => {});
+    await fs.unlink(markerPath).catch(() => {});
+    throw error;
   }
   await addWorktreeSessionMarkerExclude(worktreePath);
 }

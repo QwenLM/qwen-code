@@ -747,19 +747,30 @@ export class DaemonSessionClient {
           });
     this.reattaching = resume.then(async (session) => {
       if (this.session.worktreeState === 'persisted-v1') {
-        const sameWorktree =
-          session.worktreeState === 'persisted-v1' &&
-          session.worktree?.path === this.session.worktree?.path;
-        if (!sameWorktree) {
-          await this.client
-            .detachSession(session.sessionId, session.clientId)
-            .catch(() => {});
-          throw new Error(
-            `Daemon lost durable worktree identity for session ${this.sessionId}`,
-          );
+        if (!session.worktree) {
+          // The daemon resumed the session with no worktree object at all.
+          // Its own restore gate only accepts that when no sidecar exists —
+          // the worktree was legitimately exited (exit_worktree removes the
+          // sidecar without notifying this client), so the cached claim is
+          // stale rather than contradicted. Heal by dropping it; a response
+          // that still carries `worktree` metadata is never proof of exit.
+          this.session.worktree = undefined;
+          this.session.worktreeState = undefined;
+        } else {
+          const sameWorktree =
+            session.worktreeState === 'persisted-v1' &&
+            session.worktree.path === this.session.worktree?.path;
+          if (!sameWorktree) {
+            await this.client
+              .detachSession(session.sessionId, session.clientId)
+              .catch(() => {});
+            throw new Error(
+              `Daemon lost durable worktree identity for session ${this.sessionId}`,
+            );
+          }
+          this.session.worktree = session.worktree;
+          this.session.worktreeState = session.worktreeState;
         }
-        this.session.worktree = session.worktree;
-        this.session.worktreeState = session.worktreeState;
       }
       // Refresh only the client identity; leave the SSE cursor and ACP state intact.
       this.session.clientId = session.clientId;

@@ -12538,7 +12538,7 @@ describe('createServeApp', () => {
     });
 
     it.each(['live', 'probe-error'] as const)(
-      'preserves a worktree when post-spawn cleanup is inconclusive (%s)',
+      'removes an unowned worktree when post-spawn cleanup is inconclusive (%s)',
       async (cleanupState) => {
         const generationGuard = createWorkspaceGenerationGuard();
         const removed: string[] = [];
@@ -12609,7 +12609,10 @@ describe('createServeApp', () => {
               opts: { requireZeroAttaches: true },
             },
           ]);
-          expect(removed).toEqual([]);
+          // Relocation never ran, so nothing can own the checkout: the
+          // worktree is removed even though the session cleanup outcome was
+          // inconclusive (live summary / probe error).
+          expect(removed).toEqual(['my-task']);
         } finally {
           mockWt.impl = undefined;
         }
