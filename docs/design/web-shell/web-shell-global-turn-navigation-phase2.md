@@ -358,21 +358,32 @@ Rules:
      ordinal present in both the response and the retained pages by `turnId`.
      All matching → append-only; any mismatch, or zero overlap after a large
      gap → divergent.
-  2. **Land on the grid** (append-only only): if the largest covered ordinal
-     is already `totalTurns - 1`, the append produced no new navigation turn
-     (only excluded record kinds arrived, or two refreshes coalesced) — skip
-     this step and adopt the new `snapshot`/`totalTurns` without issuing a
-     fill request. Otherwise issue a clamped fill request against the new
-     snapshot — `start` = one past the largest covered ordinal,
-     `limit = totalTurns - start` (never 0: `limit < 1` is rejected with 400
-     `invalid_transcript_limit`), iterating in page-sized chunks when the
-     uncovered tail exceeds one page — and admit the fill page(s). The
-     validation response itself is never admitted, since it overlaps retained
-     coverage by construction.
+  2. **Land on the grid** (append-only only): compare the largest covered
+     ordinal against `totalTurns - 1`:
+     - **equal** — the append produced no new navigation turn (only excluded
+       record kinds arrived, or two refreshes coalesced): skip this step and
+       adopt the new `snapshot`/`totalTurns` without issuing a fill request;
+     - **greater** — the store still holds ordinals the chain no longer has
+       (a rewind/truncation this client has not processed yet, e.g. another
+       client rewound the session): this is divergent by definition, so fall
+       through to the divergent branch below. This exit matters because a
+       validate request omits the snapshot by design — a truncated tail does
+       not fail the request, and without the exit it would be misread as
+       append-only, compute a negative `limit` (400
+       `invalid_transcript_limit`), and adopt a `totalTurns` smaller than the
+       retained coverage;
+     - **smaller** — issue a clamped fill request against the new snapshot:
+       `start` = one past the largest covered ordinal,
+       `limit = totalTurns - start` (never 0: `limit < 1` is rejected with
+       400 `invalid_transcript_limit`), iterating in page-sized chunks when
+       the uncovered tail exceeds one page — and admit the fill page(s). The
+       validation response itself is never admitted, since it overlaps
+       retained coverage by construction.
   - **append-only**: adopt the new `snapshot`/`totalTurns`, keep old pages,
     add the fill page(s).
-  - **divergent or zero overlap**: clear all snapshot-bound pages and admit
-    the validation response as the new tail page. Deliberately conservative —
+  - **divergent, zero overlap, or shrunk** (retained coverage extends past
+    the new `totalTurns`): clear all snapshot-bound pages and admit the
+    validation response as the new tail page. Deliberately conservative —
     it cannot retain a page from a rewritten active chain.
 
   "Pages never overlap" is the stable-state invariant after a merge
@@ -595,16 +606,32 @@ The SDK, daemon routes, and core reader are unchanged.
 Provider/store unit tests (vitest + jsdom, extending the existing
 `MockDaemonSessionClient`):
 
-- turn-index store: seed newest-first, older-page fetch by `start`, snapshot
-  pinning, append-only merge, divergent reset, LRU eviction with stable
-  `totalTurns`, `413 transcript_too_large` latch;
-- page ledger: initial load, prepend parity, anchored admission containing the
-  target, older/newer continuation, dedup by record id then prompt id,
+- turn-index store: seed newest-first; older-page fetch by `start` with the
+  non-overlap clamp (shrunk `limit` butting exactly against covered ordinals);
+  `ensurePage(ordinal)` computing the largest non-overlapping slice of an
+  uncovered interval; snapshot pinning; the two-step tail merge — validation
+  response never admitted, clamped fill lands on the grid, the
+  `largest covered == totalTurns - 1` skip path, the `>` path routing to
+  divergent, chunked fill when the uncovered tail exceeds one page;
+  divergent/zero-overlap reset; LRU eviction with stable `totalTurns` plus
+  the newest-page pin (a refresh after deep-history eviction still has
+  overlap to validate against); `413 transcript_too_large` latch;
+- page ledger: initial load, prepend parity, anchored admission containing
+  the target, older continuation (`beforeRecordId` + `snapshot`) and newer
+  continuation (`nextCursor` alone), the three gap resolvers — older
+  neighbor's stored `nextCursor`, `atRecordId` re-anchor after the cursor was
+  lost to eviction, and newer-neighbor `beforeRecordId` backfill for a gap
+  lying entirely inside one long turn — dedup by record id then prompt id,
   explicit gaps, whole-page eviction that never splits a turn, live-tail
   preservation under historical admission;
+- admission sizing: `page_too_large` (server 413), retryable `window_full`
+  (rejected-page footprint remembered, re-offered only once capacity
+  suffices), terminal `window_impossible`;
 - reconciliation: provisional replacement by `promptId`, legacy no-prompt-id
   path by record identity, shell overlay lifetime, no label/timestamp
   matching;
+- identity plumbing: the message adapter surfaces both `sourceRecordIds` and
+  `promptId` onto messages (neither exists there today);
 - lifecycle: reconnect dedup, rewind/branch invalidation,
   `transcript_snapshot_unavailable` (409) invalidation followed by explicit
   re-seed (the stale-snapshot recovery the #10750 checklist calls out),
