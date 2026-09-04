@@ -5583,14 +5583,15 @@ export function App({
     }
 
     if (previousSessionId !== nextSessionId) {
+      const nextSavedState = nextSessionId
+        ? artifactPanelStateBySessionRef.current.get(nextSessionId)
+        : undefined;
       setReviewChanges([]);
       setSelectedReviewPath(null);
-      setArtifactPanelExtraArtifacts([]);
+      setArtifactPanelExtraArtifacts(nextSavedState?.extraArtifacts ?? []);
       setPaneArtifactSnapshots(new Map());
       setArtifactPanelWidth(
-        (nextSessionId
-          ? artifactPanelStateBySessionRef.current.get(nextSessionId)?.width
-          : undefined) ?? getDefaultReviewPanelWidth(),
+        nextSavedState?.width ?? getDefaultReviewPanelWidth(),
       );
       setArtifactPanelFullscreen(false);
     }

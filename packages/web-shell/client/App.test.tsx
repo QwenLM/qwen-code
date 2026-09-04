@@ -26829,7 +26829,7 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('keeps a main-session artifact tab renderable across a live-list gap', async () => {
+  it('keeps a main-session artifact tab renderable across a live-list gap and session switch', async () => {
     mockWorkspace.capabilities = {
       workspaceCwd: '/tmp/project',
       workspaces: [
@@ -26900,7 +26900,37 @@ describe('App session callbacks', () => {
     });
 
     expect(document.body.textContent).toContain('Main artifact');
+
     mockSessionActions.loadArtifacts.mockResolvedValue({ artifacts: [] });
+    testState.workspaceEventSignals = {
+      ...testState.workspaceEventSignals,
+      artifactsVersion: 1,
+    };
+    await act(async () => {
+      rerender();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).not.toContain('Artifact not found.');
+
+    await act(async () => {
+      mockConnection.sessionId = 'session-2';
+      testState.ownerVersion += 1;
+      rerender();
+      await Promise.resolve();
+    });
+    expect(document.body.textContent).not.toContain('Main artifact');
+
+    await act(async () => {
+      mockConnection.sessionId = 'session-1';
+      testState.ownerVersion += 1;
+      rerender();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).toContain('Main artifact');
+    expect(document.body.textContent).not.toContain('Artifact not found.');
   });
 
   it('delivers the main-session Artifact snapshot to the embedding host', async () => {
