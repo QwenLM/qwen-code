@@ -1396,15 +1396,44 @@ export function PlanExecutionView({
             )}
           </div>
           <div className={styles.nodeContent}>{selectedTodo.content}</div>
+          {/* This panel is outside the node's own button, so unlike the
+              chips on the node face these references can be controls: each
+              one selects the step it names, which is what makes the
+              dependency list the graph's navigation. */}
           {(selectedTodo.blockedBy?.length ?? 0) > 0 && (
             <div className={styles.dependencies}>
-              {t('planExecution.dependsOn')}{' '}
-              {selectedTodo.blockedBy!.join(', ')}
+              <span>{t('planExecution.dependsOn')}</span>
+              {selectedTodo.blockedBy!.map((id) => (
+                <button
+                  className={styles.dependencyLink}
+                  data-plan-dependency={id}
+                  key={id}
+                  onClick={() => updateSelectedTodoId(id)}
+                  title={todosById.get(id)?.content}
+                  type="button"
+                >
+                  <span>{(stepNumberByTodo.get(id) ?? 0) || '?'}</span>
+                  {todosById.get(id)?.content ?? id}
+                </button>
+              ))}
             </div>
           )}
           {selectedDependents.length > 0 && (
             <div className={styles.dependencies}>
-              {t('planExecution.unblocks')} {selectedDependents.join(', ')}
+              <span>{t('planExecution.unblocks')}</span>
+              {selectedDependents.map((id) => (
+                <button
+                  className={styles.dependencyLink}
+                  data-plan-dependency={id}
+                  key={id}
+                  onClick={() => updateSelectedTodoId(id)}
+                  title={todosById.get(id)?.content}
+                  type="button"
+                >
+                  <span>{(stepNumberByTodo.get(id) ?? 0) || '?'}</span>
+                  {todosById.get(id)?.content ?? id}
+                </button>
+              ))}
             </div>
           )}
           {selectedExecutions.length > 0 && (

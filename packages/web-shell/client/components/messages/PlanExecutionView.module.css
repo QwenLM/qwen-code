@@ -136,8 +136,11 @@
 }
 
 .dagCanvas {
+  /* Both are overwritten from TS whenever the graph has dependencies; these
+     defaults only cover the no-dependency case, where --plan-edge-lanes is 0
+     and the reservation collapses regardless of the pitch. */
   --plan-edge-lanes: 0;
-  --plan-edge-lane-height: 9px;
+  --plan-edge-lane-height: 0px;
   position: relative;
   display: flex;
   align-items: center;
@@ -149,7 +152,7 @@
      --plan-edge-lane-height from EDGE_LANE_HEIGHT) so the reservation cannot
      drift from the lane placement it is reserving for. */
   padding: 8px 10px
-    calc(28px + var(--plan-edge-lanes) * var(--plan-edge-lane-height, 9px));
+    calc(28px + var(--plan-edge-lanes) * var(--plan-edge-lane-height));
 }
 
 .dagEdges {
@@ -237,6 +240,20 @@
   .dagCanvas {
     --plan-layer-width: 168px;
     gap: 32px;
+  }
+}
+
+/* 168px lanes still put a three-layer plan at ~588px, which scrolls on a
+   390px phone and grows by a lane with every extra layer. This step gets a
+   three-layer plan under a phone viewport; deeper plans still scroll
+   horizontally, which is the honest limit of narrowing alone — reusing the
+   flat layout is tracked in #10866. */
+@media (max-width: 480px) {
+  .dagCanvas {
+    --plan-layer-width: 116px;
+    gap: 18px;
+    padding-right: 6px;
+    padding-left: 6px;
   }
 }
 
@@ -479,6 +496,36 @@
 }
 
 .dependencyChip > span {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The step-details panel's references, which sit outside the node's button
+   and so can be real controls. Same face as the node's read-only chips. */
+.dependencyLink {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: baseline;
+  overflow: hidden;
+  gap: 5px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dependencyLink:hover {
+  border-color: color-mix(in srgb, var(--agent-blue-500) 45%, var(--border));
+  background: var(--accent);
+}
+
+.dependencyLink > span {
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }

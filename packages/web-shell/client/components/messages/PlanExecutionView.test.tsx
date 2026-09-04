@@ -511,8 +511,17 @@ describe('PlanExecutionView', () => {
     const details = container.querySelector('[data-plan-step-details]');
     expect(details?.textContent).toContain('Step details');
     expect(details?.textContent).toContain('Build');
-    expect(details?.textContent).toContain('Depends on: research');
-    expect(details?.textContent).toContain('Unblocks: verify');
+    // Outside the node's own button, so these references are real controls:
+    // each names the step by number and title, and selects it on click.
+    const upstreamLink = details?.querySelector<HTMLButtonElement>(
+      '[data-plan-dependency="research"]',
+    );
+    expect(upstreamLink?.tagName).toBe('BUTTON');
+    expect(upstreamLink?.textContent).toBe('1Research');
+    expect(
+      details?.querySelector('[data-plan-dependency="verify"]')?.textContent,
+    ).toBe('3Verify');
+    expect(details?.textContent).not.toContain('Depends on: research');
     expect(details?.textContent).toContain('Subagents');
     expect(details?.textContent).toContain(
       'Current activity:Inspecting the implementation',
@@ -526,6 +535,20 @@ describe('PlanExecutionView', () => {
     );
     act(() => button?.click());
     expect(onOpen).toHaveBeenCalledWith(agentTool('build'));
+
+    // Last, because it moves the selection: following an upstream reference
+    // selects the step it names, which is what makes the dependency list the
+    // graph's navigation rather than a run of text.
+    act(() =>
+      details
+        ?.querySelector<HTMLButtonElement>('[data-plan-dependency="research"]')
+        ?.click(),
+    );
+    expect(
+      container
+        .querySelector('[data-plan-node-id="research"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
 
     act(() => root.unmount());
     container.remove();

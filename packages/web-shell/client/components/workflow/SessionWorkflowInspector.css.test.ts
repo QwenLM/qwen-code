@@ -29,4 +29,30 @@ describe('SessionWorkflowInspector stylesheet', () => {
     expect(inspectorCss).not.toMatch(/\.summaryHeading\s+span/);
     expect(inspectorCss).toMatch(/\.summaryHeading\s*>\s*div\s+span/);
   });
+
+  // `.activityList > button` (0,1,1) declares the four-column activity grid
+  // for every direct-child button. A control styled with a bare class (0,1,0)
+  // loses to it and has its label auto-placed into the 52px first column,
+  // wrapping to three or four lines with three empty columns beside it —
+  // invisible to jsdom, to the visuals suite and to a green unit run, so it
+  // is pinned here at the source.
+  it('lets the show-all control out-specify the activity grid', () => {
+    expect(inspectorCss).toMatch(
+      /\.activityList\s*>\s*button\.showAllActivity\s*\{/,
+    );
+    expect(inspectorCss).not.toMatch(/(^|\n)\.showAllActivity\s*\{/);
+    const rule = inspectorCss.match(
+      /\.activityList\s*>\s*button\.showAllActivity\s*\{[^}]*\}/,
+    )?.[0];
+    // It must actually undo the inherited grid, not merely win the cascade.
+    expect(rule).toMatch(/display:\s*block/);
+    expect(rule).toMatch(/grid-template-columns:\s*none/);
+  });
+
+  // Same collision, already fixed for the wrapping metrics row: keep both
+  // pinned so neither regresses to a bare class.
+  it('lets the metrics row out-specify its single-line row styles', () => {
+    expect(inspectorCss).toMatch(/\.linkedAgents\s+button\s+small\.metrics/);
+    expect(inspectorCss).toMatch(/\.deliverables\s+button\s+small\.metrics/);
+  });
 });

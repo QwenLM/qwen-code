@@ -336,9 +336,12 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         // remains the explicit clear (an empty array is not nullish, so it
         // wins over the preserved value).
         //
-        // Note the schema text for `blockedBy` actively invites the omission
-        // and reaches every session's prompt, so the prompt change widens the
-        // exposure of this branch rather than being independent of it.
+        // Note the `blockedBy` schema description above ("Active-plan updates
+        // preserve omitted dependencies for existing IDs; use [] to remove
+        // them") actively invites that omission, and a tool schema is part of
+        // the prompt, so it reaches every session including ones with Session
+        // Workflow off. That text is therefore what widens the exposure of
+        // this branch rather than being independent of it.
         let preservedAnyBlockedBy = false;
         candidateTodos = todos.map((todo) => {
           // Preserved edges may only reference ids that survive this update:

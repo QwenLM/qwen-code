@@ -330,8 +330,20 @@
 }
 
 /* The summary beside the list reports the true total, so the preview cap
-   needs a way out of it rather than a silent truncation. */
-.showAllActivity {
+   needs a way out of it rather than a silent truncation.
+
+   Specificity note, same class of collision as `.metrics` above: this button
+   is a DIRECT CHILD of `.activityList`, whose base rule
+   `.activityList > button` (0,1,1) declares the four-column activity grid
+   (`52px 26px minmax(0, 1fr) auto`) and `padding: 7px 4px`. A single-class
+   rule loses to it, and the label — a bare text run that Grid wraps into an
+   anonymous item — would auto-place into the 52px first column and wrap to
+   three or four lines with three empty columns beside it. So this rule
+   carries the same `.activityList >` prefix, and resets `display` and
+   `grid-template-columns` explicitly rather than relying on order. */
+.activityList > button.showAllActivity {
+  display: block;
+  grid-template-columns: none;
   padding: 7px 8px;
   border-radius: var(--radius-md);
   color: var(--muted-foreground);
@@ -340,7 +352,7 @@
   text-align: left;
 }
 
-.showAllActivity:hover {
+.activityList > button.showAllActivity:hover {
   color: var(--foreground);
   background: var(--accent);
 }

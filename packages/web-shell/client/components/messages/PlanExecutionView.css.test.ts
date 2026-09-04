@@ -29,22 +29,32 @@ describe('PlanExecutionView stylesheet', () => {
     // The literal that used to stand in for the constant must not return
     // anywhere in the reservation.
     expect(canvas).not.toMatch(/--plan-edge-lanes\)\s*\*\s*9px/);
+    // No second copy of the constant as a var() fallback either: the pitch
+    // has one source, and the default only covers the zero-lane case.
+    expect(canvas).not.toMatch(/--plan-edge-lane-height,\s*9px/);
     // TS has to actually publish it, or the fallback silently takes over.
     expect(planSource).toMatch(
       /'--plan-edge-lane-height':\s*`\$\{EDGE_LANE_HEIGHT\}px`/,
     );
   });
 
-  it('keeps the DAG on one scroll axis at phone widths', () => {
+  it('narrows the DAG lane at two viewport steps', () => {
     // Three 240px lanes plus two 64px gutters exceed a phone viewport, so the
     // canvas scrolled in both axes at once and the horizontal scroll hid the
     // layer the vertical scroll was looking for.
     expect(planCss).toMatch(
       /\.dagCanvas\s+\.layer\s*\{[^}]*flex:\s*0\s+0\s+var\(--plan-layer-width/,
     );
+    // Pinned as the source shape, not as an outcome: jsdom computes no
+    // cascade and no layout, so this cannot assert that a plan of a given
+    // depth stops scrolling — only that both steps exist and narrow.
     const narrow = planCss.match(
       /@media\s*\(max-width:\s*720px\)\s*\{[\s\S]*?\n\}/,
     )?.[0];
-    expect(narrow).toMatch(/--plan-layer-width:/);
+    expect(narrow).toMatch(/--plan-layer-width:\s*168px/);
+    const narrower = planCss.match(
+      /@media\s*\(max-width:\s*480px\)\s*\{[\s\S]*?\n\}/,
+    )?.[0];
+    expect(narrower).toMatch(/--plan-layer-width:\s*116px/);
   });
 });
