@@ -256,16 +256,23 @@ interface TranscriptGap {
 ```
 
 The protocol has no "page after record X" operation (`afterRecordId` does not
-exist), so a gap's newer side is resolvable only two ways:
+exist), so a gap's newer side is resolvable three ways:
 
 1. the `nextCursor` stored on the **older** neighboring ledger entry, when
-   that entry came from a forward read; or
+   that entry came from a forward read;
 2. re-anchoring — pick a navigation turn inside the gap from the turn-index
-   store and issue `atRecordId` with that entry's page snapshot.
+   store and issue `atRecordId` with that entry's page snapshot; or
+3. when the gap contains **no** navigation turn at all — it lies entirely
+   inside one long turn (a prompt followed by more than a page of
+   tool/assistant records has no index entries between its endpoints) —
+   backfill from the **newer** neighbor instead:
+   `beforeRecordId = <that page's firstRecordId>`, sent with that page's
+   `snapshot` (a legal combination), walking newest-to-oldest into the gap.
 
-The second is the universal resolver: it covers gaps whose older neighbor was
-evicted (its cursor is evicted with it) and gaps left by backward-only
-paging, whose pages never mint a forward cursor.
+Resolver 2 covers gaps whose older neighbor was evicted (its cursor is
+evicted with it) and gaps left by backward-only paging, whose pages never
+mint a forward cursor; resolver 3 covers the long-single-turn hole that
+resolver 2 cannot address.
 
 Invariants:
 
@@ -351,12 +358,17 @@ Rules:
      ordinal present in both the response and the retained pages by `turnId`.
      All matching → append-only; any mismatch, or zero overlap after a large
      gap → divergent.
-  2. **Land on the grid** (append-only only): issue a clamped fill request
-     against the new snapshot — `start` = one past the largest covered
-     ordinal, `limit = totalTurns - start`, iterating in page-sized chunks
-     when the uncovered tail exceeds one page — and admit the fill page(s).
-     The validation response itself is never admitted, since it overlaps
-     retained coverage by construction.
+  2. **Land on the grid** (append-only only): if the largest covered ordinal
+     is already `totalTurns - 1`, the append produced no new navigation turn
+     (only excluded record kinds arrived, or two refreshes coalesced) — skip
+     this step and adopt the new `snapshot`/`totalTurns` without issuing a
+     fill request. Otherwise issue a clamped fill request against the new
+     snapshot — `start` = one past the largest covered ordinal,
+     `limit = totalTurns - start` (never 0: `limit < 1` is rejected with 400
+     `invalid_transcript_limit`), iterating in page-sized chunks when the
+     uncovered tail exceeds one page — and admit the fill page(s). The
+     validation response itself is never admitted, since it overlaps retained
+     coverage by construction.
   - **append-only**: adopt the new `snapshot`/`totalTurns`, keep old pages,
     add the fill page(s).
   - **divergent or zero overlap**: clear all snapshot-bound pages and admit
@@ -374,10 +386,15 @@ Rules:
   refresh or reconnect retries. Label/timestamp matching is forbidden.
 - `shell:` entries are live-only overlays, removed when their live block is
   evicted; they never affect `totalTurns`.
-- Eviction bounds the page map by count and bytes (LRU). Evicting metadata
-  never changes `totalTurns`; an evicted range renders as placeholder ticks
-  and refetches on demand (Phase 3 wires the fetch trigger to the virtualized
-  viewport; in this phase the store exposes `ensurePage(ordinal)`).
+- Eviction bounds the page map by count and bytes (LRU), with the **newest
+  page pinned** — it is never evicted, so every tail refresh has overlap to
+  validate `turnId`s against, and a zero-overlap refresh then occurs only on
+  a genuine large rewrite (or after a snapshot-invalidating event, which has
+  its own path below), never merely because a cache hole made the refresh
+  unverifiable. Evicting metadata never changes `totalTurns`; an evicted
+  range renders as placeholder ticks and refetches on demand (Phase 3 wires
+  the fetch trigger to the virtualized viewport; in this phase the store
+  exposes `ensurePage(ordinal)`).
 - `409 transcript_snapshot_unavailable` or a divergent refresh invalidates the
   snapshot and pages; the store re-seeds from a fresh tail request.
 - `413 transcript_too_large` latches `status: 'unsupported'` for the session —
