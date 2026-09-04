@@ -229,6 +229,7 @@ import {
   buildScheduledTaskRunPrompt,
   scheduledTaskRunSessionName,
   scheduledTaskRunSourceId,
+  SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE,
   SCHEDULED_TASK_RUN_SOURCE_TYPE,
 } from '../../runtime/scheduled-task-run.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -8620,10 +8621,19 @@ export class Session implements SessionContext {
       }
       sessionId = responseSessionId;
     } catch (error) {
+      const modelSelectionFailed =
+        error instanceof RequestError &&
+        typeof error.data === 'object' &&
+        error.data !== null &&
+        (error.data as { code?: unknown }).code ===
+          SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE;
       debugLogger.warn(
-        `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${error instanceof Error ? error.message : String(error)}`,
+        modelSelectionFailed
+          ? `Scheduled task ${taskId} could not apply its selected model: ${error.message}`
+          : `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${error instanceof Error ? error.message : String(error)}`,
       );
       await record({ sessionId: this.sessionId, dispatchFailed: true });
+      if (modelSelectionFailed) return;
       this.#enqueueCronPrompt({
         prompt: job.prompt,
         source: 'cron',

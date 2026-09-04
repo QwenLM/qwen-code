@@ -490,23 +490,84 @@ describe('sub-session launcher', () => {
     const fake = makeFakeBridge({
       sendPromptRejects: 'child disappeared during init',
     });
+    const runtimeBaseDir = '/tmp/scheduled-task-runtime';
+    let transcriptRemovalRuntimeBaseDir: string | undefined;
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        transcriptRemovalRuntimeBaseDir = Storage.getRuntimeBaseDir();
+        return true;
+      });
     const launcher = createSubSessionLauncher({
       getBridge: () => fake.bridge,
       boundWorkspace: WS,
+      runtimeBaseDir,
     });
 
-    await expect(
-      launcher.launch({
-        prompt: 'run the task',
-        completion: 'sent',
-        sourceType: 'default',
-        sourceId: 'scheduled_task_run:task-1',
-        groupId: 'group-1',
-        callerSessionId: 'caller-1',
-      }),
-    ).rejects.toThrow(/dispatch failed.*child disappeared during init/i);
-    expect(fake.closes).toEqual(['sub-1']);
-    expect(updateSessionOrganization).not.toHaveBeenCalled();
+    try {
+      await expect(
+        launcher.launch({
+          prompt: 'run the task',
+          completion: 'sent',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          groupId: 'group-1',
+          callerSessionId: 'caller-1',
+        }),
+      ).rejects.toThrow(/dispatch failed.*child disappeared during init/i);
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(updateSessionOrganization).not.toHaveBeenCalled();
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(transcriptRemovalRuntimeBaseDir).toBe(runtimeBaseDir);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    } finally {
+      removeSession.mockRestore();
+    }
+  });
+
+  it('removes an isolated transcript when prompt admission fails', async () => {
+    const fake = makeFakeBridge({
+      sendPromptRejects: 'child disappeared during init',
+    });
+    const runtimeBaseDir = '/tmp/scheduled-task-runtime';
+    let transcriptRemovalRuntimeBaseDir: string | undefined;
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        transcriptRemovalRuntimeBaseDir = Storage.getRuntimeBaseDir();
+        return true;
+      });
+    const discardEmptyDirectory = vi.fn();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      runtimeBaseDir,
+      isolatedWorkspace: {
+        materializeDirectory: async (sessionId) =>
+          `${WS}/conversation-${sessionId}`,
+        discardEmptyDirectory,
+      },
+    });
+
+    try {
+      await expect(
+        launcher.launch({
+          prompt: 'run the task',
+          completion: 'sent',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          callerSessionId: 'caller-1',
+        }),
+      ).rejects.toThrow(/dispatch failed.*child disappeared during init/i);
+
+      expect(fake.kills).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(transcriptRemovalRuntimeBaseDir).toBe(runtimeBaseDir);
+      expect(discardEmptyDirectory).toHaveBeenCalledWith('sub-1');
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    } finally {
+      removeSession.mockRestore();
+    }
   });
 
   it('rejects a scheduled-task run when its selected model is not applied', async () => {
@@ -525,22 +586,67 @@ describe('sub-session launcher', () => {
       runtimeBaseDir,
     });
 
-    await expect(
-      launcher.launch({
-        prompt: 'run the task',
-        completion: 'sent',
-        model: 'missing-model',
-        sourceType: 'default',
-        sourceId: 'scheduled_task_run:task-1',
-        callerSessionId: 'caller-1',
-      }),
-    ).rejects.toThrow(/model selection failed.*missing-model/i);
+    try {
+      await expect(
+        launcher.launch({
+          prompt: 'run the task',
+          completion: 'sent',
+          model: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          callerSessionId: 'caller-1',
+        }),
+      ).rejects.toThrow(/model selection failed.*missing-model/i);
 
-    expect(fake.closes).toEqual(['sub-1']);
-    expect(fake.prompts).toEqual([]);
-    expect(removeSession).toHaveBeenCalledWith('sub-1');
-    expect(transcriptRemovalRuntimeBaseDir).toBe(runtimeBaseDir);
-    expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+      expect(fake.closes).toEqual(['sub-1']);
+      expect(fake.prompts).toEqual([]);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(transcriptRemovalRuntimeBaseDir).toBe(runtimeBaseDir);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    } finally {
+      removeSession.mockRestore();
+    }
+  });
+
+  it('removes an isolated scheduled-task transcript in its runtime', async () => {
+    const fake = makeFakeBridge({ modelApplied: false });
+    const runtimeBaseDir = '/tmp/scheduled-task-runtime';
+    let transcriptRemovalRuntimeBaseDir: string | undefined;
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockImplementation(async () => {
+        transcriptRemovalRuntimeBaseDir = Storage.getRuntimeBaseDir();
+        return true;
+      });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      runtimeBaseDir,
+      isolatedWorkspace: {
+        materializeDirectory: vi.fn(),
+        discardEmptyDirectory: vi.fn(),
+      },
+    });
+
+    try {
+      await expect(
+        launcher.launch({
+          prompt: 'run the task',
+          completion: 'sent',
+          model: 'missing-model',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          callerSessionId: 'caller-1',
+        }),
+      ).rejects.toThrow(/model selection failed.*missing-model/i);
+
+      expect(fake.kills).toEqual(['sub-1']);
+      expect(removeSession).toHaveBeenCalledWith('sub-1');
+      expect(transcriptRemovalRuntimeBaseDir).toBe(runtimeBaseDir);
+      expect(fake.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
+    } finally {
+      removeSession.mockRestore();
+    }
   });
 
   it('routes a standalone caller through the managed standalone child service', async () => {

@@ -1707,6 +1707,48 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     expect(document.body.textContent).toContain('providers unavailable');
   });
 
+  it('keeps loaded models when group options fail', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    actions.listSessionGroups.mockRejectedValue(
+      new Error('groups unavailable'),
+    );
+    actions.loadProviders.mockResolvedValue({
+      providers: [
+        {
+          models: [
+            {
+              modelId: 'qwen-max(openai)',
+              baseModelId: 'qwen-max',
+              name: 'Qwen Max',
+            },
+          ],
+        },
+      ],
+    });
+
+    click(findButton('New scheduled task'));
+    await flush();
+
+    expect(
+      document.querySelector('option[value="qwen-max(openai)"]'),
+    ).not.toBeNull();
+    expect(document.body.textContent).toContain('groups unavailable');
+  });
+
+  it('reports both routing option failures', async () => {
+    await mountMulti({ primary: [], 'id-other': [] });
+    actions.listSessionGroups.mockRejectedValue(
+      new Error('groups unavailable'),
+    );
+    actions.loadProviders.mockRejectedValue(new Error('providers unavailable'));
+
+    click(findButton('New scheduled task'));
+    await flush();
+
+    expect(document.body.textContent).toContain('groups unavailable');
+    expect(document.body.textContent).toContain('providers unavailable');
+  });
+
   it('clears routing selections when the target workspace changes', async () => {
     await mountMulti({ primary: [], 'id-other': [] });
     actions.listSessionGroups
@@ -1943,6 +1985,48 @@ describe('ScheduledTasksDialog multi-workspace', () => {
     // The picker is shown (so the user sees the workspace) but disabled — a
     // PATCH can't move a task between per-workspace files.
     expect(wsSelect?.disabled).toBe(true);
+  });
+
+  it('edits a secondary task with its saved routing and workspace', async () => {
+    const task = baseTask({
+      id: 's1',
+      name: 'Second task',
+      sessionMode: 'per_run',
+      modelServiceId: 'missing-model',
+      groupId: 'missing-group',
+    });
+    await mountMulti({ primary: [], 'id-other': [task] });
+    actions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: ['blue'],
+    });
+    actions.loadProviders.mockResolvedValue({ providers: [] });
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    await flush();
+
+    expect(actions.listSessionGroups).toHaveBeenCalledWith('/repo/other');
+    expect(actions.loadProviders).toHaveBeenCalledWith('/repo/other');
+    const model = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="missing-model"]'),
+    );
+    const group = Array.from(document.querySelectorAll('select')).find(
+      (select) => select.querySelector('option[value="missing-group"]'),
+    );
+    expect(model?.value).toBe('missing-model');
+    expect(group?.value).toBe('missing-group');
+
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      task.id,
+      expect.objectContaining({
+        modelServiceId: 'missing-model',
+        groupId: 'missing-group',
+      }),
+      'id-other',
+    );
   });
 
   it('keeps an untrusted primary in the aggregate and picker (trust-free route)', async () => {

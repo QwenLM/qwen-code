@@ -36,6 +36,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { RequestError } from '@agentclientprotocol/sdk';
 import {
   createDebugLogger,
   escapeXml,
@@ -58,6 +59,7 @@ import {
   isScheduledTaskRunSource,
 } from '@qwen-code/acp-bridge/sessionSource';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE } from '../runtime/scheduled-task-run.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
 
@@ -855,7 +857,7 @@ export function createSubSessionLauncher(
     // we roll this session back so it isn't orphaned (the slot was consumed and
     // the prompt may have been dispatched, but launch() reports failure).
     let spawnedSession: BridgeSession | undefined;
-    let promptDispatched = false;
+    let promptAdmitted = false;
 
     try {
       const promptId = randomUUID();
@@ -876,7 +878,6 @@ export function createSubSessionLauncher(
         sub = created.session;
         lastEventId = created.initialPrompt.lastEventId;
         turn = created.initialPrompt.turn;
-        promptDispatched = true;
       } else {
         sub = await bridge.spawnOrAttach({
           workspaceCwd: boundWorkspace,
@@ -892,6 +893,13 @@ export function createSubSessionLauncher(
       spawnedSession = sub;
       const sessionId = sub.sessionId;
       if (info.model && sub.modelApplied === false) {
+        if (isScheduledTaskRunSource(info)) {
+          throw new RequestError(
+            -32603,
+            `sub-session model selection failed: ${info.model}`,
+            { code: SCHEDULED_TASK_MODEL_SELECTION_ERROR_CODE },
+          );
+        }
         throw new Error(`sub-session model selection failed: ${info.model}`);
       }
       if (isolatedWorkspace && !standalone) {
@@ -930,6 +938,10 @@ export function createSubSessionLauncher(
         promptAdmission = new Promise<void>((resolve) => {
           markPromptAdmitted = resolve;
         });
+        const onPromptAdmitted = () => {
+          promptAdmitted = true;
+          markPromptAdmitted();
+        };
         turn = bridge.sendPrompt(
           sessionId,
           {
@@ -937,9 +949,8 @@ export function createSubSessionLauncher(
             prompt: [{ type: 'text', text: info.prompt }],
           } as Parameters<AcpSessionBridge['sendPrompt']>[1],
           undefined,
-          { promptId, onPromptAdmitted: markPromptAdmitted },
+          { promptId, onPromptAdmitted },
         );
-        promptDispatched = true;
       }
 
       // The result comes from the event stream (turn_error surfaces failures);
@@ -1128,50 +1139,51 @@ export function createSubSessionLauncher(
       // synchronously), roll back the orphaned session so it doesn't leak a slot
       // in the bridge's session pool while this launch reports failure.
       if (spawnedSession !== undefined && isolatedWorkspace && !standalone) {
+        const sessionId = spawnedSession.sessionId;
         let sessionClosed = false;
         try {
           if (spawnedSession.attached) {
             if (spawnedSession.clientId) {
-              await bridge.detachClient(
-                spawnedSession.sessionId,
-                spawnedSession.clientId,
-              );
+              await bridge.detachClient(sessionId, spawnedSession.clientId);
             }
           } else {
-            sessionClosed = await bridge.killSession(spawnedSession.sessionId, {
+            sessionClosed = await bridge.killSession(sessionId, {
               requireZeroAttaches: true,
             });
           }
         } catch (cleanupError) {
           log.debug(
             'sub-session: isolated session rollback failed',
-            spawnedSession.sessionId,
+            sessionId,
             cleanupError,
           );
         }
         if (sessionClosed) {
-          if (!promptDispatched) {
+          if (!promptAdmitted) {
             try {
-              const transcriptRemoved = await new SessionService(
-                boundWorkspace,
-              ).removeSession(spawnedSession.sessionId);
+              const removeTranscript = () =>
+                new SessionService(boundWorkspace).removeSession(sessionId);
+              const transcriptRemoved = runtimeBaseDir
+                ? await Storage.runWithResolvedRuntimeBaseDir(
+                    runtimeBaseDir,
+                    removeTranscript,
+                  )
+                : await removeTranscript();
               if (transcriptRemoved) bridge.markSessionCatalogChanged();
             } catch (cleanupError) {
               log.debug(
                 'sub-session: isolated transcript cleanup failed',
-                spawnedSession.sessionId,
+                sessionId,
                 cleanupError,
               );
             }
           }
           try {
-            await isolatedWorkspace.discardEmptyDirectory(
-              spawnedSession.sessionId,
-            );
+            await isolatedWorkspace.discardEmptyDirectory(sessionId);
           } catch (cleanupError) {
             log.debug(
               'sub-session: isolated workspace cleanup failed',
-              spawnedSession.sessionId,
+              sessionId,
               cleanupError,
             );
           }
@@ -1186,7 +1198,7 @@ export function createSubSessionLauncher(
         } catch (closeErr) {
           log.debug('sub-session: closeSession threw', sessionId, closeErr);
         }
-        if (sessionClosed && !promptDispatched) {
+        if (sessionClosed && !promptAdmitted) {
           try {
             const removeTranscript = () =>
               new SessionService(boundWorkspace).removeSession(sessionId);

@@ -33,6 +33,13 @@ import type {
 import { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 
+const stderrLines = vi.hoisted(() => [] as string[]);
+
+vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/stdioHelpers.js')>()),
+  writeStderrLine: (line: string) => stderrLines.push(line),
+}));
+
 function safeBody(req: Request): Record<string, unknown> {
   return req.body && typeof req.body === 'object'
     ? (req.body as Record<string, unknown>)
@@ -306,6 +313,7 @@ describe('scheduled-tasks routes', () => {
   let h: Harness;
 
   beforeEach(async () => {
+    stderrLines.length = 0;
     h = await makeHarness();
   });
 
@@ -539,6 +547,37 @@ describe('scheduled-tasks routes', () => {
       (await organization.readSnapshot()).sessions.get(childSessionId),
     ).toMatchObject({ groupId: group.id });
     expect(h.bridge.markSessionCatalogChanged).toHaveBeenCalled();
+  });
+
+  it('runs without a group when the saved group was deleted', async () => {
+    const organization = new SessionOrganizationService(h.workspace);
+    const group = await organization.createGroup({
+      name: 'Automations',
+      color: 'blue',
+    });
+    const created = await create({
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+      groupId: group.id,
+    });
+    await organization.deleteGroup(group.id);
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(200);
+    const childSessionId = h.bridge.spawned[1]!;
+    expect(h.bridge.prompts).toContainEqual(
+      expect.objectContaining({ sessionId: childSessionId }),
+    );
+    expect(
+      (await organization.readSnapshot()).sessions.has(childSessionId),
+    ).toBe(false);
+    expect(stderrLines).toContainEqual(
+      expect.stringMatching(/could not be assigned.*group not found/i),
+    );
   });
 
   it('rejects a missing group before creating the task session', async () => {
