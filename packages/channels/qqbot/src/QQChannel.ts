@@ -2448,10 +2448,10 @@ export class QQChannel extends ChannelBase {
     isSlash: boolean;
     safeName: string;
     cleanText: string;
+    commandText: string;
     text: string;
     displayText: string;
     displayTextOffset?: number;
-    messagePrefixText: string;
     senderName: string;
   } | null {
     // Keep identity values out of the display-name position. In particular,
@@ -2580,6 +2580,10 @@ export class QQChannel extends ChannelBase {
     // whole `[atMention=…] [sender]:` wrapper and the OPENID suffix.
     // With `allowMention` off, every mention token is dropped from both
     // rather than leaving raw openids in the prompt.
+    // This is also what the base filter matches the prefix against, so a
+    // `<@...>` the user typed after the prefix survives into the prompt --
+    // `stripMessagePrefix` consumes the leading mention run and nothing
+    // else.
     const displayText = sanitizePromptText(
       this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText,
     );
@@ -2597,10 +2601,10 @@ export class QQChannel extends ChannelBase {
       isSlash,
       safeName,
       cleanText,
+      commandText,
       text,
       displayText,
       ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
-      messagePrefixText: sanitizePromptText(safeCleanText),
       senderName,
     };
   }
@@ -2655,7 +2659,6 @@ export class QQChannel extends ChannelBase {
       chatId,
       text,
       displayText: sanitizePromptText(safeContent),
-      messagePrefixText: sanitizePromptText(safeContent),
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
@@ -2713,10 +2716,9 @@ export class QQChannel extends ChannelBase {
       text,
       displayText,
       displayTextOffset,
-      messagePrefixText,
+      commandText,
       senderName,
       safeName,
-      cleanText,
     } = result;
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
@@ -2725,7 +2727,7 @@ export class QQChannel extends ChannelBase {
 
     if (isSlash) {
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(commandText.split(/\s/)[0], 64)}\n`,
       );
     }
 
@@ -2753,7 +2755,6 @@ export class QQChannel extends ChannelBase {
       text,
       displayText,
       ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
-      messagePrefixText,
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
@@ -2804,10 +2805,10 @@ export class QQChannel extends ChannelBase {
       text,
       displayText,
       displayTextOffset,
+      commandText,
       senderName,
       isAtBot,
       safeName,
-      cleanText,
     } = result;
 
     // @-bot messages always pass through (passive reply).
@@ -2878,7 +2879,7 @@ export class QQChannel extends ChannelBase {
 
     if (isSlash) {
       process.stderr.write(
-        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(cleanText.split(/\s/)[0], 64)}\n`,
+        `[QQ:${this.name}] Slash cmd from ${sanitizeLogText(safeName, 64)} (${sanitizeLogText(chatId, 64)}): ${sanitizeLogText(commandText.split(/\s/)[0], 64)}\n`,
       );
     }
 
@@ -2908,7 +2909,6 @@ export class QQChannel extends ChannelBase {
       text,
       displayText,
       ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
-      messagePrefixText: result.messagePrefixText,
       senderId,
       senderName,
       messageId: event.id,

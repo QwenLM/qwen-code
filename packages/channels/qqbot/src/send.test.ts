@@ -449,6 +449,41 @@ describe('group sender-name sanitization', () => {
     expect(env.alreadyPrefixed).toBeUndefined();
   });
 
+  it('audits the command that ran, not the configured prefix', () => {
+    // The audit log exists to identify which command reset a session. With
+    // a prefix configured every command shares the same leading token, so
+    // the log has to read the payload after the prefix.
+    vi.useFakeTimers();
+    const ch = makeChannel('/review');
+    (ch as unknown as { handleInbound: () => Promise<void> }).handleInbound =
+      () => Promise.resolve();
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-prefixed-audit',
+      group_openid: 'grp-1',
+      content: '/review /clear',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+      mentions: [{ is_you: true, member_openid: 'bot-openid' }],
+    });
+
+    spy.mockRestore();
+
+    const audit = writes.find((w) => w.includes('Slash cmd from'));
+    expect(audit).toBeDefined();
+    expect(audit).toContain('/clear');
+    expect(audit).not.toContain('/review');
+    expect(audit!.split('\n')).toHaveLength(2);
+  });
+
   it('sanitizes the sender name AND command text in the slash-command audit log (no log forging)', () => {
     vi.useFakeTimers();
     const ch = makeChannel();

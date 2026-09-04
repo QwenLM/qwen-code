@@ -829,6 +829,157 @@ describe('FeishuChannel', () => {
     expect(bridge.prompt).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a mention the user typed after the prefix', async () => {
+    // The matching text consumes only the leading mention run, so a
+    // mention inside the payload reaches the agent exactly as it does
+    // with no prefix configured.
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    onMessage({
+      message: {
+        message_id: 'payload-mention',
+        chat_id: 'oc_group',
+        chat_type: 'group',
+        message_type: 'text',
+        content: JSON.stringify({
+          text: '@_user_1 /review please talk to @_user_2',
+        }),
+        mentions: [
+          { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+          { key: '@_user_2', id: { open_id: 'ou_alice' }, name: 'Alice Smith' },
+        ],
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = String(vi.mocked(bridge.prompt).mock.calls[0]?.[1]);
+    expect(prompt).toContain('please talk to @Alice Smith');
+    expect(prompt).not.toContain('/review');
+  });
+
+  it('matches the prefix on a rich-text post behind a spaced mention', async () => {
+    // A post carries its mentions as at-nodes, so the message-level keys
+    // never appear in the text: without normalizing the rendered name, a
+    // display name with a space leaves a token the shared mention skip
+    // cannot consume and the message is dropped.
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({ messagePrefix: '/review' }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    onMessage({
+      message: {
+        message_id: 'post-prefixed',
+        chat_id: 'oc_dm',
+        chat_type: 'p2p',
+        message_type: 'post',
+        content: JSON.stringify({
+          zh_cn: {
+            content: [
+              [
+                { tag: 'at', user_name: 'Qwen Bot' },
+                { tag: 'text', text: ' /review inspect this' },
+              ],
+            ],
+          },
+        }),
+      },
+      sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    expect(String(vi.mocked(bridge.prompt).mock.calls[0]?.[1])).toContain(
+      'inspect this',
+    );
+  });
+
+  it('keeps a media placeholder out of the next prompt as group history', async () => {
+    // The placeholder bypasses the prefix gate, so without the synthetic
+    // marking it would be recorded as unmentioned group traffic and quoted
+    // back to the model as if a member had typed `(image)`.
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = mkdtempSync(join(tmpdir(), 'feishu-history-'));
+    process.env['QWEN_HOME'] = qwenHome;
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel(
+      'test',
+      createConfig({
+        messagePrefix: '/review',
+        groupHistoryLimit: 10,
+        groups: { '*': { requireMention: true } },
+      }),
+      bridge,
+    );
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      botOpenId: 'ou_bot',
+    });
+    const onMessage = getPrivateMethod<(data: unknown) => void>(
+      channel,
+      'onMessage',
+    ).bind(channel);
+
+    try {
+      onMessage({
+        message: {
+          message_id: 'history-image',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'image',
+          content: JSON.stringify({ image_key: 'img_1' }),
+        },
+        sender: { sender_id: { open_id: 'ou_alice' }, sender_type: 'user' },
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      onMessage({
+        message: {
+          message_id: 'history-trigger',
+          chat_id: 'oc_group',
+          chat_type: 'group',
+          message_type: 'text',
+          content: JSON.stringify({ text: '@_user_1 /review summarize' }),
+          mentions: [
+            { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Qwen Bot' },
+          ],
+        },
+        sender: { sender_id: { open_id: 'ou_user' }, sender_type: 'user' },
+      });
+
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalled());
+      const prompt = String(
+        vi.mocked(bridge.prompt).mock.calls.at(-1)?.[1] ?? '',
+      );
+      expect(prompt).toContain('summarize');
+      expect(prompt).not.toContain('(image)');
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      rmSync(qwenHome, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     {
       label: 'group pairing with a user parent',
