@@ -10204,6 +10204,67 @@ describe('DaemonSessionProvider', () => {
       }
     });
 
+    it('survives a non-epoch resync that lands mid-turn', async () => {
+      // A ring eviction asks the client to rebuild transcript state. It is a
+      // recovery signal, not a prompt terminal signal — settling here drops an
+      // observer pane's indicator for the rest of a silent tool call, with no
+      // event left to revive it.
+      const resyncGate = createDeferred<void>();
+      const reloaded = createDeferred<void>();
+      const firstSession = createMockSession({
+        sessionId: 'session-resync-active',
+        events: async function* observedThenResync() {
+          yield {
+            id: 9,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'starting' },
+              },
+            },
+          };
+          await resyncGate.promise;
+          yield {
+            id: 10,
+            v: 1,
+            type: 'state_resync_required',
+            data: { reason: 'ring_evicted' },
+          } satisfies DaemonEvent;
+        },
+      });
+      const reloadedSession = createMockSession({
+        sessionId: 'session-resync-active',
+        events: createPendingEvents(reloaded),
+      });
+      sdkMocks.sessions.push(firstSession, reloadedSession);
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+      await act(async () => {
+        await flushPromises();
+      });
+      expect(promptStatus).not.toBe('idle');
+
+      await act(async () => {
+        actions?.setDaemonActivePrompt(true);
+        await flushPromises();
+      });
+
+      await act(async () => {
+        resyncGate.resolve();
+        await reloaded.promise;
+        await flushPromises();
+      });
+
+      expect(promptStatus).not.toBe('idle');
+    });
+
     it('still settles on silence when no daemon prompt state is available', async () => {
       vi.useFakeTimers();
       try {

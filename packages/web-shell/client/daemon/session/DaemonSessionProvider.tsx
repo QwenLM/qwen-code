@@ -1368,6 +1368,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let standaloneCreateAttempted = false;
       let productContextFailure = false;
       let hasCurrentSessionActivePrompt = () => false;
+      // The one gate every non-terminal path asks before settling the pane to
+      // idle. A settle is safe only when no prompt this browser is tracking is
+      // still running AND the daemon is not reporting the turn in flight;
+      // otherwise a transport hiccup or a quiet stretch inside a long tool call
+      // reads as "turn finished" (#9487). Terminal events (turn_complete,
+      // turn_error, prompt.cancelled) and lifecycle transitions do not ask —
+      // they settle unconditionally, which is what makes them terminal.
+      const maySettleToIdle = () =>
+        !hasCurrentSessionActivePrompt() &&
+        daemonActivePromptRef.current !== true;
       if (
         !restoreSessionId &&
         !reconnectSessionId &&
@@ -3126,7 +3136,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     // an observer pane reconnecting mid-turn would otherwise
                     // settle here and — inside a long silent tool call there is
                     // no next event to revive it — stay settled (#9487).
-                    if (daemonActivePromptRef.current !== true) {
+                    if (maySettleToIdle()) {
                       setPromptStatus('idle');
                     }
                   }
@@ -3181,7 +3191,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     // #9487. The stale streaming block is still finished
                     // above; settle the prompt state only when the daemon
                     // does not contradict it.
-                    if (daemonActivePromptRef.current === true) return;
+                    if (!maySettleToIdle()) return;
                     setPromptStatus('idle');
                   },
                 );
@@ -3212,10 +3222,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   // Resync asks us to rebuild transcript state, but it is not a
                   // prompt terminal signal. Keep loading alive for local/restored
                   // prompts until turn_complete, turn_error, or prompt_cancelled.
-                  if (
-                    !hasSessionActivePrompt() &&
-                    daemonActivePromptRef.current !== true
-                  ) {
+                  if (maySettleToIdle()) {
                     setPromptStatus('idle');
                     clearPassiveAssistantDoneTimer(
                       passiveAssistantDoneTimerRef,
@@ -3351,10 +3358,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // subscription can resume from DaemonSessionClient.lastEventId.
             if (sessionRef.current === activeSession) {
               console.debug('[DaemonSessionProvider] SSE stream ended');
-              if (
-                !hasSessionActivePrompt() &&
-                daemonActivePromptRef.current !== true
-              ) {
+              if (maySettleToIdle()) {
                 // A transport close is only a safe "done" signal for passive
                 // observers. When a local/restored prompt is still active, the
                 // daemon may continue running while we reconnect via
@@ -3516,12 +3520,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // observed turn the daemon still reports in flight: the reconnect
           // resumes into the same silent gap with no events to revive a
           // settled indicator (#9487).
-          if (
-            isAuthFailure ||
-            isTerminal ||
-            (!hasCurrentSessionActivePrompt() &&
-              daemonActivePromptRef.current !== true)
-          ) {
+          if (isAuthFailure || isTerminal || maySettleToIdle()) {
             clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
             setPromptStatus('idle');
           }
