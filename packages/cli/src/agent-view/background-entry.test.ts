@@ -216,4 +216,20 @@ describe('runBackgroundDispatch', () => {
     expect(stderr.join('')).toContain('prompt too large');
     expect(dispatchAgentViewSession).not.toHaveBeenCalled();
   });
+
+  it('reports an error-like rejection reason instead of [object Object]', async () => {
+    // A plain-object rejection with a message must surface the message:
+    // the hand-rolled instanceof ternary stringified it to
+    // "[object Object]" and hid the reason.
+    ensureAgentViewSupervisor.mockRejectedValue({ message: 'boom' });
+
+    const code = await runBackgroundDispatch('audit', '/w/app');
+
+    expect(code).toBe(1);
+    expect(stderr.join('')).toBe(
+      'Could not start a background session: boom\n',
+    );
+    expect(supervisorDispatch).not.toHaveBeenCalled();
+    expect(dispatchAgentViewSession).not.toHaveBeenCalled();
+  });
 });

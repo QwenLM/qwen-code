@@ -28,6 +28,7 @@
  * nothing and cost all of it.
  */
 
+import { getErrorMessage } from '../utils/errors.js';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { BACKGROUND_FLAG } from './entry-flags.js';
 
@@ -134,7 +135,7 @@ export async function runBackgroundDispatch(
     writeStdoutLine('See it with: qwen sessions ps');
     return 0;
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+    const reason = getErrorMessage(error);
     writeStderrLine(`Could not start a background session: ${reason}`);
     return 1;
   }
