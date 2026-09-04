@@ -30,7 +30,7 @@ import sdkTypescriptConfig from '../../packages/sdk-typescript/vitest.config.js'
 import vscodeCompanionConfig from '../../packages/vscode-ide-companion/vitest.config.js';
 import webShellConfig from '../../packages/web-shell/vitest.config.js';
 import webuiConfig from '../../packages/webui/vite.config.js';
-import { getTestCiWorkspacePaths } from '../workspaces.js';
+import { getTestCiWorkspacePackageJsonPaths } from '../workspaces.js';
 import scriptsTestsConfig from './vitest.config.js';
 
 // Every vitest project that `npm run test:ci` runs on the Windows/macOS
@@ -310,7 +310,7 @@ describe('shared-pool test timeout', () => {
     // itself lives in scripts/workspaces.js so it cannot drift from the
     // release-workflow pins that gate on the same set.
     const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
-    const missing = getTestCiWorkspacePaths(repoRoot)
+    const missing = getTestCiWorkspacePackageJsonPaths(repoRoot)
       .map((packageJsonPath) =>
         packageJsonPath.slice(0, -'/package.json'.length),
       )

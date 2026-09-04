@@ -34,7 +34,7 @@ export function getWorkspacePackageJsonPaths(root, workspaces) {
   return [...packageJsonPaths].sort();
 }
 
-export function getTestCiWorkspacePaths(root) {
+export function getTestCiWorkspacePackageJsonPaths(root) {
   const { workspaces } = JSON.parse(
     readFileSync(join(root, 'package.json'), 'utf8'),
   );
