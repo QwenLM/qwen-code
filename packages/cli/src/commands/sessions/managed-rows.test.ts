@@ -4,16 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type {
   AgentViewSessionSnapshot,
   AgentViewSessionState,
   AgentViewSessionStateFile,
+  AgentViewWorkerFile,
 } from '../../agent-view/protocol.js';
 import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
-import { managedSessionRows, mergeSessionRows } from './managed-rows.js';
+
+const isPidAlive = vi.fn((pid: number) => pid > 0);
+
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  isPidAlive: (...args: unknown[]) => isPidAlive(...(args as [number])),
+}));
+
+const { managedSessionRows, mergeSessionRows } = await import(
+  './managed-rows.js'
+);
 
 const NOW = Date.parse('2026-09-04T12:00:00Z');
+
+beforeEach(() => {
+  isPidAlive.mockReset();
+  isPidAlive.mockImplementation((pid: number) => pid > 0);
+});
 
 function state(
   over: Partial<AgentViewSessionStateFile> = {},
@@ -42,6 +57,18 @@ function snapshot(
   return { sessionId: base.sessionId, state: base, ...over };
 }
 
+function workerFile(
+  over: Partial<AgentViewWorkerFile> = {},
+): AgentViewWorkerFile {
+  return {
+    schemaVersion: 1,
+    protocolVersion: 1,
+    platform: 'linux',
+    recentOutputBytes: 0,
+    ...over,
+  };
+}
+
 function record(
   over: Partial<SessionRegistryRecord> = {},
 ): SessionRegistryRecord {
@@ -60,11 +87,14 @@ function record(
 }
 
 describe('managedSessionRows', () => {
-  it('labels each task state in the roster’s own vocabulary', () => {
-    const cases: Array<[AgentViewSessionState, string]> = [
-      ['working', 'working'],
-      ['starting', 'working'],
-      ['needs_input', 'needs input'],
+  it('carries the presentation layer’s own task state, not a label', () => {
+    // The row reaches `--json`, so this field is a machine contract. It
+    // stays the stable token; `ps.ts` turns it into English at the one
+    // place that renders a table.
+    const cases: Array<[AgentViewSessionState, AgentViewTaskState]> = [
+      ['working', 'running'],
+      ['starting', 'running'],
+      ['needs_input', 'waiting'],
       ['idle', 'ready'],
       ['completed', 'ready'],
       ['stopped', 'stopped'],
@@ -75,55 +105,62 @@ describe('managedSessionRows', () => {
         [snapshot({ state: state({ sessionState }) })],
         NOW,
       );
-      expect(row.state).toBe(expected);
+      expect(row.taskState).toBe(expected);
     }
   });
 
-  it('never prints "ready" for a session that failed', () => {
-    // The roster's display group folds ready/stopped/failed together. A
-    // one-line table has no icon to carry the difference, so the label
-    // must: a failed session reported as ready is unrecoverable for a
-    // user reading only this output.
+  it('never reports a failed session as ready', () => {
+    // The roster's display group folds ready/stopped/failed together, so
+    // a consumer reading the group cannot tell a failure from a clean
+    // finish. The task state can, and this is the field that reaches
+    // both the table and `--json`.
     const [row] = managedSessionRows(
       [snapshot({ state: state({ sessionState: 'failed' }) })],
       NOW,
     );
-    expect(row.state).toBe('failed');
+    expect(row.taskState).toBe('failed');
+  });
+
+  it('leaves a registry row with no task state at all', () => {
+    // A registry record knows a process is alive and nothing more;
+    // inventing a task state for it would be a claim nobody made.
+    const rows = mergeSessionRows([record()], []);
+    expect(rows[0].taskState).toBeUndefined();
   });
 
   it('reports the worker pid, falling back to the host that owns the PTY', () => {
     const withWorker = managedSessionRows(
-      [
-        snapshot({
-          worker: {
-            schemaVersion: 1,
-            hostPid: 100,
-            workerPid: 200,
-            protocolVersion: 1,
-            platform: 'linux',
-            recentOutputBytes: 0,
-          },
-        }),
-      ],
+      [snapshot({ worker: workerFile({ hostPid: 100, workerPid: 200 }) })],
       NOW,
     );
     expect(withWorker[0].pid).toBe(200);
 
     const hostOnly = managedSessionRows(
-      [
-        snapshot({
-          worker: {
-            schemaVersion: 1,
-            hostPid: 100,
-            protocolVersion: 1,
-            platform: 'linux',
-            recentOutputBytes: 0,
-          },
-        }),
-      ],
+      [snapshot({ worker: workerFile({ hostPid: 100 }) })],
       NOW,
     );
     expect(hostOnly[0].pid).toBe(100);
+  });
+
+  it('drops a recorded pid that no longer resolves to a live process', () => {
+    // The store outlives the supervisor; after a crash or a reboot a
+    // recorded pid is dead or recycled to an unrelated process, and
+    // printing it would point a kill at the wrong target.
+    isPidAlive.mockImplementation(() => false);
+    const [row] = managedSessionRows(
+      [snapshot({ worker: workerFile({ hostPid: 100, workerPid: 200 }) })],
+      NOW,
+    );
+    expect(row.pid).toBeUndefined();
+  });
+
+  it('falls back to the PTY host only while the host still lives', () => {
+    isPidAlive.mockImplementation((pid: number) => pid === 100);
+    const [row] = managedSessionRows(
+      [snapshot({ worker: workerFile({ hostPid: 100, workerPid: 200 }) })],
+      NOW,
+    );
+    expect(row.pid).toBe(100);
   });
 
   it('leaves the pid unset when no process is recorded, rather than reporting 0', () => {
@@ -169,6 +206,21 @@ describe('managedSessionRows', () => {
     expect(row.startedAt).toBeUndefined();
   });
 
+  it('lists only snapshots the supervisor owns', () => {
+    // A removed session lingers as an unmanaged tombstone for a retention
+    // window, a removal can be mid-flight, and adoption reuses the id of
+    // a session that is still live and registered. Listing any of those
+    // would show a ghost, or shadow a live registry row with a pid-less
+    // one during the adopting window.
+    for (const ownership of ['unmanaged', 'adopting', 'removing'] as const) {
+      const rows = managedSessionRows(
+        [snapshot({ state: state({ ownership }) })],
+        NOW,
+      );
+      expect(rows).toHaveLength(0);
+    }
+  });
+
   it('carries the created stamp through as epoch milliseconds', () => {
     const [row] = managedSessionRows([snapshot()], NOW);
     expect(row.startedAt).toBe(Date.parse('2026-09-04T11:58:00Z'));
@@ -205,7 +257,24 @@ describe('mergeSessionRows', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].managed).toBe(true);
-    expect(rows[0].state).toBe('working');
+    expect(rows[0].taskState).toBe('running');
+  });
+
+  it('lets a live registry record survive the adopting window', () => {
+    // Adoption reuses the live session's id before ownership flips to
+    // managed. Until it flips, the registry record is the only row that
+    // knows a live pid, so the merge must not drop it for an adopting
+    // snapshot.
+    const rows = mergeSessionRows(
+      [record({ sessionId: 'managed-1' })],
+      managedSessionRows(
+        [snapshot({ state: state({ ownership: 'adopting' }) })],
+        NOW,
+      ),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].managed).toBe(false);
+    expect(rows[0].pid).toBe(4242);
   });
 
   it('keeps registry rows whose session id no supervisor claims', () => {
@@ -232,7 +301,6 @@ describe('mergeSessionRows', () => {
         pid: 4242,
         startedAt: NOW - 90_000,
         cwd: '/w/app',
-        state: 'interactive',
         sessionId: 'sess-1',
         managed: false,
         record: rec,

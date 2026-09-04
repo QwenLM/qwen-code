@@ -15,25 +15,24 @@
  *
  * This module turns both sources into one row shape. It is deliberately
  * pure: the readers stay in the command, so the merge and the labelling
- * are testable without a filesystem or a supervisor.
+ * are testable without a filesystem or a supervisor. The one probe it
+ * makes — `isPidAlive`, which decides whether a recorded pid may still
+ * be printed — is an input the tests control like any other.
  */
 
-import type { SessionRegistryRecord } from '@qwen-code/qwen-code-core';
-import type { AgentViewSessionSnapshot } from '../../agent-view/protocol.js';
+import {
+  isPidAlive,
+  type SessionRegistryRecord,
+} from '@qwen-code/qwen-code-core';
+import type {
+  AgentViewSessionSnapshot,
+  AgentViewWorkerFile,
+} from '../../agent-view/protocol.js';
 import {
   AGENT_VIEW_UNTITLED_TITLE,
   deriveAgentViewPresentation,
   type AgentViewTaskState,
 } from '../../agent-view/presentation.js';
-
-/** What the `STATE` column can say. */
-export type SessionRowState =
-  | 'interactive'
-  | 'needs input'
-  | 'working'
-  | 'ready'
-  | 'stopped'
-  | 'failed';
 
 /** One line of `qwen sessions ps`, from either source. */
 export interface SessionRow {
@@ -47,7 +46,16 @@ export interface SessionRow {
   /** Epoch milliseconds, or undefined when the source's stamp is unusable. */
   startedAt?: number;
   cwd: string;
-  state: SessionRowState;
+  /**
+   * What the session is doing, for a managed row; absent for a registry
+   * row, which only knows that a process is alive.
+   *
+   * Deliberately the presentation layer's own token rather than the
+   * label the table prints: this field reaches `--json`, and pinning a
+   * machine contract to display wording means rewording the column
+   * breaks every script silently. The table maps it at the render site.
+   */
+  taskState?: AgentViewTaskState;
   sessionId: string;
   /** True for an Agent View session, false for a registry record. */
   managed: boolean;
@@ -62,24 +70,15 @@ export interface SessionRow {
 }
 
 /**
- * Labelled by task state, not by the roster's display group.
- *
- * The group folds `ready`, `stopped` and `failed` into one
- * `completed` bucket, which the roster UI can afford because it also
- * paints an icon tone. A one-line table has no second channel, and
- * printing "completed" beside a session that failed would be a lie the
- * user has no way to see through.
- */
-const TASK_STATE: Record<AgentViewTaskState, SessionRowState> = {
-  running: 'working',
-  waiting: 'needs input',
-  ready: 'ready',
-  stopped: 'stopped',
-  failed: 'failed',
-};
-
-/**
  * Rows for the managed sessions a supervisor knows about.
+ *
+ * Only a snapshot the supervisor owns qualifies. The store also holds
+ * unmanaged tombstones (a removed session persists for a retention
+ * window), sessions mid-removal, and sessions mid-adoption — and an
+ * adopting snapshot reuses the id of a session that is still live and
+ * registered. Mapping any of those would list a ghost, or let the merge
+ * below replace a registry row that knows a live pid with one that does
+ * not. The supervisor's own listing skips the same shapes.
  *
  * The name and the state both come from `deriveAgentViewPresentation`, so
  * this listing and the roster UI cannot drift into describing the same
@@ -89,40 +88,61 @@ export function managedSessionRows(
   snapshots: readonly AgentViewSessionSnapshot[],
   now: number = Date.now(),
 ): SessionRow[] {
-  return snapshots.map((snapshot) => {
-    // Passed field by field rather than spread: the parameter is a union
-    // of the snapshot and the presentation input, and only the latter
-    // carries `now`.
-    const presentation = deriveAgentViewPresentation({
-      state: snapshot.state,
-      rosterEntry: snapshot.rosterEntry,
-      launch: snapshot.launch,
-      activity: snapshot.activity,
-      now: new Date(now),
+  return snapshots
+    .filter((snapshot) => snapshot.state.ownership === 'managed')
+    .map((snapshot) => {
+      // Passed field by field rather than spread: the parameter is a
+      // union of the snapshot and the presentation input, and only the
+      // latter carries `now`.
+      const presentation = deriveAgentViewPresentation({
+        state: snapshot.state,
+        rosterEntry: snapshot.rosterEntry,
+        launch: snapshot.launch,
+        activity: snapshot.activity,
+        now: new Date(now),
+      });
+      const createdAt = Date.parse(snapshot.state.createdAt);
+      return {
+        // `title` is derived from the roster entry, the activity file
+        // and the launch record in that order, so it is the same label
+        // the roster shows. Its placeholder is the one case to override:
+        // the roster can afford identical "Untitled session" rows because
+        // a user arrows onto one, while here the id is the only thing
+        // that tells two of them apart — and the only thing they can be
+        // acted on by.
+        name:
+          presentation.title === AGENT_VIEW_UNTITLED_TITLE ||
+          !presentation.title
+            ? snapshot.state.sessionId
+            : presentation.title,
+        pid: liveWorkerPid(snapshot.worker),
+        startedAt: Number.isNaN(createdAt) ? undefined : createdAt,
+        cwd: snapshot.state.activeCwd,
+        taskState: presentation.taskState,
+        sessionId: snapshot.state.sessionId,
+        managed: true,
+      };
     });
-    const createdAt = Date.parse(snapshot.state.createdAt);
-    return {
-      // `title` is derived from the roster entry, the activity file and
-      // the launch record in that order, so it is the same label the
-      // roster shows. Its placeholder is the one case to override: the
-      // roster can afford identical "Untitled session" rows because a
-      // user arrows onto one, while here the id is the only thing that
-      // tells two of them apart — and the only thing they can be acted
-      // on by.
-      name:
-        presentation.title === AGENT_VIEW_UNTITLED_TITLE || !presentation.title
-          ? snapshot.state.sessionId
-          : presentation.title,
-      // The worker is the process doing the work; the host only owns the
-      // PTY. Report whichever exists, worker first.
-      pid: snapshot.worker?.workerPid ?? snapshot.worker?.hostPid,
-      startedAt: Number.isNaN(createdAt) ? undefined : createdAt,
-      cwd: snapshot.state.activeCwd,
-      state: TASK_STATE[presentation.taskState],
-      sessionId: snapshot.state.sessionId,
-      managed: true,
-    };
-  });
+}
+
+/**
+ * The recorded pid a row may point at, or none.
+ *
+ * The worker is the process doing the work; the host only owns the PTY —
+ * report whichever lives, worker first, matching the supervisor's own
+ * two-pid liveness idiom. The store is durable and nothing reaps it when
+ * no supervisor runs, so a crash or a reboot leaves recorded pids behind
+ * that are dead, or recycled to an unrelated process; printing one would
+ * point a `kill` at the wrong target. When neither lives, the row prints
+ * `-`, exactly like a session that never had a worker.
+ */
+function liveWorkerPid(
+  worker: AgentViewWorkerFile | undefined,
+): number | undefined {
+  for (const pid of [worker?.workerPid, worker?.hostPid]) {
+    if (pid !== undefined && isPidAlive(pid)) return pid;
+  }
+  return undefined;
 }
 
 /** Row for one live registry record. */
@@ -132,7 +152,6 @@ function registryRow(record: SessionRegistryRecord): SessionRow {
     pid: record.pid,
     startedAt: record.startedAt,
     cwd: record.cwd,
-    state: 'interactive',
     sessionId: record.sessionId,
     managed: false,
     record,
