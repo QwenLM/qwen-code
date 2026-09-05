@@ -79,6 +79,53 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('projects the daemon identity on every user block before a turn result', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('user-1', 'user', {
+        promptId: 'daemon-prompt-1',
+        message: {
+          role: 'user',
+          parts: [
+            { text: 'model input' },
+            { inlineData: { mimeType: 'image/png', data: 'AQID' } },
+          ],
+        },
+        systemPayload: {
+          displayText: 'visible input',
+          hookContext: '',
+          attachmentReferences: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 3,
+            },
+          ],
+        },
+      }),
+    );
+    expect(projected).toHaveLength(3);
+    for (const update of projected) {
+      expect(update.sessionUpdate).toBe('user_message_chunk');
+      expect(update._meta).toMatchObject({
+        promptId: 'daemon-prompt-1',
+        qwenTranscript: { sourceRecordIds: ['user-1'] },
+      });
+    }
+  });
+
+  it('does not infer a prompt identity for legacy user records', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('legacy', 'user', {
+        message: { role: 'user', parts: [{ text: 'same prompt' }] },
+      }),
+    );
+    expect(projected).toHaveLength(1);
+    expect(projected[0]?._meta?.['promptId']).toBeUndefined();
+  });
+
   it('stamps stable segment identity across replayed text parts', () => {
     const projected = updates(
       createTranscriptReplayMachine(),

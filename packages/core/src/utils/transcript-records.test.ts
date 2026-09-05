@@ -29,6 +29,30 @@ function record(
 }
 
 describe('prepareTranscriptRecords', () => {
+  it.each([undefined, '', '   ', 42, { id: 'untrusted' }])(
+    'keeps user content readable without a valid promptId (%j)',
+    (promptId) => {
+      const prepared = prepareTranscriptRecords([
+        record('user', null, { promptId }),
+      ]);
+      expect(prepared.records).toHaveLength(1);
+      expect(prepared.records[0]?.promptId).toBeUndefined();
+      expect(prepared.records[0]?.message?.parts).toEqual([{ text: 'user' }]);
+    },
+  );
+
+  it('preserves distinct daemon identities for identical user prompts', () => {
+    const message = { role: 'user', parts: [{ text: 'same prompt' }] };
+    const prepared = prepareTranscriptRecords([
+      record('first', null, { message, promptId: 'daemon-first' }),
+      record('second', 'first', { message, promptId: 'daemon-second' }),
+    ]);
+    expect(prepared.records.map((item) => item.promptId)).toEqual([
+      'daemon-first',
+      'daemon-second',
+    ]);
+  });
+
   it('selects the active branch and aggregates same-uuid fragments', () => {
     const prepared = prepareTranscriptRecords([
       record('root', null),

@@ -5145,6 +5145,7 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
+        const daemonPromptId = getInvocationContext()?.promptId;
         const promptMetadata = (params as { _meta?: Record<string, unknown> })
           ._meta;
         const continuesCurrentWorkChain =
@@ -5334,17 +5335,18 @@ export class Session implements SessionContext {
                 promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
               );
               const recorder = this.config.getChatRecordingService();
-              if (promptDisplayText !== undefined || attachmentReferences) {
-                recorder?.recordUserMessage(promptText, goalTurn?.permit, {
-                  displayText: promptDisplayText ?? promptText,
-                  hookContext: '',
-                  ...(attachmentReferences ? { attachmentReferences } : {}),
-                });
-              } else if (goalTurn) {
-                recorder?.recordUserMessage(promptText, goalTurn.permit);
-              } else {
-                recorder?.recordUserMessage(promptText);
-              }
+              recorder?.recordUserMessage(
+                promptText,
+                goalTurn?.permit,
+                promptDisplayText !== undefined || attachmentReferences
+                  ? {
+                      displayText: promptDisplayText ?? promptText,
+                      hookContext: '',
+                      ...(attachmentReferences ? { attachmentReferences } : {}),
+                    }
+                  : undefined,
+                daemonPromptId,
+              );
             }
 
             if (
@@ -5424,16 +5426,14 @@ export class Session implements SessionContext {
                 !isRetry
               ) {
                 const recorder = this.config.getChatRecordingService();
-                if (promptDisplayText !== undefined) {
-                  recorder?.recordUserMessage(promptText, goalTurn?.permit, {
-                    displayText: promptDisplayText,
-                    hookContext: '',
-                  });
-                } else if (goalTurn) {
-                  recorder?.recordUserMessage(promptText, goalTurn.permit);
-                } else {
-                  recorder?.recordUserMessage(promptText);
-                }
+                recorder?.recordUserMessage(
+                  promptText,
+                  goalTurn?.permit,
+                  promptDisplayText !== undefined
+                    ? { displayText: promptDisplayText, hookContext: '' }
+                    : undefined,
+                  daemonPromptId,
+                );
               }
 
               try {

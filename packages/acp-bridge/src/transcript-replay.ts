@@ -643,20 +643,24 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    const userMeta: UpdateMetaOptions =
+      typeof record.promptId === 'string' && record.promptId.trim().length > 0
+        ? { ...meta, extra: { ...meta.extra, promptId: record.promptId } }
+        : meta;
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
       : undefined;
     const replayMeta: UpdateMetaOptions =
       record.subtype === 'mid_turn_user_message'
         ? {
-            ...meta,
+            ...userMeta,
             extra: {
-              ...meta.extra,
+              ...userMeta.extra,
               source: 'mid_turn_message_injected',
               qwenDiscreteMessage: true,
             },
           }
-        : meta;
+        : userMeta;
     if (
       record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
