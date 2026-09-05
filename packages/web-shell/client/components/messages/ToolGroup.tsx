@@ -69,7 +69,11 @@ import {
   isWorkflowToolName,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
-import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import {
+  useTranscriptDocumentExpanded,
+  useTranscriptRenderMode,
+  type TranscriptRenderMode,
+} from '../../transcriptRenderMode';
 import { TodoTimelineContext } from '../../WebShellContexts';
 import {
   type ToolHeaderExtraRenderInfo,
@@ -167,6 +171,22 @@ export function extractDiff(tool: ACPToolCall): string {
     if (diffBlock && diffBlock.type === 'diff') {
       return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
+  }
+
+  if (tool.status === 'failed' || tool.wasCancelled) return '';
+
+  const previewPatch = tool.args?.patch;
+  if (typeof previewPatch === 'string' && previewPatch) return previewPatch;
+  const previewNewText = tool.args?.newText;
+  const previewOldText = tool.args?.oldText;
+  if (
+    typeof previewNewText === 'string' ||
+    typeof previewOldText === 'string'
+  ) {
+    return buildUnifiedDiff(
+      typeof previewOldText === 'string' ? previewOldText : '',
+      typeof previewNewText === 'string' ? previewNewText : '',
+    );
   }
 
   return '';
@@ -1083,7 +1103,7 @@ const SESSION_LINK_RE = /\[([^\]]+)\]\(qwen-session:\/\/([^)]+)\)/g;
 
 function renderWithSessionLinks(
   text: string,
-  renderMode: 'interactive' | 'readonly',
+  renderMode: TranscriptRenderMode,
 ): ReactNode {
   if (!text || !text.includes('qwen-session://')) return text;
   const parts: ReactNode[] = [];
@@ -1096,7 +1116,7 @@ function renderWithSessionLinks(
     }
     const sessionId = match[2];
     parts.push(
-      renderMode === 'readonly' ? (
+      renderMode !== 'interactive' ? (
         <span key={match.index} style={{ textDecoration: 'underline' }}>
           {match[1]}
         </span>
@@ -1620,6 +1640,7 @@ export const ToolLine = memo(function ToolLine({
 interface ThoughtLineHeaderProps {
   isStreaming?: boolean;
   expanded: boolean;
+  documentMode: boolean;
   /**
    * Thought content for the zh-CN translate button. Omitted while streaming —
    * the button is hidden then — so streamed content growth does not defeat the
@@ -1633,6 +1654,7 @@ interface ThoughtLineHeaderProps {
 const ThoughtLineHeader = memo(function ThoughtLineHeader({
   isStreaming,
   expanded,
+  documentMode,
   translateContent,
   generateContent,
   onToggle,
@@ -1644,17 +1666,26 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
         expanded ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
       }`}
       onClick={(event) => {
-        if (event.currentTarget.contains(event.target as Node)) {
+        if (
+          !documentMode &&
+          event.currentTarget.contains(event.target as Node)
+        ) {
           onToggle();
         }
       }}
     >
       <button
         type="button"
+        disabled={documentMode}
+        tabIndex={documentMode ? -1 : undefined}
         className={styles.chatSummaryThoughtSummary}
         data-testid="compact-thinking-summary"
-        aria-expanded={expanded}
-        title={t(expanded ? 'thinking.collapse' : 'thinking.expand')}
+        aria-expanded={documentMode ? undefined : expanded}
+        title={
+          documentMode
+            ? undefined
+            : t(expanded ? 'thinking.collapse' : 'thinking.expand')
+        }
       >
         <span className={styles.chatSummaryThoughtIcon} aria-hidden="true">
           <ThinkingDoneIcon />
@@ -1697,18 +1728,25 @@ const ThoughtLine = memo(function ThoughtLine({
   isStreaming?: boolean;
   generateContent?: SessionContentGenerator;
 }) {
+  const transcriptRenderMode = useTranscriptRenderMode();
+  const documentMode = transcriptRenderMode === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const [expanded, setExpanded] = useState(false);
-  const handleToggle = useCallback(() => setExpanded((value) => !value), []);
+  const showContent = documentMode ? documentExpanded : expanded;
+  const handleToggle = useCallback(() => {
+    if (!documentMode) setExpanded((value) => !value);
+  }, [documentMode]);
   return (
     <div className={styles.chatSummaryThought}>
       <ThoughtLineHeader
         isStreaming={isStreaming}
-        expanded={expanded}
-        translateContent={isStreaming ? undefined : content}
+        expanded={showContent}
+        documentMode={documentMode}
+        translateContent={documentMode || isStreaming ? undefined : content}
         generateContent={generateContent}
         onToggle={handleToggle}
       />
-      {expanded && (
+      {showContent && (
         <div className={styles.chatSummaryThoughtContent}>
           <Markdown content={content} source="thinking" />
         </div>
@@ -1727,12 +1765,16 @@ export const ToolGroup = memo(function ToolGroup({
   generateContent,
 }: ToolGroupProps) {
   const { t } = useI18n();
+  const transcriptRenderMode = useTranscriptRenderMode();
+  const documentMode = transcriptRenderMode === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const subagentDetails = useSubagentDetails();
   const monitorDetails = useMonitorDetails();
   const monitorDetailsAvailable = monitorDetails !== undefined;
   const [monitorDetailsUnavailable, setMonitorDetailsUnavailable] =
     useState(false);
   const [chatExpanded, setChatExpanded] = useState(false);
+  const showGroupContent = documentMode ? documentExpanded : chatExpanded;
   const monitorDetailsRequestRef = useRef<object | null>(null);
   const hasRunningTool = hasActiveAgents(tools);
   const activeTool =
@@ -1832,8 +1874,11 @@ export const ToolGroup = memo(function ToolGroup({
       <div className={isLocateFlashing ? flashStyles.flash : undefined}>
         <button
           type="button"
+          disabled={documentMode}
+          tabIndex={documentMode ? -1 : undefined}
           className={styles.chatSummary}
           onClick={() => {
+            if (documentMode) return;
             if (opensSubagentDetails && singleSubagent && subagentDetails) {
               subagentDetails.onOpen(singleSubagent);
               return;
@@ -1844,11 +1889,13 @@ export const ToolGroup = memo(function ToolGroup({
             }
             setChatExpanded((value) => !value);
           }}
-          aria-expanded={opensToolDetails ? undefined : chatExpanded}
+          aria-expanded={
+            documentMode || opensToolDetails ? undefined : chatExpanded
+          }
           title={
-            opensToolDetails
+            documentMode || opensToolDetails
               ? undefined
-              : chatExpanded
+              : showGroupContent
                 ? t('tool.collapseHint')
                 : t('tool.expand')
           }
@@ -1889,14 +1936,16 @@ export const ToolGroup = memo(function ToolGroup({
           </span>
           <span
             className={
-              chatExpanded ? styles.chatChevronDown : styles.chatChevronRight
+              showGroupContent
+                ? styles.chatChevronDown
+                : styles.chatChevronRight
             }
             aria-hidden="true"
           />
         </button>
-        {(chatExpanded || hasMcpApp || hasWorkflow) && (
+        {(showGroupContent || hasMcpApp || hasWorkflow) && (
           <div
-            aria-hidden={!chatExpanded}
+            aria-hidden={!showGroupContent}
             // Set on the DOM node, not as a JSX prop: react-dom 18 — inside
             // this package's supported peer range — has no `inert` property
             // entry and drops a boolean on an unknown attribute, so the
@@ -1904,15 +1953,15 @@ export const ToolGroup = memo(function ToolGroup({
             // focusable ToolLine rows while aria-hidden hid them from
             // assistive tech. Same pattern as ParallelAgentsGroup.
             ref={(element) => {
-              element?.toggleAttribute('inert', !chatExpanded);
+              element?.toggleAttribute('inert', !showGroupContent);
             }}
             className={
-              chatExpanded
+              showGroupContent
                 ? styles.chatSummaryContentClip
                 : `${styles.chatSummaryContentClip} ${styles.chatSummaryContentCollapsed}`
             }
             style={
-              !chatExpanded && hasMcpApp && !hasWorkflow
+              !showGroupContent && hasMcpApp && !hasWorkflow
                 ? { display: 'none' }
                 : undefined
             }
@@ -1973,8 +2022,10 @@ export const ToolGroup = memo(function ToolGroup({
                           approval={pendingApproval}
                           workspaceCwd={workspaceCwd}
                           summaryOnly={!singleTool || compactToolLines}
-                          forceExpanded={!!singleTool && !compactToolLines}
-                          detailsVisible={chatExpanded}
+                          forceExpanded={
+                            documentMode || (!!singleTool && !compactToolLines)
+                          }
+                          detailsVisible={showGroupContent}
                           hideHeader={!!singleTool && !compactToolLines}
                         />
                       )}
@@ -2011,6 +2062,7 @@ export const ToolGroup = memo(function ToolGroup({
           tool={tool}
           approval={pendingApproval}
           workspaceCwd={workspaceCwd}
+          forceExpanded={documentMode}
         />
       ))}
     </div>

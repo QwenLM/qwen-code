@@ -15,6 +15,7 @@ import {
   getAllSettingKeys,
   getDialogSettingKeys,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
+  WORKSPACE_TIGHTEN_ONLY_SETTINGS,
   // Business logic utilities
   TEST_ONLY,
   settingExistsInScope,
@@ -1033,5 +1034,58 @@ describe('setNestedProperty prototype-pollution guards', () => {
       assertNoPollution();
       expect(Object.keys(obj)).toEqual([]);
     });
+  });
+});
+
+describe('WORKSPACE_TIGHTEN_ONLY_SETTINGS', () => {
+  it('lists the cross-session keys, and the restricted list no longer does', () => {
+    const keys = WORKSPACE_TIGHTEN_ONLY_SETTINGS.map(
+      ({ section, key }) => `${section}.${key}`,
+    );
+    expect(keys).toEqual([
+      'agents.crossSessionMessaging',
+      'agents.crossSessionInbound',
+    ]);
+    for (const key of keys) {
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).not.toContain(key);
+    }
+  });
+
+  it('ranks the policy values in order, with parity between accept and hold', () => {
+    const inbound = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionInbound',
+    )!;
+    const ranks = ['accept', undefined, 'hold', 'refuse'].map(
+      inbound.strictness,
+    );
+    expect([...ranks].sort((a, b) => a - b)).toEqual(ranks);
+    expect(new Set(ranks).size).toBe(ranks.length);
+  });
+
+  it('ranks unrecognized values by their fail-closed behavior', () => {
+    const inbound = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionInbound',
+    )!;
+    const messaging = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionMessaging',
+    )!;
+    expect(inbound.strictness('definitely-not-a-value')).toBe(
+      inbound.strictness('hold'),
+    );
+    expect(inbound.strictness({})).toBe(inbound.strictness('hold'));
+    expect(messaging.strictness('definitely-not-a-value')).toBe(
+      messaging.strictness(false),
+    );
+    expect(messaging.strictness({})).toBe(messaging.strictness(false));
+  });
+
+  it('ranks the switch off as stricter than on, and unset as off', () => {
+    const messaging = WORKSPACE_TIGHTEN_ONLY_SETTINGS.find(
+      ({ key }) => key === 'crossSessionMessaging',
+    )!;
+    expect(messaging.strictness(true)).toBeLessThan(
+      messaging.strictness(false),
+    );
+    expect(messaging.strictness(undefined)).toBe(messaging.strictness(false));
   });
 });
