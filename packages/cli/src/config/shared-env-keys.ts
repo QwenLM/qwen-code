@@ -191,11 +191,13 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // via an attacker-chosen ACP entrypoint, for every workspace's sessions.
   'QWEN_CLI_ENTRY',
   // QWEN_CDP_MCP_COMMAND is the command the daemon spawns as the
-  // browser-automation MCP adapter, and QWEN_SERVE_CDP_TUNNEL_OVER_WS
-  // switches that tunnel surface on. A project `.env` or settings.env fixing
-  // either hijacks the daemon the same way QWEN_CLI_ENTRY does; values the
+  // browser-automation MCP adapter, QWEN_DAEMON_URL is the daemon endpoint
+  // those adapters are rerouted to, and QWEN_SERVE_CDP_TUNNEL_OVER_WS switches
+  // that tunnel surface on. A project `.env` or settings.env fixing any of
+  // these hijacks the daemon the same way QWEN_CLI_ENTRY does; values the
   // operator set in the daemon's launch env still apply.
   'QWEN_CDP_MCP_COMMAND',
+  'QWEN_DAEMON_URL',
   'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
   // QWEN_SERVE_NEW_FILE_MODE decides the creation mode of every agent-written
   // NEW file (owner-only 0600 vs umask-derived). A project `.env` flipping it

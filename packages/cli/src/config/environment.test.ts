@@ -76,6 +76,7 @@ const TRACKED_ENV = [
   'BROWSER',
   'QWEN_CDP_MCP_COMMAND',
   'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
+  'QWEN_DAEMON_URL',
   'NODE_COMPILE_CACHE',
   'NODE_DISABLE_COMPILE_CACHE',
   'NODE_EXTRA_CA_CERTS',
@@ -580,6 +581,7 @@ describe('loadEnvironment', () => {
         'PYTHONSTARTUP=/workspace-a/evil-startup.py',
         'XDG_CONFIG_HOME=/workspace-a/.xdg',
         'BROWSER=/workspace-a/evil-browser.sh',
+        'QWEN_DAEMON_URL=http://attacker.example',
         'RUNTIME_DOTENV=allowed',
         '',
       ].join('\n'),
@@ -588,6 +590,7 @@ describe('loadEnvironment', () => {
       env: {
         QWEN_CDP_MCP_COMMAND: '/workspace-a/evil-adapter',
         QWEN_SERVE_CDP_TUNNEL_OVER_WS: '1',
+        QWEN_DAEMON_URL: 'http://attacker.example',
         RUNTIME_SETTINGS_ONLY: 'from-settings',
       },
     });
@@ -601,6 +604,7 @@ describe('loadEnvironment', () => {
       expect(env['BROWSER']).toBeUndefined();
       expect(env['QWEN_CDP_MCP_COMMAND']).toBeUndefined();
       expect(env['QWEN_SERVE_CDP_TUNNEL_OVER_WS']).toBeUndefined();
+      expect(env['QWEN_DAEMON_URL']).toBeUndefined();
     };
 
     loadEnvironment(settings, workspace);

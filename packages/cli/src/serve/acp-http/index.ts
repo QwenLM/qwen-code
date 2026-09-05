@@ -1934,8 +1934,9 @@ export function mountAcpHttp(
         // Per-connection CDP-tunnel bridge unregister (Plan C, issue #5626),
         // called on WS close.
         let cdpBridgeUnregister: (() => void) | undefined;
-        // The registered CDP bridge endpoint. Its `routeInbound` starts as a
-        // no-op and is reassigned by the `/cdp` glue when a puppeteer client binds.
+        // The registered CDP bridge endpoint. Inbound `cdp_*` frames route
+        // through the registry (per-link dispatch); `/cdp` clients acquire
+        // their links on it via `CdpTunnelRegistry.acquireLink`.
         let cdpEndpoint: CdpBridgeEndpoint | undefined;
         const wsKey = rawAddr.startsWith('::ffff:')
           ? rawAddr.slice(7)
@@ -2041,11 +2042,20 @@ export function mountAcpHttp(
             if (
               opts.cdpTunnelOverWs === true &&
               cdpEndpoint !== undefined &&
+              opts.cdpTunnelRegistry !== undefined &&
               parsed !== null &&
               typeof parsed === 'object' &&
-              isCdpInboundFrameType(frameType) &&
-              cdpEndpoint.routeInbound(parsed as Record<string, unknown>)
+              isCdpInboundFrameType(frameType)
             ) {
+              // This connection is the extension bridge: route if a link
+              // consumes the frame, drop silently otherwise — mirroring the
+              // non-draining intercept, because the extension speaks cdp_*
+              // frames, not JSON-RPC error envelopes. Non-bridge peers
+              // sending cdp_* frames still get the drain rejection below.
+              opts.cdpTunnelRegistry.routeInboundFrom(
+                cdpEndpoint,
+                parsed as Record<string, unknown>,
+              );
               return;
             }
             ws.send(
@@ -2240,17 +2250,22 @@ export function mountAcpHttp(
 
           // ── CDP-tunnel frames (Plan C, issue #5626) ──────────────────
           // The extension's `cdp_*` frames on this `/acp` socket are NOT
-          // JSON-RPC, so intercept before `parseInbound` and route to the bound
-          // `/cdp` reverse link. `routeInbound` is a no-op until a puppeteer
-          // client binds.
+          // JSON-RPC, so intercept before `parseInbound` and route them
+          // through the registry, which dispatches each frame to its owning
+          // `/cdp` link (or broadcasts tab events to every link). Frames are
+          // dropped until a puppeteer client binds.
           if (
             opts.cdpTunnelOverWs === true &&
             cdpEndpoint !== undefined &&
+            opts.cdpTunnelRegistry !== undefined &&
             parsed !== null &&
             typeof parsed === 'object' &&
             isCdpInboundFrameType((parsed as { type?: unknown }).type)
           ) {
-            cdpEndpoint.routeInbound(parsed as Record<string, unknown>);
+            opts.cdpTunnelRegistry.routeInboundFrom(
+              cdpEndpoint,
+              parsed as Record<string, unknown>,
+            );
             return;
           }
 
@@ -2336,16 +2351,15 @@ export function mountAcpHttp(
             // Gate on `clientInfo.name`: web UI / Zed agents share this `/acp`
             // endpoint, and an un-gated last-writer-wins would let an agent steal
             // the bridge with `cdp_*` frames it can't answer.
-            const clientName =
+            const clientInfo =
               message.params &&
               typeof message.params === 'object' &&
               !Array.isArray(message.params)
-                ? (
-                    (message.params as Record<string, unknown>)[
-                      'clientInfo'
-                    ] as { name?: string } | undefined
-                  )?.name
+                ? ((message.params as Record<string, unknown>)['clientInfo'] as
+                    | { name?: string; cdpMultiClient?: boolean }
+                    | undefined)
                 : undefined;
+            const clientName = clientInfo?.name;
             if (
               activeMount.primary &&
               opts.cdpTunnelOverWs === true &&
@@ -2356,7 +2370,11 @@ export function mountAcpHttp(
                 connectionId: conn.connectionId,
                 send: (frame: CdpOutboundFrame) =>
                   safeWsSend(ws, JSON.stringify(frame), 'CDP'),
-                routeInbound: () => false,
+                // Issue #8737: extensions opt into multi-client `/cdp` routing
+                // (one shared tab, N concurrent puppeteer links) via
+                // `clientInfo.cdpMultiClient`. Absent/legacy keeps the exact
+                // single-client semantics the tunnel shipped with.
+                multiClient: clientInfo?.cdpMultiClient === true,
               };
               cdpBridgeUnregister =
                 opts.cdpTunnelRegistry.register(cdpEndpoint);

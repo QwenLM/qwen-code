@@ -82,6 +82,21 @@ When browser automation is configured, the panel also checks `/workspace/mcp`.
 It warns when the adapter has not connected or when an existing user-defined
 `chrome-devtools` server takes precedence over the extension tunnel.
 
+## Shared Chrome bridge (multiple Qwen Code sessions)
+
+The tunnel is multi-client (issue #8737): while the extension is connected,
+several `/cdp` puppeteer clients share the ONE `chrome.debugger` attachment —
+the daemon's own adapter plus every interactive `qwen` session that reroutes a
+`chrome-devtools` MCP server (configured with `--autoConnect`) through
+`ws://<daemon>/cdp`. Because `chrome.debugger` does not use Chrome's
+remote-debugging endpoint, those sessions stop triggering the per-session
+"Allow remote debugging?" consent dialog; all sessions drive the same active
+tab (events are broadcast, tab switches detach the previous clients). The
+extension identifies itself with `clientInfo.cdpMultiClient: true`; a daemon
+talking to an older build keeps the original single-client behavior. Clients
+probe `GET /cdp/status` (`usable: true`) before relying on the bridge;
+`QWEN_NO_SHARED_CHROME_BRIDGE=1` opts a CLI process out of the reroute.
+
 ## Onboarding states
 
 The side panel probes `GET /health` and `GET /capabilities` and shows one of:

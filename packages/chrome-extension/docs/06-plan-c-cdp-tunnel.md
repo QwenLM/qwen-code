@@ -122,3 +122,23 @@ DevTools MCP adapter           qwen serve daemon              扩展(MV3)       
 ## 8. 建议
 
 **C 值得做，但：① 走 patch 路线，把「零改造复用」从目标删掉（已被源码钉死）；② 先做 Phase 0 半天 spike。** spike 通过后 C 相比 A 净收益明确（page 级工具一次性接管），代价是维护一个 cdp-mcp patch + detach 胶水（A 没有的长期负担，决策时算进）。若 spike 显示受管策略普遍禁 `chrome.debugger`，则回 A。
+
+## 9. 后续演进：多客户端共享桥接（issue #8737）
+
+Chrome 对远程调试端点的每个新连接都弹授权框，而每个交互 CLI 进程各自 spawn
+chrome-devtools-mcp 子进程 → 每会话弹一次。2026-08 的改动把 `/cdp` 隧道多客户端化：
+
+- `cdp_attach`/`cdp_command`/`cdp_release`（daemon→扩展）与
+  `cdp_result`/`cdp_attached`（扩展→daemon）新增可选 `linkId`，标识所属
+  `/cdp` puppeteer 连接；`cdp_event`/`cdp_detach` 不带 linkId，广播给所有 link
+  （单 tab 共享，所有客户端看到同一页面事件）。
+- 扩展端对 `chrome.debugger` attach 做引用计数：多个 link 共享同一次 attach，
+  最后一个 `cdp_release` 才真正 detach；切 tab 时广播 `cdp_detach` 再重新 attach。
+- 协商：扩展 ACP `initialize` 携带 `clientInfo.cdpMultiClient: true`；旧扩展
+  保持单客户端语义（第二个 `/cdp` 连接被拒绝），新扩展对旧 daemon 的无 linkId
+  帧按默认 link 处理。
+- daemon 新增 `GET /cdp/status`（`usable` = 扩展已连接 && 多客户端 && 无 bearer
+  门禁）；交互 CLI 探测到可用桥接时，把配置了 `--autoConnect` 的
+  chrome-devtools MCP 重写为 `--wsEndpoint ws://<daemon>/cdp`
+  （`QWEN_NO_SHARED_CHROME_BRIDGE=1` 关闭）。
+- 详见 `docs/design/2026-08-08-shared-chrome-bridge-multi-client-cdp-tunnel.md`。

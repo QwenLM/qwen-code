@@ -41,6 +41,24 @@ export const CDP_FRAME_TYPES = {
   release: 'cdp_release',
 } as const;
 
+/**
+ * Routing key for multi-client bridges (issue #8737): identifies the `/cdp`
+ * puppeteer connection a frame belongs to. Optional on every frame — absent on
+ * legacy single-client bridges. Events remain untagged and are broadcast;
+ * detach notices carry the link that held the detached tab.
+ */
+export type CdpLinkId = string;
+
+/** Shape of the `linkId` the registry mints (bounded, map-key safe). */
+export function isValidLinkId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= 64 &&
+    !/[^\x21-\x7e]/.test(value)
+  );
+}
+
 /** A `cdp_command` frame the daemon sends to the extension. */
 export interface CdpCommandFrame {
   type: 'cdp_command';
@@ -48,6 +66,8 @@ export interface CdpCommandFrame {
   id: number;
   method: string;
   params?: Record<string, unknown>;
+  /** Owning `/cdp` link on multi-client bridges; echoed back on the result. */
+  linkId?: CdpLinkId;
 }
 
 /** A `cdp_attach` frame the daemon sends to the extension. */
@@ -55,15 +75,21 @@ export interface CdpAttachFrame {
   type: 'cdp_attach';
   /** Correlation id for the matching `cdp_attached` ack. */
   id: number;
+  /** Owning `/cdp` link on multi-client bridges; echoed back on the ack. */
+  linkId?: CdpLinkId;
 }
 
 /**
- * A `cdp_release` frame the daemon sends when the bound `/cdp` puppeteer client
- * disconnects while the extension is still connected. The extension responds by
- * detaching `chrome.debugger` so the tab doesn't keep Chrome's debugging banner.
+ * A `cdp_release` frame the daemon sends when a `/cdp` puppeteer client
+ * disconnects while the extension is still connected. On multi-client bridges
+ * the extension drops only this link's attachment ref (detaching
+ * `chrome.debugger` when the last link releases); on legacy bridges it
+ * detaches immediately so the tab doesn't keep Chrome's debugging banner.
  */
 export interface CdpReleaseFrame {
   type: 'cdp_release';
+  /** Releasing `/cdp` link on multi-client bridges. */
+  linkId?: CdpLinkId;
 }
 
 /** Any outbound frame this link pushes to the extension socket. */
@@ -78,6 +104,8 @@ export interface CdpResultFrame {
   id: number;
   result?: unknown;
   error?: { code?: number; message?: string; data?: unknown };
+  /** Owning `/cdp` link, echoed from the `cdp_command` (multi-client). */
+  linkId?: CdpLinkId;
 }
 
 /** A `cdp_event` frame the extension forwards from the real tab. */
@@ -95,12 +123,16 @@ export interface CdpAttachedFrame {
   url?: string;
   title?: string;
   error?: { message?: string };
+  /** Owning `/cdp` link, echoed from the `cdp_attach` (multi-client). */
+  linkId?: CdpLinkId;
 }
 
 /** A `cdp_detach` frame the extension sends when the debugger goes away. */
 export interface CdpDetachFrame {
   type: 'cdp_detach';
   reason?: string;
+  /** Link that held the detached tab; absent on legacy bridges. */
+  linkId?: CdpLinkId;
 }
 
 type CdpInboundFrame =
