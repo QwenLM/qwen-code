@@ -400,11 +400,20 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   PR_FETCH_OK=1
   PR_JSON="$(gh api "repos/${REPO}/pulls/${PR}" 2> "${GH_ERR:-/dev/null}")" ||
     PR_FETCH_OK=0
-  # Both fields are API-derived content published under the bot identity, so
-  # they get the same mention/comment-opener neutralization as the reason
-  # rendering. The title slice happens in jq (codepoint-safe): a bash byte
+  # Both fields are API-derived content published under the bot identity,
+  # but the two surfaces they land on render differently. The issue TITLE is
+  # stored and rendered as plain text — no markdown pass, no mention filter —
+  # so the entity/@/comment-opener stages protect nothing there and only
+  # corrupt the one human-facing string this change exists to make readable
+  # (an invisible ZWSP inside `@types`, visible `\-\-` backslashes): the
+  # title variant flattens and caps only. The BODY copy renders markdown, so
+  # it keeps the full mention/comment-opener neutralization, same as the
+  # reason rendering. The slice happens in jq (codepoint-safe): a bash byte
   # slice could cut a UTF-8 sequence on CJK titles under a C locale and
   # fail the whole create call.
+  PR_TITLE_RAW="$(jq -r '(.title // "")
+    | gsub("[\r\n\t]+"; " ")
+    | .[0:80]' <<< "${PR_JSON}" 2> /dev/null || true)"
   PR_TITLE="$(jq -r '(.title // "")
     | gsub("[\r\n\t]+"; " ")
     | gsub("&(?<ent>#0*(?:64|[xX]0*40);|commat;)"; "&amp;\(.ent)")
@@ -428,8 +437,11 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   if [[ "${PR_FETCH_OK}" != 1 ]]; then
     echo "::warning::could not fetch PR #${PR} context ($(gh_reason)); creating the deferred-findings issue with the bare title, no assignee and no cc — the findings themselves are still persisted"
   fi
+  # The ": " separator is consumed 220 lines away by the marker-less title
+  # fallback in the lookup above (startswith($t + ":")) — restyle it in both
+  # places, or marker-stripped issues stop being adopted.
   CREATE_TITLE="${TITLE}"
-  [[ -n "${PR_TITLE}" ]] && CREATE_TITLE="${TITLE}: ${PR_TITLE}"
+  [[ -n "${PR_TITLE_RAW}" ]] && CREATE_TITLE="${TITLE}: ${PR_TITLE_RAW}"
   CONTEXT="PR #${PR}"
   [[ -n "${PR_TITLE}" ]] && CONTEXT="${CONTEXT} (\"${PR_TITLE}\")"
   [[ -n "${PR_AUTHOR}" ]] && CONTEXT="${CONTEXT} by ${PR_AUTHOR}"

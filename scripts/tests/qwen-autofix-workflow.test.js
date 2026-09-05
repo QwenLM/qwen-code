@@ -14276,6 +14276,18 @@ exit 1
     expect(botAuthor.out).toContain('tracked in new issue #77');
     expect(botAuthor.calls).not.toContain('assignees');
     expect(botAuthor.calls).not.toContain('cc @');
+    // The login-charset guard in the script is the ONLY thing keeping a
+    // malformed `.user.login` (a space, an `@`, an over-long string, a
+    // non-login shape) out of both the deliberate `cc @…` mention in the
+    // public body and the `assignees[]` argument — deleting or weakening the
+    // regex must red this case.
+    const badLogin = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+      prJson: '{"title":"t","user":{"login":"not a login"}}',
+    });
+    expect(badLogin.out).toContain('tracked in new issue #77');
+    expect(badLogin.calls).not.toContain('assignees');
+    expect(badLogin.calls).not.toContain('cc @');
     // A rejected assignment only warns: by then the findings are already
     // persisted, and the assignment is a SEPARATE idempotent call — never a
     // second create POST. POST /repos/{owner}/{repo}/issues is not idempotent
@@ -14304,35 +14316,57 @@ exit 1
     expect(assignFailed.calls).toContain('-f assignees[]=someone');
     expect(assignFailed.calls).toContain('- rc:7 `?`: r');
     // The PR title is API-derived content published under the bot identity,
-    // so it gets the same mention/comment-opener neutralization as reasons.
+    // and the two surfaces it lands on render differently: the issue TITLE
+    // is plain text (no markdown pass, no mention filter), so it carries the
+    // raw title — flatten+cap only; the BODY renders markdown, so its copy
+    // keeps the full mention/comment-opener neutralization, same as reasons.
+    // The assertions are split per call on purpose: asserted over the whole
+    // log, each rendering could be coming from the other site, so dropping
+    // either half of the split derivation would ship green.
     const titled = runUpsert({
       findings: '[{"id":7,"reason":"r"}]',
       prJson: '{"title":"fix @foo <!-- x -->","user":{"login":"someone"}}',
     });
-    expect(titled.calls).toContain('@\u200bfoo');
-    expect(titled.calls).not.toContain('fix @foo');
-    expect(titled.calls).toContain('<!\\-\\- x -->');
-    // The title path's ENTITY escape needs its own witness — the reason
+    const titledTitle = titled.calls.match(/-f title=(.*?) -f body=/)?.[1];
+    expect(titledTitle).toBe(
+      'Deferred review findings from PR #5: fix @foo <!-- x -->',
+    );
+    const titledBody = titled.calls.split('-f body=')[1] ?? '';
+    expect(titledBody).toContain('@\u200bfoo');
+    expect(titledBody).not.toContain('fix @foo');
+    expect(titledBody).toContain('<!\\-\\- x -->');
+    // The BODY copy's ENTITY escape needs its own witness — the reason
     // path's identical copy is pinned by `mentions`, but a PR title is fully
     // contributor-controlled and GitHub decodes &#64; BEFORE its mention
-    // filter, so an un-escaped entity here is a live mention published under
-    // the bot identity. One case pins all three title stages: deleting the
-    // entity gsub, the [\r\n\t] flatten, or the .[0:80] slice each reds an
-    // assertion below.
+    // filter, so an un-escaped entity in the markdown-rendered body is a
+    // live mention published under the bot identity. The issue-TITLE copy is
+    // plain text — no mention filter — so the raw entity is inert there and
+    // escaping it would only corrupt the string. One case pins both
+    // variants: deleting the body chain's entity gsub, the shared
+    // [\r\n\t] flatten, or the .[0:80] slice each reds an assertion below.
     const paddedTitle = 'A'.repeat(100);
     const entityTitle = runUpsert({
       findings: '[{"id":7,"reason":"r"}]',
       prJson: `{"title":"ping &#64;admin &commat;x\\n${paddedTitle}","user":{"login":"someone"}}`,
     });
-    expect(entityTitle.calls).toContain(
-      '-f title=Deferred review findings from PR #5: ping &amp;#64;admin &amp;commat;x AAA',
+    // Title surface: raw entities, the newline flattened to a space, capped
+    // at 80 codepoints — the 26-codepoint prefix leaves 54 A's.
+    const entityTitleArg = entityTitle.calls.match(
+      /-f title=(.*?) -f body=/,
+    )?.[1];
+    expect(entityTitleArg).toBe(
+      `Deferred review findings from PR #5: ping &#64;admin &commat;x ${'A'.repeat(54)}`,
     );
-    // No live entity survives (`&amp;#64;` does not contain `&#64;`) …
-    expect(entityTitle.calls).not.toContain('&#64;');
-    expect(entityTitle.calls).not.toContain('&commat;');
-    // … and the slice kept the title at 80 codepoints: 34 survive the prefix,
-    // so 46 A's remain — 60 in a row means the slice is gone.
-    expect(entityTitle.calls).not.toContain('A'.repeat(60));
+    const entityBody = entityTitle.calls.split('-f body=')[1] ?? '';
+    expect(entityBody).toContain('ping &amp;#64;admin &amp;commat;x AAA');
+    // No live entity survives in the body (`&amp;#64;` does not contain
+    // `&#64;`) …
+    expect(entityBody).not.toContain('&#64;');
+    expect(entityBody).not.toContain('&commat;');
+    // … and the slice kept the body copy at 80 codepoints: the escaped prefix
+    // is 34 codepoints, so 46 A's remain — 60 in a row means the slice is
+    // gone.
+    expect(entityBody).not.toContain('A'.repeat(60));
     // Append path: existing issue found → dedupe against body+comments,
     // then POST an issue COMMENT (append-only; no body PATCH anywhere).
     const appended = runUpsert({
@@ -14409,6 +14443,11 @@ exit 1
     expect(writeFail.out).toContain('watermark-gated');
     expect(writeFail.out).toContain('- rc:7 ');
     expect(writeFail.out).not.toContain('NOT persisted this round');
+    // A failed create must not reach the assignment: with NUM empty, the
+    // `-n "${NUM}" &&` half of the assign guard is the only thing keeping a
+    // `repos/o/r/issues//assignees` POST off the log. Mirrors prFetchFailed's
+    // pin above, which covers the AUTHOR gate (ASSIGNABLE=0), not NUM=''.
+    expect(writeFail.calls).not.toContain('assignees');
     // Path bytes are sanitized before rendering (no forged bullet lines).
     const forged = runUpsert({
       findings: '[{"id":4,"path":"a`\\n- rc:999 `z","reason":"r"}]',
@@ -14976,6 +15015,33 @@ exit 1
       '-f title=Deferred review findings from PR #5: Some PR title',
     );
     expect(numberCollide.calls).not.toContain('issues/45/comments');
+    // Round-trip: the title the create path WRITES must be the title the
+    // marker-less lookup ACCEPTS. enrichedAdopted and numberCollide pin each
+    // side from its own hand-typed literal, so a one-sided restyle (": " to
+    // " - " at creation, or ":" to " -" at the lookup's startswith) leaves
+    // the other green while production forks a second tracking issue — the
+    // outcome this file ranks worst. Deriving the fixture from the recorded
+    // create call ties the two sides: a restyle on EITHER side reds this.
+    const roundTripCreate = runUpsert({
+      findings: '[{"id":7,"reason":"r"}]',
+    });
+    const createdTitle = roundTripCreate.calls.match(
+      /-f title=(.*?) -f body=/,
+    )?.[1];
+    expect(createdTitle).toBeTruthy();
+    const roundTripAdopt = runUpsert({
+      findings: '[{"id":8,"reason":"r2"}]',
+      list: JSON.stringify([
+        {
+          number: 46,
+          title: createdTitle,
+          body: 'a maintainer edited this body and dropped the marker',
+          pull_request: null,
+        },
+      ]),
+    });
+    expect(roundTripAdopt.calls).toContain('issues/46/comments -f body=');
+    expect(roundTripAdopt.calls).not.toContain('-f title=');
     // An unknown source value fails the gate loudly rather than silently
     // rendering under the default prefix.
     const badSource = runUpsert({
