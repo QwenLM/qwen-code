@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,6 +24,7 @@ import { Storage } from '../../config/storage.js';
 import { ToolErrorType } from '../tool-error.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
 import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
+import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
 
 function fakeConfig(): Config {
   return {} as unknown as Config;
@@ -142,6 +143,34 @@ describe('WorkflowTool', () => {
     // one: `workflow('<name>')` is a blind guess and `scriptPath` wants an
     // absolute path it cannot construct.
     expect(description).toContain('.qwen/workflows');
+    // The result surface is part of the runtime the model has to plan
+    // around: without these sentences it has no reason to expect a script
+    // path back, and resumes by re-sending the whole source.
+    expect(description).toMatch(/Every run hands back its runId/);
+    expect(description).toMatch(/read it before diagnosing/);
+  });
+
+  // Both parameter descriptions describe the same persisted file — the one
+  // `resumeFromRunId` tells the model to edit. A change on one side that
+  // leaves the other pointing at the old contract (re-send the script) is
+  // the regression this catches.
+  it('scriptPath and resumeFromRunId describe the persisted inline script', () => {
+    const tool = new WorkflowTool(fakeConfig());
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: {
+        scriptPath: { description: string };
+        resumeFromRunId: { description: string };
+      };
+    };
+    expect(schema.properties.scriptPath.description).toContain(
+      'inline/<runId>.js',
+    );
+    expect(schema.properties.resumeFromRunId.description).toMatch(
+      /Pass the `scriptPath` the original run returned/,
+    );
+    expect(schema.properties.resumeFromRunId.description).toMatch(
+      /not the script text/,
+    );
   });
 
   // The policy prose above tells the model how to orchestrate *well*; on its
@@ -896,7 +925,10 @@ await agent('scan package.json')
     expect(result.workflowRunId).toBe(entry.runId);
     expect(result.llmContent).toEqual([
       {
-        text: `Workflow started in background.\nRun ID: ${entry.runId}\nStatus: running`,
+        text:
+          `Workflow started in background.\nRun ID: ${entry.runId}\n` +
+          `Status: running\nYou will be notified when it settles. ` +
+          `Use /workflows ${entry.runId} for the live phase tree.`,
       },
     ]);
     expect(result.returnDisplay).toBe(
@@ -1246,10 +1278,20 @@ await agent('scan package.json')
       script: 'return { kind: "report", body: "hello" };',
     });
     const result = await invocation.execute(new AbortController().signal);
-    const llmText = (result.llmContent as Array<{ text: string }>)[0].text;
-    // The llmText should be the JSON of just the script's return value,
+    const parts = result.llmContent as Array<{ text: string }>;
+    // The first part should be the JSON of just the script's return value,
     // NOT a wrapper with {runId, result, phases, logs}.
-    expect(JSON.parse(llmText)).toEqual({ kind: 'report', body: 'hello' });
+    expect(JSON.parse(parts[0].text)).toEqual({
+      kind: 'report',
+      body: 'hello',
+    });
+    // The run handle is a SECOND part, so the first one still parses as
+    // whatever the script returned. (Downstream the scheduler joins the two
+    // with a newline — see the convertToFunctionResponse tests below.)
+    expect(parts).toHaveLength(2);
+    expect(parts[1].text).toMatch(
+      /^--- workflow run ---\nrunId: wf_[0-9a-f]+\ntokens: 0 spent \(no cap\)$/,
+    );
   });
 
   // FIX-C9 (TST-M2): scripts without an explicit `return` resolve to
@@ -1618,5 +1660,268 @@ await agent('scan package.json')
         process.env['QWEN_CODE_MAX_TOKENS_PER_WORKFLOW'] = originalEnv;
       }
     }
+  });
+  // ── The run handle the model gets back ──────────────────────────────
+  //
+  // A workflow result used to be the script's return value and nothing else:
+  // no run id to name to `/workflows`, no journal to read the per-agent
+  // results from, and no way to resume short of re-sending the source. These
+  // cover the trailer that carries all three — and the property that makes it
+  // safe to add, namely that it never touches the first part.
+  describe('run handle trailer', () => {
+    let runtimeDir: string;
+    let projectRoot: string;
+    let previousRuntimeDir: string | undefined;
+
+    beforeEach(async () => {
+      runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-rt-'));
+      projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-tool-proj-'));
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    });
+
+    afterEach(async () => {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    });
+
+    function storedConfig(): { config: Config; storage: Storage } {
+      const registry = new WorkflowRunRegistry();
+      const storage = new Storage(projectRoot);
+      const config = {
+        storage,
+        getWorkflowRunRegistry: () => registry,
+        getSkipWorkflowUsageWarning: () => true,
+      } as unknown as Config;
+      return { config, storage };
+    }
+
+    it('names the persisted script, the journal and the resume call', async () => {
+      const { config, storage } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({ script: 'await agent("one"); return "done";' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(parts[0].text).toBe('done');
+      const trailer = parts[1].text;
+      const runId = result.scriptPath!.match(/(wf_[0-9a-f]+)\.js$/)![1];
+      expect(trailer).toContain(`runId: ${runId}`);
+      expect(trailer).toContain(
+        `script: ${storage.getInlineWorkflowScriptPath(runId)}`,
+      );
+      expect(trailer).toContain(
+        `journal: ${storage.getWorkflowRunJournalPath(runId)}`,
+      );
+      expect(trailer).toContain(
+        'agents: 1 dispatched · 1 completed · 0 cached',
+      );
+      expect(trailer).toContain('tokens: 0 spent (no cap)');
+      expect(trailer).toContain(
+        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "${runId}" })`,
+      );
+      // Named paths are real files, not a format the runtime never wrote.
+      await expect(fs.readFile(result.scriptPath!, 'utf8')).resolves.toBe(
+        'await agent("one"); return "done";',
+      );
+      await expect(fs.stat(result.journalPath!)).resolves.toBeDefined();
+    });
+
+    it('omits the file lines when the config has no storage', async () => {
+      const registry = new WorkflowRunRegistry();
+      const config = {
+        getWorkflowRunRegistry: () => registry,
+        getSkipWorkflowUsageWarning: () => true,
+      } as unknown as Config;
+
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({ script: 'return "done";' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(parts[0].text).toBe('done');
+      expect(parts[1].text).toContain('runId: ');
+      expect(parts[1].text).not.toContain('script: ');
+      expect(parts[1].text).not.toContain('journal: ');
+      expect(parts[1].text).not.toContain('resume: ');
+      expect(result.scriptPath).toBeUndefined();
+      expect(result.journalPath).toBeUndefined();
+    });
+
+    // The failure path is where the logs matter: `returnDisplay` carries them
+    // for the user, but the scheduler replaces it with `error.message` for the
+    // model, so without this part the model sees the message alone.
+    it('carries the trailer and the last log lines on the failure path', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      })
+        .build({ script: 'log("about to fail"); throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+      const parts = result.llmContent as Array<{ text: string }>;
+      expect(parts[0].text).toBe('Workflow failed: boom');
+      expect(parts[1].text).toContain('--- workflow run ---');
+      expect(parts[1].text).toContain('script: ');
+      expect(parts[1].text).toContain('logs (last ');
+      expect(parts[1].text).toContain('about to fail');
+    });
+
+    it('names the script and journal on a background launch', async () => {
+      const { config, storage } = storedConfig();
+      Object.assign(config, { isInteractive: () => true });
+      config.getWorkflowRunRegistry()!.setCompletionCallback(vi.fn());
+      let resolveDispatch: ((value: string) => void) | undefined;
+      const result = await new WorkflowTool(config, {
+        dispatch: () =>
+          new Promise<string>((resolve) => {
+            resolveDispatch = resolve;
+          }),
+      })
+        .build({
+          script: 'return await agent("slow");',
+          run_in_background: true,
+        })
+        .execute(new AbortController().signal);
+
+      const runId = result.workflowRunId!;
+      const text = (result.llmContent as Array<{ text: string }>)[0].text;
+      expect(text).toContain(
+        `Script file: ${storage.getInlineWorkflowScriptPath(runId)}`,
+      );
+      expect(text).toContain(
+        `Journal: ${storage.getWorkflowRunJournalPath(runId)}`,
+      );
+      expect(text).toContain(`Use /workflows ${runId}`);
+
+      resolveDispatch?.('done');
+      await config.getWorkflowRunRegistry!()!.getHandle(runId)!.completion;
+    });
+
+    // The whole point of persisting the script: a resume can edit the file
+    // and re-run without re-sending the source, and the journal still serves
+    // every agent() call whose prompt and opts did not change.
+    it('resumes from the persisted script after the file is edited', async () => {
+      const { config } = storedConfig();
+      const dispatch = vi.fn(async () => 'from the agent');
+      const first = await new WorkflowTool(config, { dispatch })
+        .build({ script: 'const a = await agent("one"); return a;' })
+        .execute(new AbortController().signal);
+
+      const scriptPath = first.scriptPath!;
+      const runId = scriptPath.match(/(wf_[0-9a-f]+)\.js$/)![1];
+      expect(dispatch).toHaveBeenCalledTimes(1);
+
+      // Only the post-processing changes; the agent() call is byte-identical,
+      // so the journal keys still match.
+      await fs.writeFile(
+        scriptPath,
+        'const a = await agent("one"); return a.toUpperCase();',
+        'utf8',
+      );
+      dispatch.mockClear();
+
+      const second = await new WorkflowTool(config, { dispatch })
+        .build({ scriptPath, resumeFromRunId: runId })
+        .execute(new AbortController().signal);
+
+      expect(dispatch).not.toHaveBeenCalled();
+      expect((second.llmContent as Array<{ text: string }>)[0].text).toBe(
+        'FROM THE AGENT',
+      );
+    });
+    it('carries the original args in the resume call', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({
+          script: 'return await agent(`one ${args.who}`);',
+          args: { who: 'world' },
+        })
+        .execute(new AbortController().signal);
+
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      // A resume without the original args still runs — it just misses every
+      // journal key, because the script bakes args into the agent prompts.
+      expect(trailer).toContain(
+        `resume: Workflow({ scriptPath: "${result.scriptPath}", resumeFromRunId: "`,
+      );
+      expect(trailer).toContain('args: {"who":"world"}');
+      expect(trailer).not.toContain('too large to inline');
+    });
+
+    it('names args it cannot inline instead of truncating the call', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({
+          script: 'return "done";',
+          args: { blob: 'x'.repeat(400) },
+        })
+        .execute(new AbortController().signal);
+
+      const trailer = (result.llmContent as Array<{ text: string }>)[1].text;
+      expect(trailer).toContain('resume: Workflow({');
+      expect(trailer).not.toContain('args:');
+      expect(trailer).toContain('too large to inline here');
+    });
+
+    // What the model actually reads. `convertToFunctionResponse` folds every
+    // text part into one `functionResponse.output` joined by newlines (the
+    // #1520 behavior), so the trailer arrives appended to the return value —
+    // not as a part the model can ignore, and not as something that alters
+    // the return value's own bytes.
+    it('reaches the model as the return value with the trailer appended', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'answer',
+      })
+        .build({ script: 'return { kind: "report" };' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      const [response] = convertToFunctionResponse(
+        'Workflow',
+        'call-1',
+        result.llmContent,
+      );
+      const output = response.functionResponse?.response?.['output'];
+      expect(output).toBe(`${parts[0].text}\n${parts[1].text}`);
+      expect(String(output)).toContain('"kind": "report"');
+      expect(String(output)).toContain('}\n--- workflow run ---\n');
+    });
+
+    it('reaches the model with the failure message followed by the trailer', async () => {
+      const { config } = storedConfig();
+      const result = await new WorkflowTool(config, {
+        dispatch: async () => 'unused',
+      })
+        .build({ script: 'log("about to fail"); throw new Error("boom");' })
+        .execute(new AbortController().signal);
+
+      const parts = result.llmContent as Array<{ text: string }>;
+      const [response] = convertToFunctionResponse(
+        'Workflow',
+        'call-2',
+        result.llmContent,
+      );
+      const output = response.functionResponse?.response?.['output'];
+      expect(output).toBe(`${parts[0].text}\n${parts[1].text}`);
+      expect(String(output)).toMatch(
+        /^Workflow failed: boom\n--- workflow run ---/,
+      );
+    });
   });
 });

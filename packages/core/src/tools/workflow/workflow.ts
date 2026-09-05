@@ -68,6 +68,11 @@ import { isSymlinkedRoot } from '../../agents/runtime/workflow-saved.js';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import type { WorkflowTask } from '../../agents/workflow-run-registry.js';
+import {
+  buildResumeCall,
+  hasUninlinableResumeArgs,
+  RESUME_ARGS_TOO_LARGE_NOTE,
+} from '../../agents/workflow-resume-call.js';
 
 export interface WorkflowParams {
   /**
@@ -109,6 +114,14 @@ export interface WorkflowToolOptions {
 export interface WorkflowToolResult extends ToolResult {
   /** Exact run started by a successfully admitted background invocation. */
   workflowRunId?: string;
+  /**
+   * Where the script that ran lives on disk — the file a `{scriptPath}` call
+   * loaded, or the persisted copy of an inline `{script}`. Absent when an
+   * inline script could not be persisted.
+   */
+  scriptPath?: string;
+  /** This run's resume journal, when the config has a `storage` to hold one. */
+  journalPath?: string;
 }
 
 const WORKFLOW_PARAM_SCHEMA = {
@@ -193,7 +206,9 @@ const WORKFLOW_PARAM_SCHEMA = {
         'runtime dir, not the project tree) — any other path is refused. ' +
         'Provide exactly ONE of `script` or `scriptPath`. The file is read ' +
         'at execution time, so edits to a saved workflow take effect on the ' +
-        'next run.',
+        'next run. An inline `script` is persisted to ' +
+        '`<generated root>/inline/<runId>.js` and that path comes back in the ' +
+        'result, so a resume passes the path instead of the source.',
     },
     args: {
       description:
@@ -206,8 +221,11 @@ const WORKFLOW_PARAM_SCHEMA = {
         'Re-runs the SAME script; agent() calls whose rolling prefix-hash ' +
         '(prompt + opts, chained in call order) matches a journaled result ' +
         'are served from cache for the longest unchanged prefix, and the ' +
-        'first changed/missing call onward runs live. Pass the same script ' +
-        'and args as the original run for the cache to apply.',
+        'first changed/missing call onward runs live. Pass the `scriptPath` ' +
+        'the original run returned (edit that file first when the script has ' +
+        'to change) and the same `args`; the journal keys hash each agent() ' +
+        "call's prompt and opts, not the script text, so post-processing can " +
+        'change without losing the cache.',
     },
     run_in_background: {
       type: 'boolean',
@@ -423,9 +441,11 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       );
       return {
         workflowRunId: handle.runId,
+        ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
+        ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
         llmContent: [
           {
-            text: `Workflow started in background.\nRun ID: ${handle.runId}\nStatus: ${status}`,
+            text: buildBackgroundStartText(handle, status),
           },
         ],
         returnDisplay:
@@ -442,10 +462,12 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         handle.budget.total,
       );
 
-      // FIX-7 (UP-C2): unwrap the script result so the LLM receives the
-      // script's return value verbatim. The full metadata (runId, phases,
-      // logs) is preserved in returnDisplay for the UI but does not pad
-      // the LLM context with bookkeeping noise.
+      // FIX-7 (UP-C2): unwrap the script result so the run's own bookkeeping
+      // (phases, logs, the display payload below) does not wrap the script's
+      // return value. That full metadata stays in returnDisplay for the UI.
+      // The one exception is the run trailer appended after this value: a
+      // result the model cannot name, read back or resume is a result it
+      // cannot follow up on, so a short run handle is worth its few lines.
       //
       // T12 / T18 (PR #4732 R1): defensive serialization. A successful
       // workflow whose `return` value is a BigInt, a circular reference,
@@ -483,7 +505,19 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       });
 
       return {
-        llmContent: [{ text: llmText }],
+        ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
+        ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
+        // Two parts: the script's return value is left exactly as it was,
+        // and the run handle follows as a separate part. Note what this does
+        // NOT mean — `convertToFunctionResponse` joins the text parts with a
+        // newline, so the model reads `<return value>\n--- workflow run ---…`
+        // as one string. Keeping them apart is still what makes the return
+        // value untouched at the tool boundary, keeps `returnDisplay` clean,
+        // and puts the trailer in the tail that result truncation preserves.
+        llmContent: [
+          { text: llmText },
+          { text: buildRunTrailer(handle, this.params.args) },
+        ],
         returnDisplay: usageBanner + '```json\n' + displayJson + '\n```',
       };
     } else {
@@ -524,7 +558,18 @@ class WorkflowToolInvocation extends BaseToolInvocation<
         },
       )}`;
       return {
-        llmContent: [{ text: `Workflow failed: ${message}` }],
+        ...(handle.scriptPath ? { scriptPath: handle.scriptPath } : {}),
+        ...(handle.journalPath ? { journalPath: handle.journalPath } : {}),
+        // The failure message alone names what threw but not where to look:
+        // the logs the runtime already mirrored (`dispatch failed (result not
+        // consumed)` and friends) only reached `returnDisplay`, which the
+        // scheduler overwrites with `error.message` — so the model never saw
+        // them. The trailer part carries them, and the run handle, to it;
+        // both parts reach the model joined by a newline.
+        llmContent: [
+          { text: `Workflow failed: ${message}` },
+          { text: buildRunTrailer(handle, this.params.args, logs) },
+        ],
         returnDisplay: display,
         // FIX-10 (REUSE-I1): use the standard ToolErrorType.EXECUTION_FAILED
         // code so error routing / dashboards can classify workflow failures
@@ -533,6 +578,116 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       };
     }
   }
+}
+
+/** Log lines carried back to the model on the failure path. */
+const TRAILER_LOG_LINES = 20;
+
+/**
+ * The run handle, as plain text for the model: run id, the script on disk,
+ * the journal, what the fan-out cost, and the exact call that resumes it.
+ *
+ * Emitted as a second `llmContent` part that follows the script's return
+ * value rather than wrapping it: the first part keeps exactly the bytes it
+ * had before, and everything downstream that reads a workflow result at the
+ * tool boundary sees the same value it always did. Downstream of the
+ * scheduler the two parts are joined with a newline into one function
+ * response, so what the model reads is the return value with this block
+ * appended — which is the point. Without it the model was handed a result it
+ * could not follow up on: no run id to name to `/workflows`, no path to read
+ * the per-agent results from, and no way to resume short of re-sending the
+ * whole script.
+ *
+ * Every field is omitted when the run does not have it (a config without
+ * `storage` has no journal; an inline script that could not be persisted has
+ * no path), so the trailer never names a file that is not there.
+ */
+function buildRunTrailer(
+  handle: WorkflowRunHandle,
+  args: unknown,
+  logs?: string[],
+): string {
+  const lines = [
+    '--- workflow run ---',
+    `runId: ${sanitizeLine(handle.runId)}`,
+  ];
+  if (handle.scriptPath) {
+    lines.push(`script: ${sanitizeLine(handle.scriptPath)}`);
+  }
+  if (handle.journalPath) {
+    lines.push(`journal: ${sanitizeLine(handle.journalPath)}`);
+  }
+  const entry = handle.registry?.get(handle.runId);
+  if (entry) {
+    const cached = entry.dispatches.reduce(
+      (n, dispatch) => (dispatch.status === 'cached' ? n + 1 : n),
+      0,
+    );
+    lines.push(
+      `agents: ${entry.agentsDispatched} dispatched · ${entry.agentsCompleted} completed · ${cached} cached`,
+    );
+  }
+  const spent = handle.budget.spent();
+  lines.push(
+    handle.budget.total === null
+      ? `tokens: ${spent} spent (no cap)`
+      : `tokens: ${spent} / ${handle.budget.total} spent`,
+  );
+  // Built by the shared resume builder, the same one the background
+  // completion notification uses: this string is copied verbatim into the
+  // next tool call, and a second implementation would drift on `args` —
+  // silently, because a resume without them still runs and simply misses
+  // every journal key.
+  const resume = buildResumeCall({
+    runId: handle.runId,
+    scriptPath: handle.scriptPath,
+    args,
+  });
+  if (resume) {
+    lines.push(
+      `resume: ${resume} — edit that file first if the script needs to ` +
+        'change; agent() calls whose prompt and opts are unchanged replay ' +
+        'from the journal.',
+    );
+    if (hasUninlinableResumeArgs({ runId: handle.runId, args })) {
+      lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
+    }
+  }
+  const tail = (logs ?? []).slice(-TRAILER_LOG_LINES);
+  if (tail.length > 0) {
+    lines.push(
+      `logs (last ${tail.length}):`,
+      ...tail.map((line) => sanitizeLine(line)),
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Launch receipt for a backgrounded run. The run id alone was not enough to
+ * act on: the completion arrives in a later turn, and until it does the model
+ * has nothing to read. The script and journal paths are the two files that
+ * exist from the moment the run starts.
+ */
+function buildBackgroundStartText(
+  handle: WorkflowRunHandle,
+  status: string,
+): string {
+  const lines = [
+    'Workflow started in background.',
+    `Run ID: ${sanitizeLine(handle.runId)}`,
+    `Status: ${sanitizeLine(status)}`,
+  ];
+  if (handle.scriptPath) {
+    lines.push(`Script file: ${sanitizeLine(handle.scriptPath)}`);
+  }
+  if (handle.journalPath) {
+    lines.push(`Journal: ${sanitizeLine(handle.journalPath)}`);
+  }
+  lines.push(
+    `You will be notified when it settles. Use /workflows ${sanitizeLine(handle.runId)} for the live phase tree.`,
+  );
+  return lines.join('\n');
 }
 
 function startCancelledResult(): WorkflowToolResult {
@@ -938,7 +1093,7 @@ Reach for one to be comprehensive (decompose the work and cover every part in pa
 
 **Runtime** — see the \`script\` parameter for the detailed authoring contract.
 
-\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope, lower precedence when both define the same name); \`workflow('<name>')\` resolves against those two directories, while \`scriptPath\` takes an absolute path to a script inside either of them or inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree — where a tool emitting a one-run script writes it; never a slash command, never resolvable by name); a path outside those roots is refused. Default \`max(2, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`) — an attempt that hits either becomes \`null\` in \`parallel()\`/\`pipeline()\`, indistinguishable from a missing agent, so raise them for legitimately long work. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call is refused — a bare sequential \`await agent()\` sees the rejection, while inside \`parallel()\`/\`pipeline()\` the refused slot becomes \`null\` and the script keeps running on partial results. Per-call \`agent({ schema, agentType, model, isolation: 'worktree', workingDir, stallMs })\` covers structured-output contracts, declarative-agent selection, model override, git-worktree-isolated subagents, pinning an agent to a caller-owned worktree, and the no-progress stall watchdog (\`stallMs: 0\` disables it). \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
+\`phase(title)\`, \`log(msg)\`, \`agent(prompt, opts?)\`, \`parallel(thunks)\`, \`pipeline(items, ...stages)\`, \`workflow(nameOrRef, args?)\`, plus the \`args\` and \`budget\` globals. \`workflow()\` runs a saved workflow inline under this run's caps and nests one level only — a workflow reached through \`workflow()\` cannot call \`workflow()\` itself, and doing so throws. Saved workflows are \`<name>.js\` files under \`<projectRoot>/.qwen/workflows\` (project scope, also surfaced as \`/<name>\` slash commands) or \`~/.qwen/workflows\` (user scope, lower precedence when both define the same name); \`workflow('<name>')\` resolves against those two directories, while \`scriptPath\` takes an absolute path to a script inside either of them or inside the generated-scripts root (\`$QWEN_CODE_PROJECT_DIR/workflows/generated\` — the per-project runtime dir, not the project tree — where a tool emitting a one-run script writes it; never a slash command, never resolvable by name); a path outside those roots is refused. Default \`max(2, min(16, cpus-2))\` agents in flight per run (\`${MAX_WORKFLOW_CONCURRENCY_ENV}\`), up to ${DEFAULT_MAX_AGENTS_PER_RUN} agents total (\`${MAX_WORKFLOW_AGENTS_ENV}\`), under a 30-minute wall-clock cap per run (\`QWEN_CODE_MAX_WORKFLOW_SECONDS\`) — a fan-out near the agent cap will not fit inside the default cap. Each subagent attempt is separately capped at ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TURNS} turns (\`${WORKFLOW_SUBAGENT_MAX_TURNS_ENV}\`) and ${DEFAULT_WORKFLOW_SUBAGENT_MAX_TIME_MINUTES} minutes (\`${WORKFLOW_SUBAGENT_MAX_MINUTES_ENV}\`) — an attempt that hits either becomes \`null\` in \`parallel()\`/\`pipeline()\`, indistinguishable from a missing agent, so raise them for legitimately long work. A per-run output-token cap may also be in effect: read \`budget.total\` (\`null\` = uncapped) before committing to a large fan-out, because once the cap is reached every further \`agent()\` call is refused — a bare sequential \`await agent()\` sees the rejection, while inside \`parallel()\`/\`pipeline()\` the refused slot becomes \`null\` and the script keeps running on partial results. Per-call \`agent({ schema, agentType, model, isolation: 'worktree', workingDir, stallMs })\` covers structured-output contracts, declarative-agent selection, model override, git-worktree-isolated subagents, pinning an agent to a caller-owned worktree, and the no-progress stall watchdog (\`stallMs: 0\` disables it). \`resumeFromRunId\` resumes a prior run — agent() calls whose rolling prefix-hash matches the journal are served from cache for the longest unchanged prefix. Every run hands back its runId, the script's path on disk (an inline script is persisted, so a resume edits that file rather than re-sending the source) and its journal path; the journal holds one result line per completed agent, so read it before diagnosing an empty or surprising result. Runs appear in the background-tasks view and the \`/workflows\` dialog (live phase tree, token usage, cooperative pause/resume, cancel); \`run_in_background: true\` returns a run handle immediately in the interactive TUI and delivers completion through the conversation. Scripts run in a node:vm sandbox with no filesystem or shell access — all I/O happens through the spawned agents.
 
 **Scout first, then orchestrate**
 

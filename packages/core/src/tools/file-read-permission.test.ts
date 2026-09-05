@@ -39,6 +39,7 @@ interface Layout {
   userSkillsDir: string;
   userExtensionsDir: string;
   plansDir: string;
+  workflowRunsDir: string;
   memoryBaseDir: string;
   /** Outside the workspace and outside every allow-listed root. */
   secretsDir: string;
@@ -79,6 +80,7 @@ beforeAll(() => {
     userSkillsDir: path.join(base, 'runtime', 'skills'),
     userExtensionsDir: path.join(base, 'runtime', 'extensions'),
     plansDir: path.join(base, 'runtime', 'plans'),
+    workflowRunsDir: path.join(base, 'runtime', 'projects', 'p1', 'workflows'),
     memoryBaseDir: path.join(base, 'runtime', 'memory-base'),
     secretsDir: path.join(base, 'secrets'),
     secretFile: path.join(base, 'secrets', 'credentials'),
@@ -92,6 +94,7 @@ beforeAll(() => {
     layout.userSkillsDir,
     layout.userExtensionsDir,
     layout.plansDir,
+    layout.workflowRunsDir,
     layout.memoryBaseDir,
     layout.secretsDir,
   ]) {
@@ -149,6 +152,32 @@ describe('getFileReadDefaultPermission', () => {
       ).toBe('allow');
     });
 
+    // Every workflow result and completion notification names a path under
+    // the run dir — the resume journal above all — so reading one back must
+    // not stall on a confirmation prompt the model cannot answer.
+    it('allows a workflow run journal', () => {
+      const journal = path.join(
+        layout.workflowRunsDir,
+        'wf_1234abcd',
+        'journal.jsonl',
+      );
+      fs.mkdirSync(path.dirname(journal), { recursive: true });
+      fs.writeFileSync(journal, '{}\n', 'utf8');
+      expect(permissionFor(journal)).toBe('allow');
+    });
+
+    it('allows a persisted inline workflow script', () => {
+      const script = path.join(
+        layout.workflowRunsDir,
+        'generated',
+        'inline',
+        'wf_1234abcd.js',
+      );
+      fs.mkdirSync(path.dirname(script), { recursive: true });
+      fs.writeFileSync(script, 'return 1;', 'utf8');
+      expect(permissionFor(script)).toBe('allow');
+    });
+
     it('asks for a plain file outside every root', () => {
       expect(permissionFor(layout.secretFile)).toBe('ask');
     });
@@ -172,6 +201,7 @@ describe('getFileReadDefaultPermission', () => {
         ['user-skills-dir', () => layout.userSkillsDir],
         ['user-extensions-dir', () => layout.userExtensionsDir],
         ['plans-dir', () => layout.plansDir],
+        ['workflow-runs-dir', () => layout.workflowRunsDir],
       ];
 
       it.each(roots)('asks for a file symlink under the %s', (name, root) => {

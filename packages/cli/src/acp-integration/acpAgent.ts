@@ -842,6 +842,9 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     // Saved plan files (see ReadFileTool.getDefaultPermission for why the
     // plans dir must be readable without a confirmation prompt).
     config.getPlansDir(),
+    // Workflow run artifacts: resume journals, run snapshots, and persisted
+    // inline scripts. Every workflow result names one of these paths.
+    path.join(config.storage.getProjectDir(), 'workflows'),
     ...defaultAcpOnlyLocalReadRoots(),
     ...parseAcpLocalReadRootsEnv(),
   ];

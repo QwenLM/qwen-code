@@ -378,6 +378,43 @@ describe('writeWorkflowSnapshot + listWorkflowSnapshots', () => {
     expect(journalDirs.length).toBe(MAX_RETAINED_SNAPSHOTS);
   });
 
+  // An inline run leaves a third artifact — its persisted source. Retiring
+  // the snapshot and the journal while the script stays would let those
+  // accumulate for runs nothing can name any more.
+  it('prunes the persisted inline script alongside the snapshot', async () => {
+    const config = fakeConfig(projectDir);
+    const dir = config.storage.getWorkflowRunsDir();
+    const inlineDir = path.join(dir, 'generated', 'inline');
+    await fs.mkdir(inlineDir, { recursive: true });
+    // A file whose stem is not a well-formed run id must survive: prune only
+    // removes what the `wf_<hex>` gate admits.
+    const stranger = path.join(inlineDir, 'notarun.js');
+    await fs.writeFile(stranger, 'keep', 'utf8');
+
+    const total = MAX_RETAINED_SNAPSHOTS + 2;
+    for (let i = 0; i < total; i++) {
+      const runId = `wf_${i.toString(16)}`;
+      await fs.writeFile(
+        path.join(inlineDir, `${runId}.js`),
+        'return 1',
+        'utf8',
+      );
+      await writeWorkflowSnapshot(
+        config,
+        task({ runId, startTime: 1_000 + i }),
+      );
+    }
+
+    const scripts = (await fs.readdir(inlineDir)).filter((f) =>
+      f.startsWith('wf_'),
+    );
+    expect(scripts.length).toBe(MAX_RETAINED_SNAPSHOTS);
+    // The oldest two runs lost their scripts with their snapshots.
+    expect(scripts).not.toContain('wf_0.js');
+    expect(scripts).not.toContain('wf_1.js');
+    await expect(fs.readFile(stranger, 'utf8')).resolves.toBe('keep');
+  });
+
   // Security: prune derives `runId` from the snapshot filename and feeds it to
   // a recursive `fs.rm`. A crafted `.json` name must NOT let that delete
   // anything but a well-formed `wf_<hex>` run dir — a file named `...json`

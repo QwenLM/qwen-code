@@ -464,6 +464,17 @@ async function pruneSnapshots(dir: string): Promise<void> {
                     `prune journal dir failed for ${runId}: ${e}`,
                   ),
                 ),
+              // A run launched from an inline script also left its source at
+              // `generated/inline/<runId>.js`. Retiring the snapshot without
+              // it would keep those scripts accumulating for runs nothing can
+              // name any more. Same `wf_<hex>` gate as the directory above.
+              fs
+                .rm(`${dir}/generated/inline/${runId}.js`, { force: true })
+                .catch((e) =>
+                  debugLogger.warn(
+                    `prune inline script failed for ${runId}: ${e}`,
+                  ),
+                ),
             ]
           : []),
       ]);

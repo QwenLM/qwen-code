@@ -40,6 +40,11 @@ import {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { todoWorkChainContext } from '../utils/promptIdContext.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import {
+  buildResumeCall,
+  hasUninlinableResumeArgs,
+  RESUME_ARGS_TOO_LARGE_NOTE,
+} from './workflow-resume-call.js';
 import { escapeXml } from '../utils/xml.js';
 import { runOutsideAgentContext } from './runtime/agent-context.js';
 import type { WorkflowDispatchState } from './runtime/workflow-dispatch-scheduler.js';
@@ -338,6 +343,13 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
    * provenance (e.g. for the snapshot).
    */
   scriptPath?: string;
+  /**
+   * This run's resume journal (`<projectDir>/workflows/<runId>/journal.jsonl`),
+   * when the config had a `storage` to hold one. Recorded so the terminal
+   * notification can point the model at the per-agent results without
+   * reconstructing the path from a storage handle it does not have.
+   */
+  journalPath?: string;
   /** Process-local approval requests; omitted from persisted snapshots. */
   pendingApprovals: readonly WorkflowApproval[];
   /** Final script return value once the run completes (success path). */
@@ -576,6 +588,23 @@ export class WorkflowRunRegistry {
       modelParts.push(
         `<result>Error: ${escapeXml(entry.error ?? '')}</result>`,
       );
+    }
+    // What the run cost, so the model can size the next fan-out against a
+    // number instead of a guess. `agents_cached` is the resume-relevant half:
+    // a resumed run whose agents all replayed spent nothing and proves it here.
+    modelParts.push(`<usage>${escapeXml(buildUsageLine(entry))}</usage>`);
+    // The two recovery routes a backgrounded run needs and cannot reconstruct:
+    // a failure needs the resume call (the script is on disk, editable before
+    // the retry); a success needs the journal, because an empty-looking result
+    // is far more often a script that dropped its values than a fan-out that
+    // produced none.
+    const recovery =
+      entry.status === 'failed'
+        ? buildRecoveryLines(entry)
+        : buildDiagnosticsLines(entry);
+    if (recovery.length > 0) {
+      const tag = entry.status === 'failed' ? 'recovery' : 'diagnostics';
+      modelParts.push(`<${tag}>${escapeXml(recovery.join('\n'))}</${tag}>`);
     }
     modelParts.push('</task-notification>');
 
@@ -1693,4 +1722,57 @@ function restrictWorkflowConfirmationDetails(
       return _exhaustive;
     }
   }
+}
+
+/** Flat `key=value` usage line for the terminal notification. */
+function buildUsageLine(entry: WorkflowTask): string {
+  const countByStatus = (status: WorkflowDispatchTraceStatus): number =>
+    entry.dispatches.reduce((n, d) => (d.status === status ? n + 1 : n), 0);
+  // A run that never settled its end time reads as zero elapsed rather than
+  // as a negative duration computed against `Date.now()`.
+  const durationMs = Math.max(
+    0,
+    (entry.endTime ?? entry.startTime) - entry.startTime,
+  );
+  return [
+    `agents_dispatched=${entry.agentsDispatched}`,
+    `agents_completed=${entry.agentsCompleted}`,
+    `agents_cached=${countByStatus('cached')}`,
+    `agents_failed=${countByStatus('failed')}`,
+    `tokens_spent=${entry.tokensSpent}`,
+    `duration_ms=${durationMs}`,
+  ].join(' ');
+}
+
+/** `<recovery>` body for a failed run. */
+function buildRecoveryLines(entry: WorkflowTask): string[] {
+  const lines: string[] = [];
+  const resume = buildResumeCall(entry);
+  if (resume) {
+    lines.push(
+      `Resume after editing the script: ${resume} — agent() calls whose prompt and opts are unchanged replay from the journal.`,
+    );
+    if (hasUninlinableResumeArgs(entry)) {
+      lines.push(RESUME_ARGS_TOO_LARGE_NOTE);
+    }
+  }
+  if (entry.journalPath) {
+    lines.push(`Journal: ${stripAnsiAndControl(entry.journalPath)}`);
+  }
+  return lines;
+}
+
+/** `<diagnostics>` body for a completed run. */
+function buildDiagnosticsLines(entry: WorkflowTask): string[] {
+  const lines: string[] = [];
+  if (entry.journalPath) {
+    lines.push(
+      `Per-agent results: ${stripAnsiAndControl(entry.journalPath)} — one {"type":"result",...} line per completed agent with its full return value. If the result above is empty or unexpected, read this file BEFORE diagnosing.`,
+    );
+  }
+  const resume = buildResumeCall(entry);
+  if (resume) {
+    lines.push(`Re-run after editing the script: ${resume}`);
+  }
+  return lines;
 }

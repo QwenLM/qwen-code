@@ -4503,6 +4503,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       '/home/test/.qwen/skills',
       '/tmp/qwen-extensions',
       '/home/test/.qwen/plans',
+      '/project/workflows',
       ...(process.platform === 'win32' ? [] : ['/tmp']),
     ];
   }

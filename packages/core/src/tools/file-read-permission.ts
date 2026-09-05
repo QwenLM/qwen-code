@@ -45,6 +45,15 @@ export function getFileReadDefaultPermission(
     // back must not stall on a confirmation prompt. The dir holds only
     // session plan files, never credentials or settings.
     config.getPlansDir(),
+    // Workflow run artifacts live under <projectDir>/workflows/ (SYNC:
+    // Storage.getWorkflowRunsDir, derived here the same way the subagents
+    // root above is): the resume journal the model is told to read before
+    // diagnosing a result, the terminal snapshots, and the persisted copy of
+    // a script the model wrote itself. Nothing else is written there, and
+    // every workflow result and completion notification names one of these
+    // paths — advertising a file and then prompting to open it would make the
+    // advice unusable.
+    path.join(config.storage.getProjectDir(), 'workflows'),
   ].map(realpathNearestExisting);
 
   if (
