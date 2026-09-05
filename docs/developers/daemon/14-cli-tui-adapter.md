@@ -144,7 +144,7 @@ This landed in [#4328](https://github.com/QwenLM/qwen-code/pull/4328).
 
 The transcript adapter lives outside this directory: `packages/web-shell/client/adapters/transcriptAdapter.ts` exports only `extractPendingPermission(blocks): PermissionRequest | null`, lifting unresolved SDK permission blocks for host UIs. Transcript blocks themselves flow through the SDK `ui/*` layer and `useDaemonTranscriptBlocks()`; there is no `UnifiedMessage` adapter in Web Shell.
 
-The web UI can now connect directly to daemon HTTP+SSE and render a transcript. The old `ACPAdapter` host `postMessage` path remains available.
+The web UI can now connect directly to daemon HTTP+SSE and render a transcript. The old `ACPAdapter` host `postMessage` path was retired with `packages/webui`; webviews now embed Web Shell for rendering (see [`16-vscode-ide-adapter.md`](./16-vscode-ide-adapter.md)).
 
 ### Later migrations
 
@@ -178,7 +178,7 @@ The web UI can now connect directly to daemon HTTP+SSE and render a transcript. 
 ## Caveats and known limits
 
 - **`daemon-tui-adapter.ts` still exists**. It is the CLI package's legacy experimental adapter. New code should prefer SDK `ui/*`: `normalizeDaemonEvent`, `reduceDaemonTranscriptEvents`, and `DaemonTranscriptBlock`.
-- **CLI TUI, channel base, and VS Code IDE are not migrated yet**. They still maintain their own rendering logic. The `docs/developers/daemon-client-adapters/` directory still has `ide.md`, `channel-web.md`, and the historical `tui.md` draft; the newer `web-ui.md` covers the web UI adapter design.
+- **CLI TUI, channel base, and VS Code IDE are not migrated yet**. They still maintain their own rendering logic. The `docs/developers/daemon-client-adapters/` directory still has `ide.md`, `channel-web.md`, and the historical `tui.md` draft; the newer `web-shell.md` covers the web UI adapter design.
 - **`eventId` is the primary ordering key**. `createdAt` remains as a deprecated alias (`clientReceivedAt`). New code should use `selectTranscriptBlocksOrderedByEventId(state)`. `MIGRATION.md` shows the code diff for switching from `createdAt` ordering to `eventId` ordering.
 - **Unknown wire types normalize to `debug`**. They are no longer dropped as in the old adapter. Renderers do not show `debug` by default; hosts must opt in to display it.
 - **Bundle size**: the `ui/*` subpackage is exported as an ESM subpath through `@qwen-code/sdk/daemon` and does not pull in React or DOM dependencies. React integration is only loaded when a web UI consumer uses `DaemonSessionProvider`.
