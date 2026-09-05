@@ -136,9 +136,9 @@ class TaskStopInvocation extends BaseToolInvocation<
       };
     }
 
-    // MemoryManager memory tasks (dream + extract). Memory tasks live
+    // MemoryManager memory tasks (dream + migration + extract). Memory tasks live
     // outside the registry trio (MemoryManager owns its own task map).
-    // Only `dream` is cancellable — extract is short-lived and runs on
+    // Only `dream` and `migration` are cancellable — extract is short-lived and runs on
     // the request loop, so cancelling it would interfere with the
     // user's own turn. Surface a distinct error for known-but-not-
     // cancellable records so the model doesn't conclude the id was
@@ -146,11 +146,14 @@ class TaskStopInvocation extends BaseToolInvocation<
     const memoryManager = this.config.getMemoryManager();
     const memoryRecord = memoryManager.getTask(taskId);
     if (memoryRecord) {
-      if (memoryRecord.taskType !== 'dream') {
+      if (
+        memoryRecord.taskType !== 'dream' &&
+        memoryRecord.taskType !== 'migration'
+      ) {
         return {
           llmContent:
             `Error: Memory task "${taskId}" (${memoryRecord.taskType}) is ` +
-            `not cancellable. Only dream consolidation tasks support ` +
+            `not cancellable. Dream and migration tasks support ` +
             `cancellation; extract tasks run on the request loop and ` +
             `complete in milliseconds.`,
           returnDisplay: `Task not cancellable (${memoryRecord.taskType}).`,
@@ -161,7 +164,11 @@ class TaskStopInvocation extends BaseToolInvocation<
         };
       }
       if (memoryRecord.status !== 'running') {
-        return notRunningError('dream', taskId, memoryRecord.status);
+        return notRunningError(
+          memoryRecord.taskType,
+          taskId,
+          memoryRecord.status,
+        );
       }
       // cancelTask returns false if the AbortController is missing for
       // a running record (logic-level invariant violation; see
@@ -177,23 +184,23 @@ class TaskStopInvocation extends BaseToolInvocation<
         // scheduleDream.
         return {
           llmContent:
-            `Error: Dream task "${taskId}" could not be cancelled ` +
+            `Error: Memory ${memoryRecord.taskType} task "${taskId}" could not be cancelled ` +
             `(internal state inconsistency — abort controller missing).`,
-          returnDisplay: 'Dream cancellation failed (internal state).',
+          returnDisplay: `${memoryRecord.taskType} cancellation failed (internal state).`,
           error: {
-            message: `dream cancel failed: ${taskId}`,
+            message: `${memoryRecord.taskType} cancel failed: ${taskId}`,
             type: ToolErrorType.TASK_STOP_INTERNAL_ERROR,
           },
         };
       }
       return {
         llmContent:
-          `Cancellation requested for dream task "${taskId}". ` +
+          `Cancellation requested for ${memoryRecord.taskType} task "${taskId}". ` +
           `The fork agent is being aborted; the consolidation lock will ` +
           `be released as the agent unwinds. Status is visible via the ` +
           `interactive Background tasks dialog (focus the footer Background ` +
           `tasks pill, then Enter).`,
-        returnDisplay: `Cancelled dream: ${taskId}`,
+        returnDisplay: `Cancelled ${memoryRecord.taskType}: ${taskId}`,
       };
     }
 
@@ -209,7 +216,7 @@ class TaskStopInvocation extends BaseToolInvocation<
 }
 
 function notRunningError(
-  kind: 'agent' | 'shell' | 'monitor' | 'dream',
+  kind: 'agent' | 'shell' | 'monitor' | 'dream' | 'migration',
   taskId: string,
   status: string,
 ): ToolResult {

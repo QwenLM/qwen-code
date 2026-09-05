@@ -182,6 +182,8 @@ export default {
   'toolDisplayName.UpdateGoal': '更新目标',
   'toolDisplayName.ProposeGoal': '提议目标',
   'toolDisplayName.SaveMemory': '保存记忆',
+  'toolDisplayName.ManageMemory': '管理记忆',
+  'toolDisplayName.SearchMemory': '搜索记忆',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
   'toolDisplayName.RecordArtifact': '记录制品',

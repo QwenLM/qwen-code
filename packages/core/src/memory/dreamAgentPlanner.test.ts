@@ -27,6 +27,7 @@ import {
   planManagedAutoMemoryDreamByAgent,
 } from './dreamAgentPlanner.js';
 import { ensureAutoMemoryScaffold } from './store.js';
+import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 
 vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
@@ -121,6 +122,11 @@ describe('dreamAgentPlanner', () => {
 
     expect(prompt).toContain('`pinned/`');
     expect(prompt).toContain('Skip `pinned/` during Dream');
+    expect(prompt).toContain('description`, `category`, `usage_scenarios`');
+    expect(prompt).toContain('2-6 discriminative retrieval terms');
+    for (const category of AUTO_MEMORY_TREE_CATEGORIES) {
+      expect(prompt).toContain(category);
+    }
     expect(prompt).toContain(
       'Do not intentionally remove existing index entries for valid `pinned/` files',
     );
@@ -143,6 +149,10 @@ describe('dreamAgentPlanner', () => {
     expect(result).toBe(mockResult);
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
+        taskPrompt: expect.stringContaining('.dream-operations.json'),
+        systemPrompt: expect.stringContaining(
+          'discriminative retrieval terms or short phrases',
+        ),
         maxTurns: 8,
         maxTimeMinutes: 5,
         tools: [

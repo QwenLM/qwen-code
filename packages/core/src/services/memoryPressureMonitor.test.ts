@@ -173,6 +173,9 @@ function createMockConfig(
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
     getLlmClient: () => client as never,
+    getMemoryManager: () => ({
+      markMemoryBodiesEvictedFromHistory: vi.fn(),
+    }),
     getClearContextOnIdle: () => ({
       clearContextMinutes: 60,
       toolResultsNumToKeep: 5,
@@ -1434,6 +1437,77 @@ describe('MemoryPressureMonitor', () => {
       expect(memoryResult?.functionResponse?.response?.['output']).toBe(
         'content of f0',
       );
+    });
+
+    it('forwards evicted search_memory bodies to the memory manager', async () => {
+      const markMemoryBodiesEvictedFromHistory = vi.fn();
+      const toolHistory: Content[] = [];
+      for (let index = 0; index < 7; index += 1) {
+        const callId = `memory_${index}`;
+        toolHistory.push(
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: callId,
+                  name: 'search_memory',
+                  args: { mode: 'fetch', refs: [`project:${index}.md`] },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: callId,
+                  name: 'search_memory',
+                  response: {
+                    output: JSON.stringify({
+                      mode: 'fetch',
+                      results: [
+                        {
+                          ref: `project:${index}.md`,
+                          version: index + 1,
+                          content: `memory body ${index}`,
+                          range: { start: 0, end: 13, total: 13 },
+                        },
+                      ],
+                    }),
+                  },
+                },
+              },
+            ],
+          },
+        );
+      }
+      const config = createMockConfig({
+        llmClient: {
+          isInitialized: () => true,
+          getChat: () => ({
+            getHistoryShallow: () => toolHistory,
+            setHistory: vi.fn(),
+          }),
+        },
+      });
+      vi.spyOn(config, 'getMemoryManager').mockReturnValue({
+        markMemoryBodiesEvictedFromHistory,
+      } as unknown as ReturnType<Config['getMemoryManager']>);
+      const monitor = new MemoryPressureMonitor(config, {
+        ...DEFAULT_PRESSURE_CONFIG,
+        cleanupCooldownMs: 0,
+      });
+
+      setMemUsage(11 * 1024 * 1024 * 1024);
+      monitor.performCheck();
+      await drainCleanupMeasurement();
+
+      expect(markMemoryBodiesEvictedFromHistory).toHaveBeenCalledWith([
+        { memoryRef: 'project:0.md', mtimeMs: 1 },
+        { memoryRef: 'project:1.md', mtimeMs: 2 },
+      ]);
     });
 
     it('overrides positive toolResultsThresholdMinutes to 0', async () => {

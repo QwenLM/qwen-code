@@ -7,7 +7,10 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import type { ScannedAutoMemoryDocument } from './scan.js';
+import {
+  sanitizeAutoMemoryPromptField,
+  type ScannedAutoMemoryDocument,
+} from './scan.js';
 
 /**
  * System prompt for the selector side-query.
@@ -39,7 +42,7 @@ const MAX_MODEL_MANIFEST_BYTES = 25_000;
 
 /**
  * Format memory headers as a text manifest: one line per file with
- * [type] filePath (ISO-timestamp): description.
+ * [type] filePath (ISO-timestamp): description; keywords.
  *
  * Uses the absolute filePath (never relativePath) so docs from the two
  * memory scopes — per-project under `~/.qwen/projects/<hash>/memory/`
@@ -48,8 +51,7 @@ const MAX_MODEL_MANIFEST_BYTES = 25_000;
  * addressable. Keying by relativePath caused the selector's Map dedupe
  * to silently drop one scope.
  *
- * Selector sees only the header (type, path, age, description), not the
- * body content.
+ * Selector sees only the compact header, not the body content.
  */
 function formatMemoryManifest(docs: ScannedAutoMemoryDocument[]): {
   manifest: string;
@@ -62,9 +64,16 @@ function formatMemoryManifest(docs: ScannedAutoMemoryDocument[]): {
   for (const doc of docs) {
     const tag = `[${doc.type}] `;
     const ts = new Date(doc.mtimeMs).toISOString();
-    const line = doc.description
-      ? `- ${tag}${doc.filePath} (${ts}): ${doc.description.slice(0, 512).replace(/[\uD800-\uDBFF]$/, '')}`
-      : `- ${tag}${doc.filePath} (${ts})`;
+    const description = sanitizeAutoMemoryPromptField(doc.description, 512);
+    const keywords = doc.keywords
+      .slice(0, 3)
+      .map((keyword) => sanitizeAutoMemoryPromptField(keyword, 64))
+      .filter(Boolean)
+      .join(', ');
+    const metadata = [description, keywords ? `keywords: ${keywords}` : '']
+      .filter(Boolean)
+      .join('; ');
+    const line = `- ${tag}${doc.filePath} (${ts})${metadata ? `: ${metadata}` : ''}`;
     const nextBytes = Buffer.byteLength(
       `${lines.length > 0 ? '\n' : ''}${line}`,
     );

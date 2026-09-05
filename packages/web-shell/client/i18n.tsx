@@ -3667,6 +3667,8 @@ const ZH: Messages = {
   'toolName.update_goal': '更新目标',
   'toolName.propose_goal': '提议目标',
   'toolName.save_memory': '保存记忆',
+  'toolName.manage_memory': '管理记忆',
+  'toolName.search_memory': '搜索记忆',
   'toolName.agent': '智能体',
   'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',

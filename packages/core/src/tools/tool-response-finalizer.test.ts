@@ -695,6 +695,33 @@ describe('tool response finalization', () => {
     expect(persist).not.toHaveBeenCalled();
   });
 
+  it('does not slice structured search_memory JSON', async () => {
+    const output = JSON.stringify({ content: '\\"'.repeat(20_000) });
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'memory-search',
+        toolName: ToolNames.SEARCH_MEMORY,
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'memory-search',
+              name: ToolNames.SEARCH_MEMORY,
+              response: { output },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = await finalizeToolResponses(config(100), entries);
+
+    const retained =
+      result[0]?.responseParts[0]?.functionResponse?.response?.['output'];
+    expect(retained).toBe(output);
+    expect(() => JSON.parse(String(retained))).not.toThrow();
+    expect(persist).not.toHaveBeenCalled();
+  });
+
   it('does not split UTF-16 surrogate pairs', () => {
     const entries = [
       entry('unicode', [

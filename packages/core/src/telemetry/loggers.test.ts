@@ -45,6 +45,9 @@ import {
   EVENT_TOOL_OUTPUT_TRUNCATED,
   EVENT_PROTOCOL_TAG_SANITIZED,
   EVENT_MEMORY_RECALL_DELIVERY,
+  EVENT_MEMORY_SEARCH,
+  EVENT_MEMORY_MIGRATION,
+  EVENT_MEMORY_RECALL_MODE_TRANSITION,
 } from './constants.js';
 import {
   logApiRequest,
@@ -72,6 +75,9 @@ import {
   logApiRetry,
   logProtocolTagSanitized,
   logMemoryRecallDelivery,
+  logMemorySearch,
+  logMemoryMigration,
+  logMemoryRecallModeTransition,
   normalizeToolCallEvent,
 } from './loggers.js';
 import * as metrics from './metrics.js';
@@ -103,6 +109,9 @@ import {
   ApiRetryEvent,
   ProtocolTagSanitizedEvent,
   MemoryRecallDeliveryEvent,
+  MemorySearchEvent,
+  MemoryMigrationEvent,
+  MemoryRecallModeTransitionEvent,
   LoopDetectedEvent,
   LoopType,
   RepeatedToolFailureGuardEvent,
@@ -248,6 +257,7 @@ describe('loggers', () => {
           strategy: 'model',
           docs_selected: 2,
           latency_ms: 123,
+          router_delivered: false,
         },
       });
       expect(mockLogger.emit.mock.calls[0][0].attributes).toHaveProperty(
@@ -289,6 +299,101 @@ describe('loggers', () => {
           delivery_point: 'tool_result',
           strategy: 'model',
         },
+      );
+    });
+  });
+
+  describe('memory migration telemetry', () => {
+    it('records aggregate memory search telemetry without query content', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+
+      logMemorySearch(
+        config,
+        new MemorySearchEvent({
+          mode: 'search',
+          docs_scanned: 12,
+          results_returned: 3,
+          duration_ms: 45,
+        }),
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Memory search: mode=search. Returned 3/12 docs.',
+        attributes: expect.objectContaining({
+          'session.id': 'test-session-id',
+          'event.name': EVENT_MEMORY_SEARCH,
+          mode: 'search',
+          docs_scanned: 12,
+          results_returned: 3,
+          duration_ms: 45,
+        }),
+      });
+      expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
+        /query|keyword|content|filePath|relativePath|sourceHash|secret/i,
+      );
+    });
+
+    it('records aggregate migration cost without memory content', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      logMemoryMigration(
+        config,
+        new MemoryMigrationEvent({
+          scope: 'project',
+          status: 'completed',
+          files_scanned: 12,
+          legacy_files: 3,
+          remaining_legacy_files: 1,
+          batch_files: 3,
+          committed: 2,
+          conflicts: 1,
+          failed: 0,
+          agent_duration_ms: 400,
+          input_tokens: 100,
+          output_tokens: 20,
+          total_tokens: 120,
+          duration_ms: 450,
+        }),
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Memory metadata migration: scope=project. status=completed. Committed 2/3.',
+        attributes: expect.objectContaining({
+          'session.id': 'test-session-id',
+          'event.name': EVENT_MEMORY_MIGRATION,
+          files_scanned: 12,
+          legacy_files: 3,
+          total_tokens: 120,
+        }),
+      });
+      expect(
+        JSON.stringify(mockLogger.emit.mock.calls[0]?.[0].attributes),
+      ).not.toMatch(/keyword|memory-file|sourceHash|relativePath|content/i);
+    });
+
+    it('records recall mode transition outcomes without corpus identifiers', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      logMemoryRecallModeTransition(
+        config,
+        new MemoryRecallModeTransitionEvent({
+          from_mode: 'legacy',
+          to_mode: 'structured',
+          status: 'committed',
+          duration_ms: 12,
+        }),
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Memory recall mode transition: legacy -> structured. status=committed.',
+        attributes: expect.objectContaining({
+          'event.name': EVENT_MEMORY_RECALL_MODE_TRANSITION,
+          from_mode: 'legacy',
+          to_mode: 'structured',
+          status: 'committed',
+          duration_ms: 12,
+        }),
+      });
+      expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
+        /revision|hash|path|keyword|content/i,
       );
     });
   });

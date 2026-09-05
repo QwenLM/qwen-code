@@ -57,6 +57,9 @@ import {
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
   EVENT_MEMORY_RECALL_DELIVERY,
+  EVENT_MEMORY_SEARCH,
+  EVENT_MEMORY_MIGRATION,
+  EVENT_MEMORY_RECALL_MODE_TRANSITION,
   EVENT_TOOL_OUTPUT_TRUNCATED,
 } from './constants.js';
 import {
@@ -134,6 +137,9 @@ import type {
   MemoryDreamEvent,
   MemoryRecallEvent,
   MemoryRecallDeliveryEvent,
+  MemorySearchEvent,
+  MemoryMigrationEvent,
+  MemoryRecallModeTransitionEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
 import type { UiEvent, UiSubagentIdentity } from './uiTelemetry.js';
@@ -1512,8 +1518,16 @@ export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
     'event.name': EVENT_MEMORY_DREAM,
     'event.timestamp': event['event.timestamp'],
     trigger: event.trigger,
+    scope: event.scope,
     status: event.status,
+    created_entries: event.created_entries,
+    updated_entries: event.updated_entries,
+    deleted_entries: event.deleted_entries,
     deduped_entries: event.deduped_entries,
+    split_entries: event.split_entries,
+    keyword_backfilled: event.keyword_backfilled,
+    dirty_mutations: event.dirty_mutations,
+    scheduling_reason: event.scheduling_reason,
     touched_topics_count: event.touched_topics_count,
     touched_topics: event.touched_topics,
     duration_ms: event.duration_ms,
@@ -1526,6 +1540,7 @@ export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
   });
   recordMemoryDreamMetrics(config, event.duration_ms, {
     trigger: event.trigger,
+    scope: event.scope,
     status: event.status,
     deduped_entries: event.deduped_entries,
   });
@@ -1546,6 +1561,9 @@ export function logMemoryRecall(
     docs_selected: event.docs_selected,
     strategy: event.strategy,
     duration_ms: event.duration_ms,
+    scan_duration_ms: event.scan_duration_ms,
+    fast_duration_ms: event.fast_duration_ms,
+    selector_duration_ms: event.selector_duration_ms,
   };
 
   const logger = logs.getLogger(SERVICE_NAME);
@@ -1574,6 +1592,7 @@ export function logMemoryRecallDelivery(
     strategy: event.strategy,
     docs_selected: event.docs_selected,
     latency_ms: event.latency_ms,
+    router_delivered: event.router_delivered,
   };
   if (event.discard_reason) {
     attributes['discard_reason'] = event.discard_reason;
@@ -1589,5 +1608,55 @@ export function logMemoryRecallDelivery(
     delivery_point: event.delivery_point,
     ...(event.discard_reason ? { discard_reason: event.discard_reason } : {}),
     strategy: event.strategy,
+  });
+}
+
+export function logMemorySearch(
+  config: Config,
+  event: MemorySearchEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_SEARCH,
+    'event.timestamp': event['event.timestamp'],
+    mode: event.mode,
+    docs_scanned: event.docs_scanned,
+    results_returned: event.results_returned,
+    duration_ms: event.duration_ms,
+  };
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory search: mode=${event.mode}. Returned ${event.results_returned}/${event.docs_scanned} docs.`,
+    attributes,
+  });
+}
+
+export function logMemoryMigration(
+  config: Config,
+  event: MemoryMigrationEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory metadata migration: scope=${event.scope}. status=${event.status}. Committed ${event.committed}/${event.batch_files}.`,
+    attributes: {
+      ...getCommonAttributes(config),
+      ...event,
+      'event.name': EVENT_MEMORY_MIGRATION,
+    },
+  });
+}
+
+export function logMemoryRecallModeTransition(
+  config: Config,
+  event: MemoryRecallModeTransitionEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory recall mode transition: ${event.from_mode} -> ${event.to_mode}. status=${event.status}.`,
+    attributes: {
+      ...getCommonAttributes(config),
+      ...event,
+      'event.name': EVENT_MEMORY_RECALL_MODE_TRANSITION,
+    },
   });
 }

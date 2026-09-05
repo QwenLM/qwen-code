@@ -21,6 +21,7 @@ import { McpClientManager } from './mcp-client-manager.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
+import { ToolNames } from './tool-names.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -820,6 +821,12 @@ export class ToolRegistry {
   }): FunctionDeclaration[] {
     const includeDeferred = options?.includeDeferred === true;
     return Array.from(this.tools.values())
+      .filter(
+        (tool) =>
+          (tool.name !== ToolNames.SEARCH_MEMORY &&
+            tool.name !== ToolNames.MANAGE_MEMORY) ||
+          (this.config.getMemoryRecallMode?.() ?? 'legacy') === 'structured',
+      )
       .filter(
         (tool) =>
           includeDeferred ||

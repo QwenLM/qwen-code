@@ -104,6 +104,8 @@ describe('Session.pendingWorktreeNotice', () => {
       }),
       beginManagedAutoMemoryRecall: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      commitManagedAutoMemoryRecallDelivery: vi.fn(),
+      discardManagedAutoMemoryRecallDelivery: vi.fn(),
       finishManagedAutoMemoryRecall: vi.fn(),
       recordCompletedToolCall: vi.fn(),
     };
@@ -168,6 +170,9 @@ describe('Session.pendingWorktreeNotice', () => {
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(false),
+      getMemoryManager: vi.fn().mockReturnValue({
+        resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
+      }),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getMessageBus: vi.fn().mockReturnValue(undefined),

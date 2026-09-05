@@ -25,6 +25,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   update_goal: 'UpdateGoal',
   propose_goal: 'ProposeGoal',
   save_memory: 'SaveMemory',
+  manage_memory: 'ManageMemory',
+  search_memory: 'SearchMemory',
   agent: 'Agent',
   skill: 'Skill',
   exit_plan_mode: 'ExitPlanMode',
