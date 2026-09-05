@@ -578,6 +578,12 @@ the live-owner and workspace-qualified paths.
 
 ### Phase 2: bounded client window
 
+(Re-aligned with the #10750 checklist on 2026-09-04: the data-layer items
+originally listed under Phase 3 — the turn-index store, tail refresh,
+provisional reconciliation, and canonical locator map — belong to this phase,
+leaving Phase 3 as the rail UI. The detailed design lives in
+`web-shell-global-turn-navigation-phase2.md`.)
+
 1. Add the bounded turn-index store, tail refresh, provisional reconciliation,
    and canonical locator map without coupling metadata residency to transcript
    residency.
