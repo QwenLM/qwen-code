@@ -701,14 +701,18 @@ describe('Server Config (config.ts)', () => {
     // The pure generators are unit-tested above; these pin the wiring —
     // initialize() must consume the provider and surface its warnings, or a
     // refactor that drops the block stays green.
-    const initializeWithLists = async (lists: SkillSettingsLists) => {
+    const initializeWithLists = async (
+      lists: SkillSettingsLists,
+      disabledSkillNamesProvider: () => ReadonlySet<string> = () =>
+        lists.hardDisabled,
+    ) => {
       vi.mocked(SkillManager.prototype.listSkills).mockResolvedValueOnce([
         { name: 'rust:pdf', authoredName: 'pdf' } as SkillConfig,
       ]);
       const config = new Config({
         ...baseParams,
         skillSettingsListsProvider: () => lists,
-        disabledSkillNamesProvider: () => lists.hardDisabled,
+        disabledSkillNamesProvider,
       });
       await config.initialize();
       return config;
@@ -734,6 +738,21 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getWarnings().join('\n')).toContain('still blocks it');
+    });
+
+    it('warns with the default-entry advice when the resolved disable set exceeds the hard list', async () => {
+      const config = await initializeWithLists(
+        {
+          enabled: new Set(['rust:pdf']),
+          defaultDisabled: new Set(['pdf']),
+          hardDisabled: new Set(),
+        },
+        () => new Set(['pdf']),
+      );
+
+      expect(config.getWarnings().join('\n')).toContain(
+        'cancelled only by the identical spelling',
+      );
     });
 
     it('stays silent without a provider', async () => {

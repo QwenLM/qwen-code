@@ -2335,14 +2335,14 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description:
           'Explicit opt-ins, matched against the skill name as registered — ' +
-          'an extension skill is rust:pdf there, so a bare pdf entry never ' +
-          'matches as a grant; it only cancels an identically-spelled ' +
-          'skills.defaultDisabled entry, and once cancelled the skill is ' +
-          'enabled only if the owning extension declares it on by default. ' +
-          'Override a matching ' +
-          'skills.defaultDisabled entry and, for ' +
-          'an extension skill, the default the owning extension declares and ' +
-          'the enablement stored for this workspace. Matched ' +
+          'an extension skill is rust:pdf there. An entry spelled as the ' +
+          'registered name overrides a matching skills.defaultDisabled ' +
+          'entry and, for an extension skill, both the default the owning ' +
+          'extension declares and the enablement stored for this workspace. ' +
+          'A bare pdf entry never matches as a grant; it only cancels an ' +
+          'identically-spelled skills.defaultDisabled entry, and once ' +
+          'cancelled the enablement stored for this workspace decides, else ' +
+          'the default the owning extension declares. Matched ' +
           'case-insensitively and UNION-merged across settings scopes. Cannot ' +
           'override skills.disabled or re-enable skills from a ' +
           'skills.disabledLevels-excluded level.',

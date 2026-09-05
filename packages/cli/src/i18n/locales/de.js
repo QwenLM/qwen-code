@@ -120,6 +120,8 @@ export default {
   'All available skills are locked at a higher scope (see below).':
     'Alle verfügbaren Skills sind in einer höheren Ebene gesperrt (siehe unten).',
   'No skills match the search.': 'Keine Skills passen zur Suche.',
+  'Locked by settings entries you cannot toggle here:':
+    'Gesperrt durch Einstellungseinträge, die hier nicht umgeschaltet werden können:',
   'higher scope': 'höhere Ebene',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [gesperrt: {{scope}}]',
