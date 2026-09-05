@@ -66,7 +66,10 @@ export async function executeLocatorOperation(
     case 'locator.isVisible':
       return await locator.isVisible(options);
     case 'locator.click':
-      await locator.click(clickOptions(args, DEFAULT_ACTION_TIMEOUT_MS));
+      await locator.click({
+        ...clickOptions(args, DEFAULT_ACTION_TIMEOUT_MS),
+        noWaitAfter: true,
+      });
       return null;
     case 'locator.dblclick':
       await locator.dblclick(clickOptions(args, DEFAULT_ACTION_TIMEOUT_MS));
@@ -112,7 +115,10 @@ export async function executeLocatorOperation(
       await typeIntoLocator(locator, stringArg(args, 'value'), options);
       return null;
     case 'locator.press':
-      await locator.press(stringArg(args, 'value'), options);
+      await locator.press(stringArg(args, 'value'), {
+        ...options,
+        noWaitAfter: true,
+      });
       return null;
     case 'locator.selectOption':
       await locator.selectOption(selectOptions(args.value), options);

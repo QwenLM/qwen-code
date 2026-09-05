@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
+import { clearTimeout, setTimeout } from 'node:timers';
 
 import type { Dialog } from 'playwright-core';
 import { ZodError } from 'zod';
@@ -58,6 +59,7 @@ import { snapshotTab } from './snapshot.js';
 const BROWSER_ID = 'chrome';
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_PENDING_TAB_RESOURCES = 100;
+const INPUT_DRAIN_TIMEOUT_MS = 250;
 const LOCATOR_INPUT_METHODS: ReadonlySet<SupportedCommand> = new Set([
   'locator.click',
   'locator.dblclick',
@@ -312,10 +314,18 @@ export class PlaywrightRuntime {
   ): Promise<DispatchResult> {
     const result = await action();
     if (tab.dialog !== undefined || tab.page.isClosed()) return result;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await tab.page.evaluate(
-        () => new Promise<void>((resolve) => setTimeout(resolve, 0)),
-      );
+      // Evaluation can wait for the next document's context during navigation.
+      await Promise.race([
+        tab.page.evaluate(
+          () =>
+            new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0)),
+        ),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, INPUT_DRAIN_TIMEOUT_MS);
+        }),
+      ]);
     } catch (error) {
       // Navigation can invalidate this drain after the input already succeeded.
       const contextDestroyed =
@@ -328,6 +338,8 @@ export class PlaywrightRuntime {
         );
       if (!contextDestroyed && tab.dialog === undefined && !tab.page.isClosed())
         throw error;
+    } finally {
+      clearTimeout(timer);
     }
     return result;
   }

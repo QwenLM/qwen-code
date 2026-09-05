@@ -93,6 +93,14 @@ styles:
 `tab.dom_cua` is used when the model identifies an element in a DOM snapshot.
 `tab.cua` is used when the target is identified visually in a screenshot.
 
+Input actions and navigation waits have separate deadlines. Locator clicks,
+locator key presses, and DOM CUA clicks disable Playwright's implicit
+post-action navigation wait. The action deadline covers performing input;
+`expectNavigation()` registers its listener before the action and waits for
+the requested navigation state with its own deadline. Successful input does
+not imply that the destination has loaded. A short, bounded renderer drain
+allows queued input handlers to run without waiting for a new page context.
+
 `tab.playwright.domSnapshot()` returns Playwright's general AI accessibility
 snapshot. `tab.dom_cua.get_visible_dom()` filters that snapshot to interactive
 elements while preserving its `aria-ref` values as `node_id`. DOM CUA actions

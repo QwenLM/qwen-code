@@ -171,6 +171,7 @@ describe('PlaywrightRuntime command contracts', () => {
       modifiers: ['Shift'],
       force: true,
       timeout: 456,
+      noWaitAfter: true,
     });
     expect(fixture.locator.pressSequentially).toHaveBeenCalledWith('hello', {
       timeout: 789,
@@ -215,6 +216,7 @@ describe('PlaywrightRuntime command contracts', () => {
       button: 'left',
       modifiers: [],
       timeout: 5_000,
+      noWaitAfter: true,
     });
     expect(fixture.locator.getAttribute).toHaveBeenCalledWith('aria-label', {
       timeout: 1_000,
@@ -223,6 +225,25 @@ describe('PlaywrightRuntime command contracts', () => {
       state: 'visible',
       timeout: 30_000,
     });
+  });
+
+  it('keeps locator keypress deadlines separate from navigation', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    const steps = [{ kind: 'locator' as const, selector: '#field' }];
+
+    for (const timeoutMs of [undefined, 1234]) {
+      await fixture.runtime.dispatch('locator.press', {
+        tabId: tab.id,
+        steps,
+        value: 'Enter',
+        timeoutMs,
+      });
+      expect(fixture.locator.press).toHaveBeenLastCalledWith('Enter', {
+        timeout: timeoutMs ?? 5_000,
+        noWaitAfter: true,
+      });
+    }
   });
 
   it('drains renderer input tasks without bringing the page forward', async () => {
@@ -275,6 +296,40 @@ describe('PlaywrightRuntime command contracts', () => {
       ).toBeLessThan(fixture.page.evaluate.mock.invocationCallOrder[0] ?? 0);
     },
   );
+
+  it('bounds the auxiliary input drain while a new page context is pending', async () => {
+    const fixture = await runtimeFixture();
+    const tab = await createTab(fixture.runtime);
+    let rejectDrain!: (error: Error) => void;
+    const drain = new Promise<never>((_resolve, reject) => {
+      rejectDrain = reject;
+    });
+    fixture.page.evaluate.mockReturnValueOnce(drain);
+    vi.useFakeTimers();
+    try {
+      const settled = vi.fn();
+      const operation = fixture.runtime
+        .dispatch('locator.press', {
+          tabId: tab.id,
+          steps: [{ kind: 'locator', selector: '#submit' }],
+          value: 'Enter',
+        })
+        .then(settled);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fixture.page.evaluate).toHaveBeenCalledOnce();
+      expect(settled).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(250);
+      await operation;
+      expect(settled).toHaveBeenCalledExactlyOnceWith(null);
+      expect(fixture.locator.press).toHaveBeenCalledOnce();
+      rejectDrain(new Error('late navigation context failure'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it.each([
     'selection failed',
@@ -383,6 +438,7 @@ describe('PlaywrightRuntime command contracts', () => {
       button: 'left',
       modifiers: [],
       timeout: 30_000,
+      noWaitAfter: true,
     });
     expect(fixture.page.keyboard.insertText).toHaveBeenCalledWith('hello');
     expect(fixture.page.keyboard.press).toHaveBeenCalledWith('Control+a');
@@ -651,6 +707,100 @@ describe('PlaywrightRuntime command contracts', () => {
       timeout: 2_000,
     });
   });
+
+  it('waits for navigation independently after a successful SDK click', async () => {
+    const fixture = await runtimeFixture();
+    const tab = new TabProxy(
+      new BrowserSdkContext(fixture.runtime),
+      'chrome',
+      await createTab(fixture.runtime),
+    );
+    let finishNavigation!: (value: null) => void;
+    const navigation = new Promise<null>((resolve) => {
+      finishNavigation = resolve;
+    });
+    fixture.page.waitForNavigation.mockReturnValueOnce(navigation);
+    const dispatch = vi.spyOn(fixture.runtime, 'dispatch');
+    const finished = vi.fn();
+    const operation = tab.playwright
+      .expectNavigation(
+        async () => {
+          await tab.playwright.getByRole('button', { name: 'Submit' }).click();
+          return 'submitted';
+        },
+        { timeoutMs: 20_000 },
+      )
+      .then(finished);
+
+    await vi.waitFor(() =>
+      expect(dispatch).toHaveBeenCalledWith(
+        'playwright.expectNavigation.wait',
+        expect.any(Object),
+      ),
+    );
+    expect(fixture.locator.click).toHaveBeenCalledExactlyOnceWith({
+      button: 'left',
+      modifiers: [],
+      timeout: 5_000,
+      noWaitAfter: true,
+    });
+    expect(fixture.page.waitForNavigation).toHaveBeenCalledWith({
+      timeout: 20_000,
+      waitUntil: 'load',
+    });
+    expect(
+      fixture.page.waitForNavigation.mock.invocationCallOrder[0],
+    ).toBeLessThan(fixture.locator.click.mock.invocationCallOrder[0] ?? 0);
+    expect(finished).not.toHaveBeenCalled();
+
+    finishNavigation(null);
+    await operation;
+    expect(finished).toHaveBeenCalledWith('submitted');
+  });
+
+  it('preserves a navigation failure without repeating successful input', async () => {
+    const fixture = await runtimeFixture();
+    const tab = new TabProxy(
+      new BrowserSdkContext(fixture.runtime),
+      'chrome',
+      await createTab(fixture.runtime),
+    );
+    fixture.page.waitForNavigation.mockRejectedValueOnce(
+      new Error('navigation timed out'),
+    );
+
+    await expect(
+      tab.playwright.expectNavigation(() =>
+        tab.playwright.getByRole('button', { name: 'Submit' }).click(),
+      ),
+    ).rejects.toMatchObject({
+      message: 'playwright.expectNavigation.wait failed: navigation timed out',
+    });
+    expect(fixture.locator.click).toHaveBeenCalledOnce();
+  });
+
+  it.each(['click', 'press'] as const)(
+    'preserves a real locator %s failure without retrying it',
+    async (method) => {
+      const fixture = await runtimeFixture();
+      const tab = await createTab(fixture.runtime);
+      fixture.locator[method].mockRejectedValueOnce(
+        new Error('input timed out'),
+      );
+
+      await expect(
+        fixture.runtime.dispatch(`locator.${method}`, {
+          tabId: tab.id,
+          steps: [{ kind: 'locator', selector: '#field' }],
+          ...(method === 'press' ? { value: 'Enter' } : {}),
+        }),
+      ).rejects.toMatchObject({
+        message: `locator.${method} failed: input timed out`,
+      });
+      expect(fixture.locator[method]).toHaveBeenCalledOnce();
+      expect(fixture.page.evaluate).not.toHaveBeenCalled();
+    },
+  );
 
   it('returns an opaque result after observing a download', async () => {
     const fixture = await runtimeFixture();

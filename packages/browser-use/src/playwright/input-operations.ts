@@ -31,7 +31,7 @@ export async function executeDomCuaOperation(
   switch (method) {
     case 'dom_cua.click': {
       const locator = await domCuaLocator(tab, args);
-      await locator.click(clickOptions(args));
+      await locator.click({ ...clickOptions(args), noWaitAfter: true });
       return null;
     }
     case 'dom_cua.double_click': {
