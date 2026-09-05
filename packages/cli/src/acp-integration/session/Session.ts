@@ -35,6 +35,7 @@ import type {
   ChatCompressionInfo,
   AutoModeDecision,
   AutoModeOutcome,
+  AutoModeFallbackConfirmation,
   GoalRecord,
   GoalRuntime,
   GoalSnapshotV2,
@@ -134,16 +135,17 @@ import {
   getStopHookContinuationReason,
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
-  decorateClassifierUnavailableConfirmation,
+  decorateAutoModeFallbackConfirmation,
   evaluateAutoMode,
+  getAutoModeActionFingerprint,
   getAutoModePermissionDeniedReason,
+  prepareAutoModeFallback,
   isApproveOutcome,
   isDenialFallbackReason,
   MAX_TRANSCRIPT_MESSAGES,
   formatDenialStateLog,
   recordAllow,
   recordFallbackApprove,
-  shouldFallback,
   shouldClassifyAllShellForAutoMode,
   finalizeToolResponses,
   shouldForceAutoModeReviewForAllow,
@@ -11977,12 +11979,20 @@ export class Session implements SessionContext {
             !forceAutoReviewForAllow &&
             !planShellRequiresConfirmation;
           if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
+            const actionFingerprint = getAutoModeActionFingerprint(
+              policyToolName,
+              toolParams,
+              this.config.getCwd(),
+            );
             this.config.setAutoModeDenialState(
-              recordAllow(this.config.getAutoModeDenialState()),
+              recordAllow(
+                this.config.getAutoModeDenialState(),
+                actionFingerprint,
+              ),
             );
           }
           let wasAutoModeManualFallback = false;
-          let autoModeFallbackMessage: string | undefined;
+          let autoModeFallback: AutoModeFallbackConfirmation | undefined;
 
           // ── L5: AUTO mode three-layer filter (duplicated from
           // coreToolScheduler.ts; ACP routes through this Session path).
@@ -11994,8 +12004,15 @@ export class Session implements SessionContext {
             !requiresUserInteraction &&
             shouldRunAutoModeForCall(approvalMode, policyToolName)
           ) {
-            const denialState = this.config.getAutoModeDenialState();
-            const fallback = shouldFallback(denialState);
+            const actionFingerprint = getAutoModeActionFingerprint(
+              policyToolName,
+              toolParams,
+              this.config.getCwd(),
+            );
+            const { denialState, fallback } = prepareAutoModeFallback(
+              this.config,
+              actionFingerprint,
+            );
             // `buildClassifierContents` retains only the most recent
             // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
             // exactly that tail rather than triggering a `structuredClone`
@@ -12029,6 +12046,7 @@ export class Session implements SessionContext {
               decision,
               this.config,
               denialState,
+              actionFingerprint,
             );
             await fireSessionPermissionDeniedForAutoMode(
               this.config,
@@ -12070,10 +12088,15 @@ export class Session implements SessionContext {
                   outcome.reason === 'external_write';
 
                 if (
-                  outcome.reason === 'classifier_unavailable' ||
-                  outcome.reason === 'external_write'
+                  outcome.message &&
+                  (outcome.reason === 'classifier_unavailable' ||
+                    outcome.reason === 'external_write' ||
+                    isDenialFallbackReason(outcome.reason))
                 ) {
-                  autoModeFallbackMessage = outcome.message;
+                  autoModeFallback = {
+                    reason: outcome.reason,
+                    message: outcome.message,
+                  };
                 }
 
                 if (wasAutoModeManualFallback) {
@@ -12178,10 +12201,11 @@ export class Session implements SessionContext {
               return confirmationDetailsCancellation;
             }
 
-            if (autoModeFallbackMessage) {
-              confirmationDetails = decorateClassifierUnavailableConfirmation(
+            if (autoModeFallback && confirmationDetails) {
+              confirmationDetails = decorateAutoModeFallbackConfirmation(
                 confirmationDetails,
-                autoModeFallbackMessage,
+                autoModeFallback.reason,
+                autoModeFallback.message,
               );
             }
 

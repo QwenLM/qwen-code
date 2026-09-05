@@ -27531,6 +27531,203 @@ describe('Session', () => {
       );
     });
 
+    function configureAutoModeShellFallback(options: {
+      callId: string;
+      command: string;
+      denialState: core.AutoModeDenialState;
+      classifierResults?: Array<Record<string, unknown>>;
+    }) {
+      let denialState = options.denialState;
+      const generateJson = vi.fn();
+      for (const result of options.classifierResults ?? []) {
+        generateJson.mockResolvedValueOnce(result);
+      }
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      const invocation = {
+        params: { command: options.command },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Need permission',
+          command: options.command,
+          rootCommand: 'python',
+          onConfirm,
+        }),
+        getDescription: vi.fn().mockReturnValue('Run command'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.AUTO);
+      mockConfig.getCwd = vi.fn().mockReturnValue('/repo');
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+      mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+      mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({ generateJson });
+      mockConfig.getAutoModeDenialState = vi
+        .fn()
+        .mockImplementation(() => denialState);
+      mockConfig.setAutoModeDenialState = vi
+        .fn()
+        .mockImplementation((next: core.AutoModeDenialState) => {
+          denialState = next;
+        });
+      (
+        mockLlmClient as unknown as {
+          getHistoryTail: ReturnType<typeof vi.fn>;
+        }
+      ).getHistoryTail = vi.fn().mockReturnValue([]);
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.ProceedOnce,
+        },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: options.callId,
+                  name: core.ToolNames.SHELL,
+                  args: { command: options.command },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      return {
+        execute,
+        generateJson,
+        getDenialState: () => denialState,
+        onConfirm,
+      };
+    }
+
+    it('routes an exact ACP retry to manual approval without reclassifying it', async () => {
+      const command = 'python -c "print(1)"';
+      const { execute, generateJson, getDenialState, onConfirm } =
+        configureAutoModeShellFallback({
+          callId: 'call-exact-auto-retry',
+          command,
+          denialState: {
+            consecutiveBlock: 1,
+            consecutiveUnavailable: 0,
+            totalBlock: 1,
+            totalUnavailable: 0,
+            pendingManualRetryFingerprint: core.getAutoModeActionFingerprint(
+              core.ToolNames.SHELL,
+              { command },
+              '/repo',
+            ),
+          },
+        });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'retry tool' }],
+      });
+
+      expect(generateJson).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                content: expect.objectContaining({
+                  text: expect.stringContaining('previously blocked'),
+                }),
+              }),
+            ]),
+          }),
+        }),
+      );
+      const permissionRequest = vi.mocked(mockClient.requestPermission).mock
+        .calls[0][0];
+      expect(permissionRequest.options).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            optionId:
+              core.ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+          }),
+        ]),
+      );
+      expect(onConfirm).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        { answers: undefined },
+      );
+      expect(execute).toHaveBeenCalledOnce();
+      expect(getDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 1,
+        totalUnavailable: 0,
+      });
+    });
+
+    it('routes the current ACP threshold block to manual approval', async () => {
+      const command = 'python -c "print(1)"';
+      const { execute, generateJson, getDenialState } =
+        configureAutoModeShellFallback({
+          callId: 'call-current-threshold',
+          command,
+          denialState: {
+            consecutiveBlock: 2,
+            consecutiveUnavailable: 0,
+            totalBlock: 2,
+            totalUnavailable: 0,
+          },
+          classifierResults: [
+            { shouldBlock: true },
+            {
+              thinking: 'confirmed',
+              shouldBlock: true,
+              reason: 'unsafe command',
+            },
+          ],
+        });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run tool' }],
+      });
+
+      expect(generateJson).toHaveBeenCalledTimes(2);
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                content: expect.objectContaining({
+                  text: expect.stringContaining('consecutive denial limit'),
+                }),
+              }),
+            ]),
+          }),
+        }),
+      );
+      expect(execute).toHaveBeenCalledOnce();
+      expect(getDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 3,
+        totalUnavailable: 0,
+      });
+    });
+
     describe('in-session cron MessageDisplay', () => {
       /** Mock scheduler that delivers exactly one in-session job through `start`. */
       function schedulerFiring(job: { prompt: string }) {
