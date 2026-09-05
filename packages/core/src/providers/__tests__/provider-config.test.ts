@@ -161,6 +161,27 @@ describe('buildInstallPlan', () => {
     });
   });
 
+  it('routes advancedConfig.enableThinking through reasoning.effort for the Responses protocol', () => {
+    const config = makeConfig({
+      models: undefined,
+      modelNamePrefix: 'C',
+      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_OPENAI_RESPONSES],
+    });
+    const plan = buildInstallPlan(config, {
+      baseUrl: 'https://custom.com/v1',
+      apiKey: 'sk-custom',
+      modelIds: ['m1'],
+      protocol: AuthType.USE_OPENAI_RESPONSES,
+      advancedConfig: { enableThinking: true },
+    });
+
+    const models = plan.modelProviders?.[0]?.models;
+    expect(models?.[0]?.generationConfig).toEqual({
+      reasoning: { effort: 'medium' },
+    });
+    expect(models?.[0]?.generationConfig?.extra_body).toBeUndefined();
+  });
+
   it('produces independent generationConfig objects per custom model', () => {
     const config = makeConfig({ models: undefined, modelNamePrefix: '' });
     const plan = buildInstallPlan(config, {

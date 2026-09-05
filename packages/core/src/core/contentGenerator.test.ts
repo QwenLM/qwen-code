@@ -70,6 +70,32 @@ vi.mock('./openaiContentGenerator/index.js', () => ({
   },
 }));
 
+const openaiResponsesMockState = vi.hoisted(() => ({
+  createCount: 0,
+}));
+
+const RESPONSES_EMBED_SENTINEL = vi.hoisted(() => 424242);
+
+vi.mock('./openaiResponsesContentGenerator/index.js', () => ({
+  createOpenAIResponsesContentGenerator: () => {
+    openaiResponsesMockState.createCount += 1;
+    return {
+      generateContent: async () => ({}),
+      generateContentStream: async () =>
+        (async function* () {
+          yield {};
+        })(),
+      // A sentinel the Chat mock above never returns (it resolves to an empty
+      // `embeddings` array), so a routing regression that sends
+      // USE_OPENAI_RESPONSES to the Chat generator instead is caught rather
+      // than passing on a shape both mocks share.
+      embedContent: async () => ({
+        embeddings: [{ values: [RESPONSES_EMBED_SENTINEL] }],
+      }),
+    };
+  },
+}));
+
 vi.mock('../qwen/qwenOAuth2.js', () => ({
   getQwenOAuthClient: async () => {
     qwenMockState.oauthCount += 1;
@@ -113,6 +139,7 @@ describe('createContentGenerator', () => {
     qwenMockState.constructorCount = 0;
     qwenMockState.constructorModels = [];
     openaiLoggerMockState.constructorCalls = [];
+    openaiResponsesMockState.createCount = 0;
   });
 
   it('should defer Gemini content generator creation until first use', async () => {
@@ -218,6 +245,42 @@ describe('createContentGenerator', () => {
       generator.embedContent({ model: 'test-model', contents: 'two' }),
     ]);
     expect(openaiMockState.createCount).toBe(1);
+  });
+
+  it('routes USE_OPENAI_RESPONSES to the Responses API generator', async () => {
+    // Regression guard for the import path / auth-type check in the
+    // USE_OPENAI_RESPONSES branch: a typo there would silently break
+    // generator creation only once a real method is invoked (the returned
+    // generator is a LazyContentGenerator), so this must exercise a call,
+    // not just check the returned object's shape.
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    const generator = await createContentGenerator(
+      {
+        model: 'gpt-5',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI_RESPONSES,
+      },
+      mockConfig,
+    );
+
+    expect(openaiResponsesMockState.createCount).toBe(0);
+    const result = await generator.embedContent({
+      model: 'gpt-5',
+      contents: 'hello world',
+    });
+    // Only the Responses mock returns this sentinel (the Chat mock resolves to
+    // an empty `embeddings` array), so this fails if a routing regression
+    // sends USE_OPENAI_RESPONSES to createOpenAIContentGenerator instead -- a
+    // truthy-shape assertion alone couldn't tell the two generators apart.
+    expect(result.embeddings).toEqual([{ values: [RESPONSES_EMBED_SENTINEL] }]);
+    expect(openaiResponsesMockState.createCount).toBe(1);
+    expect(openaiMockState.createCount).toBe(0);
   });
 
   it('does not preload non-lazy content generators', async () => {

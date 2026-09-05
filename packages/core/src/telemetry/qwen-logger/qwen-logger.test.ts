@@ -170,6 +170,23 @@ describe('QwenLogger', () => {
       );
     });
 
+    it('includes the base URL for OpenAI Responses auth', async () => {
+      const config = makeFakeConfig({
+        getAuthType: () => AuthType.USE_OPENAI_RESPONSES,
+        getContentGeneratorConfig: () => ({
+          model: 'gpt-5',
+          baseUrl: 'https://api.example.com',
+        }),
+      });
+      const logger = QwenLogger.getInstance(config)!;
+
+      const payload = await (
+        logger as unknown as { createRumPayload(): Promise<RumPayload> }
+      ).createRumPayload();
+
+      expect(payload.properties?.['base_url']).toBe('https://api.example.com');
+    });
+
     it('includes source when source.json exists with valid source', async () => {
       // Note: Testing source information requires actual file system operations
       // This test verifies that the payload structure is correct

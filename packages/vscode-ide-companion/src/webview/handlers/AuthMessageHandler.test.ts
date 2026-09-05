@@ -214,6 +214,37 @@ describe('AuthMessageHandler', () => {
     });
   });
 
+  it('labels every custom protocol option with a human-readable name', async () => {
+    // Provider pick → custom; then cancel at the protocol pick so the test
+    // stays focused on the items the picker was handed.
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce(undefined);
+
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({ type: 'auth' });
+
+    const protocolItems = mockShowQuickPick.mock.calls[1]?.[0] as Array<{
+      label: string;
+      value: string;
+    }>;
+    // Raw AuthType strings ('openai-responses') must never reach the UI.
+    expect(protocolItems).toEqual(
+      expect.arrayContaining([
+        { label: 'OpenAI Compatible', value: 'openai' },
+        { label: 'OpenAI Responses', value: 'openai-responses' },
+        { label: 'Anthropic', value: 'anthropic' },
+        { label: 'Gemini', value: 'gemini' },
+      ]),
+    );
+  });
+
   it('rejects a non-http(s) custom base URL with authError', async () => {
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'custom-openai-compatible' })

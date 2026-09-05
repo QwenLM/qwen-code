@@ -102,6 +102,7 @@ export const customProvider: ProviderConfig = {
   protocol: AuthType.USE_OPENAI,
   protocolOptions: [
     AuthType.USE_OPENAI,
+    AuthType.USE_OPENAI_RESPONSES,
     AuthType.USE_ANTHROPIC,
     AuthType.USE_GEMINI,
   ],

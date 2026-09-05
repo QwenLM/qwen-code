@@ -76,6 +76,19 @@ const createConfig = (recordSlashCommand = vi.fn()) => {
 describe('useAuthCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('accepts OpenAI Responses as QWEN_DEFAULT_AUTH_TYPE', () => {
+    vi.stubEnv('QWEN_DEFAULT_AUTH_TYPE', AuthType.USE_OPENAI_RESPONSES);
+    const settings = createSettings();
+    const config = createConfig();
+
+    const { result } = renderHook(() =>
+      useAuthCommand(settings as never, config as never, vi.fn()),
+    );
+
+    expect(result.current.authError).toBeNull();
   });
 
   it('exposes closeAuthDialog that flips isAuthDialogOpen to false', () => {

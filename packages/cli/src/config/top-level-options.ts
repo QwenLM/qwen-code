@@ -46,6 +46,7 @@ const APPROVAL_MODE_DESCRIPTIONS: Record<`${ApprovalMode}`, string> = {
 
 const AUTH_TYPE_CHOICES = [
   'openai',
+  'openai-responses',
   'anthropic',
   'qwen-oauth',
   'gemini',
@@ -58,6 +59,7 @@ const AUTH_TYPE_CHOICES = [
 // runtime; exported only so noUnusedLocals preserves the witness.
 export const AUTH_TYPE_PARITY_WITNESS: Record<`${CoreAuthType}`, true> = {
   openai: true,
+  'openai-responses': true,
   anthropic: true,
   'qwen-oauth': true,
   gemini: true,
