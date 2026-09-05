@@ -1489,13 +1489,16 @@ jobs:
           # unpredictable path a watcher cannot pre-seed.
           export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           MODEL_DISPLAY="${MODEL:-default}"
-          # Same agent-model preference + allowlist as 'Push and report'
-          # (each step is its own shell, so the block does not carry over).
+          # Same agent-model preference + defensive reads as 'Push and
+          # report' (each step is its own shell, so the block does not carry
+          # over): regular file only, never a symlink, bounded head -c
+          # prefixes, allowlist + cap, || true — a planted path degrades to
+          # the configured MODEL and must not abort this PAT-bearing step.
           AGENT_MODEL=''
           AGENT_CLI_VERSION=''
-          if [[ -s "${WORKDIR}/agent-model" ]]; then
-            AGENT_MODEL="$(sed -n '1p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100)"
-            AGENT_CLI_VERSION="$(sed -n '2p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._+-' | cut -c1-40)"
+          if [[ -f "${WORKDIR}/agent-model" && ! -L "${WORKDIR}/agent-model" ]]; then
+            AGENT_MODEL="$(head -c 400 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '1p' | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100 || true)"
+            AGENT_CLI_VERSION="$(head -c 1000 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '2p' | tr -cd 'A-Za-z0-9._+-' | cut -c1-40 || true)"
           fi
           [[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"
           CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \`${AGENT_CLI_VERSION}\`}"
@@ -5579,7 +5582,11 @@ jobs:
             "${WORKDIR}/agent-timeout" \
             "${WORKDIR}/agent-model" \
             "${WORKDIR}/resolved-comments.txt" \
-            "${WORKDIR}/comment-replies.json"
+            "${WORKDIR}/comment-replies.json" || true
+          # || true: rm -f exits non-zero on a directory planted at a
+          # sentinel path; aborting HERE would lose the repair
+          # (attempted=true is already written) while every report read
+          # tolerates a leftover and run 2's writers overwrite the rest.
           # NOT deleted with its siblings: run 2 writes its own
           # deferred-findings.json, and a deferral dropped here is gone for
           # good (the eval watermark filters this round's feedback out of
@@ -5837,7 +5844,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do
+          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout agent-model resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff heartbeat.log; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               # Agent/reviewer-written content: both workflow-command syntaxes
@@ -5988,13 +5995,16 @@ jobs:
           REPORT_HEAD="${CHECKED_OUT_HEAD}"
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           MODEL_DISPLAY="${MODEL:-default}"
-          # Same agent-model preference + allowlist as 'Push and report'
-          # (each step is its own shell, so the block does not carry over).
+          # Same agent-model preference + defensive reads as 'Push and
+          # report' (each step is its own shell, so the block does not carry
+          # over): regular file only, never a symlink, bounded head -c
+          # prefixes, allowlist + cap, || true — a planted path degrades to
+          # the configured MODEL and must not abort this PAT-bearing step.
           AGENT_MODEL=''
           AGENT_CLI_VERSION=''
-          if [[ -s "${WORKDIR}/agent-model" ]]; then
-            AGENT_MODEL="$(sed -n '1p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100)"
-            AGENT_CLI_VERSION="$(sed -n '2p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._+-' | cut -c1-40)"
+          if [[ -f "${WORKDIR}/agent-model" && ! -L "${WORKDIR}/agent-model" ]]; then
+            AGENT_MODEL="$(head -c 400 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '1p' | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100 || true)"
+            AGENT_CLI_VERSION="$(head -c 1000 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '2p' | tr -cd 'A-Za-z0-9._+-' | cut -c1-40 || true)"
           fi
           [[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"
           CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \`${AGENT_CLI_VERSION}\`}"

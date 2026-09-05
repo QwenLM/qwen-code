@@ -80,15 +80,22 @@ MODEL_DISPLAY="${MODEL:-default}"
 # agent-model: run-agent.mjs's copy of the session's RESOLVED model + CLI
 # version (from its stream-json init event). Preferred over MODEL, which names
 # only what was REQUESTED and reads 'default' when the repo variable is unset.
-# WORKDIR is agent-writable, so both values pass a character allowlist
-# (markup, backticks and comment tokens cannot survive) and a length cap
-# before a bot-authored comment renders them; the version allowlist is the
-# review footer's FOOTER_VERSION_RE shape.
+# WORKDIR is agent-writable, so this read is defensive in BOTH directions.
+# Fails safe: a planted directory or FIFO fails the regular-file test, an
+# unreadable or malformed file yields empty values, and every fallback ends
+# at the configured MODEL — none of them may abort this PAT-bearing step
+# under -eo pipefail (which would lose the push and the round report).
+# Publishes nothing an agent chose: no symlink (head would follow one to an
+# arbitrary host file and print its head into a public comment), bounded
+# head -c prefixes (sed buffers a whole line before cut could bound it), and
+# a character allowlist + length cap per value — markup, backticks and
+# comment tokens cannot survive. The version allowlist is the review footer's
+# FOOTER_VERSION_RE shape.
 AGENT_MODEL=''
 AGENT_CLI_VERSION=''
-if [[ -s "${WORKDIR}/agent-model" ]]; then
-  AGENT_MODEL="$(sed -n '1p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100)"
-  AGENT_CLI_VERSION="$(sed -n '2p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._+-' | cut -c1-40)"
+if [[ -f "${WORKDIR}/agent-model" && ! -L "${WORKDIR}/agent-model" ]]; then
+  AGENT_MODEL="$(head -c 400 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '1p' | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100 || true)"
+  AGENT_CLI_VERSION="$(head -c 1000 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '2p' | tr -cd 'A-Za-z0-9._+-' | cut -c1-40 || true)"
 fi
 [[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"
 CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \`${AGENT_CLI_VERSION}\`}"
