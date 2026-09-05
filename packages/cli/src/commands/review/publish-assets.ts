@@ -67,6 +67,48 @@ interface PublishAssetsArgs {
   defaultComment?: boolean;
 }
 
+interface GhRepoView {
+  owner?: { login?: string };
+  name?: string;
+  parent?: {
+    owner?: { login?: string };
+    name?: string;
+  };
+}
+
+function resolveReviewedRepoForSelfTargetWarning(
+  args: PublishAssetsArgs,
+): string | undefined {
+  if (args.reviewedRepo !== undefined) {
+    return args.reviewedRepo;
+  }
+  try {
+    const view = JSON.parse(
+      gh('repo', 'view', '--json', 'owner,name,url,parent'),
+    ) as GhRepoView;
+    const target = view.parent ?? view;
+    const owner = target.owner?.login;
+    const name = target.name;
+    return owner && name ? `${owner}/${name}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function warnIfAssetsRepoTargetsReviewedRepo(
+  assetsRepo: string,
+  args: PublishAssetsArgs,
+): void {
+  const reviewedRepo = resolveReviewedRepoForSelfTargetWarning(args);
+  if (reviewedRepo?.toLowerCase() !== assetsRepo.toLowerCase()) return;
+  writeStderrLine(
+    'publish-assets: warning — QWEN_REVIEW_ASSETS_REPO points at the reviewed ' +
+      'repository. Evidence images will still be published because the ' +
+      'destination was explicitly designated, but this recreates pr-assets/* refs ' +
+      'in the repository under review.',
+  );
+}
+
 /** The Contents-API dance for one file: create, or update when it exists. */
 function putContent(
   repo: string,
@@ -469,6 +511,7 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   const outPath = resolve(args.out);
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+  warnIfAssetsRepoTargetsReviewedRepo(repo, args);
 
   // ── Pipeline mode: write the URLs back into the findings artifact ─────────
   if (findings && !args.findingsOut) {
