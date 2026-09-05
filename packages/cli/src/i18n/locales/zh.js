@@ -349,11 +349,10 @@ export default {
   'Search:': '搜索：',
   'type to filter…': '输入以过滤…',
   'No skills are currently available.': '当前没有可用的技能。',
-  'All available skills are locked at a higher scope (see below).':
-    '所有可用技能都被更高范围锁定（详见下方）。',
   'No skills match the search.': '没有匹配搜索的技能。',
   'Locked by higher-scope settings (cannot toggle here):':
     '被更高范围设置锁定（此处无法切换）：',
+  '(+{{count}} locked)': '（+{{count}} 个已锁定）',
   'higher scope': '更高范围',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [已锁定：{{scope}}]',
