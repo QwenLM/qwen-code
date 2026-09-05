@@ -548,6 +548,20 @@ describe('release workflow', () => {
     expect(testStep.env.VITEST_RETRY).toBe(
       "${{ vars.QWEN_RELEASE_VITEST_RETRY || '2' }}",
     );
+    // `shell: 'bash'` is this step's only source of `-o pipefail` — the
+    // workflow has no `defaults:` block — so it is what makes the guard live
+    // rather than dead code. Drop it and GitHub falls back to `bash -e {0}`,
+    // where `npm … | tee` reports tee's status 0, the `||` handler never
+    // fires, and a shard with genuinely failing tests exits 0 into the
+    // release. The probe harness below passes `-o pipefail` itself, so no
+    // behavioural row would notice the line being cleaned up as redundant.
+    expect(testStep.shell).toBe('bash');
+    // Vitest colours its summaries from the mere presence of CI, and a
+    // coloured summary sits escape bytes between a label and its value, so
+    // every anchored pattern in the guard matches nothing: the pass-through
+    // is never granted again and each transport timeout reddens the release.
+    // Quoted in YAML, so it parses to the string rather than a boolean.
+    expect(testStep.env.NO_COLOR).toBe('true');
 
     const workspacePackages = getTestCiWorkspaces();
 
@@ -694,6 +708,17 @@ describe('release workflow', () => {
         1,
         stands,
       ],
+      // The counts can also disagree with no crash in the log at all — the
+      // same transport message on two lines inflates `timeouts` past what
+      // Vitest counted. That is a fifth way to reach this refusal, so the
+      // annotation names it and prints both figures it compared; without
+      // them the oncall is told one of four things happened when none did.
+      [
+        'transport timeout counted twice against one unhandled error',
+        `${timeout}\n${timeout}\n${tally}\n     Errors  1 error`,
+        1,
+        '::warning title=Workspace tests exited 1 on a Vitest transport timeout::A transport timeout the run cannot account for — no passing tally, a failing tally, a signal death, an unhandled error that was not the transport, or the two counts disagreeing for a reason this log does not show. The failure stands (status 1, 1 counted error(s) vs 2 transport line(s)); rerun the job.',
+      ],
       // The two shapes no header pattern reaches. A class whose name carries
       // no Error/Exception suffix is not hypothetical — 26 of this repo's 293
       // Error subclasses are named that way, four of them assigning the bare
@@ -788,6 +813,19 @@ describe('release workflow', () => {
       [
         'transport timeout, and Timeout calling printed by a test',
         `${timeout}\nTimeout calling the vendor API\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // ...and the summary sum is anchored on the section-line shape for the
+      // same reason. Vitest echoes a test's console output at column 0, so a
+      // workspace printing summary-shaped fixture data lands there; an
+      // unanchored `Errors  N errors` match would add it to the sum, inflate
+      // `errors` past `timeouts`, and refuse a pass-through every test
+      // earned — the false-red this PR exists to remove, back again.
+      [
+        'transport timeout, and a summary-shaped line a test printed',
+        `${timeout}\nErrors 2 errors occurred in fixture data\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
