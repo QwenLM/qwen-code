@@ -635,6 +635,17 @@ export async function runCliEntry(
     const routableArgv =
       separator === -1 ? rawArgv : rawArgv.slice(0, separator);
 
+    // Computed BEFORE the internal intercepts: an internal flag typed as
+    // a `--bg` prompt word (`qwen --bg audit
+    // --internal-agent-view-supervisor`) is prompt data the --bg gate
+    // below must decline by name, not a spawn signal — without this
+    // guard the intercept matched first and hijacked the launch into a
+    // daemon the user never asked for. The spawner-produced argv shapes
+    // never carry `--bg` (the supervisor spawns exactly the sole flag
+    // token, the pty host the flag plus launch record and socket path),
+    // so legitimate spawns keep routing.
+    const backgroundFlag = backgroundFlagIndex(argv);
+
     // This process may have been spawned to BE the Agent View supervisor.
     // The flag that says so is internal — the strict parser below would
     // reject it, which is why the supervisor never served. The scan is
@@ -644,6 +655,7 @@ export async function runCliEntry(
     // The sole-token argv the supervisor spawner actually produces still
     // routes here.
     if (
+      backgroundFlag === -1 &&
       hasFlag(
         routableArgv,
         INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
@@ -669,11 +681,14 @@ export async function runCliEntry(
     // the socket to serve; a spawn that lacks them falls through to the
     // parser, which rejects the flag. The scan is value-slot-aware like
     // its twin above.
-    const ptyHostFlag = flagIndex(
-      routableArgv,
-      INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
-      INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
-    );
+    const ptyHostFlag =
+      backgroundFlag === -1
+        ? flagIndex(
+            routableArgv,
+            INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+            INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+          )
+        : -1;
     if (ptyHostFlag !== -1) {
       const launchPath = routableArgv[ptyHostFlag + 1];
       const socketPath = routableArgv[ptyHostFlag + 2];
@@ -702,7 +717,6 @@ export async function runCliEntry(
     // positional-led condition: it exists to serve launches the parser
     // owns, and a bare term would bounce flag-led prompts ending in
     // `help` (`qwen --bg write help`) to top-level help with no session.
-    const backgroundFlag = backgroundFlagIndex(argv);
     if (backgroundFlag !== -1) {
       const firstPositionalIndex = firstPositionalArgIndex(argv);
       const parserOwnsLaunch =

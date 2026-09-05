@@ -1161,6 +1161,66 @@ describe('runCliEntry', () => {
       expect(mocks.main).toHaveBeenCalledTimes(1);
     });
 
+    it('declines an internal supervisor flag typed as a --bg prompt word', async () => {
+      // The internal intercepts scan argv before the --bg gate runs. A
+      // `--bg` launch forwards nothing to the session, so an internal
+      // flag anywhere in it is prompt data the gate must decline by
+      // name — without the bg-absence guard, this launch matched the
+      // supervisor scan first, bound the well-known socket, and served
+      // silently until killed: no session, no output, a hung terminal.
+      await runCliEntry([
+        BACKGROUND_FLAG,
+        'audit',
+        INTERNAL_AGENT_VIEW_SUPERVISOR_ARG,
+      ]);
+
+      expect(mocks.runAsAgentViewSupervisor).not.toHaveBeenCalled();
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain(INTERNAL_AGENT_VIEW_SUPERVISOR_ARG);
+    });
+
+    it('declines an internal pty-host flag typed as a --bg prompt word', async () => {
+      // Twin of the supervisor case: the tokens after the internal flag
+      // would have ridden into the pty-host runtime as launch record
+      // and socket path.
+      await runCliEntry([
+        BACKGROUND_FLAG,
+        'audit',
+        INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+        '/path/to/launch.json',
+        '/path/to/pty-host.sock',
+      ]);
+
+      expect(mocks.runAgentViewPtyHostProcess).not.toHaveBeenCalled();
+      expect(mocks.runBackgroundDispatch).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(stderr.join('')).toContain(INTERNAL_AGENT_VIEW_PTY_HOST_ARG);
+    });
+
+    it('leaves a bare pty-host flag to the strict parser', async () => {
+      // The spawn carries exactly [flag, launchPath, socketPath]. A
+      // malformed or manual invocation short of those tokens must fall
+      // through to the parser — which rejects the internal flag —
+      // instead of entering the host with an undefined launch record.
+      await runCliEntry([INTERNAL_AGENT_VIEW_PTY_HOST_ARG]);
+
+      expect(mocks.runAgentViewPtyHostProcess).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves a pty-host flag with one following token to the strict parser', async () => {
+      await runCliEntry([
+        INTERNAL_AGENT_VIEW_PTY_HOST_ARG,
+        '/path/to/launch.json',
+      ]);
+
+      expect(mocks.runAgentViewPtyHostProcess).not.toHaveBeenCalled();
+      expect(mocks.main).toHaveBeenCalledTimes(1);
+    });
+
     it('does not treat the background flag as a value-taking flag’s value', async () => {
       // `qwen -p --bg`: the token sits in the prompt value slot, so it is
       // the launch's data, not a background launch — a bare includes()
