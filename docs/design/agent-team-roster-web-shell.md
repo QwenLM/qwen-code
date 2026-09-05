@@ -26,6 +26,8 @@ The existing session-agent snapshot adds active TeamManager members. No new HTTP
 
 Idle is represented explicitly rather than collapsed into paused or completed. Team rows show the assigned task inline. Because WebShell does not yet expose an in-process teammate transcript endpoint, team rows are status-only there; ordinary subagent rows retain their existing detail action.
 
+ACP sessions bind the same TeamManager leader callback used by the interactive and non-interactive clients. Teammate reports enter the existing serialized background-notification turn queue, so an idle WebShell leader resumes to reconcile results instead of ending after dispatch. Teammate tool approvals use the existing ACP permission request channel. Replacing or deleting a team detaches both callbacks and drops queued messages from the old team.
+
 ## Interaction sources
 
 - Claude Code Agent Teams: compact lead-side roster, explicit idle state, shared task ownership, and direct navigation to an existing teammate conversation.
@@ -34,7 +36,7 @@ Idle is represented explicitly rather than collapsed into paused or completed. T
 
 ## Scope
 
-Included: current-session in-process teammates, shared task ownership, CLI navigation, WebShell status projection, and terminal-state visibility.
+Included: current-session in-process teammates, shared task ownership, CLI navigation, WebShell status projection, teammate-to-leader continuation, teammate approvals, and terminal-state visibility.
 
 Excluded: remote agent provisioning, durable workspace scheduling, cross-machine control, a new team chat UI, and WebShell teammate transcript browsing.
 
@@ -44,6 +46,7 @@ Excluded: remote agent provisioning, durable workspace scheduling, cross-machine
 - Package builds and type checks for core consumers, CLI, SDK, ACP bridge, and WebShell.
 - Executable WebShell smoke coverage with a mocked `/session/:id/agents` team response.
 - Manual CLI E2E using `team_create`, named `agent` launches, `task_create`/`task_update`, roster navigation, and shutdown states.
+- Real Chrome + tmux E2E against `qwen serve`, covering running/idle/cleaned roster transitions, automatic leader continuation, team shutdown/deletion, and rejection of a teammate `write_file` request through WebShell's permission dialog.
 
 ## Acceptance result
 
@@ -52,4 +55,4 @@ Excluded: remote agent provisioning, durable workspace scheduling, cross-machine
 - Chromium WebShell smoke: passed against the mocked daemon route.
 - Repository build and typecheck: passed.
 - CLI, WebShell, ACP bridge, and all changed files: lint passed. The SDK package-wide lint command is blocked by its existing mixed ESLint 8/9 installation; the changed SDK type file passes lint directly.
-- Live-model CLI execution remains a manual smoke because it requires configured model credentials; the deterministic projection, rendering, and keyboard paths are covered automatically.
+- Live-model WebShell execution passed against a local tmux-hosted daemon. The leader resumed from real teammate reports, reconciled them, shut down teammates, deleted the team, and respected a rejected teammate write without creating the file. A final fresh-Chrome run confirmed that a named launch and its live inventory entry render as one running row before cleanup.

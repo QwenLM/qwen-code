@@ -883,6 +883,8 @@ export type DaemonToolPreview =
       kind: 'subagent_delegation';
       /** Sub-agent name receiving the delegation. */
       agentName: string;
+      /** Optional Agent Team member name chosen for this launch. */
+      teammateName?: string;
       /** Task description / prompt sent to the sub-agent. */
       task: string;
       /** Optional parent delegation id for chained subagents. */

@@ -7730,12 +7730,11 @@ describe('environment agent tasks', () => {
             toolName: 'agent',
             title: 'Agent: Review code',
             status: 'completed',
-            args: { description: 'Review code' },
-            rawOutput: {
-              type: 'task_execution',
-              subagentName: 'reviewer',
-              status: 'running',
+            args: {
+              description: 'Review code',
+              name: 'reviewer',
             },
+            rawOutput: 'Teammate "reviewer" is now running concurrently.',
           },
         ],
       },
