@@ -734,6 +734,7 @@ export default {
   'Hide Window Title': 'Hide Window Title',
   'Show Status in Title': 'Show Status in Title',
   'Hide Tips': 'Hide Tips',
+  'Show Tool Call Arguments': 'Show Tool Call Arguments',
   'Show Line Numbers in Code': 'Show Line Numbers in Code',
   'Show Citations': 'Show Citations',
   'Custom Witty Phrases': 'Custom Witty Phrases',
@@ -2501,8 +2502,10 @@ export default {
     'Switch to plan mode or exit plan mode',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
     'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.',
-  'Choose the output style that shapes how responses are written ({{styles}}).':
-    'Choose the output style that shapes how responses are written ({{styles}}).',
+  'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).':
+    'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).',
+  'It is saved but does not apply while this workspace is untrusted.':
+    'It is saved but does not apply while this workspace is untrusted.',
   'Set a goal — keep working until the condition is met':
     'Set a goal — keep working until the condition is met',
   'Set or control a session goal': 'Set or control a session goal',

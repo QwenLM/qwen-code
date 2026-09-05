@@ -66,9 +66,47 @@ export function getSoftwareCursorBackground(
   return luminance >= 128 ? DARK_CURSOR_BACKGROUND : LIGHT_CURSOR_BACKGROUND;
 }
 
+/**
+ * Whether the IME composition overlay can land on the software cursor cell
+ * while frames are being redrawn.
+ *
+ * Terminals render the IME preedit string at the hardware cursor, which Ink
+ * positions on the software cursor cell of the active input (see
+ * `useCursor()` in BaseTextInput). When output frames cannot be applied
+ * atomically (DECSET 2026 synchronized output), every redraw repaints that
+ * cell mid-composition and the fixed cursor background SGR corrupts the
+ * composition overlay:
+ *  - Windows terminals style IME text with their own composition highlight
+ *    (#9666, fixed by #9803).
+ *  - tmux sessions disable synchronized output (`TMUX` guard in
+ *    synchronizedOutput.ts) and tmux <= 3.6 lacks application-side 2026
+ *    support entirely, so each Ink frame clears and repaints the preedit
+ *    cell, displacing the cursor and mixing pinyin fragments into the
+ *    rendered input (#8177).
+ * In those environments the cursor uses an underline style that leaves the
+ * composition cell's background untouched.
+ */
+export function compositionOverlaysSoftwareCursor(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (platform === 'win32') {
+    return true;
+  }
+  if (!env['TMUX']) {
+    return false;
+  }
+  // With synchronized output forced on, frames apply atomically again, so
+  // the block cursor is safe (e.g. future tmux releases with 2026 support).
+  return !(
+    env['QWEN_CODE_SYNCHRONIZED_OUTPUT'] === '1' ||
+    env['QWEN_CODE_FORCE_SYNCHRONIZED_OUTPUT'] === '1'
+  );
+}
+
 export function renderSoftwareCursor(text: string): string {
   const cursorText = text || ' ';
-  return process.platform === 'win32'
+  return compositionOverlaysSoftwareCursor()
     ? chalk.underline(cursorText)
     : chalk.bgHex(getSoftwareCursorBackground())(cursorText);
 }

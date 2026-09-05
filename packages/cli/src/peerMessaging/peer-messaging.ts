@@ -34,6 +34,7 @@ import {
   MAX_HELD_MESSAGES,
   type HeldMessage,
   type InboundPolicy,
+  type PolicyScope,
   type PeerDeliveryStatus,
   type PeerFrame,
   type PeerInbox,
@@ -101,6 +102,8 @@ export interface PeerMessagingOptions {
    * the session ends". Omitted in tests, which take the default.
    */
   getHeldExpiryMs?: () => number | null;
+  /** Which scope set the policy, for wording a hold cause. See the gate. */
+  getPolicyScope?: () => PolicyScope | undefined;
   updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
     ipcToken?: string,
@@ -194,6 +197,9 @@ export class PeerMessaging {
       getPolicySetting: options.getPolicySetting,
       ...(options.getHeldExpiryMs !== undefined
         ? { getHeldExpiryMs: options.getHeldExpiryMs }
+        : {}),
+      ...(options.getPolicyScope
+        ? { getPolicyScope: options.getPolicyScope }
         : {}),
       getSessionId: options.getSessionId,
       deliver: (frame, origin) => messaging.deliver(frame, origin.selfSent),
