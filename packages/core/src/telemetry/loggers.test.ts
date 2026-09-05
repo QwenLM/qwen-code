@@ -561,6 +561,35 @@ describe('loggers', () => {
     });
   });
 
+  describe('LoopDetectedEvent error_excerpt truncation', () => {
+    it('truncates error_excerpt to 200 chars', () => {
+      const event = new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, 'p', {
+        errorSignature: 'sig',
+        errorExcerpt: 'a'.repeat(250),
+      });
+      expect(event.error_excerpt).toBe('a'.repeat(200));
+    });
+
+    it('does not end error_excerpt on a lone high surrogate', () => {
+      // The astral character straddles code-unit indices 199/200: a plain
+      // slice(0, 200) would leave an unpaired high surrogate that strict
+      // UTF-8/JSON consumers reject (issue #10887 telemetry fields).
+      const event = new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, 'p', {
+        errorSignature: 'sig',
+        errorExcerpt: 'a'.repeat(199) + '🙂',
+      });
+      expect(event.error_excerpt).toBe('a'.repeat(199));
+    });
+
+    it('keeps a complete astral character that fits the 200-char cut', () => {
+      const event = new LoopDetectedEvent(LoopType.REPEATED_TOOL_ERROR, 'p', {
+        errorSignature: 'sig',
+        errorExcerpt: 'a'.repeat(198) + '🙂',
+      });
+      expect(event.error_excerpt).toBe('a'.repeat(198) + '🙂');
+    });
+  });
+
   describe('logUserPrompt', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',

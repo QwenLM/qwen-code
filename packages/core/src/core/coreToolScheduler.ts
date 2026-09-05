@@ -1034,6 +1034,17 @@ const createErrorResponse = (
   ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
 });
 
+/**
+ * Prefix of the model-visible error payload this scheduler produces for
+ * cancelled tool calls (see createCancelledResponse and the auxiliary-cancel
+ * path in the `'cancelled'` case of `setStatusInternal`). Exported so consumers that must
+ * recognize cancellation payloads — the loop-detection error-repetition
+ * guard (services/loopDetectionService.ts) — match the producer-owned
+ * constant instead of re-declaring the literal (producer-owns-the-shape
+ * pattern, cf. ORPHAN_TOOL_USE_REPAIR_REASON in llm-chat.ts).
+ */
+export const CANCELLED_TOOL_ERROR_PREFIX = '[Operation Cancelled] Reason:';
+
 const createCancelledResponse = (
   request: ToolCallRequestInfo,
   reason: string,
@@ -1044,7 +1055,7 @@ const createCancelledResponse = (
   persistedOutputFiles?: string[],
   visionBridgeNotice?: string,
 ): CoreToolCallResponseInfo => {
-  const errorMessage = `[Operation Cancelled] Reason: ${reason}`;
+  const errorMessage = `${CANCELLED_TOOL_ERROR_PREFIX} ${reason}`;
   return {
     callId: request.callId,
     responseParts: [
@@ -1752,7 +1763,7 @@ export class CoreToolScheduler {
 
           const preservedResultDisplay =
             this.compactResultDisplayForInteractiveHistory(resultDisplay);
-          const errorMessage = `[Operation Cancelled] Reason: ${auxiliaryData}`;
+          const errorMessage = `${CANCELLED_TOOL_ERROR_PREFIX} ${auxiliaryData}`;
           const response: CoreToolCallResponseInfo = isToolCallResponseInfo(
             auxiliaryData,
           )

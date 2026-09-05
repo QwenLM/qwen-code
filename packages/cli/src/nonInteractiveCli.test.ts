@@ -2234,6 +2234,52 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('shows the always-on hint (not the skipLoopDetection escape) for a repeated-tool-error halt', async () => {
+    setupMetricsMock();
+    const toolCallEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-1',
+        name: 'run_shell_command',
+        args: { command: 'git remote show origin' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-repeated-tool-error',
+      },
+    };
+    const events: ServerLlmStreamEvent[] = [
+      toolCallEvent,
+      {
+        type: LlmEventType.LoopDetected,
+        value: { loopType: LoopType.REPEATED_TOOL_ERROR },
+      },
+    ];
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Repeat a tool',
+      'prompt-id-repeated-tool-error',
+    );
+
+    expect(exitCode).toBe(1);
+    // The error-repetition guard is always-on and never consults
+    // skipLoopDetection (neither runtime wiring gates it), so the headless
+    // message must not suggest the no-op setting as an escape hatch.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'always-on guard and cannot be disabled via `model.skipLoopDetection`',
+      ),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Set the `model.skipLoopDetection` setting to true',
+      ),
+    );
+  });
+
   it('shows the skipLoopDetection escape hint for a heuristic loop type', async () => {
     setupMetricsMock();
     const toolCallEvent: ServerLlmStreamEvent = {

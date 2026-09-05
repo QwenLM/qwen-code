@@ -8440,6 +8440,95 @@ hello
       ).toBe('consecutive_identical_tool_calls');
     });
 
+    // Drives sendMessageStream with ToolResult messages carrying failed tool
+    // results, exercising the runtime wiring of the error-repetition guard
+    // (issue #10887): every ToolResult round must reach
+    // loopDetector.recordToolErrorBatch, and a detection must halt the
+    // turn with a LoopDetected event. The tool varies its args on every
+    // round — the reported dead-end shape — so no argument-based repetition
+    // signal can accumulate; only the batch feed sees the repeated error.
+    // Reverting the recordToolErrorBatch wiring in client.ts leaves the turn
+    // running and fails the halt test below.
+    async function runFailingToolTurns(
+      errorFor: (round: number) => string,
+      maxRounds = 5,
+    ) {
+      const promptId = 'prompt-repeated-tool-error';
+      const allEvents: Array<{ type: string; value?: unknown }> = [];
+      for (let round = 0; round <= maxRounds; round++) {
+        mockTurnRunFn.mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: LlmEventType.ToolCallRequest,
+              value: {
+                callId: `fail-${round}`,
+                name: 'run_shell_command',
+                args: { command: `attempt-${round}` },
+                isClientInitiated: false,
+                prompt_id: promptId,
+              },
+            };
+          })(),
+        );
+        const contents =
+          round === 0
+            ? [{ text: 'do the work' }]
+            : [
+                {
+                  functionResponse: {
+                    id: `fail-${round - 1}`,
+                    name: 'run_shell_command',
+                    response: { error: errorFor(round - 1) },
+                  },
+                },
+              ];
+        const events = await fromAsync(
+          client.sendMessageStream(
+            contents as never,
+            new AbortController().signal,
+            promptId,
+            {
+              type:
+                round === 0
+                  ? SendMessageType.UserQuery
+                  : SendMessageType.ToolResult,
+            },
+          ),
+        );
+        allEvents.push(...(events as Array<{ type: string; value?: unknown }>));
+        if (
+          allEvents.some((e) => e.type === LlmEventType.LoopDetected) ||
+          !events.some((e) => e.type === LlmEventType.ToolCallRequest)
+        ) {
+          return allEvents;
+        }
+      }
+      return allEvents;
+    }
+
+    it('halts the interactive turn when ToolResult rounds keep returning the same error (#10887)', async () => {
+      const events = await runFailingToolTurns(
+        () =>
+          'fatal: not a git repository (or any of the parent directories): .git',
+      );
+      const loopEvent = events.find(
+        (e) => e.type === LlmEventType.LoopDetected,
+      );
+      expect(loopEvent).toBeDefined();
+      expect(
+        (loopEvent?.value as { loopType?: string } | undefined)?.loopType,
+      ).toBe('repeated_tool_error');
+    });
+
+    it('keeps the interactive turn alive while ToolResult errors keep changing (#10887)', async () => {
+      const events = await runFailingToolTurns(
+        (round) => `fatal: attempt ${round} failed in a new way`,
+      );
+      expect(events.some((e) => e.type === LlmEventType.LoopDetected)).toBe(
+        false,
+      );
+    });
+
     it('should halt via the always-on turn cap before the skipLoopDetection gate', async () => {
       let abortHandlerInvoked = false;
       mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {

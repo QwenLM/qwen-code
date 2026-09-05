@@ -489,6 +489,8 @@ export enum LoopType {
   INVALID_TOOL_PARAMS_STAGNATION = 'invalid_tool_params_stagnation',
   /** The same tool execution failure continued after a corrective reminder. */
   REPEATED_TOOL_EXECUTION_FAILURE = 'repeated_tool_execution_failure',
+  /** Consecutive tool results returned the same error signature (issue #10887). */
+  REPEATED_TOOL_ERROR = 'repeated_tool_error',
 }
 
 export class LoopDetectedEvent implements BaseTelemetryEvent {
@@ -496,12 +498,42 @@ export class LoopDetectedEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   loop_type: LoopType;
   prompt_id: string;
+  /**
+   * sha256 fingerprint of the repeated tool-error payload that tripped the
+   * guard. REPEATED_TOOL_ERROR only (issue #10887): pages arrive with the
+   * identity of the failing payload instead of a bare loop type.
+   */
+  error_signature?: string;
+  /**
+   * Leading excerpt of the repeated tool-error payload, truncated for
+   * telemetry. REPEATED_TOOL_ERROR only (issue #10887).
+   */
+  error_excerpt?: string;
 
-  constructor(loop_type: LoopType, prompt_id: string) {
+  constructor(
+    loop_type: LoopType,
+    prompt_id: string,
+    details?: { errorSignature?: string; errorExcerpt?: string },
+  ) {
     this['event.name'] = 'loop_detected';
     this['event.timestamp'] = new Date().toISOString();
     this.loop_type = loop_type;
     this.prompt_id = prompt_id;
+    if (details?.errorSignature !== undefined) {
+      this.error_signature = details.errorSignature;
+    }
+    if (details?.errorExcerpt !== undefined) {
+      // Truncate for telemetry (avoid shipping full tool payloads). Drop a
+      // trailing lone high surrogate: the slice can split an astral
+      // character (emoji/CJK-extension text in tool output) straddling the
+      // 200-char cut, and strict UTF-8/JSON consumers reject an unpaired
+      // surrogate (same hazard fitText handles via its surrogate-safe
+      // slices, tools/tool-response-finalizer.ts).
+      const cut = details.errorExcerpt.slice(0, 200);
+      this.error_excerpt = /[\uD800-\uDBFF]$/.test(cut)
+        ? cut.slice(0, -1)
+        : cut;
+    }
   }
 }
 
