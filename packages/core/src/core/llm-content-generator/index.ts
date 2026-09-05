@@ -61,6 +61,7 @@ export function createLlmContentGenerator(
       httpOptions,
     },
     config,
+    gcConfig,
   );
 
   return llmContentGenerator;

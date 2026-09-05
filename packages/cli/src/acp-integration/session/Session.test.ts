@@ -929,6 +929,9 @@ describe('Session', () => {
         setSessionPrBoundCallback: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
+      getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
+      getPermissionManager: vi.fn().mockReturnValue(null),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getToolInvocationGuard: vi.fn().mockReturnValue(undefined),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
@@ -35314,11 +35317,17 @@ describe('Session', () => {
         bare?: boolean;
         plan?: boolean;
         disableHooks?: boolean;
+        todoWriteEnabled?: boolean;
       } = {},
     ) {
       session.dispose();
       (mockSettings as unknown as { merged: Record<string, unknown> }).merged =
-        { experimental: { todoStopGuard: true } };
+        {
+          experimental: { todoStopGuard: true },
+          ...(options.todoWriteEnabled === false
+            ? {}
+            : { tools: { todoWrite: { enabled: true } } }),
+        };
       mockConfig.getBareMode = vi.fn().mockReturnValue(options.bare ?? false);
       mockConfig.isSafeMode = vi.fn().mockReturnValue(options.safe ?? false);
       mockConfig.getApprovalMode = vi
@@ -35452,6 +35461,58 @@ describe('Session', () => {
         return typeof next === 'function' ? next() : next;
       });
     }
+
+    it('disables the guard and warns when todo_write is disabled', async () => {
+      debugLoggerWarnSpy.mockClear();
+      rebuildSessionWithGuard({ todoWriteEnabled: false });
+      installPendingTodoTool();
+      queuePendingTodoThenNaturalStops();
+
+      await runGuardPrompt();
+
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        'experimental.todoStopGuard requires tools.todoWrite.enabled; the Todo Stop Guard is disabled.',
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(
+            ([params]) =>
+              params.update.sessionUpdate === 'agent_message_chunk' &&
+              params.update._meta?.['source'] === 'todo_stop_guard',
+          ),
+      ).toBe(false);
+    });
+
+    it.each([
+      ['safe mode', { safe: true }],
+      ['bare mode', { bare: true }],
+    ] as const)('suppresses the missing Todo warning in %s', (_name, mode) => {
+      debugLoggerWarnSpy.mockClear();
+      rebuildSessionWithGuard({ ...mode, todoWriteEnabled: false });
+
+      expect(debugLoggerWarnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('tools.todoWrite.enabled'),
+      );
+    });
+
+    it('returns actionable Todo enablement guidance from daemon tool calls', async () => {
+      rebuildSessionWithGuard({ todoWriteEnabled: false });
+      mockToolRegistry.getTool.mockReturnValue(undefined);
+      queuePendingTodoThenNaturalStops();
+
+      await runGuardPrompt();
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      const followUp = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[1][1] as {
+        message: unknown;
+      };
+      expect(JSON.stringify(followUp.message)).toContain(
+        'tools.todoWrite.enabled',
+      );
+    });
 
     it('cleans up an admitted retry cancelled during previous-turn drain', async () => {
       rebuildSessionWithGuard();
