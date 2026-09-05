@@ -302,9 +302,10 @@ export function isFixAuditRound(plan: { incremental?: unknown }): boolean {
 /**
  * One admission for a plan's `incremental.scope.interaction[]` entry, shared
  * by every reader of the census (#10136): the brief builder (which renders
- * the entry's scope class and seam bound), the roster's interaction paths,
- * and `compose-review`'s round-shape disclosure. Two readers with two bars
- * let the body count a seam census on an entry the briefs never rendered.
+ * the entry's scope class and seam bound) and `compose-review`'s
+ * round-shape disclosure. Two readers with two bars let the body count a
+ * seam census on an entry the briefs never rendered. (The roster reads the
+ * plan through `isFixAuditRound` alone and never opens the entries.)
  *
  * `null` for anything the briefs would not render: no path, no surviving
  * `importsChanged` edge (an entry IS its edge — "because it imports ,

@@ -46,6 +46,7 @@
 // The scan reads files from the review worktree (post-change state), because
 // the question is whether the caller AS IT NOW STANDS uses what changed.
 
+import { createRequire } from 'node:module';
 import * as nodePath from 'node:path';
 
 /** File-reading seam: the incremental scope passes worktree reads, tests pass a map. */
@@ -268,560 +269,564 @@ export function discoverWorkspacePackages(
 }
 
 /** An identifier a seam binding can be — nothing flag- or operator-shaped. */
-const IDENT_RE = /^[A-Za-z_$][\w$]*$/;
+/** The TypeScript module the seam oracle parses with (`typeof import('typescript')`). */
+export type TypeScriptModule = typeof import('typescript');
 
-/** Words an import clause carries that are never local bindings. */
-const CLAUSE_NOISE = new Set(['type', 'typeof', 'default', 'as']);
+let loadedTypeScript: TypeScriptModule | null | undefined;
 
 /**
- * The local bindings an import clause introduces, from the text between the
- * statement keyword and its `from`, or `null` when a brace entry the clause
- * carries does not parse to a binding: a silently skipped entry is an
- * unenumerated escape, and under-collection is the one error the seam bound
- * must not make (#10136). Over-collection stays the budgeted cost — a name
- * too many marks one line too many, never one fewer.
+ * The parser the seam oracle reads with, resolved at run time and never
+ * bundled (#10136): TypeScript is a build-time dependency of this package,
+ * not a runtime one, and shipping it inside the CLI for one scan is not a
+ * trade this command makes. It is resolved from the process's working
+ * directory first — the repository the review runs in, whose own
+ * `typescript` is exactly the parser that reads its sources — then from
+ * this module's own location (the source tree, the test runner). Where
+ * neither resolves, or the module does not expose the parser entry points
+ * the oracle uses, the answer is `null` and every seam read is the doubt
+ * shape: the round republishes interaction files in full, which is what
+ * every round did before the seam bound existed. Memoised: one resolution
+ * per process, whatever the answer.
  */
-function clauseBindings(clause: string): string[] | null {
-  const out: string[] = [];
-  // The noise filter applies where the words ARE keywords — a brace entry's
-  // `type`/`typeof`/`default`/`as`. In the star and default positions the
-  // name is the binding itself, keyword-shaped or not (`import * as type`,
-  // `import type from`): filtering there dropped a real binding with no
-  // doubt (#10136), so those positions bind whatever the grammar admits.
-  const push = (raw: string) => {
-    const name = raw.trim();
-    if (IDENT_RE.test(name)) out.push(name);
-  };
-  const star = /\*\s*as\s+([A-Za-z_$][\w$]*)/.exec(clause);
-  if (star) push(star[1]);
-  const braces = /\{([^}]*)\}/.exec(clause);
-  if (braces) {
-    for (const entry of braces[1].split(',')) {
-      const name = entry.trim();
-      if (name === '') continue; // a trailing comma binds nothing
-      // `a as b` binds the LOCAL alias; `a` alone binds itself. `type x`
-      // never reaches runtime, but its usage lines are still seam reads for
-      // a reviewer, so type-only names are kept once the keyword is shed.
-      const words = name.split(/\s+/).filter((w) => !CLAUSE_NOISE.has(w));
-      const local = words[words.length - 1];
-      if (local === undefined || !IDENT_RE.test(local)) return null;
-      push(local);
+export function loadTypeScript(
+  /**
+   * Where to resolve from, in order — a test's seam. Absent, the default
+   * bases (the working directory, then this module) and the memo apply.
+   */
+  bases?: readonly string[],
+): TypeScriptModule | null {
+  if (bases === undefined && loadedTypeScript !== undefined) {
+    return loadedTypeScript;
+  }
+  const from: string[] = bases ? [...bases] : [];
+  if (bases === undefined) {
+    try {
+      from.push(nodePath.join(process.cwd(), 'package.json'));
+    } catch {
+      /* a working directory that no longer exists: only the CLI's own tree */
+    }
+    from.push(import.meta.url);
+  }
+  let found: TypeScriptModule | null = null;
+  for (const base of from) {
+    try {
+      const candidate = createRequire(base)('typescript') as unknown;
+      if (isTypeScriptModule(candidate)) {
+        found = candidate;
+        break;
+      }
+    } catch {
+      /* not resolvable or not usable from here — try the next base */
     }
   }
-  // The default import: the first identifier after the keyword, outside any
-  // braces (`import a, { b } from …` — `a`; `import { b } from …` — none).
-  // `type`/`typeof` right after the keyword is the type-only MODIFIER when a
-  // name, a brace or a star follows it (`import type X`, `import type {`)
-  // and the default binding itself otherwise (`import type from`,
-  // `import type, { x } from`) — a name the grammar admits, not noise.
-  const head = clause.split('{')[0];
-  const def =
-    /^\s*(?:import|export)\s+([A-Za-z_$][\w$]*)(?:\s+([A-Za-z_$][\w$]*)|\s*(,))?/.exec(
-      head,
-    );
-  if (def) {
-    const [, first, second, comma] = def;
-    if (first !== 'type' && first !== 'typeof') push(first);
-    else if (second !== undefined) push(second);
-    else if (comma !== undefined || !/[{*]/.test(clause)) push(first);
-  }
-  return [...new Set(out)];
+  if (bases === undefined) loadedTypeScript = found;
+  return found;
 }
 
-/** Words after which a `/` opens a regex literal, never a division. */
-const REGEX_AFTER_WORDS = new Set([
-  'return',
-  'typeof',
-  'instanceof',
-  'in',
-  'of',
-  'new',
-  'delete',
-  'void',
-  'throw',
-  'case',
-  'do',
-  'else',
-  'yield',
-  'await',
-  'extends',
-]);
-/** Punctuator characters after which a `/` opens a regex literal. */
-const REGEX_AFTER_PUNCT = new Set([
-  '(',
-  ',',
-  '=',
-  ':',
-  '[',
-  '!',
-  '&',
-  '|',
-  '?',
-  '{',
-  ';',
-  '+',
-  '-',
-  '*',
-  '%',
-  '<',
-  '>',
-  '~',
-  '^',
-]);
-/** Words that open a block statement's `{` (its `}` ends a statement). */
-const BLOCK_AFTER_WORDS = new Set(['else', 'try', 'finally', 'do']);
-/** Words whose `(…)` is a control head: a `/` after its `)` opens a regex. */
-const CONTROL_PAREN_WORDS = new Set(['if', 'while', 'for', 'with']);
-const IDENT_CHAR_RE = /[\w$]/;
-
 /**
- * A comment-stripped view of `source`, length- and newline-preserving:
- * every comment byte becomes a space, nothing else moves, so every position
- * and line number in it is the same position and line number in the source.
- * The seam scans run on THIS, because a keyword inside a comment used to
- * displace the clause-bound scan and parse the clause to the wrong bindings
- * (#10136) — comment-awareness is the scan's job, and one strip gives it to
- * every pattern at once.
- *
- * The walk is a lexer over the JavaScript lexical grammar, not a
- * comment-marker scan (#10136): a marker is a comment only in the CODE
- * state, and every other state is tracked, never guessed — string literals
- * with their escapes (an unterminated quote ends at its line), template
- * literals with `${…}` interpolations nested to any depth (the interpolation
- * is code again, braces and all, and a backtick inside it opens a NESTED
- * template, never closes the outer one), regex literals with their escapes
- * and character classes, and the shebang line. Whether a `/` opens a regex
- * or is a division is decided by the token before it, the standard rule: a
- * regex after an operator, a control-flow keyword, a statement boundary, a
- * control head's `)` or a block's `}`; a division after an operand — a
- * name, a number, a literal, a `]`, a call's or grouping's `)`, an object
- * literal's `}`.
- *
- * Returns `null` — the DOUBT state — wherever the walk cannot prove the
- * state it is in: a `/` after a `}` whose `{` it could not class as block or
- * object literal, or after a punctuator the rule does not list; a `)` or
- * `}` with no opener; a block comment, regex literal, template or
- * interpolation still open at end of input (the walk lost sync). The seam
- * oracle republishes such a file in full. Nothing here is guessed, so a
- * miss cannot blank a real seam statement — the one error the seam bound
- * must not make. Known residual, documented rather than modelled: JSX is
- * not a lexical state of this walk — a closing tag's `</` is an
- * unterminated regex literal to the JS grammar, so a JSX file doubts at
- * its first closing tag and republishes in full (measured: no `.ts` source
- * in this repository doubts; most `.tsx` files do) — and a `/` after a
- * generic's `>` reads as a regex, which only ever costs an unblanked
- * comment on that line — over-collection, the budgeted direction.
+ * The entry points the oracle calls, present and working: a probe parse of
+ * a trivial module runs here so a module that resolves but cannot parse
+ * (a broken install, an incompatible build) is refused now, visibly, rather
+ * than doubting every file silently. Guards the members added after TS
+ * 4.8 (`isSatisfiesExpression`) explicitly: a reviewed repository may pin
+ * an older compiler, and the walk must never throw on its absence.
  */
-export function stripComments(source: string): string | null {
-  const out = source.split('');
-  const n = source.length;
-  const at = (k: number): string => (k < n ? source.charAt(k) : '');
-  const blank = (from: number, to: number): void => {
-    for (let k = from; k < to && k < n; k++) {
-      if (out[k] !== '\n') out[k] = ' ';
-    }
-  };
-  // The token before the cursor, as the regex/division rule reads it: its
-  // last character, the word it ended (for the keyword lists), whether it
-  // was a postfix `++`/`--` (an operand whatever `+` says), and — when it
-  // was a `)` or `}` — the class of what it closed.
-  let prevChar = '';
-  let prevWord = '';
-  let prevPostfix = false;
-  let prevClose: boolean | null = null;
-  // Every open `{`, classed when it opened: `true` for a block (statement
-  // position — its `}` ends a statement), `false` for an object literal
-  // (operand — its `}` ends an expression), `null` when the walk could not
-  // tell. Every open `(`: `true` for a control head (`if (…)`), `false` for
-  // a call or a grouping. Every open template interpolation: the brace
-  // depth it was entered at, so its own `}` is told apart from the code's.
-  const braces: Array<boolean | null> = [];
-  const parens: boolean[] = [];
-  const tplFrames: number[] = [];
-  const setPunct = (c: string): void => {
-    prevPostfix =
-      (c === '+' || c === '-') &&
-      prevChar === c &&
-      !prevPostfix &&
-      prevWord === '';
-    prevChar = c;
-    prevWord = '';
-    prevClose = null;
-  };
-  const setOperand = (): void => {
-    prevChar = '`';
-    prevWord = '';
-    prevPostfix = false;
-    prevClose = null;
-  };
-  // Walk a template body from `from`: the index after the closing backtick,
-  // or the index of a `${` (the caller enters code), or -1 when the input
-  // ends inside the template.
-  const walkTemplate = (from: number): number => {
-    let k = from;
-    while (k < n) {
-      const d = at(k);
-      if (d === '\\') k += 2;
-      else if (d === '`') return k + 1;
-      else if (d === '$' && at(k + 1) === '{') return k;
-      else k++;
-    }
-    return -1;
-  };
-  // Enter code at a `${`, or land after a closing backtick. Returns false
-  // when the template never closes.
-  const resumeTemplate = (from: number): boolean => {
-    const next = walkTemplate(from);
-    if (next < 0) return false;
-    if (at(next) === '$') {
-      tplFrames.push(braces.length);
-      i = next + 2;
-      setPunct('(');
-    } else {
-      i = next;
-      setOperand();
-    }
-    return true;
-  };
-
-  let i = 0;
-  if (at(0) === '#' && at(1) === '!') {
-    // The shebang: a comment by the host's grammar, never the lexer's.
-    while (i < n && at(i) !== '\n') {
-      out[i] = ' ';
-      i++;
-    }
+function isTypeScriptModule(value: unknown): value is TypeScriptModule {
+  const m = value as Partial<TypeScriptModule> | null;
+  if (
+    typeof m !== 'object' ||
+    m === null ||
+    typeof m.createSourceFile !== 'function' ||
+    typeof m.forEachChild !== 'function' ||
+    typeof m.isImportDeclaration !== 'function' ||
+    typeof m.isCallExpression !== 'function' ||
+    typeof m.isStringLiteralLike !== 'function' ||
+    typeof m.SyntaxKind !== 'object' ||
+    typeof m.ScriptKind !== 'object' ||
+    typeof m.ScriptTarget !== 'object'
+  ) {
+    return false;
   }
-  while (i < n) {
-    const c = at(i);
-    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') {
-      i++;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      i++;
-      while (i < n) {
-        const d = at(i);
-        if (d === '\\') i += 2;
-        else if (d === c) {
-          i++;
-          break;
-        } else if (d === '\n') break;
-        else i++;
-      }
-      setOperand();
-      continue;
-    }
-    if (c === '`') {
-      if (!resumeTemplate(i + 1)) return null;
-      continue;
-    }
-    if (c === '/' && at(i + 1) === '/') {
-      const from = i;
-      while (i < n && at(i) !== '\n') i++;
-      blank(from, i);
-      continue;
-    }
-    if (c === '/' && at(i + 1) === '*') {
-      const close = source.indexOf('*/', i + 2);
-      if (close < 0) return null;
-      blank(i, close + 2);
-      i = close + 2;
-      continue;
-    }
-    if (c === '/') {
-      let regex: boolean | null;
-      if (prevChar === '') regex = true;
-      else if (prevPostfix) regex = false;
-      else if (IDENT_CHAR_RE.test(prevChar)) {
-        regex = REGEX_AFTER_WORDS.has(prevWord);
-      } else if (prevChar === ')' || prevChar === '}') regex = prevClose;
-      else if (prevChar === ']' || prevChar === '`' || prevChar === '/') {
-        regex = false;
-      } else regex = REGEX_AFTER_PUNCT.has(prevChar) ? true : null;
-      if (regex === null) return null;
-      if (!regex) {
-        i++;
-        setPunct('/');
-        continue;
-      }
-      i++;
-      let inClass = false;
-      let closed = false;
-      while (i < n) {
-        const d = at(i);
-        if (d === '\n') break;
-        if (d === '\\') i += 2;
-        else if (d === '[') {
-          inClass = true;
-          i++;
-        } else if (d === ']') {
-          inClass = false;
-          i++;
-        } else if (d === '/' && !inClass) {
-          i++;
-          closed = true;
-          break;
-        } else i++;
-      }
-      if (!closed) return null;
-      while (i < n && IDENT_CHAR_RE.test(at(i))) i++;
-      setOperand();
-      continue;
-    }
-    if (c === '{') {
-      // Classed by the token before it. A block: after a `)` (a control
-      // head's or a signature's), a `=>`, a block keyword, a name (`class
-      // X {`, `function f() {` reaches here via `)`), a statement boundary,
-      // or another block's `{`. An object literal: after an operator, an
-      // opener, a separator, a `return`-like word, or an object literal's
-      // own `{`. Unknowable otherwise.
-      let block: boolean | null;
-      if (
-        prevChar === '' ||
-        prevChar === ')' ||
-        prevChar === ';' ||
-        prevChar === '}' ||
-        prevChar === '>'
-      ) {
-        block = true;
-      } else if (IDENT_CHAR_RE.test(prevChar)) {
-        block =
-          BLOCK_AFTER_WORDS.has(prevWord) || !REGEX_AFTER_WORDS.has(prevWord);
-      } else if (prevChar === '{') {
-        block = braces.length > 0 && braces[braces.length - 1] === true;
-      } else if (REGEX_AFTER_PUNCT.has(prevChar) || prevChar === '`') {
-        block = false;
-      } else {
-        block = null;
-      }
-      braces.push(block);
-      i++;
-      setPunct('{');
-      continue;
-    }
-    if (c === '}') {
-      const frame = tplFrames[tplFrames.length - 1];
-      if (frame !== undefined && braces.length === frame) {
-        // The interpolation's own close: back into the template body.
-        tplFrames.pop();
-        if (!resumeTemplate(i + 1)) return null;
-        continue;
-      }
-      // A `}` with no opener may close a block the walk never saw: refuse.
-      if (braces.length === 0) return null;
-      const closed = braces.pop();
-      i++;
-      prevChar = '}';
-      prevWord = '';
-      prevPostfix = false;
-      prevClose = closed === undefined ? null : closed;
-      continue;
-    }
-    if (c === '(') {
-      parens.push(
-        IDENT_CHAR_RE.test(prevChar) && CONTROL_PAREN_WORDS.has(prevWord),
-      );
-      i++;
-      setPunct('(');
-      continue;
-    }
-    if (c === ')') {
-      if (parens.length === 0) return null;
-      const control = parens.pop() === true;
-      i++;
-      prevChar = ')';
-      prevWord = '';
-      prevPostfix = false;
-      prevClose = control;
-      continue;
-    }
-    if (IDENT_CHAR_RE.test(c)) {
-      const from = i;
-      while (i < n && IDENT_CHAR_RE.test(at(i))) i++;
-      prevWord = source.slice(from, i);
-      prevChar = at(i - 1);
-      prevPostfix = false;
-      prevClose = null;
-      continue;
-    }
-    i++;
-    setPunct(c);
+  try {
+    const probe = m.createSourceFile(
+      'probe.ts',
+      'export {};',
+      m.ScriptTarget.Latest,
+      true,
+      m.ScriptKind.TS,
+    );
+    return Array.isArray(
+      (probe as { parseDiagnostics?: unknown }).parseDiagnostics,
+    );
+  } catch {
+    return false;
   }
-  if (tplFrames.length > 0) return null;
-  return out.join('');
 }
 
 /**
  * The 1-based lines of `source` that touch its seam with the changed files:
- * every import/require statement whose specifier resolves into `changed`,
- * plus every line mentioning a binding such a statement introduces.
+ * every import/require statement whose specifier resolves into `changed`
+ * (every line the statement spans), plus every line mentioning a binding
+ * such a statement introduces.
  *
  * This is the seam-bounded widening's oracle (#10104): a fix-audit round
  * republishes an interaction file's hunks only where they display one of
- * these lines. It shares `scanImportSpecifiers`' regex spirit and its
- * documented misses (template-literal specifiers, statements the patterns do
- * not spell), and adds its own: a binding renamed into a local alias after
- * import, or reached through a barrel, marks no line. Both directions were
- * chosen — a missed line drops one hunk from a republication the previous
- * round already cleared once, an extra line republishes one hunk more — and
- * the file itself always stays in scope with its brief, so the seam question
- * is asked even when no hunk survives.
+ * these lines. It reads the file through TypeScript's own parser (#10136) —
+ * the grammar's reading of strings, templates, regex literals, comments,
+ * JSX and import clauses, not a hand-rolled approximation of it: six review
+ * rounds of an in-house lexer each surfaced a new lexical shape it guessed
+ * wrong (a `/` after a non-null `!`, a keyword-shaped property name, a
+ * control-word-shaped method, an `import { export as x }` clause), and a
+ * wrong guess is not line-local — a mis-lexed literal desyncs everything
+ * after it. The parser carries none of that: an `ImportDeclaration` is an
+ * import, its clause's bindings are the nodes the grammar says they are.
  *
- * One read fails CLOSED (#10136): any read whose bindings cannot be
- * proven collected marks EVERY line, the doubt shape `widenScope`
- * republishes in full. The reads that doubt: a clause carrying a quote (no
- * legal clause has one; a keyword inside a string displaced the bound), a
- * keyword-bound clause past the 2000-char cap (a barrel re-export the read
- * cannot enumerate), a brace entry that parses to no identifier, ANY
- * dynamic `import(` call (its value escapes into expressions the
- * line-shape read cannot follow — an awaited or wrapped declaration, a
- * callback parameter), and a `require(` whose own line parses to no
- * declaration the read can collect. Under-collection of the oracle is the
- * one error the seam bound must not make.
+ * What it marks: `import`/`export … from` declarations, TypeScript's
+ * `import x = require(…)`, a type position's `import('…')` and JSDoc's
+ * `@import`/`@type {import('…')}` (the JSDoc tree is walked too — a JS
+ * caller's types live there) whose specifier resolves into `changed`; a
+ * `require(…)` or `import(…)` call whose specifier does, together with
+ * EVERY receiver of its value on the way to the statement — the declared
+ * names (`const { a, b: c } = require('x')`, `const m = await import('x')`),
+ * each identifier or property assigned along a chain (`a = b = require('x')`,
+ * `cache ?? (cache = require('x'))`, `exports.m = require('x')`), a class
+ * field — through whatever wraps the call (a property access, an `await`,
+ * a `?.`, an `as`, a conditional's branch, a `??`); and every line where an
+ * identifier spelled like one of those bindings appears. That last read is
+ * by NAME, so a shadowing local or a same-named property marks one line too
+ * many — over-collection is the budgeted direction; a binding renamed into
+ * another local after import, or reached through a barrel, marks no line,
+ * and the file itself always stays in scope with its brief, so the seam
+ * question is asked even when no hunk survives. A statement that receives
+ * nothing (`require('x');`, `await import('x');`, `require('x').init();`)
+ * marks its own lines and binds nothing — the grammar introduces no name.
+ * A dynamic import's value is a promise until an `await` unwraps it, so a
+ * method chained onto the un-awaited promise (`import('x').then(handler)`)
+ * hands the module to a callback the name read cannot follow: an escape.
+ *
+ * Every read the oracle cannot prove fails CLOSED — the doubt shape marks
+ * every line, which `widenScope` republishes in full: no parser resolvable
+ * (`loadTypeScript`), a source the parser reports a syntax error on (the
+ * tree past the error is a guess), a `require`/`import(…)` whose specifier
+ * is not a string literal (a computed one may name a changed file the read
+ * cannot see, so "no match" is no proof), a `require`/`import(…)` whose
+ * value escapes into an expression the receiver walk does not follow (an
+ * argument — `foo(require('x'))` — a method chained onto an un-awaited
+ * `import('x')` promise, an array or object literal, a `return`, an
+ * `export =`, an element-access target), and
+ * a walk that throws on a parser build missing an entry point. Under-
+ * collection of the oracle is the one error the seam bound must not make.
+ * Line numbers count LF alone — the diff's own accounting — never the
+ * CR/LS/PS breaks the parser also counts.
  */
 export function seamLines(
   fromFile: string,
   source: string,
   changed: ReadonlySet<string>,
   packages: readonly WorkspacePackage[] = [],
+  ts: TypeScriptModule | null = loadTypeScript(),
 ): number[] {
-  const lexed = stripComments(source);
-  if (lexed === null) {
-    // The lexer could not prove its state (#10136): the doubt shape,
-    // exactly as an unreadable clause below — every line, the file in full.
-    return Array.from({ length: source.split('\n').length }, (_, i) => i + 1);
+  const total = source.split('\n').length;
+  const doubt = (): number[] => Array.from({ length: total }, (_, i) => i + 1);
+  if (ts === null) return doubt();
+  try {
+    return seamLinesWith(ts, fromFile, source, changed, packages) ?? doubt();
+  } catch {
+    // A parser build the oracle's walk does not fit (an entry point missing,
+    // a node shape it did not expect): not a reading, so not a census.
+    return doubt();
   }
-  const stripped = lexed;
-  const lineOf = (index: number): number => {
-    let line = 1;
-    for (let i = 0; i < index && i < stripped.length; i++) {
-      if (stripped.charCodeAt(i) === 10) line++;
+}
+
+type TSNode = import('typescript').Node;
+
+/** The read itself; `null` is the doubt state. */
+function seamLinesWith(
+  ts: TypeScriptModule,
+  fromFile: string,
+  source: string,
+  changed: ReadonlySet<string>,
+  packages: readonly WorkspacePackage[],
+): number[] | null {
+  // LF-only line accounting, computed once: the parser's own line map
+  // counts CR, LS and PS as breaks, and a hunk's line numbers do not.
+  const lineStarts: number[] = [0];
+  for (let i = 0; i < source.length; i++) {
+    if (source.charCodeAt(i) === 10) lineStarts.push(i + 1);
+  }
+  const lineOf = (pos: number): number => {
+    let lo = 0;
+    let hi = lineStarts.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (lineStarts[mid] <= pos) lo = mid;
+      else hi = mid - 1;
     }
-    return line;
+    return lo + 1;
   };
+
+  const sf = ts.createSourceFile(
+    `seam${scriptExtension(fromFile)}`,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKindOf(ts, fromFile),
+  );
+  // The parser is error-tolerant, and a tree built past a syntax error is
+  // a guess about what the author meant — not a reading the oracle can
+  // certify. The diagnostics ride on the source file as an internal field;
+  // a build of TypeScript that hides it is one the oracle cannot vouch for.
+  const diagnostics = (sf as { parseDiagnostics?: unknown }).parseDiagnostics;
+  if (!Array.isArray(diagnostics) || diagnostics.length > 0) return null;
+
   const marked = new Set<number>();
   const bindings = new Set<string>();
-  let doubt = false;
-  const fromRe = /\bfrom\s*(['"])([^'"\n]+)\1/g;
-  for (const m of stripped.matchAll(fromRe)) {
-    if (resolveSpecifier(fromFile, m[2], changed, packages) === null) continue;
-    marked.add(lineOf(m.index ?? 0));
-    // The clause sits between the statement keyword and this `from`. The
-    // nearest preceding keyword bounds it — word-bounded, because a binding
-    // that merely CONTAINS the keyword (`exporter`, `reimport`) used to
-    // displace the bound inside its own name and parse the clause to zero
-    // bindings; a clause the scan cannot bound contributes the statement
-    // line alone — fail toward fewer lines, which the always-in-scope
-    // brief backstops. A clause carrying a quote character is none the
-    // scan can read — no legal clause has one — so the bound fails CLOSED
-    // instead (#10136).
-    const at = m.index ?? 0;
-    let start = -1;
-    for (const km of stripped
-      .slice(0, at)
-      .matchAll(/(^|[^\w$])(?:import|export)(?![\w$])/g)) {
-      start = (km.index ?? 0) + (km[1]?.length ?? 0);
+  let refused = false;
+  const markSpan = (node: TSNode): void => {
+    const from = lineOf(node.getStart(sf));
+    const to = lineOf(node.getEnd());
+    for (let line = from; line <= to; line++) marked.add(line);
+  };
+  // The statement — or the class/interface/object member — a node sits in:
+  // every line it spans is the seam, not the node's own line alone (a
+  // destructuring spread over three lines is one statement), and a member
+  // rather than its whole class (one typed method must not republish the
+  // class around it).
+  const statementOf = (node: TSNode): TSNode => {
+    let current = node;
+    while (
+      current.parent !== undefined &&
+      !ts.isSourceFile(current.parent) &&
+      // A node inside a JSDoc comment spans its tag, not the declaration
+      // the comment documents.
+      !ts.isJSDoc(current.parent) &&
+      !ts.isBlock(current.parent) &&
+      !ts.isModuleBlock(current.parent) &&
+      !ts.isCaseClause(current.parent) &&
+      !ts.isDefaultClause(current.parent) &&
+      !ts.isClassLike(current.parent) &&
+      !ts.isInterfaceDeclaration(current.parent) &&
+      !ts.isTypeLiteralNode(current.parent) &&
+      !ts.isObjectLiteralExpression(current.parent)
+    ) {
+      current = current.parent;
     }
-    const clause = start >= 0 ? stripped.slice(start, at) : null;
-    if (clause === null) continue;
-    if (clause.length > 2000) {
-      // Keyword-bound but past the cap the read budgets — a barrel
-      // re-export whose bindings the scan cannot enumerate. Marking the
-      // statement line alone would shed every usage line, so the bound
-      // fails CLOSED instead (#10136).
-      doubt = true;
-      break;
+    return current;
+  };
+  // A specifier the read can resolve: a string literal, a template with no
+  // substitution, either wrapped in parentheses. Anything else — a name, a
+  // concatenation, a substituting template — is computed.
+  const literalSpecifier = (
+    expr: import('typescript').Expression | undefined,
+  ): string | null => {
+    let e = expr;
+    while (e !== undefined && ts.isParenthesizedExpression(e)) e = e.expression;
+    return e !== undefined && ts.isStringLiteralLike(e) ? e.text : null;
+  };
+  const resolves = (spec: string): boolean =>
+    resolveSpecifier(fromFile, spec, changed, packages) !== null;
+  // The names a binding pattern or identifier declares — the LOCAL names,
+  // whatever property they were taken from.
+  const declaredNames = (name: import('typescript').BindingName): string[] => {
+    if (ts.isIdentifier(name)) return [name.text];
+    const out: string[] = [];
+    for (const element of name.elements) {
+      if (ts.isOmittedExpression(element)) continue;
+      out.push(...declaredNames(element.name));
     }
-    if (/['"`]/.test(clause)) {
-      doubt = true;
-      break;
+    return out;
+  };
+  // The names an assignment target receives: an identifier, a property
+  // (a private `#field` included — its uses are read by the same name), or
+  // an object/array assignment pattern, element by element. Anything else
+  // (an element access, a call) is a target the name read cannot follow.
+  const assignmentTargetNames = (
+    target: import('typescript').Expression,
+  ): string[] | null => {
+    if (ts.isIdentifier(target)) return [target.text];
+    if (ts.isPropertyAccessExpression(target)) return [target.name.text];
+    if (ts.isParenthesizedExpression(target)) {
+      return assignmentTargetNames(target.expression);
     }
-    const names = clauseBindings(clause);
-    if (names === null) {
-      doubt = true;
-      break;
-    }
-    for (const name of names) {
-      bindings.add(name);
-    }
-  }
-  const callRe =
-    /\b(?:import|require)\s*\(\s*(['"])([^'"\n]+)\1\s*\)|\bimport\s*(['"])([^'"\n]+)\3/g;
-  for (const m of stripped.matchAll(callRe)) {
-    const spec = m[2] ?? m[4];
-    if (resolveSpecifier(fromFile, spec, changed, packages) === null) continue;
-    const at = m.index ?? 0;
-    marked.add(lineOf(at));
-    if (m[2] === undefined) continue; // side-effect `import 'x'`: no bindings
-    // A dynamic `import(` fails closed outright: its value escapes into
-    // expressions the line-shape read cannot follow — a declaration on the
-    // previous line, a `.then` callback's parameter — and a read whose
-    // bindings cannot be proven collected is the one error the seam bound
-    // must not make (#10136).
-    if (m[0].startsWith('import')) {
-      doubt = true;
-      break;
-    }
-    // `const { a, b: c } = require('x')` / `const x = require('x')`: the
-    // bindings sit BEFORE the call, on its own line. Any other shape — a
-    // wrapped or keywordless declaration, an assignment to an existing
-    // binding, a bare side-effect call — parses to no declaration the read
-    // can collect, and fails CLOSED (#10136).
-    const lineStart = stripped.lastIndexOf('\n', at - 1) + 1;
-    const before = stripped.slice(lineStart, at);
-    const decl =
-      /(?:const|let|var)\s+(?:\{([^}]*)\}|([A-Za-z_$][\w$]*))\s*=\s*$/.exec(
-        before,
-      );
-    if (!decl) {
-      doubt = true;
-      break;
-    }
-    if (decl[2]) {
-      bindings.add(decl[2]);
-      continue;
-    }
-    for (const entry of decl[1].split(',')) {
-      const raw = entry.trim();
-      if (raw === '') continue; // a trailing comma binds nothing
-      // Split at `=` BEFORE the rename parse: a default (`moved =
-      // fallback`) binds the imported name, not the fallback expression.
-      const words = raw
-        .split('=')[0]
-        .split(/[:\s]+/)
-        .filter(Boolean);
-      const local = words[words.length - 1];
-      if (!local || !IDENT_RE.test(local)) {
-        doubt = true;
-        break;
+    if (ts.isObjectLiteralExpression(target)) {
+      const out: string[] = [];
+      for (const prop of target.properties) {
+        let names: string[] | null;
+        if (ts.isShorthandPropertyAssignment(prop)) names = [prop.name.text];
+        else if (ts.isPropertyAssignment(prop)) {
+          names = assignmentTargetNames(prop.initializer);
+        } else if (ts.isSpreadAssignment(prop)) {
+          names = assignmentTargetNames(prop.expression);
+        } else names = null;
+        if (names === null) return null;
+        out.push(...names);
       }
-      bindings.add(local);
+      return out;
     }
-    if (doubt) break;
-  }
-  if (doubt) {
-    // The clause read could not be trusted: mark every line so `widenScope`
-    // keeps every hunk and republishes the file in full — the same shape a
-    // scan that keeps everything produces, the doubt state its seam record
-    // already reads.
-    const total = source.split('\n').length;
-    return Array.from({ length: total }, (_, i) => i + 1);
-  }
+    if (ts.isArrayLiteralExpression(target)) {
+      const out: string[] = [];
+      for (const element of target.elements) {
+        if (ts.isOmittedExpression(element)) continue;
+        const names = assignmentTargetNames(
+          ts.isSpreadElement(element) ? element.expression : element,
+        );
+        if (names === null) return null;
+        out.push(...names);
+      }
+      return out;
+    }
+    if (
+      ts.isBinaryExpression(target) &&
+      target.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    ) {
+      // A default inside a pattern: `[a = 1] = …` binds `a`.
+      return assignmentTargetNames(target.left);
+    }
+    return null;
+  };
+  const isPassThrough = (parent: TSNode, node: TSNode): boolean =>
+    ts.isPropertyAccessExpression(parent) ||
+    ts.isElementAccessExpression(parent) ||
+    ts.isAwaitExpression(parent) ||
+    ts.isVoidExpression(parent) ||
+    ts.isParenthesizedExpression(parent) ||
+    ts.isNonNullExpression(parent) ||
+    ts.isAsExpression(parent) ||
+    ts.isTypeAssertionExpression(parent) ||
+    (typeof ts.isSatisfiesExpression === 'function' &&
+      ts.isSatisfiesExpression(parent)) ||
+    (ts.isCallExpression(parent) && parent.expression === node) ||
+    (ts.isConditionalExpression(parent) && parent.condition !== node) ||
+    (ts.isBinaryExpression(parent) &&
+      (parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
+        parent.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+        parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken));
+  // Every receiver of a `require(…)`/`import(…)` value on the way up to its
+  // statement. A declaration or a class field is terminal (it binds and the
+  // value stops there); an assignment records its target and keeps going —
+  // the assignment expression's value flows on (`a = b = require('x')`,
+  // `cache ?? (cache = require('x'))`); an expression statement ends the
+  // walk with whatever was collected (nothing, for a bare side-effect
+  // call). Anything else the value flows into is an escape the name read
+  // cannot follow, and the read fails closed.
+  const receiverBindings = (
+    call: TSNode,
+    promise: boolean,
+  ): string[] | null => {
+    const out: string[] = [];
+    let node: TSNode = call;
+    // A dynamic import's value is a PROMISE of the module until an `await`
+    // unwraps it: a method chained onto the promise (`.then(handler)`,
+    // `.catch(…)`) hands the module to a callback the name read cannot
+    // follow, so until the await a call on the path is an escape.
+    let unwrapped = !promise;
+    for (;;) {
+      const parent: TSNode | undefined = node.parent;
+      if (parent === undefined) return null;
+      if (ts.isAwaitExpression(parent)) unwrapped = true;
+      if (
+        !unwrapped &&
+        ts.isCallExpression(parent) &&
+        parent.expression === node
+      ) {
+        return null;
+      }
+      if (ts.isVariableDeclaration(parent) && parent.initializer === node) {
+        out.push(...declaredNames(parent.name));
+        return out;
+      }
+      if (ts.isBindingElement(parent) && parent.initializer === node) {
+        out.push(...declaredNames(parent.name));
+        return out;
+      }
+      if (
+        ts.isPropertyDeclaration(parent) &&
+        parent.initializer === node &&
+        (ts.isIdentifier(parent.name) || ts.isPrivateIdentifier(parent.name))
+      ) {
+        out.push(parent.name.text);
+        return out;
+      }
+      if (
+        ts.isBinaryExpression(parent) &&
+        parent.right === node &&
+        (parent.operatorToken.kind === ts.SyntaxKind.EqualsToken ||
+          parent.operatorToken.kind ===
+            ts.SyntaxKind.QuestionQuestionEqualsToken ||
+          parent.operatorToken.kind === ts.SyntaxKind.BarBarEqualsToken ||
+          parent.operatorToken.kind ===
+            ts.SyntaxKind.AmpersandAmpersandEqualsToken)
+      ) {
+        const names = assignmentTargetNames(parent.left);
+        if (names === null) return null;
+        out.push(...names);
+        node = parent;
+        continue;
+      }
+      if (ts.isExpressionStatement(parent) && parent.expression === node) {
+        return out;
+      }
+      if (isPassThrough(parent, node)) {
+        node = parent;
+        continue;
+      }
+      return null;
+    }
+  };
+  const bindImportClause = (
+    clause: import('typescript').ImportClause | undefined,
+  ): void => {
+    if (clause?.name) bindings.add(clause.name.text);
+    const named = clause?.namedBindings;
+    if (named) {
+      if (ts.isNamespaceImport(named)) bindings.add(named.name.text);
+      else for (const el of named.elements) bindings.add(el.name.text);
+    }
+  };
+  // `forEachChild` never enters a node's JSDoc, and a JavaScript caller's
+  // types live there — `@type {import('./x').T}`, `@import { T } from
+  // './x'` — so the walk enters it by hand, in every script kind (a `.ts`
+  // file's JSDoc import marks one line too many at worst).
+  const eachChild = (node: TSNode, fn: (child: TSNode) => void): void => {
+    ts.forEachChild(node, fn);
+    const docs = (node as { jsDoc?: readonly TSNode[] }).jsDoc;
+    if (Array.isArray(docs)) for (const doc of docs) fn(doc);
+  };
+  const isJSDocImport = (node: TSNode): boolean =>
+    typeof ts.isJSDocImportTag === 'function' && ts.isJSDocImportTag(node);
+  // A parser too old to know `@import` (TS < 5.5) hands the tag over as an
+  // unknown one, clause unread: a seam it cannot show is a doubt, not a
+  // "no match".
+  const isUnreadableJSDocImport = (node: TSNode): boolean =>
+    typeof ts.isJSDocImportTag !== 'function' &&
+    (node as { tagName?: { text?: unknown } }).tagName?.text === 'import';
+  // Every branch falls through to the children walk at the bottom: the
+  // JSDoc a statement carries — an `@import` above an `import`, a
+  // `@typedef` above an `export … from` — is a child the walk must enter
+  // whatever the statement itself was.
+  const visit = (node: TSNode): void => {
+    if (refused) return;
+    if (ts.isImportDeclaration(node)) {
+      const spec = literalSpecifier(node.moduleSpecifier);
+      if (spec === null) {
+        refused = true;
+        return;
+      }
+      if (resolves(spec)) {
+        markSpan(node);
+        bindImportClause(node.importClause);
+      }
+    } else if (isUnreadableJSDocImport(node)) {
+      refused = true;
+      return;
+    } else if (isJSDocImport(node)) {
+      const tag = node as import('typescript').JSDocImportTag;
+      const spec = literalSpecifier(tag.moduleSpecifier);
+      if (spec === null) {
+        refused = true;
+        return;
+      }
+      if (resolves(spec)) {
+        markSpan(node);
+        bindImportClause(tag.importClause);
+      }
+    } else if (ts.isExportDeclaration(node)) {
+      if (node.moduleSpecifier !== undefined) {
+        const spec = literalSpecifier(node.moduleSpecifier);
+        if (spec === null) {
+          refused = true;
+          return;
+        }
+        // A re-export introduces no local binding: the statement is the seam.
+        if (resolves(spec)) markSpan(node);
+      }
+    } else if (ts.isImportTypeNode(node)) {
+      // `import('./changed.js').Foo` in a type position: a seam by the
+      // grammar (the signature it names moved), used inline — no binding.
+      const arg = node.argument;
+      const spec =
+        ts.isLiteralTypeNode(arg) && ts.isStringLiteralLike(arg.literal)
+          ? arg.literal.text
+          : null;
+      if (spec === null) {
+        refused = true;
+        return;
+      }
+      if (resolves(spec)) markSpan(statementOf(node));
+    } else if (ts.isImportEqualsDeclaration(node)) {
+      const ref = node.moduleReference;
+      if (ts.isExternalModuleReference(ref)) {
+        const spec = literalSpecifier(ref.expression);
+        if (spec === null) {
+          refused = true;
+          return;
+        }
+        if (resolves(spec)) {
+          markSpan(node);
+          bindings.add(node.name.text);
+        }
+      }
+    } else if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const isRequire = ts.isIdentifier(callee) && callee.text === 'require';
+      const isDynamicImport = callee.kind === ts.SyntaxKind.ImportKeyword;
+      if ((isRequire || isDynamicImport) && node.arguments.length >= 1) {
+        const spec = literalSpecifier(node.arguments[0]);
+        if (spec === null) {
+          refused = true;
+          return;
+        }
+        if (resolves(spec)) {
+          markSpan(statementOf(node));
+          const received = receiverBindings(node, isDynamicImport);
+          if (received === null) {
+            refused = true;
+            return;
+          }
+          for (const b of received) bindings.add(b);
+        }
+      }
+    }
+    eachChild(node, visit);
+  };
+  visit(sf);
+  if (refused) return null;
   if (bindings.size > 0) {
-    // `$` is legal in the identifiers IDENT_RE admits and is a regex anchor,
-    // and `\b` cannot bound a name that starts or ends with it (`store$.x`
-    // never matched; a DIFFERENT identifier at end-of-line did). So the
-    // names are escaped and the boundary is spelled explicitly: not
-    // preceded/followed by an identifier character, `$` included.
-    const escaped = [...bindings].map((b) => b.replace(/\$/g, '\\$'));
-    const usage = new RegExp(`(?<![\\w$])(?:${escaped.join('|')})(?![\\w$])`);
-    const lines = stripped.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      if (usage.test(lines[i])) marked.add(i + 1);
-    }
+    const mention = (node: TSNode): void => {
+      if (
+        (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) &&
+        bindings.has(node.text)
+      ) {
+        marked.add(lineOf(node.getStart(sf)));
+      }
+      eachChild(node, mention);
+    };
+    mention(sf);
   }
   return [...marked].sort((a, b) => a - b);
+}
+
+function scriptExtension(file: string): string {
+  const ext = nodePath.extname(file).toLowerCase();
+  return EXT_WALK.includes(ext) ? ext : '.ts';
+}
+
+function scriptKindOf(
+  ts: TypeScriptModule,
+  file: string,
+): import('typescript').ScriptKind {
+  switch (scriptExtension(file)) {
+    case '.tsx':
+      return ts.ScriptKind.TSX;
+    case '.jsx':
+      return ts.ScriptKind.JSX;
+    case '.js':
+    case '.mjs':
+    case '.cjs':
+      return ts.ScriptKind.JS;
+    default:
+      return ts.ScriptKind.TS;
+  }
 }
 
 /**

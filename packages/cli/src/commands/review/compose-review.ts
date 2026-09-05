@@ -6405,27 +6405,45 @@ function composeReviewBody(
         ? '，机械兜底未移动任何内容——下方列出的延后没有姿态授权（操作者关闭了该姿态），本判定因此受限；只有上述收窄形态生效。'
         : '，机械兜底未移动任何内容——下方列出的延后由收敛姿态路由，而非已解析下限的移动；只有上述收窄形态生效。'
       : '，没有任何发现被下限扣留——只有上述收窄形态生效。';
-  // The engaged arm asserts a deferral only beside a deferral list: with
-  // nothing deferred this round, "were recorded and deferred" names
-  // findings that do not exist (#10136). Beside an empty list the floor
-  // either saw nothing below Critical at all, or only the pre-confirmed
-  // deterministic findings it leaves inline — which is what
-  // `suggestionsInline` counts once enforcement has moved everything else.
+  // The engaged arm asserts a below-Critical deferral only beside one
+  // (#10136 R16-1): the merged list the deferral block renders carries
+  // Criticals too — the fails-closed/new-surface ones the axes defer, from
+  // the reroute and the model channel alike — so a list holding only those
+  // has NO finding below Critical in it, and "findings below Critical were
+  // recorded and deferred" would name findings that do not exist. Keyed
+  // on the same merged list `deferredCriticals` reads. With nothing
+  // deferred at all the floor either saw nothing below Critical, or only
+  // the pre-confirmed deterministic findings it leaves inline — which is
+  // what `suggestionsInline` counts once enforcement has moved everything
+  // else.
+  const deferredBelowCritical = deferredSuggestions.some(
+    (e) => e.severity !== 'Critical',
+  );
   const fixAuditFloorEn = fixAuditFloorEngaged
-    ? deferredSuggestions.length > 0
+    ? deferredBelowCritical
       ? 'Findings below Critical were recorded and deferred, never posted — except pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor.'
-      : suggestionsInline > 0
-        ? 'The floor was engaged; the only findings below Critical this round are pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor — nothing else reached it, so nothing was deferred.'
-        : 'The floor was engaged and nothing below Critical reached it this round — any such finding would have been recorded and deferred, never posted (pre-confirmed `[build]`/`[test]`/`[probe]` findings excepted).'
+      : deferredSuggestions.length > 0
+        ? 'The deferred findings below are Criticals deferred by their axes (fails-closed on new surface) — nothing below Critical was withheld this round' +
+          (suggestionsInline > 0
+            ? ', and the pre-confirmed `[build]`/`[test]`/`[probe]` findings below Critical stay inline at any floor.'
+            : '.')
+        : suggestionsInline > 0
+          ? 'The floor was engaged and nothing was deferred this round; the only Suggestions the floor leaves inline are pre-confirmed `[build]`/`[test]`/`[probe]` findings, which stay inline at any floor.'
+          : 'The floor was engaged and nothing below Critical reached it this round — any such finding would have been recorded and deferred, never posted (pre-confirmed `[build]`/`[test]`/`[probe]` findings excepted).'
     : 'The posting floor itself resolved OPEN at compose time this round ' +
       fixAuditOpenCauseEn +
       fixAuditOpenTailEn;
   const fixAuditFloorZh = fixAuditFloorEngaged
-    ? deferredSuggestions.length > 0
+    ? deferredBelowCritical
       ? '低于 Critical 的发现只记录延后，不发布——除了预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内。'
-      : suggestionsInline > 0
-        ? '下限已生效；本轮低于 Critical 的发现只有预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内——没有其它发现触及下限，因此没有延后。'
-        : '下限已生效，本轮没有任何低于 Critical 的发现触及它——若有，也只会记录延后、不发布（预确认的 `[build]`/`[test]`/`[probe]` 发现除外）。'
+      : deferredSuggestions.length > 0
+        ? '下方延后的发现都是按其轴向延后的 Critical（新表面上的 fails-closed）——本轮没有任何低于 Critical 的发现被扣留' +
+          (suggestionsInline > 0
+            ? '，预确认的 `[build]`/`[test]`/`[probe]` 低于 Critical 的发现在任何下限下都留在行内。'
+            : '。')
+        : suggestionsInline > 0
+          ? '下限已生效且本轮没有延后；下限唯一留在行内的 Suggestion 是预确认的 `[build]`/`[test]`/`[probe]` 发现，它们在任何下限下都留在行内。'
+          : '下限已生效，本轮没有任何低于 Critical 的发现触及它——若有，也只会记录延后、不发布（预确认的 `[build]`/`[test]`/`[probe]` 发现除外）。'
     : '但本轮发布下限在 compose 期实际解析为开放' +
       fixAuditOpenCauseZh +
       fixAuditOpenTailZh;
@@ -6464,19 +6482,23 @@ function composeReviewBody(
               ? ` plus their import-seam interaction files${fixAuditSeamEn}`
               : ' (no still-clean importer re-entered the scope)') +
             `, and the reverse-audit waves ` +
-            `re-launched only delta territories and non-delta chunks the ` +
-            `previous waves could not certify dry (a yield, an uncertified ` +
-            `receipt, no audit history, or a dry receipt stale against a ` +
-            `same-digest yield keeps a chunk in the wave). ${fixAuditFloorEn}`,
+            `re-launched delta territories under the ordinary retirement ` +
+            `rules (a twice-dry one only on its cold-check rounds) and ` +
+            `non-delta chunks the previous waves could not certify dry (a ` +
+            `yield, an uncertified receipt or no audit history keeps a chunk ` +
+            `in the wave; a dry receipt stale against a same-digest yield or ` +
+            `uncertified receipt returns it to the ordinary retirement ` +
+            `rules). ${fixAuditFloorEn}`,
           zh:
             `轮次形态：本次 re-review 以 critical 发布姿态下的 fix-audit 轮运行` +
             `（由${fixAuditCauseZh}触发）——领地扇出只覆盖上一轮以来的 commits` +
             (fixAudit.interactionFiles > 0
               ? `及其 import 接缝 interaction 文件${fixAuditSeamZh}`
               : '（没有仍然干净的 importer 重新进入范围）') +
-            `，反向审计各波只重发 delta ` +
-            `领地与此前各波未能证实干燥的非 delta chunk（出过发现、收据未认证、` +
-            `无审计历史、或干燥收据对同摘要的发现已过时，都会让 chunk 留在波内）。` +
+            `，反向审计各波按普通退役规则重发 delta ` +
+            `领地（两次干燥的只在其冷检轮重发），并重发此前各波未能证实干燥的非 delta ` +
+            `chunk（出过发现、收据未认证或无审计历史会让 chunk 留在波内；干燥收据对` +
+            `同摘要的发现或未认证收据已过时，则让它回到普通退役规则）。` +
             `${fixAuditFloorZh}`,
         },
       ]

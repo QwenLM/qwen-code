@@ -5145,7 +5145,11 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       'every non-delta chunk the previous waves could not certify dry',
     );
     expect(out).toContain('uncertified (unknown)');
-    expect(out).not.toContain('re-launches only the delta territories');
+    expect(out).toContain(
+      'stale against a same-digest yield or uncertified receipt',
+    );
+    expect(out).toContain('under the ordinary retirement rules');
+    expect(out).toContain('returns to the ordinary retirement rules');
     expect(out).toContain(
       'followed by the retirement and posture-narrowing notes, when there are any',
     );
@@ -5161,6 +5165,65 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
       'all 2 hunk(s) display a seam line and are republished',
     );
     expect(brief).not.toContain('not re-shown');
+    // The reverse auditor's brief carries the fix-audit framing too — the
+    // floor governs posting, never finding (#10136).
+    expect(brief).toContain('Fix-audit round (critical posting posture)');
+    expect(brief).toContain('the floor governs posting, never');
+  });
+
+  it('a reverse-audit brief names a shed census as seam-bounded, and a plain round carries no banner (#10136)', () => {
+    const shed = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'a.ts',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+              seam: { kept: 1, total: 3 },
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(shed));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    runRound(1);
+    const key15 = [...readRecordedPrompts(plan).keys()].find((k) =>
+      k.startsWith('reverse-audit--chunk-15--round-1--'),
+    );
+    if (key15 === undefined) throw new Error('chunk 15 was not built');
+    const brief = readFileSync(briefPath(plan, key15), 'utf8');
+    expect(brief).toContain(
+      'seam-bounded: 1 of 3 hunk(s) republished; the rest were cleared by an earlier round and are not re-shown',
+    );
+    expect(brief).toContain('Fix-audit round (critical posting posture)');
+
+    // Without the posture: the same incremental scope, no banner.
+    const plain = {
+      ...shed,
+      incremental: { ...shed.incremental, posture: undefined },
+    };
+    writeFileSync(plan, JSON.stringify(plain));
+    utimesSync(plan, old, old);
+    runRound(1);
+    const key15b = [...readRecordedPrompts(plan).keys()].find((k) =>
+      k.startsWith('reverse-audit--chunk-15--round-1--'),
+    );
+    if (key15b === undefined) throw new Error('chunk 15 was not built');
+    const plainBrief = readFileSync(briefPath(plan, key15b), 'utf8');
+    expect(plainBrief).not.toContain('Fix-audit round');
   });
 
   it('a round that converges through narrowing names the narrowed chunks in CONVERGED (#10136 R1-10)', () => {
@@ -5237,14 +5300,113 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
     const old = new Date(2020, 0, 1);
     utimesSync(plan, old, old);
 
-    answerRound(1, { 13: YIELD, 14: null, 15: null });
+    // Two dry receipts each for 14 and 15 — the narrowing would price both
+    // out on the single receipt and the ordinary rules RETIRE them: both
+    // skip round 3, and only the note tells the two schedules apart. The
+    // containment gate is what makes it the retirement note.
+    answerRound(1, { 13: YIELD, 14: DRY, 15: DRY });
     answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
     const out = runRound(3);
 
     expect(process.exitCode).toBeUndefined();
-    expect(out).toContain('3 auditors required this round — one per chunk.');
+    expect(out).toContain('1 auditors required this round');
+    expect(out).toContain('2 retired chunk(s) skipped');
+    expect(out).toContain('retirement: a chunk whose two most recent audits');
     expect(out).not.toContain('posture narrowing');
     expect(out).not.toContain('posture-narrowed');
+  });
+
+  it('a chunk file entry without a usable path is malformed input: ordinary schedule (#10136)', () => {
+    // The containment gate must not skip what it cannot read: a file entry
+    // whose path is not a non-empty string is a chunk the record cannot
+    // classify either way, and the schedule falls back to auditing it.
+    const corrupt = {
+      ...PLAN,
+      chunks: (PLAN.chunks as Array<{ id: number; files: unknown[] }>).map(
+        (c) => (c.id === 14 ? { ...c, files: [{ path: 7 }] } : c),
+      ),
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(corrupt));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+
+    // Two dry receipts each: the narrowing would narrow, the ordinary
+    // rules retire — the note names which schedule ran.
+    answerRound(1, { 13: YIELD, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+    const out = runRound(3);
+
+    expect(process.exitCode).toBeUndefined();
+    expect(out).toContain('2 retired chunk(s) skipped');
+    expect(out).not.toContain('posture-narrowed');
+  });
+
+  it('the per-chunk path names the narrowed chunks in CONVERGED too (#10136 R1-10)', () => {
+    const fixAuditPlan = {
+      ...PLAN,
+      incremental: {
+        since: 'a'.repeat(40),
+        effective: true,
+        posture: 'critical',
+        postureCause: 'round',
+        scope: {
+          anchor: 'a'.repeat(40),
+          deltaFiles: ['packages/cli/src/commands/review/x.test.ts'],
+          interaction: [
+            {
+              path: 'a.ts',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+            {
+              path: 'bundle.min.js',
+              importsChanged: ['packages/cli/src/commands/review/x.test.ts'],
+            },
+          ],
+        },
+      },
+    };
+    writeFileSync(plan, JSON.stringify(fixAuditPlan));
+    const old = new Date(2020, 0, 1);
+    utimesSync(plan, old, old);
+    answerRound(1, { 13: DRY, 14: DRY, 15: DRY });
+    answerRound(2, { 13: DRY, 14: DRY, 15: DRY });
+
+    // A single-chunk rebuild of a round nobody admitted: the schedule has
+    // converged, and the refusal must carry the same narrowed list the
+    // `--all-chunks` refusal does.
+    process.exitCode = undefined;
+    (writeStderrLine as unknown as Mock).mockClear();
+    (agentPromptCommand.handler as (a: unknown) => void)({
+      plan,
+      role: 'reverse-audit',
+      chunk: 14,
+      findings,
+      round: 3,
+    });
+    expect(process.exitCode).toBe(5);
+    const msg = (writeStderrLine as unknown as Mock).mock.calls
+      .map((c) => c[0])
+      .join('\n');
+    expect(msg).toContain('CONVERGED');
+    expect(msg).toContain('Posture-narrowed this round (#10104):');
+    expect(msg).toContain('chunk 14 — not a delta territory, dry in round 2');
+    expect(msg).toContain('chunk 15 — not a delta territory, dry in round 2');
   });
 
   it('a delta list no chunk covers degrades to the ordinary schedule, never an empty narrowing (#10104)', () => {
@@ -5267,7 +5429,14 @@ describe('per-chunk retirement — cold territories stop costing a round', () =>
         scope: {
           anchor: 'a'.repeat(40),
           deltaFiles: ['src/disjoint.ts'],
-          interaction: [],
+          // Every chunk file IS classified (interaction), so the
+          // containment gate passes and the EMPTY delta-coverage guard is
+          // the one ruling here.
+          interaction: [
+            'packages/cli/src/commands/review/x.test.ts',
+            'a.ts',
+            'bundle.min.js',
+          ].map((path) => ({ path, importsChanged: ['src/disjoint.ts'] })),
         },
       },
     };

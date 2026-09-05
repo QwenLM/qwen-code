@@ -134,12 +134,6 @@ interface FetchPrArgs {
   remote: string;
   out: string;
   host?: string;
-  /**
-   * The review's recorded-arguments file, for the posture's recorded-floor
-   * recovery (#10136) — honoured only when no session id is present, the
-   * same rule compose and submit apply to their own `--skill-args`.
-   */
-  skillArgs?: string;
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
   effort?: ReviewEffort;
@@ -1342,9 +1336,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
             (remoteUrl ? parseRemoteUrl(remoteUrl)?.host : undefined) ||
             resolveGhHost(undefined),
           defaultSeverityFloor: operatorReviewSettings().severityFloor,
-          // The caller-supplied record seam compose and submit honour when
-          // no session id is present — the sessionless scripted review.
-          skillArgs: args.skillArgs,
+          // No `skillArgs` seam here, deliberately: the caller-supplied
+          // record path is honoured only with no session id present, and
+          // this command refuses to run without one (the lease needs it) —
+          // the seam would be dead code wearing a flag.
         })?.floor,
         sideLedger,
       });
@@ -2079,11 +2074,6 @@ export const fetchPrCommand: CommandModule = {
           'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
       .option('effort', EFFORT_OPTION)
-      .option('skill-args', {
-        type: 'string',
-        describe:
-          "Path of the review's recorded-arguments file, read for the operator's recorded severity floor when the round's posture is resolved. Honoured only when no session id is present (a sessionless scripted review); inside a session the session's own record is read, exactly as compose-review and submit do.",
-      })
       .option('since', {
         type: 'string',
         describe:

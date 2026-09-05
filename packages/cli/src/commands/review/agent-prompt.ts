@@ -203,6 +203,26 @@ interface IncrementalScope {
 }
 
 /**
+ * The fix-audit round's framing (#10104), rendered wherever a territory is
+ * briefed under the posture — the chunk agent's brief and the reverse
+ * auditor's role brief alike (#10136): an auditor that never learns the
+ * floor governs posting, not finding, can drop or inflate a finding on the
+ * wave the posture exists to keep running.
+ */
+const FIX_AUDIT_BANNER =
+  `**Fix-audit round (critical posting posture).** The commits since the anchor ` +
+  `answer earlier rounds' findings, and this round's posting floor is Critical — ` +
+  `everything below it is recorded and deferred, never posted — except ` +
+  `pre-confirmed \`[build]\`/\`[test]\`/\`[probe]\` findings, which stay inline at any ` +
+  `floor. Spend your walk ` +
+  `where such a round's signal measurably lives: for each change in your ` +
+  `territory, work out what the fix changed and what that change could break — ` +
+  `the guard added with no test of its own, the caller the moved callee leaves ` +
+  `behind, the invariant the fix's shortcut skips. Severities are unchanged: ` +
+  `report every finding at its true severity (the floor governs posting, never ` +
+  `finding), and never inflate one to clear the floor.`;
+
+/**
  * The per-file scope bullets for ONE chunk's files — uncapped, because the
  * agent holding that chunk is the sole reviewer of those files and has no
  * other source for their class.
@@ -761,22 +781,7 @@ export function buildChunkAgentPrompt(
         `plus still-clean files one import hop from a change. Your files' scopes:`,
     ];
     if (isFixAuditRound(report)) {
-      lines.splice(
-        1,
-        0,
-        `**Fix-audit round (critical posting posture).** The commits since the anchor ` +
-          `answer earlier rounds' findings, and this round's posting floor is Critical — ` +
-          `everything below it is recorded and deferred, never posted — except ` +
-          `pre-confirmed \`[build]\`/\`[test]\`/\`[probe]\` findings, which stay inline at any ` +
-          `floor. Spend your walk ` +
-          `where such a round's signal measurably lives: for each change in your ` +
-          `territory, work out what the fix changed and what that change could break — ` +
-          `the guard added with no test of its own, the caller the moved callee leaves ` +
-          `behind, the invariant the fix's shortcut skips. Severities are unchanged: ` +
-          `report every finding at its true severity (the floor governs posting, never ` +
-          `finding), and never inflate one to clear the floor.`,
-        '',
-      );
+      lines.splice(1, 0, FIX_AUDIT_BANNER, '');
     }
     if (deltaHere.length > 0) {
       lines.push(
@@ -1183,6 +1188,10 @@ function diffReadingBlock(
     // as the bare chunk agent's brief lists them.
     ...(incremental && scoped
       ? [
+          // The posture's framing rides with the territory it frames: a
+          // reverse auditor briefed under the fix-audit shape must hear the
+          // same floor-governs-posting rule the chunk agent did (#10136).
+          ...(isFixAuditRound(report) ? [FIX_AUDIT_BANNER, ''] : []),
           ...chunkScopeBullets(
             incremental,
             chunks.find((c) => c.id === chunkId),
@@ -2858,11 +2867,18 @@ function postureNarrowing(
     // LESS coverage. Null restores the ordinary schedule, like every
     // sibling reader of malformed input.
     if (
-      files.some((f) => typeof f?.path === 'string' && !classified.has(f.path))
+      files.some(
+        (f) =>
+          typeof f?.path !== 'string' ||
+          f.path === '' ||
+          !classified.has(f.path),
+      )
     ) {
       return null;
     }
-    if (files.some((f) => typeof f?.path === 'string' && delta.has(f.path))) {
+    // Every path is a non-empty string here — the gate above returned
+    // otherwise.
+    if (files.some((f) => delta.has(f.path as string))) {
       ids.add(c.id as number);
     }
   }
@@ -3136,11 +3152,14 @@ function runAllChunks(
       ? []
       : [
           `posture narrowing (#10104): on this critical-posture round the ` +
-            `wave re-launches the delta territories and every non-delta ` +
-            `chunk the previous waves could not certify dry — one that ` +
-            `yielded, one whose latest receipt is uncertified (unknown), ` +
-            `one with no audit history, or one whose dry receipt is stale ` +
-            `against a same-digest yield; a chunk holding no delta file ` +
+            `wave re-launches the delta territories under the ordinary ` +
+            `retirement rules (a twice-dry one only on its cold-check ` +
+            `rounds) and every non-delta chunk the previous waves could not ` +
+            `certify dry — one that yielded, one whose latest receipt is ` +
+            `uncertified (unknown), or one with no audit history stays in ` +
+            `the wave, and one whose dry receipt is stale against a ` +
+            `same-digest yield or uncertified receipt returns to the ` +
+            `ordinary retirement rules; a chunk holding no delta file ` +
             `leaves the schedule after one substantive dry audit and takes ` +
             `no cold checks. Narrowed out this round:\n` +
             narrowedOut

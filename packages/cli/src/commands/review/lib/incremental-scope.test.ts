@@ -347,7 +347,14 @@ describe('widenScope seam bound (#10104)', () => {
     // removed lines against the post-image line count — not the slice the
     // bound would leave. A section past the heavy bar keeps every hunk with
     // NO census, so `heavyFiles()` and the invariant agents still see it.
-    const bulk = Array.from({ length: 800 }, (_, i) => `+heavy ${i}`);
+    // The fixture is dimensioned so that the REMOVED side decides both
+    // heavy terms: 101 added + 800 removed against a 302-line post-image.
+    // With removals: preLines 1001 (bar 300), changed 901 (bar 800) —
+    // heavy. Ignore removals in the pre-image count and preLines is 201;
+    // ignore them in the changed count and it is 101 at a 0.33 ratio (bar
+    // 0.4) — either way not heavy, and the census would appear.
+    const bulk = Array.from({ length: 100 }, (_, i) => `+heavy ${i}`);
+    const gone = Array.from({ length: 800 }, (_, i) => `-gone ${i}`);
     const impSection = [
       'diff --git a/src/imp.ts b/src/imp.ts',
       '--- a/src/imp.ts',
@@ -355,15 +362,16 @@ describe('widenScope seam bound (#10104)', () => {
       '@@ -1,1 +1,2 @@',
       " import { moved } from './changed.js';",
       '+const a = moved();',
-      '@@ -100,2 +101,802 @@',
+      '@@ -100,802 +101,102 @@',
       ' ctx',
+      ...gone,
       ...bulk,
       ' ctx2',
       '',
     ].join('\n');
     const source =
       "import { moved } from './changed.js';\nconst a = moved();\n" +
-      Array.from({ length: 1100 }, (_, i) => `filler ${i}`).join('\n');
+      Array.from({ length: 300 }, (_, i) => `// filler ${i}`).join('\n');
     const selection = selectNarrowing(
       Buffer.from(section('src/changed.ts') + impSection, 'utf8'),
       Buffer.from(section('src/changed.ts'), 'utf8'),
@@ -381,7 +389,11 @@ describe('widenScope seam bound (#10104)', () => {
     // The same section below the heavy bar IS bounded — the exemption is
     // the heaviness, not the shape.
     const light = impSection.replace(
-      '@@ -100,2 +101,802 @@\n ctx\n' + bulk.join('\n') + '\n ctx2\n',
+      '@@ -100,802 +101,102 @@\n ctx\n' +
+        gone.join('\n') +
+        '\n' +
+        bulk.join('\n') +
+        '\n ctx2\n',
       '@@ -100,2 +101,3 @@\n ctx\n+light\n ctx2\n',
     );
     const lightSel = selectNarrowing(
@@ -397,6 +409,38 @@ describe('widenScope seam bound (#10104)', () => {
       seamBound: true,
     });
     expect(bounded.scope.interaction[0].seam).toEqual({ kept: 1, total: 2 });
+  });
+
+  it('a seam line on a hunk boundary keeps the hunk — both ends inclusive (#10136)', () => {
+    // IMP_SECTION's second hunk spans new-side lines 10-12. A seam use on
+    // line 12 exactly (the last line) must keep it; one on line 10 exactly
+    // (the first) must too; one on line 13 must not.
+    const withUse = (line: number): string => {
+      const rows = Array.from({ length: 14 }, (_, i) =>
+        i + 1 === line ? 'moved();' : `// filler ${i + 1}`,
+      );
+      rows[0] = "import { moved } from './changed.js';";
+      return rows.join('\n');
+    };
+    const keptAt = (line: number): { kept: number; hunks: number[] | null } => {
+      const widened = widenScope({
+        anchor: 'a'.repeat(40),
+        selection: seamSelection(),
+        readWorktree: (rel) => (rel === 'src/imp.ts' ? withUse(line) : null),
+        seamBound: true,
+      });
+      const keep = widened.hunkKeep?.get('src/imp.ts');
+      return {
+        kept: widened.scope.interaction[0].seam?.kept ?? -1,
+        // No `hunkKeep` entry means nothing was shed (both kept).
+        hunks: keep === undefined ? null : [...keep],
+      };
+    };
+    // Line 1 (the import) always keeps hunk 0 (new-side 1-3).
+    expect(keptAt(12)).toEqual({ kept: 2, hunks: null });
+    expect(keptAt(10)).toEqual({ kept: 2, hunks: null });
+    expect(keptAt(13)).toEqual({ kept: 1, hunks: [0] });
+    expect(keptAt(9)).toEqual({ kept: 1, hunks: [0] });
   });
 
   it('republishes in full when the seam scan cannot read the source', () => {
@@ -452,11 +496,12 @@ describe('widenScope seam bound (#10104)', () => {
     );
     if (selection === null)
       throw new Error('the narrowing refused this fixture');
-    // The worktree source trips the oracle's doubt: a dynamic import the
-    // line-shape read cannot collect bindings from.
+    // The worktree source trips the oracle's doubt: a dynamic import whose
+    // value escapes into an argument before any declaration receives it.
     const source = [
-      "const api = await import('./changed.js');",
+      "const api = wrap(await import('./changed.js'));",
       'api.call();',
+      'export {};',
     ].join('\n');
     const widened = widenScope({
       anchor: 'a'.repeat(40),

@@ -302,6 +302,21 @@ describe('scheduleReverseAuditRound — the scheduler on its own', () => {
     expect(plain.narrowed).toEqual([]);
   });
 
+  it('a non-delta chunk with NO audit history stays in the wave (#10136)', () => {
+    // The `latest !== undefined` arm alone keeps such a chunk hot: no
+    // receipt at all is not a dry receipt. Chunk 17 has no record in
+    // rounds 1-2; it is due at round 3, not narrowed, beside a narrowed
+    // sibling that holds its single dry receipt.
+    transcript(record(1, 14, 'chunk 14 round 1 territory walk', 'd1'), DRY);
+    transcript(record(2, 14, 'chunk 14 round 2 territory walk', 'd2'), DRY);
+    const r3 = scheduleReverseAuditRound(plan, [14, 17], 3, process.env, diff, {
+      deltaChunkIds: new Set([99]),
+    });
+    expect(r3.due).toEqual([17]);
+    expect(r3.narrowed).toEqual([{ chunkId: 14, dryRound: 2 }]);
+    expect(r3.converged).toBe(false);
+  });
+
   it('a dry receipt sharing its digest with a yield does not narrow the chunk out (#10136)', () => {
     // The convergence-pair shape: a fix-audit round's first two waves run
     // against the SAME findings digest. Chunk 14's round-1 member YIELDED;
