@@ -13,7 +13,11 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { TestRig } from './test-helper.js';
+import {
+  applyContainerSandboxNoProxy,
+  fakeServerHostOptions,
+  TestRig,
+} from './test-helper.js';
 import { fakeToolCall, startFakeOpenAIServer } from './fake-openai-server.js';
 import type { FakeOpenAIServer } from './fake-openai-server.js';
 import { join } from 'node:path';
@@ -61,8 +65,11 @@ exit 0
 describe('skill hooks fire on both invocation paths', () => {
   let rig: TestRig;
   let fakeServer: FakeOpenAIServer;
+  let restoreNoProxy: (() => void) | undefined;
 
   afterEach(async () => {
+    restoreNoProxy?.();
+    restoreNoProxy = undefined;
     await fakeServer?.close();
     await rig?.cleanup();
   });
@@ -106,7 +113,7 @@ describe('skill hooks fire on both invocation paths', () => {
         };
       }
       return { content: 'done' };
-    });
+    }, fakeServerHostOptions());
 
     vi.stubEnv('OPENAI_API_KEY', 'fake-key');
     vi.stubEnv('OPENAI_BASE_URL', fakeServer.baseUrl);
@@ -114,8 +121,10 @@ describe('skill hooks fire on both invocation paths', () => {
     vi.stubEnv('QWEN_MODEL', 'fake-model');
     vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
     vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
-    vi.stubEnv('NO_PROXY', '127.0.0.1,localhost');
-    vi.stubEnv('no_proxy', '127.0.0.1,localhost');
+    // Under the docker/podman sandbox legs the CLI is containerized, so the
+    // fake server must be reachable as host.docker.internal and excluded from
+    // the proxy. Both helpers are no-ops outside a container sandbox.
+    restoreNoProxy = applyContainerSandboxNoProxy();
     // The gate's required value is deliberately absent.
     vi.stubEnv('DOWNSTREAM_SESSION_ID', '');
 

@@ -352,13 +352,20 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   restoreLoadedSkillsFromHistory(history: Content[]): void {
     this.clearLoadedSkills();
 
-    const skillByName = new Map<string, { name: string; output: string }>();
+    const skillByName = new Map<
+      string,
+      { name: string; output: string; config: SkillConfig }
+    >();
     for (const skill of this.skillManager.getCachedSkills() ?? []) {
       const output = buildSkillLlmContent(
         path.dirname(skill.filePath),
         skill.body,
       );
-      skillByName.set(skill.name.toLowerCase(), { name: skill.name, output });
+      skillByName.set(skill.name.toLowerCase(), {
+        name: skill.name,
+        output,
+        config: skill,
+      });
     }
 
     const pendingSkillCalls = new Map<string, string>();
@@ -398,6 +405,15 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
         this.loadedSkillContents.add(skill.output);
         this.loadedSkillNames.add(skill.name);
+        // Session hooks and allow rules live only in memory, so a resumed
+        // session starts with none of them — while the restored body still
+        // carries the skill's instructions to the model. Without this the
+        // skill's PreToolUse gate would never fire again after `--continue` /
+        // `--resume`: the dedup guard answers "already loaded in context", so
+        // nothing prompts a re-invocation that would re-apply them. That is
+        // the same fail-open shape this path is meant to prevent. Both
+        // registrations dedup, and the trust gate is re-applied here.
+        applySkillSideEffects(this.config, skill.config);
       }
     }
   }

@@ -346,6 +346,13 @@ export function applySkillHooks(
   const hookSystem = config.getHookSystem();
   const sessionId = config.getSessionId();
   if (!hookSystem || !sessionId) {
+    // Sessions that disable hooks (`disableAllHooks`, safe mode, bare mode,
+    // the ACP agent's `skipHooks`) never build a hook system. The skill body
+    // and its allowedTools still land, so without this line a skill whose
+    // frontmatter promises an enforcement gate would go silently ungated.
+    debugLogger.debug(
+      `Skipping hook registration for skill "${skill.name}": no hook system or session id (hooks disabled?)`,
+    );
     return;
   }
   const count = registerSkillHooks(

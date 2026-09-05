@@ -192,7 +192,7 @@ You can combine both fields, but then the Skill is not reachable through the nor
 
 ### Optional: enforce a rule deterministically (`hooks:`)
 
-Everything in a `SKILL.md` body is an instruction to the model: it is prompt text, so following it depends on the model. When a rule must hold no matter what the model decides — refuse to run unless a required value was injected, never touch a protected path — declare a [hook](hooks) in the frontmatter instead. Hooks run as code, so they do not depend on the model's cooperation:
+Everything in a `SKILL.md` body is an instruction to the model: it is prompt text, so following it depends on the model. When a rule must hold no matter what the model decides — refuse to run unless a required value was injected, never touch a protected path — declare a [hook](hooks.md) in the frontmatter instead. Hooks run as code, so they do not depend on the model's cooperation:
 
 ```yaml
 ---
@@ -220,11 +220,11 @@ exit 0
 
 Notes:
 
-- Hooks are registered when the Skill is invoked and last for the rest of the session. This is true on both invocation paths — whether the model calls the Skill or you type `/<skill-name>`.
+- Hooks are registered when the Skill is invoked and last for the rest of the session. This is true on both invocation paths — whether the model calls the Skill or you type `/<skill-name>` — and a session resumed with `--continue` / `--resume` re-registers the hooks of every Skill still loaded in its context.
 - Registration is idempotent: re-invoking a Skill does not stack duplicate hooks.
 - A **project** Skill's hooks run repo-supplied commands, so they are registered only in a trusted folder, and folder trust is re-checked each time a hook fires — revoking trust mid-session silences them without a restart. The same gate applies to `allowedTools`.
 - `hooks:` is read for project, user, and bundled Skills. Extension-provided Skills do not support it; use the extension's own manifest-level hooks instead.
-- See [Hooks](hooks) for the full event list, matcher syntax, and output format.
+- See [Hooks](hooks.md) for the full event list, matcher syntax, and output format.
 
 ## Add supporting files
 

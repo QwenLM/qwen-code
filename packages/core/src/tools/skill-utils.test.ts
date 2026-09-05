@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   applySkillAllowedTools,
+  applySkillSideEffects,
   canApplySkillSideEffects,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
@@ -16,6 +17,7 @@ import { ToolNames } from './tool-names.js';
 import type { ToolRegistry } from './tool-registry.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { SkillManager } from '../skills/skill-manager.js';
+import type { SkillConfig } from '../skills/types.js';
 import type { Config } from '../config/config.js';
 
 function mockPermissionManager(): {
@@ -115,6 +117,101 @@ describe('canApplySkillSideEffects', () => {
       expect(canApplySkillSideEffects({ level }, untrusted)).toBe(true);
     },
   );
+});
+
+describe('applySkillSideEffects', () => {
+  const gatedSkill = {
+    name: 'gated-skill',
+    description: 'Gated',
+    level: 'user',
+    filePath: '/skills/gated-skill/SKILL.md',
+    skillRoot: '/skills/gated-skill',
+    body: 'Body.',
+    allowedTools: ['Edit'],
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: 'Shell',
+          hooks: [{ type: 'command', command: './gate.sh' }],
+        },
+      ],
+    },
+  } as unknown as SkillConfig;
+
+  function makeConfig(
+    overrides: Partial<{
+      getHookSystem: () => unknown;
+      getSessionId: () => string | undefined;
+    }> = {},
+  ) {
+    const { pm, addSessionAllowRule } = mockPermissionManager();
+    const addSessionHook = vi.fn();
+    const config = {
+      isTrustedFolder: () => true,
+      getPermissionManager: () => pm,
+      getSessionId: () => 'session-1',
+      getHookSystem: () => ({
+        getSessionHooksManager: () => ({
+          addSessionHook,
+          getHooksForEvent: () => [],
+        }),
+      }),
+      ...overrides,
+    } as unknown as Config;
+    return { config, addSessionAllowRule, addSessionHook };
+  }
+
+  it('applies both allowedTools and hooks', () => {
+    const { config, addSessionAllowRule, addSessionHook } = makeConfig();
+    applySkillSideEffects(config, gatedSkill);
+    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
+      trustGated: false,
+    });
+    expect(addSessionHook).toHaveBeenCalledTimes(1);
+  });
+
+  // Hooks can be disabled session-wide (`disableAllHooks`, safe mode, bare
+  // mode, the ACP agent's `skipHooks`), so no hook system is built. Dropping
+  // the guard would call getSessionHooksManager() on undefined and crash every
+  // skill invocation in those sessions.
+  it('registers nothing and does not throw when there is no hook system', () => {
+    const { config, addSessionAllowRule, addSessionHook } = makeConfig({
+      getHookSystem: () => undefined,
+    });
+    expect(() => applySkillSideEffects(config, gatedSkill)).not.toThrow();
+    expect(addSessionHook).not.toHaveBeenCalled();
+    // The allowedTools half still applies — only the hooks are skipped.
+    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
+      trustGated: false,
+    });
+  });
+
+  it('registers nothing and does not throw when there is no session id', () => {
+    const { config, addSessionHook } = makeConfig({
+      getSessionId: () => undefined,
+    });
+    expect(() => applySkillSideEffects(config, gatedSkill)).not.toThrow();
+    expect(addSessionHook).not.toHaveBeenCalled();
+  });
+
+  it('applies neither for a project skill in an untrusted folder', () => {
+    const { config, addSessionAllowRule, addSessionHook } = makeConfig();
+    const projectSkill = {
+      ...gatedSkill,
+      level: 'project',
+    } as unknown as SkillConfig;
+    applySkillSideEffects(
+      { ...config, isTrustedFolder: () => false } as unknown as Config,
+      projectSkill,
+    );
+    expect(addSessionAllowRule).not.toHaveBeenCalled();
+    expect(addSessionHook).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op without a config', () => {
+    expect(() => applySkillSideEffects(null, gatedSkill)).not.toThrow();
+    expect(() => applySkillSideEffects(undefined, gatedSkill)).not.toThrow();
+  });
 });
 
 describe('collectAvailableSkillEntries memoize cache', () => {
