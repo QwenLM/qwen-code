@@ -70,6 +70,7 @@ function assertDescriptorWireShape(
     'options',
     'default',
     'description',
+    'multiline',
   ]);
   if (descriptor.kind === 'object') {
     allowedKeys.add('properties');

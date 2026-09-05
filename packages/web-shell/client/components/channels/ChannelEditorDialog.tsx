@@ -39,6 +39,7 @@ import {
   DialogTitle,
 } from '../ui/dialog';
 import { Input } from '../ui/input';
+import { Textarea } from '../ui/textarea';
 import { Label } from '../ui/label';
 import { RadioGroup, RadioGroupItem } from '../ui/radio-group';
 import {
@@ -110,6 +111,7 @@ const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
   groupPolicy: 'channels.editor.field.shared.groupPolicy',
   sessionScope: 'channels.editor.field.shared.sessionScope',
   multiSession: 'channels.editor.field.shared.multiSession',
+  instructions: 'channels.editor.field.shared.instructions',
 };
 
 export interface ChannelEditorDialogProps {
@@ -589,6 +591,26 @@ export function ChannelEditorDialog({
               );
             })}
           </div>
+        </FieldShell>
+      );
+    }
+    if (field.kind === 'string' && field.multiline) {
+      return (
+        <FieldShell
+          key={field.key}
+          id={id}
+          label={fieldLabel(field)}
+          required={field.required}
+          description={fieldDescription(field)}
+          error={error}
+        >
+          <Textarea
+            id={id}
+            value={String(value ?? '')}
+            aria-invalid={Boolean(error)}
+            aria-required={field.required}
+            onChange={(event) => update(event.target.value)}
+          />
         </FieldShell>
       );
     }

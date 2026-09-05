@@ -115,6 +115,18 @@ function managementFieldsWithSharedControls(
               'Retain an owner-scoped catalog of named tasks in daemon-managed mode',
           },
         ]),
+    ...(declared.has('instructions')
+      ? []
+      : [
+          {
+            key: 'instructions',
+            label: 'Instructions',
+            kind: 'string' as const,
+            multiline: true,
+            description:
+              'Extra guidance prepended to the session context of each channel session',
+          },
+        ]),
   ];
 }
 
