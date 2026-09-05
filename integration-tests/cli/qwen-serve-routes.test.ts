@@ -372,6 +372,8 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_mcp',
       'workspace_skills',
       'workspace_skills_config_runtime',
+      'workspace_extensions_config_runtime',
+      'workspace_extension_mentions',
       'workspace_providers',
       'workspace_acp_preheat',
       'workspace_acp_status',
