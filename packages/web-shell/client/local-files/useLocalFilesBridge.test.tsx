@@ -569,6 +569,77 @@ describe('useLocalFilesBridge restore', () => {
     hB.unmount();
   });
 
+  it('clears a latched unavailable status when the blocker clears', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store: fakeStore(),
+    };
+    const h = render({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-ineligible',
+    });
+    await h.flush();
+    expect(h.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+    });
+
+    // Without an unavailable -> idle edge the panel would render no Connect
+    // affordance for the life of the mount once the blocker clears.
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: undefined,
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.get().status).toEqual({ phase: 'idle', blocker: null });
+    h.unmount();
+  });
+
+  it('registers nothing when a blocker lands while restore is parked', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    let resolveLoad:
+      | ((value: FileSystemDirectoryHandle | undefined) => void)
+      | undefined;
+    const store = {
+      save: async () => true,
+      load: () =>
+        new Promise<FileSystemDirectoryHandle | undefined>((resolve) => {
+          resolveLoad = resolve;
+        }),
+      clear: async () => true,
+    };
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store,
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+
+    // restore() is parked in store.load(); the blocker lands meanwhile and
+    // the parked continuation must fail closed when it resumes.
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-ineligible',
+    });
+    await h.flush();
+    resolveLoad!(handle);
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(0);
+    expect(h.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+    });
+    h.unmount();
+  });
+
   it('stops the running bridge when a blocker activates late', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const common = {

@@ -119,6 +119,29 @@ describe('resolveLocalFilesWorkspaceRoute', () => {
     ).toEqual({ kind: 'none' });
   });
 
+  it('withholds the bridge for an untrusted or live primary workspace', () => {
+    // The shared resolver exempts the primary workspace from its trust/live
+    // test, but the bare /acp mount performs no trust check at registration.
+    const untrustedPrimary = {
+      ...primary,
+      trusted: false,
+    } as unknown as DaemonWorkspaceCapability;
+    const livePrimary = {
+      ...primary,
+      kind: 'live',
+    } as unknown as DaemonWorkspaceCapability;
+    for (const entry of [untrustedPrimary, livePrimary]) {
+      expect(
+        resolveLocalFilesWorkspaceRoute({
+          capabilities,
+          workspaces: [entry],
+          workspaceCwd: '/primary',
+          sessionId: 'session-1',
+        }),
+      ).toEqual({ kind: 'none' });
+    }
+  });
+
   it('stays undecided while the capabilities snapshot is pending', () => {
     expect(
       resolveLocalFilesWorkspaceRoute({

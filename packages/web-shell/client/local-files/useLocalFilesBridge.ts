@@ -172,6 +172,12 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   // would otherwise change them on every render and re-run the mount effect.
   const optionsRef = useRef(options);
   optionsRef.current = options;
+  // Mirrored like optionsRef so startBridge — the single funnel every
+  // continuation (restore, connect, rebind) ends in — fails closed on the
+  // LIVE blocker: a withheldBlocker landing while a continuation is parked
+  // must register nothing, not just stop a bridge that already exists.
+  const capabilityRef = useRef(capability);
+  capabilityRef.current = capability;
   const bridgeRef = useRef<LocalFilesBridge | undefined>(undefined);
   const handleRef = useRef<FileSystemDirectoryHandle | undefined>(undefined);
   /**
@@ -192,6 +198,13 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   const startBridge = useCallback(
     (handle: FileSystemDirectoryHandle) => {
       stopBridge();
+      // stopBridge() first: stopping afterwards would let the 'stopped' ->
+      // idle mapping overwrite the unavailable status set here.
+      const blocker = capabilityRef.current.blocker;
+      if (blocker !== null) {
+        setStatus({ phase: 'unavailable', blocker });
+        return;
+      }
       // Remember the grant even when we cannot use it yet: a session may not
       // exist at this moment, and losing the handle here would leave the
       // rebind effect with nothing to start.
@@ -279,7 +292,15 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       return;
     }
     const handle = handleRef.current;
-    if (handle === undefined) return;
+    if (handle === undefined) {
+      // Clear the one latch this hook can leave behind: an unavailable
+      // status written while a blocker was live must return to idle once the
+      // blocker clears, or the panel renders no Connect affordance for the
+      // life of the mount. needs-gesture must survive (its handle is not in
+      // handleRef either, but its phase is not unavailable).
+      setStatus((prev) => (prev.phase === 'unavailable' ? IDLE : prev));
+      return;
+    }
     // Rebind preconditions, in order: the store must still hold the grant (a
     // peer tab's disconnect clears it with no signal reaching this tab, and
     // the browser permission outlives the store), and the permission must

@@ -207,9 +207,24 @@ export function resolveLocalFilesWorkspaceRoute(options: {
     sessionId: options.sessionId,
   });
   if (target !== undefined) {
-    return target.route === 'workspace-qualified'
-      ? { kind: 'qualified', selector: target.selector }
-      : { kind: 'legacy' };
+    if (target.route === 'workspace-qualified') {
+      return { kind: 'qualified', selector: target.selector };
+    }
+    // The shared resolver exempts the primary workspace from its trust/live
+    // test (voice gates that case behind its own feature flag), but this
+    // surface must withhold: the bare /acp mount performs no trust check at
+    // registration, so an untrusted or live primary would receive the granted
+    // directory - write tool included.
+    const entry = (
+      options.workspaces ?? options.capabilities?.workspaces
+    )?.find((w) => w.cwd === options.workspaceCwd);
+    if (
+      entry !== undefined &&
+      (entry.kind === 'live' || entry.trusted === false)
+    ) {
+      return { kind: 'none' };
+    }
+    return { kind: 'legacy' };
   }
   const list = options.workspaces ?? options.capabilities?.workspaces;
   if (list === undefined) return undefined;
