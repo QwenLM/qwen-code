@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { ChromeExtensionTransport } from '../src/bridge/index.js';
 import { PlaywrightRuntime } from '../src/playwright/playwright-runtime.js';
 import { withManagedChrome } from './managed-chrome.js';
+import { collectAssistantReport } from './smoke-transcript.js';
 
 const PROMPT = [
   '这是 Qwen Browser Use 的隔离 SauceDemo 冒烟测试。',
@@ -239,8 +240,7 @@ await withManagedChrome('sauce', async (chrome) => {
         result['is_error'] === false,
       'Qwen did not finish successfully',
     );
-    const finalAnswer =
-      typeof result['result'] === 'string' ? result['result'] : '';
+    const finalAnswer = collectAssistantReport(events);
     const calls = collectSuccessfulNodeReplCalls(events);
     const inventoryPrices = pricesFromCall(
       calls,
