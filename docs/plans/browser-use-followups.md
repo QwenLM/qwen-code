@@ -17,6 +17,8 @@ Chrome-relay, or product-integration PRs.
   Browser Use or History permissions.
 - Preserve the current single-session behavior until a multi-session path is
   verified end to end.
+- Prioritize the normal model-to-SDK-to-Chrome workflow in pre-merge reviews.
+  Uncommon shared-control scenarios are follow-up work, not initial blockers.
 
 ## Codex reference behavior
 
@@ -105,6 +107,12 @@ The most important Codex behaviors to evaluate further are therefore:
 | Evaluation isolation | Evaluate Codex-style read-only page execution and dynamic removal of APIs that are unavailable in the current context. | Read-only evaluation cannot mutate the page, and unsupported APIs are absent or fail with a stable capability error. |
 
 ## Priority 3: runtime maintenance
+
+Manual or external closure of JavaScript dialogs outside the SDK is deferred.
+The pinned Playwright version does not synchronize its dialog bookkeeping from
+Chrome's dialog-closed event. The initial release supports SDK-mediated
+accept/dismiss; seamless human/model shared control is not guaranteed, and no
+Playwright patch is included for this edge case.
 
 | Area                     | Work                                                                                                                                              | Completion signal                                                                                                   |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
