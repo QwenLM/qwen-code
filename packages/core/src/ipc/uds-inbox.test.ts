@@ -43,6 +43,7 @@ import {
   type PeerConnectionAuth,
   type PeerInbox,
 } from './uds-inbox.js';
+import type { PeerControllerIdentity } from './peer-controllers.js';
 import { expectWithinLatencyBudget } from '../test-utils/latency-budget.js';
 import { leaveStaleSocket } from '../test-utils/stale-socket.js';
 
@@ -973,6 +974,137 @@ describe.skipIf(isWindows)('child token', () => {
     await settle();
     expect(received).toHaveLength(2);
     expect(admitted).toEqual([undefined, undefined]);
+  });
+});
+
+describe.skipIf(isWindows)('controller grants', () => {
+  const PEER = 'a'.repeat(64);
+  const CHILD = 'c'.repeat(64);
+  const GRANT = 'qpc_' + 'd'.repeat(64);
+  const IDENTITY = { id: 'c_0123abcd', label: 'voice bridge' };
+  let admitted: Array<PeerConnectionAuth | undefined>;
+  let controllers: Array<PeerControllerIdentity | undefined>;
+
+  beforeEach(() => {
+    admitted = [];
+    controllers = [];
+  });
+
+  async function listenWithController(
+    resolveController?: (
+      presented: string,
+    ) => PeerControllerIdentity | undefined,
+  ): Promise<PeerInbox> {
+    const started = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'controller.sock'),
+      requiredToken: PEER,
+      childToken: CHILD,
+      ...(resolveController ? { resolveController } : {}),
+      onFrame: (frame, auth, controller) => {
+        received.push(frame);
+        admitted.push(auth);
+        controllers.push(controller);
+      },
+    });
+    if (!started) throw new Error('inbox failed to start');
+    inbox = started;
+    return started;
+  }
+
+  it('admits a granted token and names the grant', async () => {
+    const started = await listenWithController((presented) =>
+      presented === GRANT ? IDENTITY : undefined,
+    );
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'g' }), {
+      authToken: GRANT,
+    });
+    await settle();
+    expect(received).toHaveLength(1);
+    expect(admitted).toEqual(['controller']);
+    expect(controllers).toEqual([IDENTITY]);
+  });
+
+  it("names no grant for this session's own tokens", async () => {
+    const started = await listenWithController(() => IDENTITY);
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'p' }), {
+      authToken: PEER,
+    });
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'c' }), {
+      authToken: CHILD,
+    });
+    await settle();
+    // A resolver that says yes to everything must not re-label a
+    // connection this session can already account for precisely.
+    expect(admitted).toEqual(['peer', 'child']);
+    expect(controllers).toEqual([undefined, undefined]);
+  });
+
+  it('holds the grant for every frame on the connection', async () => {
+    const started = await listenWithController((presented) =>
+      presented === GRANT ? IDENTITY : undefined,
+    );
+    await writeRaw(started.socketPath, [
+      buildAuthLine(GRANT) +
+        encodePeerFrame(buildUserFrame({ content: 'one' })) +
+        encodePeerFrame(buildUserFrame({ content: 'two' })),
+    ]);
+    await settle();
+    expect(received).toHaveLength(2);
+    expect(admitted).toEqual(['controller', 'controller']);
+    expect(controllers).toEqual([IDENTITY, IDENTITY]);
+  });
+
+  it('drops a connection whose token no grant resolves', async () => {
+    const started = await listenWithController(() => undefined);
+    await writeRaw(started.socketPath, [
+      buildAuthLine(GRANT) +
+        encodePeerFrame(buildUserFrame({ content: 'no grant' })),
+    ]).catch(() => {});
+    await settle();
+    expect(received).toHaveLength(0);
+  });
+
+  it('treats a throwing resolver as "not a controller"', async () => {
+    // The resolver reads a file the user can edit at any moment, so it
+    // can fail for reasons unrelated to the token. A failure must not
+    // admit the connection, and must not take the inbox down with it.
+    const started = await listenWithController(() => {
+      throw new Error('registry on fire');
+    });
+    await writeRaw(started.socketPath, [
+      buildAuthLine(GRANT) + encodePeerFrame(buildUserFrame({ content: 'x' })),
+    ]).catch(() => {});
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'p' }), {
+      authToken: PEER,
+    });
+    await settle();
+    expect(
+      received.map(
+        (f) => (f as { message: { content: string } }).message.content,
+      ),
+    ).toEqual(['p']);
+    expect(admitted).toEqual(['peer']);
+  });
+
+  it('means nothing without a required token', async () => {
+    const started = await startPeerInbox({
+      socketPath: path.join(tmpDir, 'socks', 'open.sock'),
+      resolveController: () => IDENTITY,
+      onFrame: (frame, auth, controller) => {
+        received.push(frame);
+        admitted.push(auth);
+        controllers.push(controller);
+      },
+    });
+    if (!started) throw new Error('inbox failed to start');
+    inbox = started;
+    await sendPeerFrame(started.socketPath, buildUserFrame({ content: 'x' }), {
+      authToken: GRANT,
+    });
+    await settle();
+    expect(received).toHaveLength(1);
+    expect(admitted).toEqual([undefined]);
+    expect(controllers).toEqual([undefined]);
   });
 });
 

@@ -20,18 +20,23 @@
  * the sender asserts its class on the frame.
  *
  *   sender is a process this session started → accept
+ *   sender presented a controller grant       → accept
  *   receiver mode unknown/unrecognized        → hold  (fail closed)
  *   sender asserts no class                   → hold
  *   sender class equals receiver class        → accept
  *   sender class differs from receiver class  → hold
  *   policy setting unreadable                 → hold  (fail closed)
  *
- * The first row is the one case where the sender is known: a connection
- * that authenticated with the child token was opened by a script or hook
- * this session itself ran, and whatever it can ask for, the session
- * already chose to run the thing that is asking. Parity has nothing to
- * weigh there. The explicit setting still wins over it — a user who said
- * `hold` reviews everything, own processes included.
+ * The first two rows are the cases where the transport knows something
+ * about the sender. A connection that authenticated with the child token
+ * was opened by a script or hook this session itself ran, and whatever it
+ * can ask for, the session already chose to run the thing that is asking.
+ * A connection that presented a controller grant belongs to a program the
+ * user minted a token for by hand and handed it to, to relay their own
+ * instructions; parity compares two sessions' review classes, and that is
+ * not a session. Parity has nothing to weigh in either case. The explicit
+ * setting still wins over both — a user who said `hold` reviews
+ * everything, own processes and controllers included.
  *
  * The rule holds in both directions on purpose. A bypassing receiver has
  * to be careful about a prompting sender because a peer can ask it for a
@@ -49,8 +54,8 @@
  * A frame that asserts no class comes from a script, an older build, or
  * an external process. The receiver has nothing to pair it with, so it
  * is held for every receiver; an external process the user wants driving
- * their session earns delivery through explicit trust, not through the
- * receiver guessing.
+ * their session earns delivery through a controller grant — explicit
+ * trust the user minted — rather than through the receiver guessing.
  *
  * A hold is not open-ended. The sender is blocked on a decision that
  * only a person can give, so a parked message expires after
@@ -70,6 +75,7 @@
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { APPROVAL_MODES, ApprovalMode } from '../config/approval-mode.js';
+import type { PeerControllerIdentity } from './peer-controllers.js';
 import { canonicalizeMsgId, type PeerUserFrame } from './peer-frames.js';
 
 const debugLogger = createDebugLogger('PEER_INBOUND');
@@ -173,6 +179,16 @@ export interface PeerOrigin {
    * from a process this session started.
    */
   selfSent: boolean;
+  /**
+   * The connection presented a controller grant the user minted, and this
+   * names it.
+   *
+   * Mutually exclusive with `selfSent` in practice — one connection
+   * presents one token — but not modelled as a union, because every
+   * existing caller constructs a `PeerOrigin` from `selfSent` alone and a
+   * union would churn all of them to say the same thing.
+   */
+  controller?: PeerControllerIdentity;
 }
 
 /**
@@ -203,6 +219,16 @@ export interface HeldMessage {
   monotonicAt?: number;
   /** Set when the message came from one of this session's own processes. */
   selfSent?: true;
+  /**
+   * The controller grant that admitted the message, when one did.
+   *
+   * Kept on the entry because a controller's message is still parked by
+   * an explicit `hold`, and releasing it has to rebuild the same envelope
+   * it would have had on arrival. Recorded as it was at arrival: revoking
+   * the grant afterwards does not re-attribute a message already waiting
+   * — the user drops it with `/peers deny` if that is what they want.
+   */
+  controller?: PeerControllerIdentity;
 }
 
 export interface InboundGateOptions {
@@ -404,6 +430,14 @@ export class InboundGate {
       return { policy: 'accept' };
     }
 
+    // Nor is a program the user minted a controller grant for. It has no
+    // review class to compare and needs none: the user granted it the
+    // right to speak into their sessions, out of band, by hand. Below the
+    // explicit setting above, for the same reason self-sent is.
+    if (origin?.controller) {
+      return { policy: 'accept' };
+    }
+
     let mode: ApprovalMode | null;
     try {
       mode = this.options.getApprovalMode();
@@ -556,6 +590,7 @@ export class InboundGate {
       heldAt: Date.now(),
       monotonicAt: performance.now(),
       ...(origin.selfSent ? { selfSent: true } : {}),
+      ...(origin.controller ? { controller: origin.controller } : {}),
     });
     debugLogger.debug(
       `held peer message ${frame.msgId} (cause=${cause}, ${this.held.length} held)`,
@@ -923,7 +958,10 @@ export class InboundGate {
 }
 
 function originOf(entry: HeldMessage): PeerOrigin {
-  return { selfSent: entry.selfSent === true };
+  return {
+    selfSent: entry.selfSent === true,
+    ...(entry.controller ? { controller: entry.controller } : {}),
+  };
 }
 
 /**

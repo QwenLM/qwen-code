@@ -23,6 +23,17 @@ const inboxFailure = vi.hoisted(() => ({
   },
 }));
 
+/**
+ * Stands in for the on-disk controller registry. The file format and its
+ * failure modes are core's business (peer-controllers.test.ts); what this
+ * file checks is what `/peers` renders and revokes.
+ */
+const controllers = vi.hoisted(() => ({
+  records: [] as Array<{ id: string; label: string; createdAt: number }>,
+  listThrows: null as string | null,
+  removeThrows: null as string | null,
+}));
+
 vi.mock('@qwen-code/qwen-code-core', () => ({
   getLastPeerInboxFailure: () => inboxFailure.current,
   // Mirrors the real renderer's `foreign_owner` branch (uds-inbox.ts).
@@ -49,6 +60,18 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     return oneLine.length > 200 ? `${oneLine.slice(0, 199)}\u2026` : oneLine;
   },
   canonicalizeMsgId: (msgId: string) => msgId.replace(/-/g, '').toLowerCase(),
+  listPeerControllers: async () => {
+    if (controllers.listThrows) throw new Error(controllers.listThrows);
+    return controllers.records;
+  },
+  removePeerController: async (id: string) => {
+    if (controllers.removeThrows) throw new Error(controllers.removeThrows);
+    const index = controllers.records.findIndex(
+      (record) => record.id.toLowerCase() === id.trim().toLowerCase(),
+    );
+    if (index === -1) return null;
+    return controllers.records.splice(index, 1)[0];
+  },
 }));
 
 import {
@@ -67,6 +90,8 @@ function held(over: {
   policyScope?: HeldMessage['policyScope'];
   heldAt?: number;
   monotonicAt?: number;
+  selfSent?: true;
+  controller?: HeldMessage['controller'];
 }): HeldMessage {
   return {
     frame: {
@@ -86,6 +111,8 @@ function held(over: {
     ...(over.monotonicAt !== undefined
       ? { monotonicAt: over.monotonicAt }
       : {}),
+    ...(over.selfSent ? { selfSent: over.selfSent } : {}),
+    ...(over.controller !== undefined ? { controller: over.controller } : {}),
   };
 }
 
@@ -131,6 +158,9 @@ let listed: ReadonlyArray<{ id: string; heldAt: number }> | null;
 beforeEach(() => {
   messages = [];
   listed = null;
+  controllers.records = [];
+  controllers.listThrows = null;
+  controllers.removeThrows = null;
   fake = {
     getHeld: () => messages,
     getHeldExpiryMs: () => null,
@@ -774,5 +804,122 @@ describe('formatHeldList — remaining time', () => {
     );
     expect(out).toContain('held because');
     expect(out).toContain('5 minutes left');
+  });
+});
+
+describe('controller attribution in the listing', () => {
+  it('names the grant, never the frame', () => {
+    // This is the screen where a message is judged; a sender that could
+    // choose the string shown here could dress itself as a grant.
+    const out = formatHeldList([
+      held({
+        msgId: 'a1b2c3',
+        fromName: 'not the grant',
+        controller: { id: 'c_0123abcd', label: 'voice bridge' },
+      }),
+    ]);
+    expect(out).toContain('[controller] voice bridge');
+    expect(out).not.toContain('not the grant');
+  });
+
+  it('still distinguishes a peer from an own process', () => {
+    const out = formatHeldList([
+      held({ msgId: 'a1b2c3', fromName: 'app-ab' }),
+      held({ msgId: 'd4e5f6', selfSent: true }),
+    ]);
+    expect(out).toContain('[peer] app-ab');
+    // Both fall back to the reply address the frame carries; only the
+    // bracketed origin separates them.
+    expect(out).toContain('[own process] /tmp/peer.sock');
+  });
+
+  it('flattens a label a hand edit put newlines and escapes into', () => {
+    // The registry is a JSON file the user can edit, and this listing is
+    // the screen where untrusted messages are decided: a label that spans
+    // lines or repaints the terminal would spoof the review itself.
+    const out = formatHeldList([
+      held({
+        msgId: 'a1b2c3',
+        controller: { id: 'c_0123abcd', label: 'voice\nbridge' },
+      }),
+      held({
+        msgId: 'd4e5f6',
+        controller: { id: 'c_89abcdef', label: 'dictation\u001b' },
+      }),
+    ]);
+    expect(out).toContain('[controller] voice bridge');
+    expect(out).not.toContain('\u001b');
+  });
+});
+
+describe('/peers controllers', () => {
+  it('says what a grant means when none is held', async () => {
+    const out = await run(fake, 'controllers');
+    expect(out.messageType).toBe('info');
+    expect(out.content).toContain('No trusted controllers');
+    expect(out.content).toContain('qwen sessions controllers add');
+  });
+
+  it('lists the grants with their ids', async () => {
+    controllers.records = [
+      { id: 'c_0123abcd', label: 'voice bridge', createdAt: 1_700_000_000_000 },
+      { id: 'c_89abcdef', label: 'dictation', createdAt: 1_700_000_000_000 },
+    ];
+    const out = await run(fake, 'controllers');
+    expect(out.content).toContain('2 trusted controllers');
+    expect(out.content).toContain('c_0123abcd  voice bridge');
+    expect(out.content).toContain('c_89abcdef  dictation');
+    expect(out.content).toContain('/peers revoke <id>');
+  });
+
+  it('reports a registry it cannot read as a line, not a crash', async () => {
+    controllers.listThrows = 'EACCES';
+    const out = await run(fake, 'controllers');
+    expect(out.content).toContain('Could not read the trusted controllers');
+    expect(out.content).toContain('EACCES');
+  });
+});
+
+describe('/peers revoke', () => {
+  beforeEach(() => {
+    controllers.records = [
+      { id: 'c_0123abcd', label: 'voice bridge', createdAt: 1_700_000_000_000 },
+    ];
+  });
+
+  it('revokes by id and says when it takes effect', async () => {
+    const out = await run(fake, 'revoke c_0123abcd');
+    expect(out.messageType).toBe('info');
+    expect(out.content).toContain('Revoked the controller "voice bridge"');
+    expect(out.content).toContain('next connection');
+    expect(controllers.records).toHaveLength(0);
+  });
+
+  it('asks which one when the id is missing', async () => {
+    const out = await run(fake, 'revoke');
+    expect(out.messageType).toBe('error');
+    expect(out.content).toContain('/peers revoke <id>');
+    expect(controllers.records).toHaveLength(1);
+  });
+
+  it('reports an id nothing holds', async () => {
+    const out = await run(fake, 'revoke c_99999999');
+    expect(out.messageType).toBe('error');
+    expect(out.content).toContain('No controller has the id "c_99999999"');
+    expect(controllers.records).toHaveLength(1);
+  });
+
+  it('reports a failed write as a line', async () => {
+    controllers.removeThrows = 'EROFS';
+    const out = await run(fake, 'revoke c_0123abcd');
+    expect(out.messageType).toBe('error');
+    expect(out.content).toContain('Could not revoke that controller');
+    expect(out.content).toContain('EROFS');
+  });
+
+  it('is listed among the subcommands an unknown verb suggests', async () => {
+    const out = await run(fake, 'wat');
+    expect(out.content).toContain('/peers controllers');
+    expect(out.content).toContain('/peers revoke <id>');
   });
 });

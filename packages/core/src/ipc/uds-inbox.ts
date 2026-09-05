@@ -17,7 +17,11 @@
  * on entirely. A second token, `childToken`, goes only to processes this
  * session spawns, and is the one fact about a sender the inbox can vouch
  * for: a connection that presents it was opened by something this session
- * itself started. Beyond that, a token authenticates the connection, not
+ * itself started. A third kind, a controller grant, is minted by the user
+ * outside any session and handed to one program; it vouches for something
+ * different — not that this session started the process, but that the
+ * user chose to let it drive their sessions (see `peer-controllers.ts`).
+ * Beyond those, a token authenticates the connection, not
  * the sender: Node cannot read `SO_PEERCRED` without a native addon, so a
  * frame's claimed `from` is still unauthenticated and kept only for reply
  * routing — any process holding a token can write any `from` it likes.
@@ -33,6 +37,7 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isPidAlive } from '../utils/process-liveness.js';
+import type { PeerControllerIdentity } from './peer-controllers.js';
 import {
   MAX_FRAME_BYTES,
   parsePeerAuthLine,
@@ -348,20 +353,50 @@ export interface PeerInboxOptions {
    */
   childToken?: string;
   /**
+   * Resolve a presented token to a controller grant the user minted, or
+   * undefined when it is not one.
+   *
+   * A function rather than a list of tokens because the answer must be
+   * current: grants live in a file the user edits with
+   * `qwen sessions controllers`, and reading it per auth line is what
+   * makes both adding and revoking one take effect without a restart.
+   * Called for every auth line, like the two token comparisons above and
+   * for the same reason, so it must be cheap on a token that is plainly
+   * not a grant. It should not throw; one that does is treated as "not a
+   * controller".
+   *
+   * Ignored unless `requiredToken` is set, like `childToken`: without an
+   * admission requirement there is nothing to tell apart.
+   */
+  resolveController?: (presented: string) => PeerControllerIdentity | undefined;
+  /**
    * Called for each well-formed frame. Must not throw. `auth` says which
    * token admitted the connection, and is absent when the inbox requires
-   * none.
+   * none. `controller` is set only for `auth === 'controller'`, and names
+   * the grant that admitted it.
    */
-  onFrame: (frame: PeerFrame, auth?: PeerConnectionAuth) => void;
+  onFrame: (
+    frame: PeerFrame,
+    auth?: PeerConnectionAuth,
+    controller?: PeerControllerIdentity,
+  ) => void;
   /** Override for tests; production uses {@link LINE_DEADLINE_MS}. */
   lineDeadlineMs?: number;
 }
 
 /**
  * Which token a connection presented: the published one any peer holds,
- * or the child token only this session's own processes were given.
+ * the child token only this session's own processes were given, or a
+ * controller grant the user minted for a program outside any session.
  */
-export type PeerConnectionAuth = 'peer' | 'child';
+export type PeerConnectionAuth = 'peer' | 'child' | 'controller';
+
+/** What {@link authKindOf} concluded about a connection. */
+interface PeerConnectionCredential {
+  kind: PeerConnectionAuth;
+  /** Present only for `kind === 'controller'`. */
+  controller?: PeerControllerIdentity;
+}
 
 export interface PeerInbox {
   readonly socketPath: string;
@@ -768,7 +803,7 @@ async function bindAt(
     arm();
 
     let authed = options.requiredToken === undefined;
-    let auth: PeerConnectionAuth | undefined;
+    let credential: PeerConnectionCredential | undefined;
     // destroy() does not stop lines already buffered from this chunk, and
     // a failed line followed by a *valid* auth line must not resurrect
     // the connection — the refusal is terminal.
@@ -783,9 +818,9 @@ async function bindAt(
           arm();
           const presented = parsePeerAuthLine(line);
           if (presented !== null) {
-            auth = authKindOf(options, presented);
+            credential = authKindOf(options, presented);
           }
-          if (auth !== undefined) {
+          if (credential !== undefined) {
             authed = true;
             return;
           }
@@ -810,7 +845,7 @@ async function bindAt(
         }
         arm();
         try {
-          options.onFrame(frame, auth);
+          options.onFrame(frame, credential?.kind, credential?.controller);
         } catch (error) {
           debugLogger.error(`onFrame threw: ${describe(error)}`);
         }
@@ -966,23 +1001,45 @@ function tokenMatches(expected: string, presented: string): boolean {
 }
 
 /**
- * Which of the inbox's tokens a presented one is, or undefined for none.
+ * Which of the inbox's credentials a presented token is, or undefined for
+ * none.
  *
- * Both comparisons always run so a wrong token costs the same whichever
- * one it was aiming at.
+ * All three checks always run so a wrong token costs the same whichever
+ * one it was aiming at. The two session tokens are ranked above a
+ * controller grant, which only matters if a grant somehow held the same
+ * value as one of them: this session's own tokens describe the
+ * connection more precisely than a grant does.
  */
 function authKindOf(
-  options: Pick<PeerInboxOptions, 'requiredToken' | 'childToken'>,
+  options: Pick<
+    PeerInboxOptions,
+    'requiredToken' | 'childToken' | 'resolveController'
+  >,
   presented: string,
-): PeerConnectionAuth | undefined {
+): PeerConnectionCredential | undefined {
   const peer =
     options.requiredToken !== undefined &&
     tokenMatches(options.requiredToken, presented);
   const child =
     options.childToken !== undefined &&
     tokenMatches(options.childToken, presented);
-  if (peer) return 'peer';
-  if (child) return 'child';
+  // The resolver reads a file the user can edit at any moment, so it is
+  // the one check here that can fail for reasons unrelated to the token.
+  // A failure is "not a controller", never an admission and never a
+  // crash in the connection handler.
+  let controller: PeerControllerIdentity | undefined;
+  try {
+    controller = options.resolveController?.(presented);
+  } catch (error) {
+    debugLogger.debug(
+      `controller resolver threw (treating the token as unknown): ${describe(
+        error,
+      )}`,
+    );
+  }
+  if (peer) return { kind: 'peer' };
+  if (child) return { kind: 'child' };
+  if (controller) return { kind: 'controller', controller };
   return undefined;
 }
 
