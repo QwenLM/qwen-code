@@ -256,6 +256,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [152. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…](#af-152)
 - [153. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…](#af-153)
 - [154. review-address · Report dry-run / failure — Convergence-break report guard (#10122): the report step's stale-base retry is a sibling…](#af-154)
+- [155. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…](#af-155)
 
 ---
 
@@ -4199,4 +4200,88 @@ sites stay in one lockstep pin — and skips update-branch while the
 reading holds, exactly like the conflict verdict's skip above it. A
 skipped retry reports the gate failure honestly instead; the park's own
 notice is still the scan's job.
+```
+
+<a id="af-155"></a>
+
+### 155. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…
+
+In `review-address` · `Prepare branch and feedback`.
+
+```text
+Classify the live head: a round that pushes onto a fully
+GREEN head and leaves it red introduced the red. Until this
+existed the loop had no notion of a regression at all —
+`grep -rE 'regress|introduced'` over the workflow, the gate
+script and the SKILL hit only prose about WRITING regression
+tests. The consecutive-failure brake counts "rounds that
+pushed nothing", so a round that pushed a fix and turned CI
+red counted as a SUCCESS and reset the counter; the red it
+created came back as the next round's input and was paid for
+out of the round budget. A PR could alternate regress /
+repair indefinitely while every brake read it as converging.
+
+The gate cannot close this on its own. It runs build,
+typecheck, lint and `--changed` tests for the touched
+workspaces only, and says so — "Full regression is covered by
+regular CI on the PR after the push". Everything the gate
+does run IS already charged: a check that fails on the round
+tree and passes at `origin/<branch>` is a rejection, and a
+rejected round pushes nothing and feeds the brake. What is
+left over is precisely the post-push signal — the full suite,
+the other packages, other platforms — and that verdict does
+not exist until CI finishes, long after the job has ended.
+
+So the accounting is deferred rather than waited on, and it
+is measured, never inferred:
+
+  - Every ACTED round stamps `autofix-push round= head= pre=
+    key=`. `pre=` is this classifier's verdict on the head
+    the round STARTED from; `head=` is the sha it pushed
+    (NOT the redcheck marker's, which deliberately records
+    the pre-round head).
+  - The next round's prepare charges a regression only when
+    all four hold: the live head is exactly the sha that
+    marker names (nothing else moved the branch), `pre=green`
+    (fully green — `pending` and `none` are not green, so a
+    check still running at push time can never be charged),
+    the marker's window key matches, and the head is red NOW.
+  - The observing round writes `autofix-regression round=
+    key=` into whichever report it posts — pushed, no-op or
+    failure — so the record survives the round that made it.
+  - The consecutive-failure walk stops resetting on a
+    regressing round's headline, reading the round number out
+    of the headline the report already wrote it into. The
+    walk also adds THIS round's own observation, which is not
+    in the fetched comment list yet: without it the newest
+    regressing push escapes by exactly one round, and that is
+    the round that matters.
+
+Attribution is deliberately conservative on every axis that
+could charge the loop for someone else's red. A head that
+moved (a human push, a base update) breaks the head equality
+and drops the charge — and the equality binds BOTH halves:
+the marker's head to the checked-out head, and the check
+rollup to the commit it describes (`headRefOid` is read in
+the same call as the rollup; a rollup for any other commit
+classifies `none`, unknown, never chargeable). A re-arm
+changes the window key and drops the whole set with it.
+Cancelled checks are not red here, matching the scan's own
+N_RED_NOW filter. The loop's own lanes are excluded wholesale
+by the canonical five-name filter this file's other own-lane
+filters use, plus the loop's own dispatch-pending commit
+status by its exact context value (a StatusContext carries no
+workflowName) — deliberately NOT the feedback renderer's
+review-address carve-out, which keeps failed and in-flight
+address runs visible as feedback: a charge verdict must never
+see them (a failed own round is feedback, not a regression
+the pushed code authored, and an in-flight own check would
+hold the verdict at pending across the trigger family whose
+suite attaches to the PR head). What remains uncovered is a
+flake: a
+genuinely flaky check failing on the bot's push
+reads as a regression. The consequence is bounded on purpose
+— one regression only declines to RESET a counter that needs
+five consecutive non-progress rounds to trip, and the
+recovery is automatic, since a clean push resets it.
 ```

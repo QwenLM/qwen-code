@@ -3872,6 +3872,7 @@ jobs:
           cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          cp .github/scripts/count-test-surface.mjs "${RUNNER_TEMP}/count-test-surface.mjs"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
           # Absent from the trusted base until this PR merges, and this step
           # runs under -e: a hard failure here would kill every pre-merge
@@ -4285,9 +4286,15 @@ jobs:
             | jq -s 'add // []' > "${WORKDIR}/rc.json"
           gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
             | jq -s 'add // []' > "${WORKDIR}/ic.json"
-          gh pr view "${PR}" --repo "${REPO}" \
-            --json statusCheckRollup --jq '.statusCheckRollup // []' > "${WORKDIR}/checks.json" \
-            2> /dev/null || echo '[]' > "${WORKDIR}/checks.json"
+          # headRefOid rides the same read as the rollup: the regression
+          # classifier below binds its verdict to the commit the rollup
+          # describes (af-155), and checks.json stays the bare array its
+          # positional readers expect.
+          PR_ROLLUP="$(gh pr view "${PR}" --repo "${REPO}" \
+            --json statusCheckRollup,headRefOid 2> /dev/null || echo '{}')"
+          jq '.statusCheckRollup // []' <<< "${PR_ROLLUP}" > "${WORKDIR}/checks.json" 2> /dev/null \
+            || echo '[]' > "${WORKDIR}/checks.json"
+          ROLLUP_HEAD="$(jq -r '.headRefOid // ""' <<< "${PR_ROLLUP}" 2> /dev/null || echo '')"
 
           # Newest actionable feedback timestamp — stamped into the eval marker so
           # the next scan knows everything up to here has been considered.
@@ -4725,6 +4732,65 @@ jobs:
             [[ -z "${OVER_BUDGET_AUTHORS}" ]] && OVER_BUDGET_AUTHORS='[]'
             [[ "${OVER_BUDGET_AUTHORS}" != '[]' ]] && echo "🚦 regular-feedback budget exhausted this window for: $(jq -r 'join(", ")' <<< "${OVER_BUDGET_AUTHORS}")"
           fi
+          # ---- regression accounting ------------------------------------
+          # Classify the live head: a round that pushes onto a fully GREEN
+          # head and leaves it red introduced the red. Recorded now, charged
+          # by the consecutive-failure walk later.
+          # The charge verdict counts ONLY checks outside the loop's own
+          # lanes — the canonical five-name exclusion this file's other
+          # own-lane filters use. A red auxiliary lane (review-pr, patrol,
+          # fork bridge/signal) or the loop's own failed/in-flight
+          # review-address run is the loop's business, not a regression the
+          # pushed code introduced; charging it would bill a round for a
+          # red it never authored, and an in-flight own check would hold
+          # the verdict at pending for the whole trigger family whose suite
+          # attaches to the PR head. The review-address carve-out stays at
+          # the FEEDBACK sites (N_FAILED_CHECKS / N_RED_NOW), where a
+          # failed own round genuinely is new feedback.
+          # Full rationale → qwen-autofix.md#af-155
+          # The loop's own dispatch-pending commit status is a StatusContext,
+          # which carries no workflowName: excluded by its exact context
+          # value (never by typename, or third-party DCO/CLA statuses would
+          # stop counting), or the loop's own stamp keeps the `none` arm
+          # unreachable and an unreported head classifies green.
+          # The rollup is read live, minutes after the checkout: bind the
+          # verdict to the commit it describes, or a head pushed in between
+          # is classified under the checked-out head's name. A moved head
+          # reads `none` -- unknown, never chargeable. A check with no verdict
+          # (EXPECTED: a required context that never reported; STALE; a run
+          # that never started) is pending, never green.
+          CHECK_STATE="$(jq -r --arg dispatch "${DISPATCH_STATUS_CONTEXT}" '
+            [ .[] | select((((.workflowName // "")
+                | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not))
+              | select(((.context // "") == $dispatch) | not) ] as $c
+            | if ($c | length) == 0 then "none"
+              elif any($c[]; (.conclusion // .state // "")
+                | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED")) then "red"
+              elif any($c[]; ((.status // "") | IN("QUEUED", "IN_PROGRESS", "WAITING", "PENDING"))
+                or ((.conclusion // .state // "") | IN("PENDING", "", "EXPECTED", "STALE", "STARTUP_FAILURE"))) then "pending"
+              else "green" end' "${WORKDIR}/checks.json" 2> /dev/null || echo 'none')"
+          case "${CHECK_STATE}" in green | red | pending | none) ;; *) CHECK_STATE='none' ;; esac
+          if [[ "${ROLLUP_HEAD:-}" != "${CHECKED_OUT_HEAD}" ]]; then
+            echo "🩸 #${PR}: the check rollup describes ${ROLLUP_HEAD:-<unknown>}, not the checked-out head ${CHECKED_OUT_HEAD} — head state unknown"
+            CHECK_STATE='none'
+          fi
+          REGRESSED_ROUND=''
+          LAST_PUSH="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+              | [ scan("<!-- autofix-push round=([0-9]+) head=([0-9a-f]+) pre=([a-z]+) key=([^ ]+) -->") ] | .[]
+              | {r: .[0], h: .[1], p: .[2], k: .[3], at: ($c.created_at // "")} ]
+            | sort_by(.at) | last // {}
+            | "\(.r // "") \(.h // "") \(.p // "") \(.k // "")"' \
+            "${WORKDIR}/ic.json" 2> /dev/null || echo '')"
+          read -r LP_ROUND LP_HEAD LP_PRE LP_KEY <<< "${LAST_PUSH}" || true
+          if [[ -n "${LP_ROUND:-}" && "${LP_HEAD:-}" == "${CHECKED_OUT_HEAD}" \
+            && "${LP_PRE:-}" == 'green' && "${LP_KEY:-}" == "${WINDOW:-none}" \
+            && "${CHECK_STATE}" == 'red' ]]; then
+            REGRESSED_ROUND="${LP_ROUND}"
+            echo "🩸 #${PR}: round ${LP_ROUND} pushed ${CHECKED_OUT_HEAD:0:9} onto a green head and it is red now — charging that round as a regression"
+          fi
+          echo "check_state=${CHECK_STATE}" >> "${GITHUB_OUTPUT}"
+          echo "regressed_round=${REGRESSED_ROUND}" >> "${GITHUB_OUTPUT}"
           echo "stale=${STALE}" >> "${GITHUB_OUTPUT}"
           echo "effective_round=${ROUND}" >> "${GITHUB_OUTPUT}"
           echo "round_start=${LIVE_ROUND_START}" >> "${GITHUB_OUTPUT}"
@@ -5870,6 +5936,11 @@ jobs:
           # variable (not a secret), already the agent's OPENAI_MODEL.
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
+          # Regression accounting (af-155): the head state this round STARTED
+          # from, stamped into the round's own push marker, and the prior
+          # round prepare charged as a regression.
+          CHECK_STATE: '${{ steps.prepare.outputs.check_state }}'
+          REGRESSED_ROUND: '${{ steps.prepare.outputs.regressed_round }}'
           VERIFIED_HEAD: '${{ steps.final_verify.outputs.verified_head }}'
           RESANITIZE_SHA256: '${{ steps.stage.outputs.resanitize_sha256 }}'
           UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
@@ -5951,6 +6022,9 @@ jobs:
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
+          # Regression accounting (af-155): the prior round prepare charged as
+          # a regression, recorded by whichever report this round posts.
+          REGRESSED_ROUND: '${{ steps.prepare.outputs.regressed_round }}'
           # This step also posts a round report (timeout / gate-rejection /
           # abort), so it writes the per-round growth-now marker too — else an
           # over-budget round that never reaches 'Push and report' leaves a
@@ -6379,18 +6453,42 @@ jobs:
                          | ($wins | length) > 0 and (($wins | last) == $win))]
                 | sort_by(.created_at) | .[]
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
+              # Rounds a later round measured as having left a green head red
+              # (af-155). Same window filter the eval markers above use, so a
+              # re-arm drops the whole set with the rounds it keyed.
+              REGRESSED_ROUNDS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+                [ .[] | select((.user.login // "") == $ab) | (.body // "")
+                  | [ scan("<!-- autofix-regression round=([0-9]+) key=([^ ]+) -->") ] | .[]
+                  | select(.[1] == $win) | .[0] ]
+                | unique | join(" ")' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
+              # THIS round's own observation is not in COMMENTS_JSON yet — the
+              # marker rides the report this step is still composing. Without
+              # it the newest regressing push always escapes the walk by one
+              # round, which is exactly the round that matters.
+              [[ -n "${REGRESSED_ROUND:-}" ]] && REGRESSED_ROUNDS="${REGRESSED_ROUNDS} ${REGRESSED_ROUND}"
               while IFS= read -r H; do
                 [[ -n "${H}" ]] || continue
                 if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"updated a stale base"* ]]; then
-                  CONSEC_FAIL=1
+                  # A push that turned the checks red is not progress: it
+                  # bought the next round's work rather than reducing it, and
+                  # resetting here let a PR alternate regress/repair forever
+                  # while every brake read it as converging. The round number
+                  # is read from the headline the same report wrote it into.
+                  H_ROUND=''
+                  [[ "${H}" =~ \(round\ ([0-9]+)/ ]] && H_ROUND="${BASH_REMATCH[1]}"
+                  if [[ -n "${H_ROUND}" && " ${REGRESSED_ROUNDS} " == *" ${H_ROUND} "* ]]; then
+                    CONSEC_FAIL=$(( CONSEC_FAIL + 1 ))
+                  else
+                    CONSEC_FAIL=1
+                  fi
                 else
                   CONSEC_FAIL=$(( CONSEC_FAIL + 1 ))
                 fi
               done <<< "${PRIOR_HEADS}"
               if [[ "${CONSEC_FAIL}" -ge "${CONSECUTIVE_FAILURE_CAP}" ]]; then
                 MARK_ROUND="${MAX_ROUNDS}"
-                HEADLINE="🤖 AutoFix stopped after ${CONSEC_FAIL} consecutive rounds that pushed nothing (failed rounds, timeouts, gate rejections, or stops under instruction). Retrying at the same per-round budget is not converging — this usually means the PR is too large or conflicts with a fast-moving \`main\`. A human should rebase, split, or reduce it, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
-                HEADLINE_ZH="🤖 AutoFix 已停止：连续 ${CONSEC_FAIL} 轮未能推送任何内容（失败轮次、超时、验证门拒绝或按指示停止）。以相同的单轮预算重试并不收敛 —— 这通常意味着 PR 过大，或与快速变动的 \`main\` 冲突。应由人工 rebase、拆分或缩减它，然后评论 \`${RETRY_COMMAND}\` 重新武装。在此之前，后续扫描将跳过本 PR。"
+                HEADLINE="🤖 AutoFix stopped after ${CONSEC_FAIL} consecutive rounds without progress (failed rounds, timeouts, gate rejections, stops under instruction, or a push that left the checks red). Retrying at the same per-round budget is not converging — this usually means the PR is too large or conflicts with a fast-moving \`main\`. A human should rebase, split, or reduce it, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                HEADLINE_ZH="🤖 AutoFix 已停止：连续 ${CONSEC_FAIL} 轮没有进展（失败轮次、超时、验证门拒绝、按指示停止，或推送后检查转红）。以相同的单轮预算重试并不收敛 —— 这通常意味着 PR 过大，或与快速变动的 \`main\` 冲突。应由人工 rebase、拆分或缩减它，然后评论 \`${RETRY_COMMAND}\` 重新武装。在此之前，后续扫描将跳过本 PR。"
               fi
               # CUMULATIVE timeout breaker — the sibling of the consecutive
               # one above, for the failure shape it cannot see: timeouts
@@ -6534,6 +6632,10 @@ jobs:
               echo
               echo "Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
               echo
+              if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+                echo
+                echo "🩸 Regression charged to round ${REGRESSED_ROUND}: that round pushed onto a head whose checks were all green and left them red. It no longer counts as progress for the consecutive-failure brake. · 已将回归记在第 ${REGRESSED_ROUND} 轮：该轮在检查全绿的 head 上推送后检查转红，因此不再计入连续失败熔断的有进展判定。"
+              fi
               echo "---"
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
@@ -6554,6 +6656,13 @@ jobs:
               # promising a retry.
               if [[ "${MARK_TS}" != '9999-12-31T23:59:59Z' ]]; then
                 echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+              fi
+              # A failed round pushed nothing, so it writes no autofix-push
+              # marker — but the regression prepare charged to the PRIOR round
+              # must still be recorded, or a run of failures after a regressing
+              # push would lose it entirely (af-155).
+              if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+                echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
               fi
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"

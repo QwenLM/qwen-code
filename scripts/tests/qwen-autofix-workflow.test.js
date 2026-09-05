@@ -8,6 +8,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -22,6 +23,10 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
+import {
+  count as countTestSurface,
+  measure as measureTestSurface,
+} from '../../.github/scripts/count-test-surface.mjs';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 // Long-form rationale moved out of the YAML when the file approached
@@ -9759,7 +9764,10 @@ exit 1
     // review-address must also fetch ic.json and render issue-level comments.
     expect(prepareBranchAndFeedbackStep).toMatch(normalizedIcFetch);
     expect(prepareBranchAndFeedbackStep).toContain(
-      '2> /dev/null || echo \'[]\' > "${WORKDIR}/checks.json"',
+      'jq \'.statusCheckRollup // []\' <<< "${PR_ROLLUP}" > "${WORKDIR}/checks.json"',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '|| echo \'[]\' > "${WORKDIR}/checks.json"',
     );
     expect(workflow).toContain('## Issue-level comments');
     expect(workflow).toContain('## Failed checks');
@@ -9769,10 +9777,14 @@ exit 1
     );
     // Four sites: the NEWEST computation, the live-watermark revalidation,
     // the "Failed checks" rendering, and the "Still-red checks" rendering
-    // share the address-check carve-out (the autofix workflow's OTHER lanes
-    // failing is the loop's own business, not actionable feedback). The
-    // conflict-handoff wake filter deliberately does NOT share it: under a
-    // park no address round can legitimately run, so it excludes ALL Qwen
+    // share the address-check carve-out (the autofix workflow's OTHER
+    // lanes failing is the loop's own business, not actionable feedback).
+    // The regression classifier (af-155) deliberately does NOT share it:
+    // the charge verdict excludes ALL own-lane checks via the canonical
+    // five-name filter — a failed or in-flight own run is feedback or
+    // observer noise, not a red the loop may charge to its own push. The
+    // conflict-handoff wake filter also does NOT share it: under a park
+    // no address round can legitimately run, so it excludes ALL Qwen
     // Autofix checks — the conflict round's own failed check must not
     // unpark its own park.
     expect(
@@ -16082,11 +16094,7 @@ exit 1
         'crashed or timed out before reading the feedback',
         '在读取反馈之前崩溃或超时',
       ],
-      [
-        'HEADLINE',
-        'consecutive rounds that pushed nothing',
-        '轮未能推送任何内容',
-      ],
+      ['HEADLINE', 'consecutive rounds without progress', '轮没有进展'],
       ['HEADLINE', 'time-budget exhaustions', '次时间预算耗尽'],
       // The cap remedy is inlined in HEADLINE/HEADLINE_ZH (the REMEDY
       // variables are gone) — its EN/ZH pairing stays pinned here.
@@ -18025,6 +18033,7 @@ exit 1
         prepareOutcome = 'success',
         staleBaseRetry = false,
         agentTimeout = '',
+        regressedRound = '',
       } = {},
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'consec-'));
@@ -18039,7 +18048,11 @@ exit 1
             return {
               user: { login: 'qwen-code-dev-bot' },
               created_at: `2026-01-01T00:${String(i).padStart(2, '0')}:00Z`,
-              body: `${headline}\n<!-- autofix-eval ts=x acted=y round=1${win ? ` win=${win}` : ''} -->`,
+              body: `${headline}\n<!-- autofix-eval ts=x acted=y round=1${win ? ` win=${win}` : ''} -->${
+                typeof h === 'object' && h.regressed !== undefined
+                  ? `\n<!-- autofix-regression round=${h.regressed} key=${h.regKey ?? win ?? 'none'} -->`
+                  : ''
+              }`,
             };
           }),
         ),
@@ -18053,7 +18066,7 @@ exit 1
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\nREGRESSED_ROUND='${regressedRound}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -18161,6 +18174,84 @@ exit 1
       consec: 3,
       terminal: false,
     });
+    // A push that turned the checks red is NOT progress (af-155). Before
+    // this, "pushed something" was the whole reset test, so a PR could
+    // alternate regress / repair forever and every brake read it as
+    // converging: the red it created came back as the next round's input
+    // and was paid for out of the round budget.
+    const pushAt = (n) =>
+      `🤖 Addressed the latest review feedback (round ${n}/100).`;
+    // Control: the same push with no regression marker still resets.
+    expect(run([FAIL, FAIL, { headline: pushAt(2) }, FAIL])).toMatchObject({
+      consec: 2,
+      terminal: false,
+    });
+    // ...and with one, the streak carries straight through it.
+    expect(
+      run([FAIL, FAIL, { headline: pushAt(2), regressed: 2 }, FAIL]),
+    ).toMatchObject({ consec: 5, terminal: true });
+    // An unbroken run of regressing pushes trips the cap on its own — the
+    // shape the old counter could never see, because each round pushed.
+    expect(
+      run([
+        { headline: pushAt(1), regressed: 1 },
+        { headline: pushAt(2), regressed: 2 },
+        { headline: pushAt(3), regressed: 3 },
+        { headline: pushAt(4), regressed: 4 },
+      ]),
+    ).toMatchObject({ consec: cap, terminal: true });
+    // THIS round's own observation is not in the fetched comments yet — the
+    // marker rides the report this step is still composing. Without folding
+    // it in, the newest regressing push escapes by exactly one round, and
+    // that is the round that matters.
+    expect(
+      run(
+        [
+          { headline: pushAt(1), regressed: 1 },
+          { headline: pushAt(2), regressed: 2 },
+          { headline: pushAt(3), regressed: 3 },
+          { headline: pushAt(4) },
+        ],
+        { regressedRound: '4' },
+      ),
+    ).toMatchObject({ consec: cap, terminal: true });
+    // A clean push after a regression clears the streak: the brake is about
+    // consecutive non-progress, and the loop recovering is progress.
+    expect(
+      run([
+        { headline: pushAt(1), regressed: 1 },
+        { headline: pushAt(2) },
+        { headline: pushAt(3) },
+      ]),
+    ).toMatchObject({ consec: 1, terminal: false });
+    // Marker round numbers are matched WHOLE — round 1 must not charge
+    // round 10 (a substring match would, and the cap would trip early).
+    expect(
+      run([FAIL, FAIL, { headline: pushAt(10), regressed: 1 }, FAIL]),
+    ).toMatchObject({ consec: 2, terminal: false });
+    // A regression keyed to another window is not this window's business:
+    // a re-arm drops the whole set with the rounds it keyed.
+    expect(
+      run(
+        [
+          FAIL,
+          FAIL,
+          { headline: pushAt(2), win: 'w1', regressed: 2, regKey: 'w0' },
+          { headline: FAIL, win: 'w1' },
+        ],
+        { window: 'w1' },
+      ),
+    ).toMatchObject({ consec: 2, terminal: false });
+    // The terminal headline must name the new cause, or a maintainer reads
+    // "pushed nothing" on a PR whose every round pushed.
+    expect(
+      run([
+        { headline: pushAt(1), regressed: 1 },
+        { headline: pushAt(2), regressed: 2 },
+        { headline: pushAt(3), regressed: 3 },
+        { headline: pushAt(4), regressed: 4 },
+      ]).headline,
+    ).toContain('left the checks red');
     // The CURRENT round being a stale-base retry is exempt from the breaker
     // entirely — the base was just updated and the next round builds fresh, so
     // cap-1 prior failures must not trip it.
@@ -18218,7 +18309,7 @@ exit 1
     });
     expect(idleStreak).toMatchObject({ consec: cap, terminal: true });
     expect(idleStreak.headline).toContain(
-      'consecutive rounds that pushed nothing',
+      'consecutive rounds without progress',
     );
     // ...and the TERMINAL run's job log still names the wedged runner: the
     // census warning runs outside the cap's terminal guard precisely so an
@@ -18341,7 +18432,7 @@ exit 1
     // — an `if true` mutation on the timeout guard flips the headline and
     // must fail here.
     expect(bothCapped.headline).toContain(
-      'consecutive rounds that pushed nothing',
+      'consecutive rounds without progress',
     );
     expect(bothCapped.headline).not.toContain('time-budget exhaustions');
     // Pin the census greps to the actual emit line: the timeout CAUSE text
@@ -23332,6 +23423,15 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     // drive stop-marker combinations through this. Defaults empty: the
     // summary default is owned by summaryPresent above, not duplicated here.
     workdirFiles = {},
+    // Test-weakening fixtures: names a shape in WEAKEN_FIXTURES whose
+    // PRE-ROUND ref carries the pinned test and whose round then edits it.
+    weaken = '',
+    // Leave the counter unstaged: the measured signals go UNAVAILABLE.
+    noCounter = false,
+    // Shadow git so the gate's own enumeration producer fails (only the
+    // calls carrying the weakening pathspec): the producer's status must
+    // be read, not swallowed.
+    gitDiffFails = false,
   }) => {
     const dir = mkdtempSync(join(tmpdir(), 'gate-ab-'));
     try {
@@ -23347,18 +23447,44 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
       sh(`git clone -q '${origin}' '${work}'`, dir);
       const g = (cmd) => sh(cmd, work);
       g('git config user.email t@t && git config user.name t');
+      // `typescript` resolves from the checkout under measurement, as on
+      // the runner: link the real package in (ignored, so never dirt).
+      mkdirSync(join(work, 'node_modules'));
+      symlinkSync(
+        resolve('node_modules/typescript'),
+        join(work, 'node_modules', 'typescript'),
+      );
+      g("printf 'node_modules/\\n' > .gitignore");
       g('echo base > f.txt && git add . && git commit -qm base');
       g('git branch -M main && git push -q origin main');
+      if (weaken && !WEAKEN_FIXTURES[weaken]) {
+        throw new Error(`unknown weaken fixture: ${weaken}`);
+      }
+      const fx = weaken ? WEAKEN_FIXTURES[weaken] : null;
+      if (fx && fx.onMain) {
+        for (const cmd of fixtureWrite(fx.onMain)) g(cmd);
+        g('git add . && git commit -qm seed-test && git push -q origin main');
+      }
       g('git checkout -qb feature');
       if (touchCore) {
         // Reaches the core-rebuild run_check BEFORE the commit gate, so a
         // failure there exercises the no-round-commit guard.
         g('mkdir -p packages/core/src && echo x > packages/core/src/x.ts');
         g('git add . && git commit -qm core');
+      } else if (fx) {
+        // The pinned test must exist at origin/feature (the PRE-ROUND ref)
+        // before the round's agent commit weakens it.
+        for (const cmd of fixtureWrite(fx.files ?? {})) g(cmd);
+        g('echo branch > f.txt && git add . && git commit -qm branch');
       } else {
         g('echo branch > f.txt && git commit -qam branch');
       }
       g('git push -q origin feature');
+      if (fx && fx.mainMoves) {
+        g('git checkout -q main');
+        for (const cmd of fx.mainMoves) g(cmd);
+        g('git push -q origin main && git checkout -q feature');
+      }
       if (agentCommit) {
         if (addWorkspace) {
           // The round ADDS a workspace — it does not exist at the baseline.
@@ -23371,6 +23497,8 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
           // A file the branch TRACKS but the baseline lacks: the baseline
           // leg recreates it untracked, and the restore checkout refuses.
           g('echo tracked > clash.txt && git add . && git commit -qm agent');
+        } else if (fx) {
+          for (const cmd of fx.round) g(cmd);
         } else {
           g('echo agent > f.txt && git commit -qam agent');
         }
@@ -23481,6 +23609,23 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         writeFileSync(join(bin, 'comm'), '#!/bin/bash\nexit 1\n');
         chmodSync(join(bin, 'comm'), 0o755);
       }
+      if (gitDiffFails) {
+        const realGit = execFileSync('bash', ['-c', 'command -v git'], {
+          encoding: 'utf8',
+          env: { ...process.env, ...GIT_ISOLATION },
+        }).trim();
+        writeFileSync(
+          join(bin, 'git'),
+          [
+            '#!/bin/bash',
+            'for a in "$@"; do',
+            "  if [[ \"$a\" == ':(glob)**/test_*.py' ]]; then echo 'stub: enumeration refused' >&2; exit 128; fi",
+            'done',
+            `exec '${realGit}' "$@"`,
+          ].join('\n'),
+        );
+        chmodSync(join(bin, 'git'), 0o755);
+      }
       const rt = join(dir, 'rt');
       mkdirSync(rt);
       writeFileSync(
@@ -23512,6 +23657,12 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         join(rt, 'resolve-owning-packages.sh'),
         'cat > /dev/null\nprintf "%s" "${RESOLVED_PKGS:-}"\n',
       );
+      if (!noCounter) {
+        copyFileSync(
+          resolve('.github/scripts/count-test-surface.mjs'),
+          join(rt, 'count-test-surface.mjs'),
+        );
+      }
       const workdir = join(dir, 'wd');
       mkdirSync(workdir);
       if (summaryPresent) {
@@ -23596,6 +23747,9 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
         summary: readFileSync(summaryFile, 'utf8'),
         rejection: existsSync(join(workdir, 'gate-rejection.md'))
           ? readFileSync(join(workdir, 'gate-rejection.md'), 'utf8')
+          : '',
+        advisories: existsSync(join(workdir, 'gate-advisories.md'))
+          ? readFileSync(join(workdir, 'gate-advisories.md'), 'utf8')
           : '',
         headAfter: sh('git rev-parse --abbrev-ref HEAD', work).trim(),
         baselineSha,
@@ -24473,6 +24627,1647 @@ describe('review verification gate: baseline A/B on deterministic rejection', ()
     );
     expect(r.outputs).not.toContain('audit_verdict=');
     expect(r.outputs).toContain('retryable=true');
+  });
+
+  // ---- test-weakening gate ------------------------------------------------
+  // Each fixture names the file(s) seeded at the PRE-ROUND ref (`files`, on
+  // the branch; `onMain`, on main ahead of the fork when the shape needs
+  // main-side history), main's moves after the fork (`mainMoves`), and the
+  // round's own commands (`round`). The gate runs for real against the
+  // fixture repo: count-test-surface.mjs is staged the way the workflow
+  // stages it (a copy under RUNNER_TEMP) and `typescript` resolves from the
+  // checkout under measurement, as on the runner.
+  const shellQuote = (s) => `'${s.replaceAll("'", "'\\''")}'`;
+  const fixtureWrite = (files) =>
+    Object.entries(files).flatMap(([path, lines]) => [
+      ...(path.includes('/')
+        ? [`mkdir -p '${path.slice(0, path.lastIndexOf('/'))}'`]
+        : []),
+      `printf '%s\\n' ${lines.map(shellQuote).join(' ')} > '${path}'`,
+    ]);
+  const AGENT_COMMIT = 'echo agent > f.txt && git commit -qam agent';
+  const WT_IMPORT = "import { it, expect } from 'vitest';";
+  const WT_BASE = [
+    WT_IMPORT,
+    "it('a', () => {",
+    '  expect(one()).toBe(1);',
+    '  expect(two()).toBe(2);',
+    '});',
+  ];
+  const WT_BASE_MINUS_TWO = WT_BASE.filter((l) => !l.includes('two()'));
+  const WT_BASE_PLUS_THREE = [
+    ...WT_BASE.slice(0, -1),
+    '  expect(three()).toBe(3);',
+    '});',
+  ];
+  const testA = (head, ...body) => [
+    WT_IMPORT,
+    head,
+    ...(body.length
+      ? body
+      : ['  expect(one()).toBe(1);', '  expect(two()).toBe(2);']),
+    '});',
+  ];
+  const WEAKEN_REASON =
+    'coverage moved to pkg/b.test.ts, which pins the same behaviour end to end';
+  const roundWrites = (files, ...extra) => [
+    ...fixtureWrite(files),
+    ...extra,
+    AGENT_COMMIT,
+  ];
+  const WEAKEN_FIXTURES = {
+    // -- the three plain shapes
+    assert: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+    },
+    skip: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a.test.ts': testA("it.skip('a', () => {") }),
+    },
+    delete: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: ['git rm -q pkg/a.test.ts', AGENT_COMMIT],
+    },
+    // -- honest edits the gate must not charge
+    add: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+    },
+    'skipif-guard': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it.skipIf(process.platform === 'win32')('a', () => {",
+        ),
+      }),
+    },
+    'ctx-skip-conditional': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', (ctx) => {",
+          "  ctx.skip(process.platform === 'win32', 'requires the POSIX daemon harness');",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'todo-new': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [...WT_BASE, "it.todo('a later behaviour');"],
+      }),
+    },
+    rename: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it('a, renamed', () => {"),
+      }),
+    },
+    'move-within': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '});',
+          "it('b', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '});',
+          "it('b', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      }),
+    },
+    reflow: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(',
+          '    one(),',
+          '  ).toBe(',
+          '    1,',
+          '  );',
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      }),
+    },
+    'jsx-swap': {
+      files: { 'pkg/a.test.tsx': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.tsx': testA(
+          "it('a', () => {",
+          "  expect(render(<Foo bar={1} />).getByText('x')).toBeTruthy();",
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'delete-readd-stronger': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git add pkg/a.test.ts',
+        AGENT_COMMIT,
+      ],
+    },
+    'python-edit': {
+      files: { 'tests/test_x.py': ['def test_x():', '    assert one() == 1'] },
+      round: roundWrites({ 'tests/test_x.py': ['def test_x():', '    pass'] }),
+    },
+    'non-test-file-delete': {
+      files: {
+        'integration-tests/README.md': ['# notes'],
+        'packages/cli/src/test-utils/render.tsx': [
+          'export const render = () => null;',
+        ],
+      },
+      round: [
+        'git rm -q integration-tests/README.md packages/cli/src/test-utils/render.tsx',
+        AGENT_COMMIT,
+      ],
+    },
+    // -- weakenings that hide from text patterns, visible to the parser
+    'comment-out': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  /*',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+          '  */',
+        ),
+      }),
+    },
+    'string-decoy': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          "  const decoy = 'expect(two()).toBe(2); expect(x).toBe(1)';",
+          '  const re = /expect\\(two\\(\\)\\)\\.toBe\\(2\\)/;',
+          '  fn(expect.anything(), `expect(${decoy}).toBe(2)`);',
+        ),
+      }),
+    },
+    'jsx-decoy': {
+      files: { 'pkg/a.test.tsx': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.tsx': testA(
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  const html = <div>expect(two()).toBe(2)</div>;',
+        ),
+      }),
+    },
+    'matcher-drop': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '  expect(two());',
+        ),
+      }),
+    },
+    'computed-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it['\\x73kip']('a', () => {"),
+      }),
+    },
+    'options-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it('a', { skip: true }, () => {"),
+      }),
+    },
+    'skipif-true': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it.skipIf(true)('a', () => {"),
+      }),
+    },
+    'ctx-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', (ctx) => {",
+          '  ctx.skip();',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'early-return': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  if (!process.env.QWEN_RUN_ADDS) {',
+          '    return;',
+          '  }',
+          '  expect(one()).toBe(1);',
+          '  expect(two()).toBe(2);',
+        ),
+      }),
+    },
+    'skip-swap': {
+      files: {
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it('a', () => {",
+          '  expect(one()).toBe(1);',
+          '});',
+          "it.skip('b', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      },
+      round: roundWrites({
+        'pkg/a.test.ts': [
+          WT_IMPORT,
+          "it.skip('a', () => {",
+          '  expect(one()).toBe(1);',
+          '});',
+          "it('b', () => {",
+          '  expect(two()).toBe(2);',
+          '});',
+        ],
+      }),
+    },
+    'rename-skip': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA("it.skip('a, renamed', () => {"),
+      }),
+    },
+    'delete-readd-weaker': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git rm -q pkg/a.test.ts',
+        'git commit -qm delete',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git add pkg/a.test.ts',
+        AGENT_COMMIT,
+      ],
+    },
+    symlink: {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'rm pkg/a.test.ts',
+        'ln -s ../f.txt pkg/a.test.ts',
+        'git add -A pkg',
+        AGENT_COMMIT,
+      ],
+    },
+    'python-delete': {
+      files: { 'tests/test_x.py': ['def test_x():', '    assert one() == 1'] },
+      round: ['git rm -q tests/test_x.py', AGENT_COMMIT],
+    },
+    'rust-delete': {
+      files: { 'crates/x/src/browser/v2_tests.rs': ['#[test]', 'fn t() {}'] },
+      round: ['git rm -q crates/x/src/browser/v2_tests.rs', AGENT_COMMIT],
+    },
+    'tab-name': {
+      files: { 'pkg/a\tb.test.ts': WT_BASE },
+      round: roundWrites({ 'pkg/a\tb.test.ts': WT_BASE_MINUS_TWO }),
+    },
+    'two-files': {
+      files: { 'pkg/a.test.ts': WT_BASE, 'pkg/b.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': WT_BASE_MINUS_TWO,
+        'pkg/b.test.ts': WT_BASE_MINUS_TWO,
+      }),
+    },
+    'spec-delete': {
+      files: { 'pkg/a.spec.ts': WT_BASE },
+      round: ['git rm -q pkg/a.spec.ts', AGENT_COMMIT],
+    },
+    'snapshot-delete': {
+      files: {
+        'pkg/a.test.ts': WT_BASE,
+        'pkg/__snapshots__/a.test.ts.snap': ['exports[`a 1`] = `1`;'],
+      },
+      round: ['git rm -q pkg/__snapshots__/a.test.ts.snap', AGENT_COMMIT],
+    },
+    // -- declared non-goal: reachability is the runner's business
+    'dead-code': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: roundWrites({
+        'pkg/a.test.ts': testA(
+          "it('a', () => {",
+          '  if (false) {',
+          '    expect(one()).toBe(1);',
+          '    expect(two()).toBe(2);',
+          '  }',
+        ),
+      }),
+    },
+    // -- attribution across main's own history
+    'merge-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    'merge-delete-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: ['git rm -q pkg/a.test.ts', 'git commit -qm main-deletes'],
+      round: ['git merge -q --no-edit origin/main', AGENT_COMMIT],
+    },
+    'merge-conflict-drop': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) => l.replace('toBe(1)', 'toBe(10)')),
+        }),
+        'git commit -qam main-edits',
+      ],
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) => l.replace('toBe(1)', 'toBe(11)')),
+        }),
+        'git commit -qam branch-edits',
+        'git merge -q --no-edit origin/main || true',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('one()')),
+        }),
+        'git add pkg/a.test.ts && git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    'merge-restore': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.map((l) => l.replace('toBe(1)', 'toBe(10)')),
+        }),
+        'git commit -qam main-edits',
+      ],
+      round: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE.filter((l) => !l.includes('one()')),
+        }),
+        'git commit -qam drop',
+        'git merge -q --no-edit origin/main || true',
+        'git checkout --theirs pkg/a.test.ts',
+        'git add pkg/a.test.ts && git commit -qm take-main',
+        AGENT_COMMIT,
+      ],
+    },
+    'premerge-weaken-postmerge-decoy': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({
+          'pkg/a.test.ts': [...WT_BASE, '// main touched this file'],
+        }),
+        'git commit -qam main-touches',
+      ],
+      round: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam weaken',
+        'git merge -q --no-edit origin/main',
+        ...fixtureWrite({
+          'pkg/a.test.ts': [
+            WT_IMPORT,
+            "it('a', () => {",
+            '  expect(one()).toBe(1);',
+            "  const decoy = 'expect(two()).toBe(2)';",
+            '});',
+            '// main touched this file',
+          ],
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'ff-ride-freight': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam main-weakens',
+      ],
+      round: [
+        'git reset -q --hard origin/main',
+        ...fixtureWrite({
+          'pkg/a.test.ts': WT_BASE_MINUS_TWO.map((l) =>
+            l.replace('one()', 'uno()'),
+          ),
+        }),
+        AGENT_COMMIT,
+      ],
+    },
+    'ff-ride-revert': {
+      onMain: { 'pkg/a.test.ts': WT_BASE },
+      files: {},
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_PLUS_THREE }),
+        'git commit -qam main-adds',
+      ],
+      round: [
+        'git reset -q --hard origin/main',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE }),
+        AGENT_COMMIT,
+      ],
+    },
+    'merge-introduced-discard': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      mainMoves: [
+        ...fixtureWrite({ 'pkg/b.test.ts': WT_BASE }),
+        'git add pkg/b.test.ts && git commit -qm main-adds-b',
+      ],
+      round: [
+        'git merge -q --no-commit --no-edit origin/main || true',
+        'git rm -qf pkg/b.test.ts',
+        'git commit -qm resolution',
+        AGENT_COMMIT,
+      ],
+    },
+    'side-branch-merge': {
+      files: { 'pkg/a.test.ts': WT_BASE },
+      round: [
+        'git checkout -qb side',
+        ...fixtureWrite({ 'pkg/a.test.ts': WT_BASE_MINUS_TWO }),
+        'git commit -qam side-weakens',
+        'git checkout -q feature',
+        'git merge -q --no-ff --no-edit side',
+        AGENT_COMMIT,
+      ],
+    },
+  };
+
+  const rejectsWeakening = (weaken, signal, opts = {}) => {
+    const r = runGate({ weaken, ...opts });
+    expect(r.status).toBe(1);
+    expect(r.outputs).toContain('outcome=failed');
+    // Retryable: the same-run repair pass can restore the coverage or
+    // record the evidence, so this must not burn the whole round.
+    expect(r.outputs).toContain('retryable=true');
+    expect(r.outputs).not.toContain('preexisting=true');
+    expect(r.rejection).toContain(signal);
+    // The remedy has to name the artifact, or the repair pass cannot act.
+    expect(r.rejection).toContain('test-weakening.json');
+    // Rejected BEFORE the expensive deterministic checks: a round that
+    // cannot be accepted must not spend twenty minutes proving it.
+    expect(r.stdout).not.toContain('Re-running deterministic checks');
+    return r;
+  };
+  const acceptsWithoutCharge = (weaken, opts = {}) => {
+    const r = runGate({ weaken, ...opts });
+    expect(r.status).toBe(0);
+    expect(r.outputs).toContain('outcome=fixed');
+    expect(r.rejection).toBe('');
+    expect(r.advisories).not.toContain('weakened or removed pre-existing');
+    expect(r.stdout).not.toContain('UNAVAILABLE');
+    return r;
+  };
+
+  it('rejects a round that removes assertions from a pre-existing test', () => {
+    const r = rejectsWeakening('assert', 'net 1 assertion(s) removed');
+    expect(r.rejection).toContain('pkg/a.test.ts');
+  });
+
+  it('rejects a skip marker added to a pre-existing test', () => {
+    // Assertion counts are identical on both sides — only the
+    // registration's enabled state moves.
+    rejectsWeakening('skip', 'pre-existing test registration(s) disabled');
+  });
+
+  it('rejects a deleted pre-existing test', () => {
+    rejectsWeakening('delete', 'test file deleted');
+  });
+
+  it('gates every status-0 weakening flow on the host probe', () => {
+    // Accepted rounds run the REAL script past the bite section's
+    // unconditional `mapfile`: on a bash without it (macOS ships 3.2) the
+    // spawn dies there before the semantics under test can execute, so
+    // each accepted-round test carries the host gate.
+    const self = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+    for (const title of [
+      'charges nothing to honest edits of a pre-existing test',
+      'accepts the weakening once the evidence is recorded, and surfaces it',
+      'renders only the entries that match a MEASURED weakening',
+      'neutralizes a comment-marker forged inside an agent-authored reason',
+      "attributes main's own changes crossing a merge to main, never to the round",
+      'does not charge non-test files or non-JS test edits',
+      "declares reachability a non-goal: dead code is the runner's business",
+      'judges deletions even when the measurement is unavailable',
+      'renders the qualifying reason when a thin one for the same path precedes it',
+    ]) {
+      const literal = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      expect(self).toMatch(
+        new RegExp(
+          `it\\.skipIf\\(!hasBashMapfile\\)\\(\\s*(?:'${literal}'|"${literal}")`,
+        ),
+      );
+    }
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'charges nothing to honest edits of a pre-existing test',
+    () => {
+      // Strictly more coverage.
+      acceptsWithoutCharge('add');
+      // The repo's environment-guard idioms are conditions, not skips.
+      acceptsWithoutCharge('skipif-guard');
+      acceptsWithoutCharge('ctx-skip-conditional');
+      // A brand-new todo registration is the round's own.
+      acceptsWithoutCharge('todo-new');
+      // A retitled test keeps its assertions and its enabled state.
+      acceptsWithoutCharge('rename');
+      // An assertion moved WITHIN a file nets zero, by contract.
+      acceptsWithoutCharge('move-within');
+      // Prettier reflow and a JSX-carrying assertion swap: the parser sees
+      // the same declared surface a text census mis-measured.
+      acceptsWithoutCharge('reflow');
+      acceptsWithoutCharge('jsx-swap');
+      // Delete then recreate STRONGER: the tip is the authority, not the
+      // commit sequence.
+      acceptsWithoutCharge('delete-readd-stronger');
+    },
+    120000,
+  );
+
+  it('charges the weakenings that hide from a text census', () => {
+    // A commented-out assertion, a string/regex/template decoy, a JSX
+    // text decoy: the parser counts executable statements, not tokens.
+    rejectsWeakening('comment-out', 'net 2 assertion(s) removed');
+    rejectsWeakening('string-decoy', 'net 1 assertion(s) removed');
+    rejectsWeakening('jsx-decoy', 'net 1 assertion(s) removed');
+    // A matcher-less expect() pins nothing.
+    rejectsWeakening('matcher-drop', 'net 1 assertion(s) removed');
+    // Every spelling of a disabled registration the parser can decode.
+    for (const shape of [
+      'computed-skip',
+      'options-skip',
+      'skipif-true',
+      'ctx-skip',
+    ]) {
+      rejectsWeakening(shape, 'pre-existing test registration(s) disabled');
+    }
+    // The early-return spelling of a skip.
+    rejectsWeakening('early-return', 'early return(s) added before assertions');
+  }, 120000);
+
+  it('charges registration-level weakening by title, not by net marker count', () => {
+    // Un-skipping one test never licenses silencing another: the net
+    // marker count is zero here and the gate still charges `a`.
+    rejectsWeakening('skip-swap', 'pre-existing test registration(s) disabled');
+    // Retitle-and-skip: no baseline title is disabled, but an enabled
+    // registration disappeared.
+    rejectsWeakening(
+      'rename-skip',
+      'net 1 enabled test registration(s) removed',
+    );
+  });
+
+  it('charges a weakening by the tip, whichever commit sequence produced it', () => {
+    // Delete then recreate WEAKER.
+    rejectsWeakening('delete-readd-weaker', 'net 1 assertion(s) removed');
+    // A pre-existing test replaced by a symlink is a zero surface.
+    rejectsWeakening('symlink', 'net 2 assertion(s) removed');
+    // A side branch merged into the round is the round's own authorship.
+    rejectsWeakening('side-branch-merge', 'net 1 assertion(s) removed');
+  });
+
+  it('judges non-JS test files by the deletion arm', () => {
+    rejectsWeakening('python-delete', 'test file deleted');
+    rejectsWeakening('rust-delete', 'test file deleted');
+    rejectsWeakening('spec-delete', 'test file deleted');
+  });
+
+  it('charges every weakened file and acknowledges per path', () => {
+    const r = rejectsWeakening('two-files', 'net 1 assertion(s) removed');
+    expect(r.rejection).toContain('pkg/a.test.ts');
+    expect(r.rejection).toContain('pkg/b.test.ts');
+    const half = runGate({
+      weaken: 'two-files',
+      workdirFiles: {
+        'test-weakening.json': JSON.stringify([
+          { path: 'pkg/a.test.ts', reason: WEAKEN_REASON },
+        ]),
+      },
+    });
+    expect(half.status).toBe(1);
+    expect(half.rejection).toContain('pkg/b.test.ts');
+    expect(half.rejection).not.toContain('pkg/a.test.ts');
+  });
+
+  it('uses no bash-4 construct ahead of the bite section (the bash-3.2 lane)', () => {
+    // The gate section runs before the bite section's mapfile — the first
+    // bash-4 boundary the host probe gates — so it must stay bash-3.2
+    // clean or the macOS lane dies before any verdict.
+    const start = reviewVerificationRunner.indexOf('# --- Test-weakening gate');
+    const end = reviewVerificationRunner.indexOf('\nmapfile ');
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    expect(reviewVerificationRunner.slice(start, end)).not.toMatch(
+      /mapfile|readarray|declare -A|\$\{[A-Za-z_]+(,,|\^\^)|\|&|;;&/,
+    );
+  });
+
+  it('acknowledges and renders a branch-controlled filename byte-safely', () => {
+    // A tab in the name must neither split the record nor forge text: the
+    // ack matches base64-encoded paths and the rendering sanitizes.
+    const r = rejectsWeakening('tab-name', 'net 1 assertion(s) removed');
+    expect(r.rejection).toContain('pkg/a?b.test.ts');
+    const acked = runGate({
+      weaken: 'tab-name',
+      workdirFiles: {
+        'test-weakening.json': JSON.stringify([
+          { path: 'pkg/a\tb.test.ts', reason: WEAKEN_REASON },
+        ]),
+      },
+    });
+    expect(acked.rejection).toBe('');
+    expect(acked.stdout).toContain(
+      'test weakening recorded and acknowledged: 1 file(s)',
+    );
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'accepts the weakening once the evidence is recorded, and surfaces it',
+    () => {
+      const r = runGate({
+        weaken: 'assert',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            { path: 'pkg/a.test.ts', reason: WEAKEN_REASON },
+          ]),
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.outputs).toContain('outcome=fixed');
+      // Recording it is not hiding it: the machine measurement and the
+      // agent's reason both ride into the round report for a human.
+      expect(r.advisories).toContain('weakened or removed pre-existing tests');
+      expect(r.advisories).toContain('本轮弱化或删除了既有测试');
+      expect(r.advisories).toContain('pkg/a.test.ts');
+      expect(r.advisories).toContain('net 1 assertion(s) removed');
+      expect(r.advisories).toContain('coverage moved to pkg/b.test.ts');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    'renders only the entries that match a MEASURED weakening',
+    () => {
+      // The ack file is agent-authored and otherwise unbounded: entries for
+      // files the round never touched would decide the size of a posted PR
+      // comment, and a repeated path would print the same claim N times.
+      const r = runGate({
+        weaken: 'assert',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            { path: 'pkg/a.test.ts', reason: WEAKEN_REASON },
+            { path: 'pkg/a.test.ts', reason: `${WEAKEN_REASON} (duplicate)` },
+            ...Array.from({ length: 50 }, (_, i) => ({
+              path: `pkg/never-touched-${i}.test.ts`,
+              reason: `${WEAKEN_REASON} padding entry number ${i}`,
+            })),
+          ]),
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.advisories).toContain('coverage moved to pkg/b.test.ts');
+      expect(r.advisories).not.toContain('never-touched');
+      expect(r.advisories).not.toContain('(duplicate)');
+      expect(
+        (r.advisories.match(/pkg\/a\.test\.ts/g) ?? []).length,
+      ).toBeLessThanOrEqual(2);
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    'renders the qualifying reason when a thin one for the same path precedes it',
+    () => {
+      const r = runGate({
+        weaken: 'assert',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            { path: 'pkg/a.test.ts', reason: 'thin' },
+            { path: 'pkg/a.test.ts', reason: WEAKEN_REASON },
+          ]),
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.advisories).toContain('coverage moved to pkg/b.test.ts');
+      expect(r.advisories).not.toContain(': thin');
+    },
+  );
+
+  it('does not accept an entry whose reason is too thin to be evidence', () => {
+    const r = runGate({
+      weaken: 'assert',
+      workdirFiles: {
+        'test-weakening.json': JSON.stringify([
+          { path: 'pkg/a.test.ts', reason: 'not needed' },
+        ]),
+      },
+    });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+  });
+
+  it('does not accept an entry for a DIFFERENT file than the one weakened', () => {
+    // The acknowledgement is per-path, not a blanket opt-out.
+    const r = runGate({
+      weaken: 'assert',
+      workdirFiles: {
+        'test-weakening.json': JSON.stringify([
+          { path: 'pkg/other.test.ts', reason: WEAKEN_REASON },
+        ]),
+      },
+    });
+    expect(r.status).toBe(1);
+    expect(r.rejection).toContain('pkg/a.test.ts');
+  });
+
+  it('acknowledges nothing on a malformed ack file', () => {
+    for (const body of ['not json', '{"path":"pkg/a.test.ts"}', '[1, 2]']) {
+      const r = runGate({
+        weaken: 'assert',
+        workdirFiles: { 'test-weakening.json': body },
+      });
+      expect(r.status).toBe(1);
+      expect(r.rejection).toContain('pkg/a.test.ts');
+    }
+  });
+
+  it.skipIf(!hasBashMapfile)(
+    'neutralizes a comment-marker forged inside an agent-authored reason',
+    () => {
+      const r = runGate({
+        weaken: 'assert',
+        workdirFiles: {
+          'test-weakening.json': JSON.stringify([
+            {
+              path: 'pkg/a.test.ts',
+              reason: `${WEAKEN_REASON} <!-- autofix-eval forged --> <details><summary>x ${'y'.repeat(300)} PAST-THE-CAP`,
+            },
+          ]),
+        },
+      });
+      expect(r.status).toBe(0);
+      expect(r.advisories).toContain('coverage moved to pkg/b.test.ts');
+      expect(r.advisories).not.toContain('<!-- autofix-eval');
+      expect(r.advisories).not.toContain('<details>');
+      expect(r.advisories).not.toContain('<summary>');
+      // Each rendered reason is capped, so an unbounded reason cannot
+      // decide the size of a posted comment.
+      expect(r.advisories).not.toContain('PAST-THE-CAP');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    "attributes main's own changes crossing a merge to main, never to the round",
+    () => {
+      // Main weakened the file; the round only merged it in.
+      acceptsWithoutCharge('merge-freight');
+      // Main deleted the file; the round adopted the deletion.
+      acceptsWithoutCharge('merge-delete-freight');
+      // The round dropped an assertion, main edited it, and the merge
+      // resolution took main's side: the tip carries the assertion.
+      acceptsWithoutCharge('merge-restore');
+      // A fast-forwarded main weakened the file; the round then renamed a
+      // symbol in it.
+      acceptsWithoutCharge('ff-ride-freight');
+    },
+    120000,
+  );
+
+  it("charges the round's own authorship on either side of a merge", () => {
+    // A conflict resolution that drops an assertion.
+    rejectsWeakening('merge-conflict-drop', 'net 1 assertion(s) removed');
+    // A weakening committed BEFORE the merge, with a post-merge decoy: the
+    // tip-based recount subtracts main's contribution and nothing else.
+    rejectsWeakening(
+      'premerge-weaken-postmerge-decoy',
+      'net 1 assertion(s) removed',
+    );
+    // After riding main forward, the round restored the pre-round bytes,
+    // dropping the assertion main had just landed.
+    rejectsWeakening('ff-ride-revert', 'net 1 assertion(s) removed');
+    // A merge resolution that discards a test main added during the round.
+    const r = rejectsWeakening('merge-introduced-discard', 'test file deleted');
+    expect(r.rejection).toContain('pkg/b.test.ts');
+  }, 120000);
+
+  it.skipIf(!hasBashMapfile)(
+    'does not charge non-test files or non-JS test edits',
+    () => {
+      // Files under a test directory that are not tests by name are not
+      // enumerated: a README or a render helper is not a test deletion.
+      const r = acceptsWithoutCharge('non-test-file-delete');
+      expect(r.stdout).not.toContain('test file deleted');
+      // A non-JS test file measures a zero surface: edits are not judged,
+      // only deletions are.
+      acceptsWithoutCharge('python-edit');
+      // Snapshots are out of scope: an obsolete one removed by `vitest -u`
+      // is routine bookkeeping.
+      acceptsWithoutCharge('snapshot-delete');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    "declares reachability a non-goal: dead code is the runner's business",
+    () => {
+      // Pinned as the documented boundary of the instrument, not as a
+      // guarantee: assertions wrapped in dead code still DECLARE the same
+      // surface. The package test run and the bite check judge execution.
+      acceptsWithoutCharge('dead-code');
+    },
+  );
+
+  it.skipIf(!hasBashMapfile)(
+    'judges deletions even when the measurement is unavailable',
+    () => {
+      // Without the staged counter the measured signals are skipped, and
+      // the gate says so; a whole-file deletion is proven by the pre-round
+      // -> tip pair alone.
+      const open = runGate({ weaken: 'assert', noCounter: true });
+      expect(open.status).toBe(0);
+      expect(open.stdout).toContain(
+        'test-weakening measurement UNAVAILABLE this round',
+      );
+      const closed = runGate({ weaken: 'delete', noCounter: true });
+      expect(closed.status).toBe(1);
+      expect(closed.rejection).toContain('test file deleted');
+      // Main's own deletion is still told apart by the merge base.
+      const freight = runGate({
+        weaken: 'merge-delete-freight',
+        noCounter: true,
+      });
+      expect(freight.status).toBe(0);
+      // An enumeration producer git refuses is read as UNAVAILABLE, never
+      // as "nothing to measure".
+      const refused = runGate({ weaken: 'assert', gitDiffFails: true });
+      expect(refused.status).toBe(0);
+      expect(refused.stdout).toContain(
+        'test-weakening measurement UNAVAILABLE this round',
+      );
+    },
+  );
+
+  it('stages the counter beside the gate runner, from the trusted base', () => {
+    expect(
+      workflow.match(
+        /cp \.github\/scripts\/count-test-surface\.mjs "\$\{RUNNER_TEMP\}\/count-test-surface\.mjs"/g,
+      ) ?? [],
+    ).toHaveLength(1);
+    expect(reviewVerificationRunner).toContain(
+      'WEAKEN_COUNTER="${RUNNER_TEMP}/count-test-surface.mjs"',
+    );
+  });
+});
+
+describe('count-test-surface: the declared test surface of a test file', () => {
+  // The instrument the test-weakening gate rests on. `count` is exercised
+  // in-process on a table of shapes (each row names what the parser must
+  // see through), and the CLI contract once through a real spawn; the
+  // attribution algebra of `measure` is exercised on blob files directly.
+  const surface = (source, path = 'a.test.ts') => {
+    const r = countTestSurface(source.join('\n'), path);
+    return {
+      a: r.assertions,
+      g: r.guards,
+      e: r.enabled,
+      d: r.disabled,
+    };
+  };
+
+  it.each([
+    [
+      'counts a called matcher chain once, however it is chained',
+      [
+        "it('a', () => {",
+        '  expect(one()).toBe(1);',
+        '  expect(x).not.toBe(1);',
+        '  expect(x).resolves.toEqual({ a: 1 });',
+        '});',
+      ],
+      { a: 3, g: 0, e: 1, d: [] },
+    ],
+    [
+      'counts awaited, returned and arrow-bodied assertions',
+      [
+        "it('a', async () => {",
+        '  await expect(p).rejects.toThrow();',
+        '  await vi.waitFor(() => expect(x).toBe(1));',
+        '  return expect(q).resolves.toBe(2);',
+        '});',
+      ],
+      { a: 3, g: 0, e: 1, d: [] },
+    ],
+    [
+      'counts expect.soft/poll with a matcher and expect.unreachable',
+      [
+        "it('a', () => {",
+        '  expect.soft(x).toBe(1);',
+        '  expect.poll(() => y).toBe(2);',
+        "  expect.unreachable('never');",
+        '});',
+      ],
+      { a: 3, g: 0, e: 1, d: [] },
+    ],
+    [
+      'counts assert() and assert.member() but not an uncalled member',
+      [
+        "it('a', () => {",
+        '  assert(x);',
+        '  assert.equal(a, b);',
+        '  const eq = assert.deepEqual;',
+        '  console.assert(x);',
+        '});',
+      ],
+      { a: 2, g: 0, e: 1, d: [] },
+    ],
+    [
+      'counts a supertest .expect( member call once per chain',
+      [
+        "it('a', async () => {",
+        "  await request(app).get('/').expect(200).expect('x', /y/);",
+        '});',
+      ],
+      { a: 1, g: 0, e: 1, d: [] },
+    ],
+    [
+      'does not count a bare expect(), a property-accessed matcher, or an argument',
+      [
+        "it('a', () => {",
+        '  expect(one());',
+        '  const dropped = expect(two()).toBe;',
+        '  expect.soft(x);',
+        '  fn(expect.anything(), expect.objectContaining({}));',
+        '});',
+      ],
+      { a: 0, g: 0, e: 1, d: [] },
+    ],
+    [
+      'sees through comments, strings, regex literals and templates',
+      [
+        "it('a', () => {",
+        '  /* expect(one()).toBe(1); */',
+        '  // expect(two()).toBe(2);',
+        "  const s = 'expect(x).toBe(1)';",
+        '  const r = /expect\\(x\\)\\.toBe\\(1\\)/;',
+        '  const t = `expect(${s}).toBe(1)`;',
+        '  expect(three()).toBe(3);',
+        '});',
+      ],
+      { a: 1, g: 0, e: 1, d: [] },
+    ],
+    [
+      'sees an assertion formatted across lines',
+      [
+        "it('a', () => {",
+        '  expect(',
+        '    one(),',
+        '  ).toBe(',
+        '    1,',
+        '  );',
+        '});',
+      ],
+      { a: 1, g: 0, e: 1, d: [] },
+    ],
+    [
+      'sees through JSX, in both directions',
+      [
+        "it('a', () => {",
+        "  expect(render(<Foo bar={1} />).getByText('x')).toBeTruthy();",
+        '  const html = <div>expect(two()).toBe(2)</div>;',
+        '});',
+      ],
+      { a: 1, g: 0, e: 1, d: [] },
+      'a.test.tsx',
+    ],
+    [
+      'reads every collector spelling of a disabled registration',
+      [
+        "it.skip('a', fn);",
+        "test.todo('b');",
+        "describe.concurrent.skip('c', fn);",
+        "it.skip.each([1])('d %s', fn);",
+        "it['skip']('e', fn);",
+        "it['\\x73kip']('f', fn);",
+        "it.\\u0073kip('g', fn);",
+        "it?.skip('h', fn);",
+        'it',
+        "  .skip('i', fn);",
+        "it.skip.each`table`('j', fn);",
+        "xit('k', fn);",
+        "xdescribe('l', fn);",
+        "suite.todo('m', fn);",
+      ],
+      {
+        a: 0,
+        g: 0,
+        e: 0,
+        d: [
+          'test:a',
+          'test:b',
+          'describe:c',
+          'test:d %s',
+          'test:e',
+          'test:f',
+          'test:g',
+          'test:h',
+          'test:i',
+          'test:j',
+          'test:k',
+          'describe:l',
+          'describe:m',
+        ],
+      },
+    ],
+    [
+      'reads a literal skipIf/runIf and a literal options object, not a condition',
+      [
+        "it.skipIf(true)('a', fn);",
+        "it.runIf(false)('b', fn);",
+        "it('c', { skip: true }, fn);",
+        "it('d', { 'todo': true }, fn);",
+        "it.each(getCases())('e', { skip: true }, fn);",
+        "it.skipIf(process.platform === 'win32')('f', fn);",
+        "it.runIf(cond)('g', fn);",
+        "it('h', { skip: cond }, fn);",
+        "it('i', opts, fn);",
+      ],
+      {
+        a: 0,
+        g: 0,
+        e: 4,
+        d: ['test:a', 'test:b', 'test:c', 'test:d', 'test:e'],
+      },
+    ],
+    [
+      'reads a body-level unconditional skip, not the condition-valued guard',
+      [
+        "it('a', (ctx) => { ctx.skip(); expect(x).toBe(1); });",
+        "it('b', () => { skip('reason'); });",
+        "it('c', function () { this.skip(true); });",
+        "it('d', () => { skip(process.platform === 'win32', 'reason'); expect(x).toBe(1); });",
+        "it('e', () => { skip(cond); });",
+      ],
+      { a: 2, g: 0, e: 2, d: ['test:a', 'test:b', 'test:c'] },
+    ],
+    [
+      "reads a bare early return ahead of a test body's assertions",
+      [
+        "it('a', () => {",
+        '  if (!process.env.X) {',
+        '    return;',
+        '  }',
+        '  expect(x).toBe(1);',
+        '});',
+        "it('b', () => { expect(x).toBe(1); return; });",
+        "it('c', () => { const h = (m) => { if (m) { return; } }; expect(x).toBe(1); });",
+        "it('d', () => { return expect(p).resolves.toBe(1); });",
+      ],
+      { a: 4, g: 1, e: 4, d: [] },
+    ],
+    [
+      'counts a declared surface, not a reachable one (documented non-goal)',
+      [
+        "it('a', () => { if (false) { expect(x).toBe(1); } });",
+        "it('b', () => { const unused = () => expect(x).toBe(1); });",
+      ],
+      { a: 2, g: 0, e: 2, d: [] },
+    ],
+    [
+      'measures a file that does not parse cleanly',
+      ["it('a', () => { expect(x).toBe(1) ; }} ) garbage <<<"],
+      { a: 1, g: 0, e: 1, d: [] },
+    ],
+  ])('%s', (_title, source, expected, path) => {
+    expect(surface(source, path)).toEqual(expected);
+  });
+
+  it('measures a zero surface for a non-JS test file', () => {
+    expect(
+      countTestSurface('def test_x():\n    assert 1\n', 'test_x.py'),
+    ).toEqual({
+      language: 'other',
+      assertions: 0,
+      guards: 0,
+      enabled: 0,
+      disabled: [],
+      enabledTitles: [],
+    });
+  });
+
+  it('serves the count and measure modes over the CLI the gate uses', () => {
+    const counter = resolve('.github/scripts/count-test-surface.mjs');
+    const counted = spawnSync('node', [counter, 'count', 'pkg/a.test.ts'], {
+      input: "it('a', () => {\n  expect(one()).toBe(1);\n});\n",
+      encoding: 'utf8',
+    });
+    expect(counted.status).toBe(0);
+    expect(JSON.parse(counted.stdout)).toMatchObject({
+      language: 'ts',
+      assertions: 1,
+      enabled: 1,
+    });
+    const dir = mkdtempSync(join(tmpdir(), 'surface-'));
+    try {
+      const blob = (name, lines) => {
+        const p = join(dir, name);
+        writeFileSync(p, `${lines.join('\n')}\n`);
+        return p;
+      };
+      const manifest = join(dir, 'm.json');
+      writeFileSync(
+        manifest,
+        JSON.stringify({
+          path: 'pkg/a.test.ts',
+          tip: blob('tip', ["it('a', () => { expect(x).toBe(1); });"]),
+          pre: blob('pre', [
+            "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+          ]),
+          events: [],
+        }),
+      );
+      const measured = spawnSync('node', [counter, 'measure', manifest], {
+        encoding: 'utf8',
+      });
+      expect(measured.status).toBe(0);
+      expect(JSON.parse(measured.stdout)).toEqual({
+        language: 'ts',
+        assertions: -1,
+        guards: 0,
+        enabled: 0,
+        newlyDisabled: [],
+        baselinePresent: true,
+      });
+      const unknown = spawnSync('node', [counter, 'bogus'], {
+        encoding: 'utf8',
+      });
+      expect(unknown.status).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("subtracts main's contribution across events, and only that", () => {
+    const dir = mkdtempSync(join(tmpdir(), 'surface-'));
+    try {
+      const blob = (name, lines) => {
+        const p = join(dir, name);
+        writeFileSync(p, `${lines.join('\n')}\n`);
+        return p;
+      };
+      const two = blob('two', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+      ]);
+      const one = blob('one', ["it('a', () => { expect(x).toBe(1); });"]);
+      const oneSkipped = blob('one-skipped', [
+        "it.skip('a', () => { expect(x).toBe(1); });",
+      ]);
+      const twoPlusB = blob('two-b', [
+        "it('a', () => { expect(x).toBe(1); expect(y).toBe(2); });",
+        "it.todo('b');",
+      ]);
+      const m = (o) => measureTestSurface({ path: 'pkg/a.test.ts', ...o });
+      // Main removed the assertion (the event carries it); the round only
+      // merged: nothing to charge.
+      expect(
+        m({ tip: one, pre: two, events: [{ before: two, after: one }] }),
+      ).toMatchObject({ assertions: 0, baselinePresent: true });
+      // Main added the file; the round dropped it: the baseline holds the
+      // file and the round removed its whole surface.
+      expect(
+        m({ tip: null, pre: null, events: [{ before: null, after: two }] }),
+      ).toMatchObject({ assertions: -2, baselinePresent: true });
+      // Main deleted the file; the round adopted it: no baseline to weaken.
+      expect(
+        m({ tip: null, pre: two, events: [{ before: two, after: null }] }),
+      ).toMatchObject({ assertions: 0, baselinePresent: false });
+      // The round disabled `a`; main's later event did not touch its state.
+      expect(
+        m({
+          tip: oneSkipped,
+          pre: one,
+          events: [{ before: oneSkipped, after: oneSkipped }],
+        }),
+      ).toMatchObject({ enabled: -1, newlyDisabled: ['test:a'] });
+      // Main itself disabled `a` across the event: not the round's doing.
+      expect(
+        m({
+          tip: oneSkipped,
+          pre: one,
+          events: [{ before: one, after: oneSkipped }],
+        }),
+      ).toMatchObject({ enabled: 0, newlyDisabled: [] });
+      // A todo registration that is new at the tip is the round's own.
+      expect(m({ tip: twoPlusB, pre: two, events: [] })).toMatchObject({
+        enabled: 0,
+        newlyDisabled: [],
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('review-address: regression accounting (af-155)', () => {
+  // The loop had no notion of a regression at all: the consecutive-failure
+  // brake counts "rounds that pushed nothing", so a round that pushed a fix
+  // and turned CI red counted as a SUCCESS and reset the counter. The gate
+  // cannot close this — it runs `--changed` tests for the touched workspaces
+  // and defers full regression to the PR's own CI, whose verdict does not
+  // exist until long after the job ended. So the charge is measured on the
+  // NEXT round, from markers, and these tests run the real block.
+  const script = prepareBranchAndFeedbackStep
+    .match(
+      /# ---- regression accounting[\s\S]*?echo "regressed_round=\$\{REGRESSED_ROUND\}" >> "\$\{GITHUB_OUTPUT\}"\n/,
+    )?.[0]
+    ?.replace(/^ {10}/gm, '');
+  it('extracts the block it tests', () => {
+    expect(script).toBeTruthy();
+  });
+
+  const HEAD = 'a'.repeat(40);
+  const OTHER = 'b'.repeat(40);
+  const run = ({
+    checks,
+    comments = [],
+    checkedOutHead = HEAD,
+    // The commit the rollup describes (headRefOid read with the rollup).
+    checksHead = HEAD,
+    window = 'w1',
+  }) => {
+    const dir = mkdtempSync(join(tmpdir(), 'af148-'));
+    try {
+      writeFileSync(join(dir, 'checks.json'), JSON.stringify(checks));
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+      const outFile = join(dir, 'out');
+      writeFileSync(outFile, '');
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\nWORKDIR=${JSON.stringify(dir)}\nAUTOFIX_BOT=qwen-code-dev-bot\nDISPATCH_STATUS_CONTEXT='qwen-autofix/dispatch-pending'\nCHECKED_OUT_HEAD='${checkedOutHead}'\nROLLUP_HEAD='${checksHead}'\nWINDOW='${window}'\nPR=1\nGITHUB_OUTPUT=${JSON.stringify(outFile)}\n${script}`,
+        ],
+        { encoding: 'utf8' },
+      );
+      const out = readFileSync(outFile, 'utf8');
+      return {
+        state: out.match(/check_state=(\S*)/)?.[1] ?? '',
+        regressed: out.match(/regressed_round=(\S*)/)?.[1] ?? '',
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const pushMarker = ({
+    round = 3,
+    head = HEAD,
+    pre = 'green',
+    key = 'w1',
+  }) => [
+    {
+      user: { login: 'qwen-code-dev-bot' },
+      created_at: '2026-01-01T00:00:00Z',
+      body: `report\n<!-- autofix-push round=${round} head=${head} pre=${pre} key=${key} -->`,
+    },
+  ];
+  const RED = [
+    {
+      name: 'Test',
+      status: 'COMPLETED',
+      conclusion: 'FAILURE',
+      workflowName: 'Qwen Code CI',
+    },
+  ];
+  const GREEN = [
+    {
+      name: 'Test',
+      status: 'COMPLETED',
+      conclusion: 'SUCCESS',
+      workflowName: 'Qwen Code CI',
+    },
+  ];
+
+  it('classifies the head state the marker records', () => {
+    expect(run({ checks: GREEN }).state).toBe('green');
+    expect(run({ checks: RED }).state).toBe('red');
+    // A check still RUNNING is not green: a round pushing while CI is
+    // mid-flight must never be able to claim the head was clean, or a
+    // pre-existing failure that had not landed yet gets charged to it.
+    expect(
+      run({
+        checks: [{ name: 'Test', status: 'IN_PROGRESS', conclusion: null }],
+      }).state,
+    ).toBe('pending');
+    expect(
+      run({
+        checks: [
+          { __typename: 'StatusContext', context: 'dco', state: 'PENDING' },
+        ],
+      }).state,
+    ).toBe('pending');
+    // No checks at all is unknown, never green.
+    expect(run({ checks: [] }).state).toBe('none');
+    // The loop's OWN dispatch-pending commit status is a StatusContext with
+    // no workflowName: excluded by its exact context value, so a head
+    // carrying nothing but the loop's stamp is still unknown, while a
+    // third-party status (dco above) keeps counting.
+    expect(
+      run({
+        checks: [
+          {
+            __typename: 'StatusContext',
+            context: 'qwen-autofix/dispatch-pending',
+            state: 'SUCCESS',
+          },
+        ],
+      }).state,
+    ).toBe('none');
+    expect(
+      run({
+        checks: [
+          {
+            __typename: 'StatusContext',
+            context: 'qwen-autofix/dispatch-pending',
+            state: 'PENDING',
+          },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('green');
+    // A check with no verdict — a required context that never reported, a
+    // stale one, a run that never started — is pending, never green.
+    for (const check of [
+      { __typename: 'StatusContext', context: 'required', state: 'EXPECTED' },
+      { name: 'a', status: 'COMPLETED', conclusion: 'STALE' },
+      { name: 'a', status: 'COMPLETED', conclusion: 'STARTUP_FAILURE' },
+    ]) {
+      expect(run({ checks: [check, ...GREEN] }).state).toBe('pending');
+    }
+    // The rollup is read live, after the checkout: a rollup describing any
+    // other commit says nothing about the checked-out head.
+    expect(run({ checks: GREEN, checksHead: OTHER }).state).toBe('none');
+    expect(run({ checks: RED, checksHead: OTHER }).state).toBe('none');
+    // CANCELLED is not a failure here, matching the scan's own N_RED_NOW
+    // filter — the two must agree or a cancelled run selects a round the
+    // classifier then charges to the bot.
+    expect(
+      run({
+        checks: [{ name: 'a', status: 'COMPLETED', conclusion: 'CANCELLED' }],
+      }).state,
+    ).toBe('green');
+    // The loop's OWN lanes going red is its business, not the PR's — the
+    // charge verdict excludes every own-lane workflow (the canonical
+    // five-name filter), with no review-address carve-out: a failed prior
+    // address round is feedback for the next round, not a regression the
+    // pushed code introduced, and an in-flight own check is observer
+    // noise on the triggers whose suite attaches to the PR head. The
+    // carve-out survives at the FEEDBACK sites (N_FAILED_CHECKS /
+    // N_RED_NOW).
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-scan',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('green');
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address (1)',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('green');
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address (1)',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+        ],
+      }).state,
+    ).toBe('none');
+    // A red AUXILIARY lane of the fleet is the loop's own business too.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-pr',
+            status: 'COMPLETED',
+            conclusion: 'FAILURE',
+            workflowName: '🧐 Qwen Pull Request Review',
+          },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('green');
+    // The round's own in-flight check must not hold the verdict pending.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address (1)',
+            status: 'IN_PROGRESS',
+            conclusion: null,
+            workflowName: 'Qwen Autofix',
+          },
+          ...GREEN,
+        ],
+      }).state,
+    ).toBe('green');
+  });
+
+  it('charges the prior round only when all four facts hold', () => {
+    // The whole point: green head in, red head out, nothing else moved.
+    expect(run({ checks: RED, comments: pushMarker({}) }).regressed).toBe('3');
+    // The head MOVED — a human push or a base update owns the red, not the
+    // bot's round.
+    expect(
+      run({ checks: RED, comments: pushMarker({ head: OTHER }) }).regressed,
+    ).toBe('');
+    // ...and the equality binds the rollup too: a red rollup for a commit
+    // pushed after the checkout is not the checked-out head's red.
+    expect(
+      run({ checks: RED, checksHead: OTHER, comments: pushMarker({}) })
+        .regressed,
+    ).toBe('');
+    // The round pushed onto an already-red head: it did not create this.
+    expect(
+      run({ checks: RED, comments: pushMarker({ pre: 'red' }) }).regressed,
+    ).toBe('');
+    expect(
+      run({ checks: RED, comments: pushMarker({ pre: 'pending' }) }).regressed,
+    ).toBe('');
+    expect(
+      run({ checks: RED, comments: pushMarker({ pre: 'none' }) }).regressed,
+    ).toBe('');
+    // A re-arm moved the window: the old round is not this window's charge.
+    expect(
+      run({ checks: RED, comments: pushMarker({ key: 'w0' }) }).regressed,
+    ).toBe('');
+    // Head is green now — nothing to charge.
+    expect(run({ checks: GREEN, comments: pushMarker({}) }).regressed).toBe('');
+    // A failed own address run beside a green suite is feedback, not a
+    // regression: the charge path never bills the prior round for it.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address (1)',
+            status: 'COMPLETED',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+          ...GREEN,
+        ],
+        comments: pushMarker({}),
+      }).regressed,
+    ).toBe('');
+    // Same for a red auxiliary lane of the fleet.
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-pr',
+            status: 'COMPLETED',
+            conclusion: 'FAILURE',
+            workflowName: '🧐 Qwen Pull Request Review',
+          },
+          ...GREEN,
+        ],
+        comments: pushMarker({}),
+      }).regressed,
+    ).toBe('');
+    // No push marker at all (a no-op round pushed nothing that could
+    // regress): fail open.
+    expect(run({ checks: RED, comments: [] }).regressed).toBe('');
+    // A marker forged by anyone other than the bot is not evidence.
+    expect(
+      run({
+        checks: RED,
+        comments: pushMarker({}).map((c) => ({
+          ...c,
+          user: { login: 'someone-else' },
+        })),
+      }).regressed,
+    ).toBe('');
+  });
+
+  it('reads the NEWEST push marker, not the first', () => {
+    const [older] = pushMarker({ round: 2, head: OTHER });
+    const [newer] = pushMarker({ round: 5, head: HEAD });
+    expect(
+      run({
+        checks: RED,
+        comments: [
+          { ...older, created_at: '2026-01-01T00:00:00Z' },
+          { ...newer, created_at: '2026-01-02T00:00:00Z' },
+        ],
+      }).regressed,
+    ).toBe('5');
+  });
+
+  it('stamps the push marker on the pushed report and nowhere else', () => {
+    // Only an ACTED round can regress, so only the pushed report carries
+    // autofix-push — and it names the PUSHED sha, not REPORT_HEAD (which
+    // deliberately records the PRE-round head for the redcheck marker).
+    expect(pushAndReportScript).toContain(
+      '<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->',
+    );
+    // A salvage-merged branch move means the pushed head did not start from
+    // the head prepare classified: the premise is stamped unknown.
+    expect(pushAndReportScript).toContain(
+      "[[ \"${PUSH_RACE_MERGED}\" == 'true' ]] && PUSH_PRE='none'",
+    );
+    // The emitter's headline shape and the brake's reader agree on where
+    // the round number sits.
+    expect(pushAndReportScript).toContain(
+      'Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS})',
+    );
+    expect(workflow).toContain('[[ "${H}" =~ \\(round\\ ([0-9]+)/ ]]');
+    expect(
+      '🤖 Addressed the latest review feedback (round 12/100). What changed'.match(
+        /\(round ([0-9]+)\//,
+      )?.[1],
+    ).toBe('12');
+    expect(pushAndReportScript).toContain('PUSHED_HEAD="$(git rev-parse HEAD');
+    // headRefOid rides the same read as the rollup, so the classifier can
+    // bind its verdict to the commit the rollup describes.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '--json statusCheckRollup,headRefOid',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'ROLLUP_HEAD="$(jq -r \'.headRefOid // ""\' <<< "${PR_ROLLUP}"',
+    );
+    expect(
+      (pushAndReportScript.match(/<!-- autofix-push /g) ?? []).length,
+    ).toBe(1);
+    // The OBSERVATION rides every report shape: a run of failures after a
+    // regressing push must not lose the record.
+    expect(
+      (pushAndReportScript.match(/<!-- autofix-regression round=/g) ?? [])
+        .length,
+    ).toBe(2);
+    expect(reviewAddressReportStep).toContain(
+      '<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->',
+    );
+    // The visible disclosure rides beside the marker on every report shape
+    // — pushed, no-op and failure — not only the pushed one.
+    expect(
+      (pushAndReportScript.match(/Regression charged to round/g) ?? []).length,
+    ).toBe(2);
+    expect(reviewAddressReportStep).toContain('Regression charged to round');
+    // Both report steps receive the charge; only the push step (the marker
+    // emitter) reads the head state.
+    expect(
+      (
+        workflow.match(
+          /REGRESSED_ROUND: '\$\{\{ steps\.prepare\.outputs\.regressed_round \}\}'/g,
+        ) ?? []
+      ).length,
+    ).toBe(2);
+    expect(
+      (
+        workflow.match(
+          /CHECK_STATE: '\$\{\{ steps\.prepare\.outputs\.check_state \}\}'/g,
+        ) ?? []
+      ).length,
+    ).toBe(1);
   });
 });
 

@@ -486,9 +486,27 @@ Two boundaries hold regardless of what any feedback asks for:
 - Deleting or weakening tests requires content evidence, not an author's
   say-so: it is sound only when the pinned behavior itself is wrong (show the
   probe that proves the correct behavior) or the coverage demonstrably
-  survives in a named surviving test. State that evidence in the summary —
-  the gate appends its own machine-measured advisory listing every deleted
-  test to the round report, and a maintainer will read the two side by side.
+  survives in a named surviving test. State that evidence in the summary AND
+  record it machine-readably: the gate parses every pre-existing test file
+  (by name: `*.test.*`, `*.spec.*`, `test_*.py`, Rust test-file shapes) and
+  REJECTS the round when its declared test surface shrank — the file was
+  deleted, statement-level assertions were removed, a test or describe that
+  was enabled is now disabled by any spelling (`.skip`/`.todo`/`.fails`,
+  `xit`, a literal `skipIf(true)`/`runIf(false)`, `{ skip: true }`, a
+  body-level `skip()`/`ctx.skip()`), enabled registrations were removed, or
+  a bare early `return` was added ahead of a test's assertions — unless each
+  such file is named in `<workdir>/test-weakening.json`, a JSON array of
+  `{"path": "<file>", "reason": "<evidence>"}` whose reason is at least 40
+  characters. Condition-valued environment guards (`.skipIf(cond)`,
+  `skip(cond, reason)`), snapshot churn, and a brand-new `it.todo` are not
+  weakening and need no entry; an assertion moved WITHIN a file nets zero
+  and needs none either, while one moved to another file does (name its new
+  home as the evidence). Main's own changes crossing a merge are attributed
+  to main, never to the round. The gate checks that the claim EXISTS, not
+  that it is right — a maintainer reads each reason against the diff in the
+  round report, alongside the gate's own machine-measured advisory. Never
+  write an entry to buy silence for a weakening you cannot justify: restore
+  the assertion instead.
 
 The gate also measures a deny-by-default FOOTPRINT: any area (declared
 workspace, top-level directory, or root file) a round touches that the PR
@@ -558,6 +576,9 @@ Finish with exactly one outcome:
   disposition and the reason in a sentence or two, plus the question you need
   answered when you escalated. Each body is bilingual per GitHub Actions Rules.
   Omit the file when every inline finding was resolved.
+  Also write `<workdir>/test-weakening.json` when this round deleted or
+  weakened any pre-existing test, per the test-evidence boundary above; omit
+  it otherwise.
 - No change: write `<workdir>/no-action.md` (bilingual per GitHub Actions Rules).
 - Stopped by the growth brake: write `<workdir>/handoff.md` per the
   not-converging rule (English-only, no details block) — and commit nothing.
