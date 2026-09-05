@@ -103,7 +103,11 @@ const SHARED_ACCESS_FIELD_KEYS = new Set([
   'allowedUsers',
   'groupPolicy',
 ]);
-const SHARED_SESSION_FIELD_KEYS = new Set(['sessionScope', 'multiSession']);
+const SHARED_SESSION_FIELD_KEYS = new Set([
+  'sessionScope',
+  'multiSession',
+  'instructions',
+]);
 
 const SHARED_FIELD_LABEL_KEYS: Record<string, string> = {
   senderPolicy: 'channels.editor.field.shared.senderPolicy',
