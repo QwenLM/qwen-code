@@ -1937,13 +1937,17 @@ exit 1`;
         h.includes('Could not produce a passing fix for this feedback') ||
         h.includes('deferred this item to a human under instruction') ||
         h.includes('wrote a handoff but left a dirty workspace') ||
-        h.includes('wrote a handoff but the round HAS a commit'),
+        h.includes('wrote a handoff but the round HAS a commit') ||
+        // #10110: the report step held its stale-base update-branch because
+        // a review-pr was in flight; the loop retries next scan, so the
+        // shepherd must read it as a transient stop, never a terminal one.
+        h.includes('deferred a stale-base refresh'),
     );
     const unclassified = headlines.filter(
       (h) => !terminal.includes(h) && !transient.includes(h),
     );
     expect(terminal.length).toBe(5);
-    expect(transient).toHaveLength(7);
+    expect(transient).toHaveLength(8);
     expect(unclassified).toEqual([]);
     const matches = (h) =>
       execFileSync('jq', ['-rn', '--arg', 'b', h, `$b | test("${reasonRe}")`], {
