@@ -420,31 +420,40 @@ if [[ -z "${ISSUE_NUM}" || "${ISSUE_NUM}" == 'null' ]]; then
   # The assignment below notifies the author only when GitHub accepts it;
   # external contributors are NOT assignable, so also cc them in the body —
   # the mention is what actually reaches them. The login is charset-validated
-  # above, so this deliberate mention cannot inject anything else.
+  # above, so this deliberate mention cannot inject anything else. Evaluated
+  # ONCE and reused below: a second copy of the condition could drift, cc'ing
+  # an author in the body that the assignment then declines.
   CC=''
+  ASSIGNABLE=0
   if [[ -n "${PR_AUTHOR}" && "${PR_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then
     CC=" cc @${PR_AUTHOR}."
+    ASSIGNABLE=1
   fi
   BODY="${MARKER}"$'\n\n'"Verified review findings from ${CONTEXT} whose fixes lie outside that PR's footprint, deferred by the autofix loop for follow-up.${CC} Each rc: item links back to its original review comment. A maintainer or the PR author can turn any item into its own issue/PR (or apply the ready-for-agent flow) — nothing here is scheduled automatically."$'\n\n'"${NEW_LINES}"
   gh_err_reset
-  NUM=''
-  if [[ -n "${PR_AUTHOR}" && "${PR_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then
-    NUM="$(gh api "repos/${REPO}/issues" \
-      -f title="${CREATE_TITLE}" \
-      -f body="${BODY}" \
-      -f "assignees[]=${PR_AUTHOR}" --jq '.number' 2> "${GH_ERR:-/dev/null}")" || {
-      # An unassignable author (no repo access, assignment restrictions)
-      # must not lose the findings: retry once without the assignment
-      # before declaring them lost.
-      gh_err_reset
-      NUM="$(gh api "repos/${REPO}/issues" \
-        -f title="${CREATE_TITLE}" \
-        -f body="${BODY}" --jq '.number' 2> "${GH_ERR:-/dev/null}")" || NUM=''
-    }
-  else
-    NUM="$(gh api "repos/${REPO}/issues" \
-      -f title="${CREATE_TITLE}" \
-      -f body="${BODY}" --jq '.number' 2> "${GH_ERR:-/dev/null}")" || NUM=''
+  # ONE create call, never retried. POST /repos/{owner}/{repo}/issues is not
+  # idempotent, and the failures that reach a retry are the ambiguous ones —
+  # a connection reset, a gateway 502, a read timeout after the server already
+  # committed — so re-POSTing can mint a second tracking issue carrying the
+  # same marker and title. The next round's newest-first lookup adopts the
+  # newer one and the first is orphaned forever, publicly duplicating every
+  # finding while this round logs clean success. Same rule as the lookup cap
+  # above: creating a duplicate is worse than deferring persistence one round,
+  # so the failure path here is the loud LOST warning below, not another POST.
+  NUM="$(gh api "repos/${REPO}/issues" \
+    -f title="${CREATE_TITLE}" \
+    -f body="${BODY}" --jq '.number' 2> "${GH_ERR:-/dev/null}")" || NUM=''
+  if [[ -n "${NUM}" && "${ASSIGNABLE}" == 1 ]]; then
+    # Assignment is a separate metadata call: it can never mint a second
+    # issue, and it is where GitHub puts it anyway — assignees on the create
+    # call are silently dropped for users without push access, so for the
+    # external contributors this branch exists for the create always returned
+    # 201 unassigned. Failure only warns (persistence already succeeded) and
+    # the body's cc mention is what actually reaches them.
+    gh_err_reset
+    gh api "repos/${REPO}/issues/${NUM}/assignees" -f "assignees[]=${PR_AUTHOR}" \
+      > /dev/null 2> "${GH_ERR:-/dev/null}" \
+      || echo "::warning::could not assign deferred-findings issue #${NUM} to ${PR_AUTHOR} ($(gh_reason)); the body's cc mention still notifies them"
   fi
   if [[ -n "${NUM}" ]]; then
     echo "🗂 deferred findings tracked in new issue #${NUM} (${KEPT} of ${TOTAL_NEW} new)"
