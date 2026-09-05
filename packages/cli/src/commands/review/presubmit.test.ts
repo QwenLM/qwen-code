@@ -415,6 +415,11 @@ describe('presubmitCommand', () => {
     ghApiAllMock.mockReturnValue(comments);
     ghApiMock.mockReturnValue(null);
     readFileSyncMock.mockReturnValue(JSON.stringify(newFindings));
+    // Per CALL, not only per test: a cell that runs several shapes reads
+    // the report of ITS run, not the first report written in the test —
+    // with the spy left uncleared, every later shape in a loop returned
+    // the first shape's report and passed vacuously (#9940 review, audit).
+    writeFileSyncMock.mockClear();
     const handler = presubmitCommand.handler;
     if (!handler) throw new Error('presubmit handler missing');
     await handler({
@@ -1298,6 +1303,47 @@ describe('presubmitCommand', () => {
         expect(matched).toEqual(['R1-3']);
         expect(result.existingComments.total).toBe(2);
       }
+    });
+
+    it('matches a non-canonical id spelling to the canonical wanted id, and reads no id off a code block (#9940 review, audit)', async () => {
+      // `R03-2:` in a posted comment names R3-2 — one spelling for every
+      // join, or the re-post is a plain overlap and dedup-dropped.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** R03-2: eq-form rescue asymmetry _— model via Qwen Code /review (v0.21.3)_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+      // An attribution-off post whose first line is an indented code block
+      // carries no claim — not a re-post target (the code merely starts
+      // with an id token).
+      const code = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '\n\n    R3-2: eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(code.existingComments.byBucket.repost).toBe(0);
+      expect(code.existingComments.byBucket.overlap).toBe(1);
+    });
+
+    it('reports a match under the spelling the findings file wrote — the orchestrator exempts by that id (#9940 review, audit 2)', async () => {
+      const result = await presubmitWithComments(
+        [CARRIED_COMMENT],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R03-2' }],
+      );
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(
+        expect.arrayContaining(['R03-2', 'R3-2']),
+      );
     });
 
     it('marks an id-matched overlap comment as a re-post target', async () => {

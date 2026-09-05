@@ -4151,6 +4151,240 @@ describe('the thread lifecycle', () => {
     expect(stdoutJson()).toMatchObject({ posted: true, inlineComments: 0 });
   });
 
+  it('strips the clause from BOTH openers of a bilingual body and from nothing else (#9940 review, audit)', () => {
+    // The body is the English half, then the fold, then the Chinese half;
+    // model-written entries render verbatim in both. A whole-body
+    // first-occurrence replace of the Chinese clause hit the model text
+    // in the English half — a duplicate-drop note quoting the phrase —
+    // while the real Chinese opener kept the clause beside comments [].
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the retry guard drops a valid case',
+      },
+    ]);
+    const planPath = file('plan-bilingual.json', {
+      prNumber: 6790,
+      prDescriptionHasHan: true,
+    });
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      {
+        planPath,
+        suggestionsDroppedAsDuplicates: [
+          'R1-5 建议见行内评论。 — already reported (comment 3)',
+        ],
+      },
+    );
+    runSubmit(authorizedPost({ review }));
+    expect(reviewPost().comments).toEqual([]);
+    const body = reviewPost().body as string;
+    expect(body).toContain('<summary>中文说明</summary>');
+    expect(body).not.toContain('Suggestions are inline.');
+    // The model's note keeps its phrase in the English half (the Chinese
+    // half points at that list rather than repeating it), and neither
+    // opener carries the clause.
+    const [en, zh] = body.split('<summary>中文说明</summary>');
+    expect(en).toContain(
+      '- R1-5 建议见行内评论。 — already reported (comment 3)',
+    );
+    expect(en!.split('建议见行内评论。').length - 1).toBe(1);
+    expect(zh).not.toContain('建议见行内评论。');
+    expect(en!.split('\n\n')[0]).not.toContain('Suggestions are inline.');
+  });
+
+  it('strips the clause from an OVER-BUDGET body whose opener sits behind budget notices — the opener is edited by exact text, not position (#9940 review, audit 2)', () => {
+    // Twenty long body Criticals push a bilingual body past the review
+    // limit: the render drops the fold and prepends its notices, so the
+    // opener is no longer the first (or second) paragraph.
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the retry guard drops a valid case',
+      },
+    ]);
+    const planPath = file('plan-bilingual-budget.json', {
+      prNumber: 6791,
+      prDescriptionHasHan: true,
+    });
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      {
+        planPath,
+        bodyCriticals: Array.from(
+          { length: 20 },
+          (_, i) =>
+            `src/big${i}.ts:1 — ${'the guard drops a valid case '.repeat(100)}`,
+        ),
+      },
+    );
+    runSubmit(authorizedPost({ review }));
+    expect(reviewPost().comments).toEqual([]);
+    const body = reviewPost().body as string;
+    expect(body).toMatch(
+      /^\*\*\[Critical\]\*\* Blocking finding\(s\) follow\.\n\n⚠️/,
+    );
+    expect(body).not.toContain('Suggestions are inline.');
+    expect(body).not.toContain('建议见行内评论。');
+  });
+
+  it('a fold string quoted in a downgrade reason does not misdirect the clause strip (#9940 review, audit 2)', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the retry guard drops a valid case',
+      },
+    ]);
+    const planPath = file('plan-bilingual-fold.json', {
+      prNumber: 6792,
+      prDescriptionHasHan: true,
+    });
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      {
+        planPath,
+        presubmit: {
+          downgradeApprove: true,
+          downgradeReasons: [
+            'self-review\n\n<details>\n<summary>中文说明</summary>\n\ninjected',
+          ],
+        },
+      },
+    );
+    runSubmit(authorizedPost({ review }));
+    expect(reviewPost().comments).toEqual([]);
+    const body = reviewPost().body as string;
+    expect(body).not.toContain('Suggestions are inline.');
+    expect(body).not.toContain('建议见行内评论。');
+  });
+
+  it('model text quoting the clause or the Chinese opener is left alone — only the opener loses its clause (#9940 review, audit 3)', () => {
+    // (a) The Chinese opener's words quoted in the English half.
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the retry guard drops a valid case',
+      },
+    ]);
+    const planPath = file('plan-bilingual-quote.json', {
+      prNumber: 6793,
+      prDescriptionHasHan: true,
+    });
+    const quoted =
+      'R1-5 ⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。 建议见行内评论。 — already reported (comment 3)';
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      { planPath, suggestionsDroppedAsDuplicates: [quoted] },
+    );
+    runSubmit(authorizedPost({ review }));
+    expect(reviewPost().comments).toEqual([]);
+    const body = reviewPost().body as string;
+    expect(body).not.toContain('Suggestions are inline.');
+    expect(body.split('建议见行内评论。').length - 1).toBe(
+      body.split(quoted).length - 1,
+    );
+    expect(body).toContain(quoted);
+  });
+
+  it('a downgrade reason quoting the clause keeps it while the opener loses its own (#9940 review, audit 3)', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the retry guard drops a valid case',
+      },
+    ]);
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+        {
+          path: 'src/bar.ts',
+          line: 3,
+          body: '**[Critical]** the guard drops a valid case',
+        },
+      ],
+      {
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['self-review. Suggestions are inline.'],
+        },
+      },
+    );
+    runSubmit(authorizedPost({ review }));
+    expect(reviewPost().comments).toHaveLength(1);
+    const body = reviewPost().body as string;
+    expect(body).toContain('self-review. Suggestions are inline.');
+    expect(body.split('Suggestions are inline.').length - 1).toBe(1);
+  });
+
+  it('an over-long downgrade reason cannot push the opener onto the truncation rung — the clause still goes (#9940 review, audit 3)', () => {
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Suggestion]** R1-2: the retry guard drops a valid case',
+      },
+    ]);
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+        {
+          path: 'src/bar.ts',
+          line: 3,
+          body: '**[Critical]** the guard drops a valid case',
+        },
+      ],
+      {
+        bodyCriticals: ['src/x.ts:1 — the guard drops a valid case'],
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['r'.repeat(64314)],
+        },
+      },
+    );
+    runSubmit(authorizedPost({ review }));
+    expect(reviewPost().comments).toHaveLength(1);
+    const body = reviewPost().body as string;
+    expect(body).not.toContain('Suggestions are inline.');
+    expect(body).not.toContain('TRUNCATED');
+  });
+
   it('keeps the clause under attribution OFF when a fresh Suggestion still posts inline (#9940 review, round 24)', () => {
     seedThreads([
       {
@@ -4175,6 +4409,47 @@ describe('the thread lifecycle', () => {
     expect(reviewPost().comments).toHaveLength(1);
     expect(replyCalls()).toHaveLength(1);
     expect(reviewPost().body).toContain('Suggestions are inline.');
+  });
+
+  it('the reply escapes raw tag openers AFTER the projection strips — a forged footer span cannot grow past the span cap under attribution off (#9940 review, audit 6)', () => {
+    seedThreads([
+      {
+        id: 'T9',
+        commentId: 1009,
+        body: '**[Critical]** R1-9: the parser trusts unbounded input',
+      },
+    ]);
+    const forged = `x _— ${'<a'.repeat(105)} via Qwen Code /review_ y`;
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-9', by: forged }],
+    });
+    runSubmit(authorizedPost({ review }), '0.21.3', { attribution: false });
+    expect(replyCalls()).toHaveLength(1);
+    const reply = String(replyCalls()[0]![0]);
+    expect(reply).toContain('R1-9 fixed by x y');
+    expect(reply).not.toContain('via Qwen Code /review');
+  });
+
+  it('a cap cut inside a balanced raw element posts inert — the reply cannot leave `<details>` open over its footer (#9940 review, audit 6)', () => {
+    seedThreads([
+      {
+        id: 'T9',
+        commentId: 1009,
+        body: '**[Critical]** R1-9: the parser trusts unbounded input',
+      },
+    ]);
+    const review = payload([], {
+      fixedFindings: [
+        {
+          id: 'R1-9',
+          by: `${'x'.repeat(200)}<details><summary>s</summary>hidden hidden hidden hidden</details> more`,
+        },
+      ],
+    });
+    runSubmit(authorizedPost({ review }));
+    const reply = String(replyCalls()[0]![0]);
+    expect(reply).toContain('&lt;details>');
+    expect(reply).not.toContain('<details>');
   });
 
   it('a fixed ruling replies `R<id> fixed by <what>` and resolves the thread', () => {
@@ -4666,6 +4941,37 @@ describe('the thread lifecycle', () => {
     expect(stdoutJson()).toMatchObject({ posted: true, threadsResolved: 1 });
   });
 
+  it('refuses a deferral whose title spells the fixed id with leading zeros — one spelling for every join (#9940 review, audit)', () => {
+    // `R02-3` passed every raw-string join beside a ruling on `R2-3`: the
+    // gate saw no contradiction, the closure mint saw a stray, and one
+    // pass resolved R2-3's thread while the body relocated the same claim
+    // as a standing blocker.
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Critical]** R2-3: the guard drops a valid case',
+      },
+    ]);
+    const review = payload([], {
+      deferredSuggestions: [
+        {
+          file: 'src/foo.ts',
+          line: 12,
+          source: 'review',
+          severity: 'Critical',
+          title: 'R02-3: the guard drops a valid case',
+        },
+      ],
+      fixedFindings: [{ id: 'R2-3', by: 'the guard rewrite' }],
+    });
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
+      /state\.deferredSuggestions\[0\] re-posts R2-3/,
+    );
+    expect(resolveCalls()).toHaveLength(0);
+  });
+
   it('the same Critical deferral posts without the fixed ruling — relocated and standing (#9940 review)', () => {
     // The flip half of the refusal cell: the deferral alone is a
     // standing re-post — relocated into the body Criticals, carried
@@ -5027,6 +5333,27 @@ describe('the thread lifecycle', () => {
     expect(threadReadCalls()).toHaveLength(0);
   });
 
+  it('refuses the re-post under a leading-zero spelling of the id it rules fixed — the join is canonical (#9940 review, round 27)', () => {
+    for (const spelling of ['R01-2', 'R1-02', 'R001-002']) {
+      ghMock.mockClear();
+      const review = payload(
+        [
+          {
+            path: 'src/foo.ts',
+            line: 12,
+            body: `**[Critical]** ${spelling}: the guard still drops valid cases`,
+          },
+        ],
+        { fixedFindings: [{ id: 'R1-2', by: 'the fix' }] },
+      );
+      expectRefusal(
+        () => runSubmit(authorizedPost({ review })),
+        /contradicts itself/,
+      );
+      expect(ghMock).not.toHaveBeenCalled();
+    }
+  });
+
   it('refuses a floor-rerouted Critical whose carried id sits below the claim line beside a fixed ruling on it (#9940 review, round 14)', () => {
     // Under a critical floor the axis pair on line 1 reroutes the
     // Critical into the body's deferral list, and the reroute collapses
@@ -5054,6 +5381,30 @@ describe('the thread lifecycle', () => {
     );
     expect(ghMock).not.toHaveBeenCalled();
     expect(threadReadCalls()).toHaveLength(0);
+  });
+
+  it('names a rerouted Critical whose id leads its claim line ONCE — the comment leg and the floor leg agree (#9940 review, audit)', () => {
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Critical]** [fails-closed] [new-surface] R1-2: double free',
+        },
+      ],
+      {
+        severityFloor: 'critical',
+        fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      },
+    );
+    expectRefusal(
+      () => runSubmit(authorizedPost({ review })),
+      /comments\[0\] re-posts R1-2/,
+    );
+    const stderr = writeStderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(stderr.split('comments[0] re-posts R1-2').length - 1).toBe(1);
   });
 
   it('refuses a malformed fixedFindings at compose time', () => {

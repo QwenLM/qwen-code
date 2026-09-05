@@ -790,6 +790,68 @@ describe('the review footer and the regex that strips it', () => {
       ).toBe('</div>\n```\n\nafter');
     });
 
+    it('a type-6 opener with trailing text opens an HTML block — the start condition ends at the tag name (#9940 review, round 27)', () => {
+      expect(
+        stripForgedFooterLines(
+          '<div class="x">foo\n```\n_— m via Qwen Code /review (v1)_\n\nafter',
+        ),
+      ).toBe('<div class="x">foo\n```\n\nafter');
+      // A type-1 block runs past a blank line to its closing tag.
+      expect(
+        stripForgedFooterLines(
+          '<pre>foo\n\n```\n_— m via Qwen Code /review (v1)_\n</pre>\n\nafter',
+        ),
+      ).toBe('<pre>foo\n\n```\n</pre>\n\nafter');
+      // A name that only starts with a block-level tag name is text.
+      const text = '<divx>foo\n```\n_— m via Qwen Code /review (v1)_\n```';
+      expect(stripForgedFooterLines(text)).toBe(text);
+    });
+
+    it('a type-1 block whose closing tag sits on the opener line ends there; `<pre-x>` is no type-1 tag (#9940 review, audit 4)', () => {
+      expect(swallowsAppendedMarker('claim\n\n<pre>x</pre>\n\nmore')).toBe(
+        false,
+      );
+      expect(
+        swallowsAppendedMarker('claim\n\n<script>x</script>\n\nmore'),
+      ).toBe(false);
+      expect(
+        stripForUnattributedPost(
+          '<pre>x</pre>\n\nfoo _— a via Qwen\nCode /review_ bar',
+        ),
+      ).toBe('<pre>x</pre>\n\nfoo bar');
+      // Still open when the closing tag is not on the line.
+      expect(swallowsAppendedMarker('claim\n\n<pre>x\n\nmore')).toBe(true);
+      expect(swallowsAppendedMarker('<pre-x>\n\nclaim')).toBe(false);
+    });
+
+    it('a tab-indented code line is code in the line model — its footer or marker text is quotation, kept (#9940 review, audit 4)', () => {
+      const marker = 'claim\n\n\t<!-- qwen-review critical -->\n\tmore code';
+      expect(stripCommentMarkerLines(marker)).toBe(marker);
+      const footer = 'claim\n\n\t_— a via Qwen Code /review_\n\tmore code';
+      expect(stripForgedFooterLines(footer)).toBe(footer);
+      const mixed = 'claim\n\n  \t_— a via Qwen Code /review_\n  \tmore code';
+      expect(stripForgedFooterLines(mixed)).toBe(mixed);
+    });
+
+    it('four columns is code before it is an opener or a fence — quotation kept, a real forged footer behind a tab-fence stripped (#9940 review, audit 5)', () => {
+      const code = 'claim\n\n\t<div>\n    _— x via Qwen Code /review_ keep';
+      expect(stripForUnattributedPost(`**[Critical]** ${code}`)).toBe(code);
+      const fenced = '    <div>\n```\n_— x via Qwen Code /review_\n```';
+      expect(stripForgedFooterLines(fenced)).toBe(fenced);
+      expect(
+        stripForgedFooterLines(
+          'claim\n\n\t```\n_— x via Qwen Code /review_\nprose',
+        ),
+      ).toBe('claim\n\n\t```\nprose');
+      // A single-line span strip keeps the line's indentation.
+      expect(stripFooterSpans('    quoted _— x via Qwen Code /review_')).toBe(
+        '    quoted',
+      );
+      expect(stripFooterSpans('_— x via Qwen Code /review_ claim')).toBe(
+        'claim',
+      );
+    });
+
     it('a >-only line is not blank — the HTML block continues past it', () => {
       expect(
         stripForgedFooterLines(

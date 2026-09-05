@@ -79,6 +79,7 @@ import { ledgerDedupFacts } from './dedup-candidates.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_BODY_FILE,
+  canonicalLedgerId,
   LEDGER_ID_SHAPE,
   LEDGER_MAX_CLOSED,
   LEDGER_MAX_ID,
@@ -126,6 +127,7 @@ import {
   stripSeverityPrefix,
   unmarkedComments,
   type DraftedComment,
+  codeIndentedAfter,
 } from './lib/inline-counts.js';
 import {
   MODEL_ID_MAX_CHARS,
@@ -1496,6 +1498,21 @@ export interface ComposeReviewResult {
    */
   floorEnforcedEntries: DeferredEntry[];
   /**
+   * The same body rendered WITHOUT the inline-Suggestions opener clause —
+   * present whenever the body carries that clause. `submit` posts this
+   * one when the thread lifecycle diverts every inline Suggestion into
+   * its original thread, so the body does not say "Suggestions are
+   * inline" beside an empty comment set. Rendered here, by the same
+   * budget ladder, rather than edited in `submit`: the clause's position
+   * in the body is not fixed (budget notices and the blocking-findings
+   * prefix precede it), and any text search for it — by phrase, by
+   * paragraph, by fold anchor — found model text quoting the same words
+   * (a duplicate note, a downgrade reason) or nothing at all once a cut
+   * landed in the opener (#9940 review, audit). Live-only, like
+   * `draftedIds`.
+   */
+  bodyWithoutInlineClause?: string;
+  /**
    * How many findings this round posts as comments — the posting set after
    * floor enforcement, i.e. what `submit` sends to the PR, whether a
    * comment opens a new thread or (a carried re-report) lands as a reply
@@ -2610,6 +2627,13 @@ export function composeReview(
         draftedIds,
         mintedIds,
         body: `${withVolume.body}\n\n${marker}`,
+        // The variant posts in the body's place, so it carries the marker
+        // the same way.
+        ...(withVolume.bodyWithoutInlineClause === undefined
+          ? {}
+          : {
+              bodyWithoutInlineClause: `${withVolume.bodyWithoutInlineClause}\n\n${marker}`,
+            }),
       }
     : withVolume;
 }
@@ -3563,6 +3587,34 @@ export function tryIngestBodyCriticals(value: unknown): string[] | undefined {
  */
 export const FIXED_BY_MAX = 240;
 
+/** Longest downgrade reason the opener carries verbatim, in code points. */
+export const DOWNGRADE_REASON_MAX_CHARS = 400;
+
+/** Longest run of downgrade reasons the opener carries, in code points. */
+export const DOWNGRADE_REASONS_TOTAL_MAX_CHARS = 2000;
+
+/**
+ * Raw HTML tag openers made inert — `<` before a tag name, `/` or `?`
+ * becomes `&lt;`, which renders as `<`. For model prose the body or a
+ * reply carries verbatim after a length cap: a cut inside a balanced
+ * `<details>…</details>` left the element open over everything after it
+ * (#9940 review, audit 5). Comment grammar (`<!`) is not touched — the
+ * gates and retreats govern it, and a balanced comment stays the
+ * render-nothing it was. A code span (`` `Map<string, number>` ``) and a
+ * URI or e-mail autolink keep their `<`: inside a code span an entity is
+ * literal text, and an escaped autolink is no link (#9940 review, audit
+ * 6). Applied at the POST, after every projection strip: an escape made
+ * before the attribution-off strip pushed a forged footer span past the
+ * span cap that strip enforces.
+ */
+export function escapeTagOpeners(text: string): string {
+  return text.replace(
+    /(`+)(?:(?!\1)[^`]|(?!\1)`+)*\1(?!`)|<(?:[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)>|<(?=[A-Za-z/?])/g,
+    // A code span or an autolink matched whole (longer than the lone `<`).
+    (m) => (m.length > 1 ? m : '&lt;'),
+  );
+}
+
 /**
  * `fixedFindings` through the boundary's shape gate: an array of
  * `{id, by?}` where the id is a WHOLE ledger id (`LEDGER_ID_SHAPE` — the
@@ -3580,6 +3632,18 @@ export const FIXED_BY_MAX = 240;
  * under a carried id.
  */
 /**
+ * Where the bilingual body's Chinese half begins — the English half, then
+ * this fold opener, then the Chinese half. Named once because `submit`
+ * splits the posted body on it: the opener clause it reconciles after the
+ * thread-lifecycle diversion exists in BOTH halves, and a whole-body
+ * first-occurrence replace of the Chinese clause hit model text in the
+ * English half (a duplicate-drop note quoting the phrase) while the real
+ * Chinese opener kept it (#9940 review, audit).
+ */
+export const BILINGUAL_FOLD_OPEN =
+  '\n\n<details>\n<summary>中文说明</summary>\n\n';
+
+/**
  * The opener's inline-Suggestions clause, named once because TWO ends act
  * on it: this module writes it off the posting count, and `submit` strips
  * it again when the thread lifecycle's diversion — which runs AFTER the
@@ -3592,6 +3656,37 @@ export const INLINE_SUGGESTIONS_CLAUSE = {
   en: 'Suggestions are inline.',
   zh: '建议见行内评论。',
 } as const;
+
+/** Non-overlapping occurrences of `needle` in `text`. */
+/**
+ * Whether the text opens an HTML comment it never closes — an opener left
+ * after every closed comment is removed. A count comparison passed
+ * `--> <!--` (one of each, the opener still open) (#9940 review, audit).
+ */
+function opensUnclosedComment(text: string): boolean {
+  // One forward pass — each opener is closed by the first `-->` after its
+  // four characters, and the scan resumes past that close (the shape a
+  // lazy `<!--[\s\S]*?-->` match takes, without re-scanning to the end
+  // from every opener: a hundred thousand `<!--` cost seconds) (#9940
+  // review, audit 4).
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf('<!--', from);
+    if (open === -1) return false;
+    // `<!-->` and `<!--->` are empty comments (CommonMark 0.31, HTML).
+    if (text.startsWith('>', open + 4)) {
+      from = open + 5;
+      continue;
+    }
+    if (text.startsWith('->', open + 4)) {
+      from = open + 6;
+      continue;
+    }
+    const close = text.indexOf('-->', open + 4);
+    if (close === -1) return true;
+    from = close + 3;
+  }
+}
 
 export function ingestFixedFindings(value: unknown): FixedFinding[] {
   if (value === undefined || value === null) return [];
@@ -3642,37 +3737,81 @@ export function ingestFixedFindings(value: unknown): FixedFinding[] {
       idRound < 1 ||
       idRound > LEDGER_MAX_ROUND
     ) {
+      const canonical = canonicalLedgerId(id);
       throw new Error(
-        `compose-review: ${at} carries no ledger id — an id is at most ` +
-          `${LEDGER_MAX_ID} characters and its round sits in ` +
-          `1..${LEDGER_MAX_ROUND}; got ${JSON.stringify(id)}, which no ` +
-          `ledger entry can carry.`,
+        canonical !== id && /^R[1-9]\d*-[1-9]\d*$/.test(canonical)
+          ? `compose-review: ${at} spells its id non-canonically — ` +
+            `${JSON.stringify(id)} carries leading zeros no ledger entry ` +
+            `has; write ${canonical}.`
+          : `compose-review: ${at} carries no ledger id — an id is at most ` +
+            `${LEDGER_MAX_ID} characters and its round sits in ` +
+            `1..${LEDGER_MAX_ROUND}; got ${JSON.stringify(id)}, which no ` +
+            `ledger entry can carry.`,
       );
     }
+    if (by !== undefined && typeof by !== 'string') {
+      throw new Error(
+        `compose-review: ${at}.by must be ONE non-empty line — it ` +
+          `becomes the reply \`${id} fixed by <by>\` left in the resolved ` +
+          `thread.`,
+      );
+    }
+    // `by` is PROSE — what fixed the finding — never a finding: a leading
+    // severity marker is machine grammar the reply would post verbatim
+    // under attribution on, so it is stripped like every posted body
+    // strips it (#9940 review, audit).
+    const prose = by === undefined ? undefined : stripSeverityPrefix(by);
     // `by` becomes the visible half of the reply — a clause that renders
-    // as nothing (a bare HTML comment, a Cf run `trim` keeps) posts
-    // `R<id> fixed by` with no account of what fixed it, on the thread
-    // this same pass resolves; the body-Criticals boundary already
-    // refuses the identical texts (#9940 review, round 14) — through the
-    // EXIT projection, not the plain render test: `submit` strips the
-    // reply through the attribution-off chain and the footer strip before
-    // posting, so a bare severity marker (`**[Critical]**`) renders as
-    // prose here and as nothing there, and `rendersAsNothingAtExit` is
-    // the one statement of what the exit empties (#9940 review, round
-    // 21). Residue AHEAD of visible text stays admitted, like everywhere
-    // else.
+    // as nothing (a bare HTML comment, a Cf run `trim` keeps, a bare
+    // marker) posts `R<id> fixed by` with no account of what fixed it, on
+    // the thread this same pass resolves; the body-Criticals boundary
+    // already refuses the identical texts (#9940 review, round 14) —
+    // through the EXIT projection, not the plain render test: `submit`
+    // strips the reply through the attribution-off chain and the footer
+    // strip before posting, and `rendersAsNothingAtExit` is the one
+    // statement of what the exit empties (#9940 review, round 21).
+    // Residue AHEAD of visible text stays admitted, like everywhere else.
     if (
-      by !== undefined &&
-      (typeof by !== 'string' ||
-        by.trim() === '' ||
-        /[\r\n]/.test(by) ||
-        rendersAsNothingAtExit(by))
+      prose !== undefined &&
+      (prose.trim() === '' ||
+        /[\r\n]/.test(prose) ||
+        rendersAsNothingAtExit(prose))
     ) {
       throw new Error(
         `compose-review: ${at}.by must be ONE non-empty line — it ` +
           `becomes the reply \`${id} fixed by <by>\` left in the resolved ` +
           `thread.`,
       );
+    }
+    // Two grammars a clause may not carry: the pipeline's own comment
+    // marker (`<!-- qwen-review … -->`), which under attribution off
+    // would end the posted reply and make presubmit read the fixed
+    // ruling as a posted FINDING that carries its id — a re-post carrier
+    // for an id the ruling just retired — and an unterminated HTML
+    // comment, which swallows the attribution footer appended after the
+    // clause (#9940 review, audit). Residue between visible text is
+    // still admitted: a BALANCED comment is not either of these.
+    // Both grammars are tested on the clause as written AND on what the
+    // attribution-off exit posts (`stripReviewFooter(stripForUnattributedPost)`):
+    // a forged footer span splitting `<!-` from `- qwen-review …` carried
+    // no marker at the entry and posted one at the exit (#9940 review,
+    // audit).
+    for (const view of prose === undefined
+      ? []
+      : [prose, stripReviewFooter(stripForUnattributedPost(prose))]) {
+      if (/<!--\s*qwen-review\b/i.test(view)) {
+        throw new Error(
+          `compose-review: ${at}.by carries the pipeline's comment-marker ` +
+            `grammar (\`<!-- qwen-review\`) — the clause is prose, and the ` +
+            `marker would make the posted reply read as a finding.`,
+        );
+      }
+      if (opensUnclosedComment(view)) {
+        throw new Error(
+          `compose-review: ${at}.by opens an HTML comment it never closes — ` +
+            `the opener would post as literal text in the thread.`,
+        );
+      }
     }
     if (seen.has(id)) return;
     seen.add(id);
@@ -3685,11 +3824,40 @@ export function ingestFixedFindings(value: unknown): FixedFinding[] {
     // exactly the reply the gate refuses. That shape is the tool's own
     // cut, not the model's draft, so it degrades to a by-less ruling
     // (`R<id> fixed`) rather than refusing the round (#9940 review,
-    // round 21).
-    const slicedBy =
-      by === undefined
-        ? undefined
-        : [...by.trim()].slice(0, FIXED_BY_MAX).join('');
+    // round 21). A cut that lands INSIDE a comment leaves a dangling
+    // `<!--` that would swallow the footer — the cut retreats to before
+    // that comment first (#9940 review, audit).
+    const points = prose === undefined ? undefined : [...prose.trim()];
+    const cut = points !== undefined && points.length > FIXED_BY_MAX;
+    let slicedBy =
+      points === undefined ? undefined : points.slice(0, FIXED_BY_MAX).join('');
+    // Both retreats belong to the CUT alone: an uncut clause passed the
+    // gate whole, and its own trailing `<` (`compare with <`) is its prose
+    // (#9940 review, audit 4).
+    if (slicedBy !== undefined && cut) {
+      while (opensUnclosedComment(slicedBy)) {
+        slicedBy = slicedBy.slice(0, slicedBy.lastIndexOf('<!--')).trimEnd();
+      }
+      // A cut that lands one to three characters into `<!--` leaves a
+      // visible `<!-` / `<!` / `<` stub — retreat past it too.
+      slicedBy = slicedBy.replace(/<(?:!-?)?$/, '').trimEnd();
+    }
+    // The marker grammar is tested AGAIN on what the cap left, on both
+    // projections: a cut landing right after `qwen-review` inside a
+    // `<!-- qwen-reviewer -->` the gate passed leaves the marker's opening
+    // — and the exit projection can assemble it from a forged footer span
+    // the cut split. That is the tool's own cut, so it degrades to a
+    // by-less ruling like the invisible-only cut does (#9940 review,
+    // audit 2).
+    if (
+      slicedBy !== undefined &&
+      [slicedBy, stripReviewFooter(stripForUnattributedPost(slicedBy))].some(
+        (view) =>
+          /<!--\s*qwen-review\b/i.test(view) || opensUnclosedComment(view),
+      )
+    ) {
+      slicedBy = '';
+    }
     out.push({
       id,
       ...(slicedBy === undefined ||
@@ -3700,6 +3868,50 @@ export function ingestFixedFindings(value: unknown): FixedFinding[] {
     });
   });
   return out;
+}
+
+/**
+ * Two private-use characters absent from `haystack` — the placeholders the
+ * inline-Suggestions clause renders as (see the render site). Undefined
+ * when the text holds every private-use character, which no real body
+ * does; the variant is then simply not offered.
+ */
+function placeholderPair(
+  haystack: string,
+): { en: string; zh: string } | undefined {
+  const free: string[] = [];
+  for (let code = 0xe000; code <= 0xf8ff && free.length < 2; code++) {
+    const ch = String.fromCharCode(code);
+    if (!haystack.includes(ch)) free.push(ch);
+  }
+  return free.length === 2 ? { en: free[0]!, zh: free[1]! } : undefined;
+}
+
+/** The rendered body with each placeholder run replaced by the clause it stands for — a run the cut shortened by the clause's same-length prefix. */
+function restoreClause(
+  rendered: string,
+  sentinel: { en: string; zh: string },
+  clause: { en: string; zh: string },
+): string {
+  return rendered
+    .replace(new RegExp(`${sentinel.en}+`, 'g'), (run) =>
+      clause.en.slice(0, run.length),
+    )
+    .replace(new RegExp(`${sentinel.zh}+`, 'g'), (run) =>
+      clause.zh.slice(0, run.length),
+    );
+}
+
+/** The rendered body with each placeholder run removed along with the space that joined it to its neighbour (both spaces collapse to one). */
+function dropClause(
+  rendered: string,
+  sentinel: { en: string; zh: string },
+): string {
+  const drop = (text: string, ch: string): string =>
+    text.replace(new RegExp(`( ?)${ch}+( ?)`, 'g'), (_m, before, after) =>
+      before !== '' && after !== '' ? ' ' : '',
+    );
+  return drop(drop(rendered, sentinel.en), sentinel.zh);
 }
 
 function composeReviewBody(
@@ -4868,10 +5080,42 @@ function composeReviewBody(
     presubmitObj['downgradeRequestChanges'],
     'presubmit.downgradeRequestChanges',
   );
-  const downgradeReasons = toStringList(
+  // Display prose the model wrote, quoted like every other model-written
+  // line the body carries (`quotedProse`: comment grammar, marker lines
+  // and footer spans go inert — a `<!--` in a reason swallowed the rest
+  // of the body, a forged footer posted as attribution), then capped: a
+  // reason is a sentence, and one sixty thousand characters long pushed
+  // the body onto the truncation rung by itself (#9940 review, audit 3
+  // and 4). Cut by code point, with the cut disclosed.
+  // The LIST is capped as well as each entry: three hundred capped reasons
+  // pushed the body onto the truncation rung as surely as one long one
+  // (#9940 review, audit 5). Raw HTML openers go inert (`&lt;`): a cut
+  // that lands inside `<details>…</details>` leaves the element open over
+  // the rest of the body.
+  const cappedReasons = toStringList(
     presubmitObj['downgradeReasons'],
     'presubmit.downgradeReasons',
-  );
+  ).map((raw) => {
+    // One line of prose, like `by`: a line break in a reason put a fence
+    // or a `<!DOCTYPE` at a line start, and the block it opened ran over
+    // the footer and the ledger marker (#9940 review, audit 6).
+    const reason = escapeTagOpeners(
+      quotedProse(raw.replace(/\s+/g, ' ').trim(), attribution),
+    );
+    const points = [...reason];
+    return points.length <= DOWNGRADE_REASON_MAX_CHARS
+      ? reason
+      : `${points.slice(0, DOWNGRADE_REASON_MAX_CHARS).join('').trimEnd()}…`;
+  });
+  const downgradeReasons: string[] = [];
+  let reasonBudget = DOWNGRADE_REASONS_TOTAL_MAX_CHARS;
+  for (const reason of cappedReasons) {
+    const cost = [...reason].length;
+    if (cost > reasonBudget) break;
+    downgradeReasons.push(reason);
+    reasonBudget -= cost;
+  }
+  const reasonsLeftOut = cappedReasons.length - downgradeReasons.length;
   const modelId: unknown = input.modelId;
   let footer = '';
   if (attribution) {
@@ -5444,7 +5688,7 @@ function composeReviewBody(
     const zh = parts.map((p) => p.zh).join(sep);
     const text =
       bilingual && zh !== en
-        ? `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>`
+        ? `${en}${BILINGUAL_FOLD_OPEN}${zh}\n\n</details>`
         : en;
     return footer === '' ? text : `${text}\n\n${footer}`;
   };
@@ -6770,6 +7014,16 @@ function composeReviewBody(
 
   // 1. Downgrade sentence (only when a presubmit flag changed the event).
   if (downgraded && downgradedFrom) {
+    // Disclosed only where the sentence renders — an event that stayed
+    // put shows no reasons, so none were "left out" (#9940 review, audit 6).
+    if (reasonsLeftOut > 0) {
+      remediation.push(
+        `downgrade reasons: ${reasonsLeftOut} of ${cappedReasons.length} ` +
+          `reason(s) did not fit the body's ` +
+          `${DOWNGRADE_REASONS_TOTAL_MAX_CHARS}-character budget for them ` +
+          `and were left out — read them in the presubmit report.`,
+      );
+    }
     const reasons = downgradeReasons.join('; ');
     const fromZh = downgradedFrom === 'Approve' ? '批准' : '请求修改';
     clauses.push({
@@ -6875,9 +7129,11 @@ function composeReviewBody(
   //    the discarded sentence says the opposite is the round-6 collision
   //    this module exists to kill. (`s` stays right for the event — see
   //    above.)
-  if (suggestionsInline > 0) {
-    clauses.push({ keep: 1, ...INLINE_SUGGESTIONS_CLAUSE });
-  }
+  const inlineClause: Bi | undefined =
+    suggestionsInline > 0
+      ? { keep: 1, ...INLINE_SUGGESTIONS_CLAUSE }
+      : undefined;
+  if (inlineClause !== undefined) clauses.push(inlineClause);
   if (suggestionsDiscarded > 0) {
     // Self-contained: this lands in the posted body, and "see the terminal
     // output" pointed the PR author at a terminal only the operator has —
@@ -6981,8 +7237,8 @@ function composeReviewBody(
   }
 
   const openerParts = clauses.slice(0, openerCount);
-  const paragraphs: Bi[] = [
-    ...(openerParts.length > 0
+  const paragraphsWith = (opener: Bi[]): Bi[] => [
+    ...(opener.length > 0
       ? [
           {
             // The merge is a rendering detail; it must not launder away the
@@ -6992,27 +7248,63 @@ function composeReviewBody(
             // it to 3 made it the FIRST thing the tail cut spent. No `trim`
             // rank rides here: an opener clause never carries one, and
             // inheriting one would drop untagged text with it.
-            keep: openerParts.reduce(
+            keep: opener.reduce(
               (lowest, c) => Math.min(lowest, c.keep ?? 3),
               3,
             ),
-            en: openerParts.map((c) => c.en).join(' '),
-            zh: openerParts.map((c) => c.zh).join(' '),
+            en: opener.map((c) => c.en).join(' '),
+            zh: opener.map((c) => c.zh).join(' '),
           },
         ]
       : []),
     ...clauses.slice(openerCount),
   ];
-  const body = render(paragraphs, '\n\n');
   // Critical-only consumers use a body-leading marker. This must happen after
   // rendering because budget notices can otherwise precede the marked details.
-  const visibleBody =
+  const finish = (rendered: string): string =>
     attribution &&
     event === 'COMMENT' &&
     (bodyCriticalBlock.length > 0 || cannotTellBlock.length > 0) &&
-    !body.startsWith(CRITICAL_PREFIX)
-      ? `${CRITICAL_PREFIX} Blocking finding(s) follow.\n\n${body}`
-      : body;
+    !rendered.startsWith(CRITICAL_PREFIX)
+      ? `${CRITICAL_PREFIX} Blocking finding(s) follow.\n\n${rendered}`
+      : rendered;
+  // ONE render, two bodies. The inline-Suggestions clause renders as a run
+  // of a placeholder character of the clause's exact length (per
+  // language), so every budget decision — the fold, the trimmed ranks,
+  // the last-resort cut — is made once, on one string, and the two bodies
+  // differ by the clause alone. A second render of the shorter variant
+  // landed on a different rung at a knife-edge budget (the variant kept
+  // the fold or the deferral list the body dropped) while `bodyTrim`, the
+  // verdict line and `remediation` described the body — and pushed its
+  // trim disclosures twice (#9940 review, audit 4). The placeholder is a
+  // private-use character absent from every part and the footer; when
+  // none is free the variant is not offered.
+  const sentinel =
+    inlineClause !== undefined && openerParts.includes(inlineClause)
+      ? placeholderPair(
+          `${clauses.map((c) => `${c.en}${c.zh}`).join('')}${footer}`,
+        )
+      : undefined;
+  const renderParts =
+    sentinel === undefined
+      ? openerParts
+      : openerParts.map((c) =>
+          c === inlineClause
+            ? {
+                ...c,
+                en: sentinel.en.repeat(c.en.length),
+                zh: sentinel.zh.repeat(c.zh.length),
+              }
+            : c,
+        );
+  const rendered = render(paragraphsWith(renderParts), '\n\n');
+  const visibleBody = finish(
+    sentinel === undefined
+      ? rendered
+      : restoreClause(rendered, sentinel, inlineClause!),
+  );
+  const bodyWithoutInlineClause =
+    sentinel === undefined ? undefined : finish(dropClause(rendered, sentinel));
   return {
     event,
     body: visibleBody,
@@ -7024,6 +7316,9 @@ function composeReviewBody(
     deferredCount: deferredSuggestions.length,
     floorEnforced: reroute.indices,
     floorEnforcedEntries: reroute.entries,
+    ...(bodyWithoutInlineClause === undefined
+      ? {}
+      : { bodyWithoutInlineClause }),
     postedInline,
     postedFresh,
     fixedFindings,
@@ -7922,11 +8217,15 @@ export const composeReviewCommand: CommandModule = {
 export function bodyCriticalClaim(
   entry: unknown,
 ): ReturnType<typeof readClaim> {
+  const stripped = stripForUnattributedPost(
+    typeof entry === 'string' ? entry : '',
+  );
+  const leading = LEADING_INVISIBLE_RE.exec(stripped)?.[0] ?? '';
+  // An indented code line carries no claim — the rule every other id
+  // reader applies (`bareClaimLine`); reading one here carried an id the
+  // comment readback returned null for (#9940 review, audit 4).
   return readClaim(
-    stripForUnattributedPost(typeof entry === 'string' ? entry : '').replace(
-      LEADING_INVISIBLE_RE,
-      '',
-    ),
+    codeIndentedAfter(leading, true) ? '' : stripped.slice(leading.length),
   );
 }
 

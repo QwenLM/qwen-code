@@ -66,7 +66,6 @@ import {
 } from './lib/receipt.js';
 import {
   ENTRY_FENCE_DELIMITER_RE,
-  INLINE_SUGGESTIONS_CLAUSE,
   composeReview,
   normalizeSeverityFloor,
   tryIngestBodyCriticals,
@@ -76,10 +75,12 @@ import {
   type ComposeReviewInput,
   type DeferredEntry,
   type FixedFinding,
+  escapeTagOpeners,
 } from './compose-review.js';
 import {
   carriedFindingOf,
   fetchReviewThreads,
+  fixedRulingLine,
   planThreadActions,
   postReviewReply,
   resolveReviewThread,
@@ -379,24 +380,6 @@ function authorization(
  * to the API — so the only place it can be caught is here.
  */
 /**
- * The composed body without its inline-Suggestions opener clause, in both
- * languages. The opener is one space-joined paragraph, so the clause is
- * removed with the space that joined it to its neighbour; the first
- * occurrence is the opener's — the opener is the body's first paragraph.
- */
-function stripInlineSuggestionsClause(body: string): string {
-  return [INLINE_SUGGESTIONS_CLAUSE.en, INLINE_SUGGESTIONS_CLAUSE.zh].reduce(
-    (b, clause) =>
-      b.includes(` ${clause}`)
-        ? b.replace(` ${clause}`, '')
-        : b.includes(`${clause} `)
-          ? b.replace(`${clause} `, '')
-          : b.replace(clause, ''),
-    body,
-  );
-}
-
-/**
  * The verdict, computed — from the states the caller established and the comments
  * it actually attached.
  *
@@ -428,6 +411,8 @@ function compose(
    * (#9940 review, round 14).
    */
   floorEnforcedEntries: DeferredEntry[];
+  /** The body without the inline-Suggestions clause — see compose-review. */
+  bodyWithoutInlineClause: string | undefined;
   /**
    * Step 6's `fixed` rulings, validated by the compose — the thread
    * lifecycle's resolve list. Rides the composed result rather than being
@@ -500,6 +485,7 @@ function compose(
     cappedBy: r.cappedBy,
     floorEnforced: r.floorEnforced,
     floorEnforcedEntries: r.floorEnforcedEntries ?? [],
+    bodyWithoutInlineClause: r.bodyWithoutInlineClause,
     fixedFindings: r.fixedFindings,
     draftedIds: r.draftedIds,
     mintedIds: r.mintedIds,
@@ -828,8 +814,12 @@ function inconsistencies(
     for (const { entry, at } of floorRerouted) {
       if (entry === undefined) continue;
       const id = readClaimHead(entry.title).id;
-      if (id !== undefined && fixedIds.has(id)) {
-        problems.push(contradiction(`comments[${at}]`, id));
+      // A rerouted comment whose id already LEADS its claim line was named
+      // by the comment leg above with the identical text — one refusal
+      // line per contradiction (#9940 review, audit).
+      const line = contradiction(`comments[${at}]`, id ?? '');
+      if (id !== undefined && fixedIds.has(id) && !problems.includes(line)) {
+        problems.push(line);
       }
     }
   }
@@ -1480,6 +1470,7 @@ function submit(
   let cappedBy: string[];
   let floorEnforced: number[];
   let floorEnforcedEntries: DeferredEntry[];
+  let bodyWithoutInlineClause: string | undefined;
   let fixedFindings: FixedFinding[];
   let draftedIds: Array<string | undefined> | undefined;
   let mintedIds: string[] | undefined;
@@ -1490,6 +1481,7 @@ function submit(
       cappedBy,
       floorEnforced,
       floorEnforcedEntries,
+      bodyWithoutInlineClause,
       fixedFindings,
       draftedIds,
       mintedIds,
@@ -1756,7 +1748,9 @@ function submit(
           countInlineFindings(marked.filter((_, i) => !diverted.has(i)))
             .suggestionsInline === 0
         ) {
-          body = stripInlineSuggestionsClause(body);
+          if (bodyWithoutInlineClause !== undefined) {
+            body = bodyWithoutInlineClause;
+          }
         }
         carriedReplies = plan.replies.map((r) => ({
           commentId: r.commentId,
@@ -1793,13 +1787,18 @@ function submit(
         // appends it to every comment.
         const modelId = payload.state?.modelId;
         fixedResolves = plan.resolves.map((r) => {
+          // The strips first, the escape last: an `&lt;` made before the
+          // attribution-off strip lengthened a forged footer span past the
+          // cap that strip enforces (#9940 review, audit 6).
           const by =
             r.by === undefined
               ? ''
-              : stripReviewFooter(
-                  attribution ? r.by : stripForUnattributedPost(r.by),
-                ).trim();
-          const line = by === '' ? `${r.id} fixed` : `${r.id} fixed by ${by}`;
+              : escapeTagOpeners(
+                  stripReviewFooter(
+                    attribution ? r.by : stripForUnattributedPost(r.by),
+                  ).trim(),
+                );
+          const line = fixedRulingLine(r.id, by);
           return {
             threadId: r.threadId,
             commentId: r.commentId,

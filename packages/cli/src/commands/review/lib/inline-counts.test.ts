@@ -148,6 +148,20 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
 });
 
 describe('carriedClaimLine — the shared readback strip', () => {
+  it('reads no claim off an indented code block, and a canonical id off a variant spelling (#9940 review, audit)', () => {
+    expect(carriedClaimLine('**[Critical]**\n\n    R1-2: code')).toBe('');
+    // One break and a tab is a lazy continuation, not code (audit 5).
+    expect(carriedClaimLine('**[Critical]**\n\tR1-2: code')).toBe('R1-2: code');
+    expect(carriedClaimLine('**[Critical]**\n\n\tR1-2: code')).toBe('');
+    expect(carriedClaimLine('**[Critical]**\n  R1-2: not code')).toBe(
+      'R1-2: not code',
+    );
+    expect(carriedClaimLine('**[Critical]** R1-2: x\rsecond')).toBe('R1-2: x');
+    expect(readClaimHead('R02-3: the guard').id).toBe('R2-3');
+    expect(readClaimHead('[probe] R007-010: the guard').id).toBe('R7-10');
+    expect(readClaimHead('R0-1: the guard').id).toBe('R0-1');
+  });
+
   it('reads the claim through every shape the classifier admits', () => {
     // Leading residue: severityOf classifies through it, so the slice
     // must too — slicing the raw bytes cut mid-marker and garbled the

@@ -62,6 +62,8 @@ interface PersistedVerdict
     // contradiction gate consumes the reroute entries in the same pass
     // that composed them, and the indices already persist.
     | 'floorEnforcedEntries'
+    // The clause-less body variant is the same live-only input.
+    | 'bodyWithoutInlineClause'
   > {
   verdictLine: string;
   /**

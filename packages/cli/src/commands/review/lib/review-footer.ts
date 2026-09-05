@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { stripSeverityPrefix } from './inline-counts.js';
+import { indentColumns, stripSeverityPrefix } from './inline-counts.js';
 
 // The attribution footer every posted review carries, stated once.
 //
@@ -277,7 +277,12 @@ export function stripFooterSpans(text: string): string {
   if (!text.includes('/review') && !text.includes('&')) return text;
   if (!text.includes('\n')) {
     const stripped = stripFooterSpanInLine(text);
-    return stripped === text ? text : stripped.trim();
+    if (stripped === text) return text;
+    // The line's own indentation stays (four columns is a code block, and
+    // the span inside it was quotation); only the space a removed span
+    // left behind goes (#9940 review, audit 5).
+    const indent = /^[ \t]*/.exec(text)?.[0] ?? '';
+    return indent + stripped.slice(indent.length).trim();
   }
   const rejoined = stripSplitFooterSpans(text);
   return mapLinesAware(rejoined, (line) => stripFooterSpanInLine(line));
@@ -451,10 +456,13 @@ const FENCE_RUN_RE = /^[ \t]{0,3}(`{3,}|~{3,})/;
 
 /**
  * The fence OPENER rule — the ONE statement `scanLines` and the stamp skip
- * (`stampCarriedId`) both apply: a delimiter run of ``` or ~~~ opens a
- * fence, EXCEPT a backtick run whose info string carries a backtick —
- * CommonMark forbids that spelling, so the line is ordinary paragraph
- * text (tilde fences may carry one). A delimiter-only test over-skipped
+ * (`stampCarriedId`) both apply: a delimiter run of ``` or ~~~ after at
+ * most three indentation characters opens a fence, EXCEPT a backtick run
+ * whose info string carries a backtick — CommonMark forbids that spelling,
+ * so the line is ordinary paragraph text (tilde fences may carry one). The
+ * indentation count is the line model's own — a tab is one character
+ * here, where CommonMark counts it as four columns — so both ends agree on
+ * a tab-led run; the difference only ever widens a skip. A delimiter-only test over-skipped
  * exactly that line out of its id stamp, posting an id-less root behind
  * a disclosure naming a fence that does not exist (#9940 review, round
  * 25). Returns the opener's character and run length — the state a
@@ -476,7 +484,7 @@ export function fenceOpener(
 const FENCE_CLOSE_RE = /^[ \t]{0,3}(`{3,}|~{3,})[ \t]*\r?$/;
 
 // The CommonMark type-6 block-level tag names, opening or closing.
-const HTML_BLOCK_TAG_NAMES =
+export const HTML_BLOCK_TAG_NAMES =
   '(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)';
 
 /**
@@ -489,12 +497,29 @@ const HTML_BLOCK_TAG_NAMES =
  * validated.
  */
 export const HTML_BLOCK_OPEN_RE = new RegExp(
-  `^(?:<[A-Za-z][^>]*>?|</${HTML_BLOCK_TAG_NAMES}[ \\t]*>)[ \\t]*\\r?$`,
+  // The type-1 (`<pre`, `<script`, `<style`, `<textarea`) and type-6
+  // (block-level tag name) start conditions end at the tag NAME — a
+  // space, `>`, `/>` or the line end after it — and the rest of the line
+  // is the block's own content: `<div class="x">foo` opens an HTML block
+  // (CommonMark 4.6). The whole-line alternatives below approximate type 7
+  // (a complete tag alone on its line); the round-27 review showed the
+  // type-6 line with trailing text escaping them (#9940 review).
+  //
+  // The unclosed-tag alternative carries no trailing `[ \t]*` of its own:
+  // with the `>` optional, `[^>]*` and the trailing whitespace class both
+  // matched spaces and the engine re-split them at every length — 60,000
+  // spaces after `<a` cost 1.7 s per call, paid by every posted comment
+  // twice (#9940 review, audit). One class per character keeps it linear.
+  `^(?:<(?:pre|script|style|textarea)(?:[ \\t>]|\\r?$)|</?${HTML_BLOCK_TAG_NAMES}(?:[ \\t]|/?>|\\r?$)|(?:<[A-Za-z][^>]*>[ \\t]*|<[A-Za-z][^>]*|</${HTML_BLOCK_TAG_NAMES}[ \\t]*>[ \\t]*)\\r?$)`,
   'i',
 );
 
-/** The type-1 openers: their blocks end at the closing tag, not a blank line. */
-const HTML_TYPE1_OPEN_RE = /^<(pre|script|style|textarea)\b/i;
+/**
+ * The type-1 openers: their blocks end at the closing tag, not a blank line.
+ * The name ends at a space, `>` or the line end — `<pre-x>` is a type-7 tag
+ * (#9940 review, audit 4).
+ */
+const HTML_TYPE1_OPEN_RE = /^<(pre|script|style|textarea)(?:[ \t>]|\r?$)/i;
 
 /** Structural classes a line falls into, in scan order. */
 type LineKind =
@@ -589,12 +614,22 @@ function scanLines(body: string): ScannedLine[] {
       }
       continue;
     }
+    // Four columns of indentation is code before it is anything else — an
+    // opener or a fence written there is code text (#9940 review, audit 5).
+    if (indentColumns(content) >= 4) {
+      out.push({ line, kind: 'code', depth, content });
+      continue;
+    }
     if (HTML_BLOCK_OPEN_RE.test(trimmed)) {
       const t1 = HTML_TYPE1_OPEN_RE.exec(trimmed);
+      const endRe = t1 === null ? null : new RegExp(`</${t1[1]}\\s*>`, 'i');
+      // A type-1 block ends on the line holding its closing tag — the
+      // opener's OWN line included (`<pre>x</pre>` is a one-line block;
+      // left open, every later line read as HTML) (#9940 review, audit 4).
       html =
-        t1 === null
-          ? { endRe: null }
-          : { endRe: new RegExp(`</${t1[1]}\\s*>`, 'i') };
+        endRe !== null && endRe.test(trimmed.slice(t1![0].length))
+          ? null
+          : { endRe };
       out.push({ line, kind: 'htmlOpen', depth, content });
       continue;
     }
@@ -602,10 +637,6 @@ function scanLines(body: string): ScannedLine[] {
     if (opener !== null) {
       fence = { ...opener, depth };
       out.push({ line, kind: 'fenceEdge', depth, content });
-      continue;
-    }
-    if (/^[ \t]{4}/.test(content)) {
-      out.push({ line, kind: 'code', depth, content });
       continue;
     }
     out.push({ line, kind: 'text', depth, content });

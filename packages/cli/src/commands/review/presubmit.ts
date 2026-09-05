@@ -29,12 +29,16 @@ import {
 import { detectPlatformKind } from './lib/platform/registry.js';
 import { ensureAoneAuthenticated } from './lib/platform/aone-client.js';
 import {
-  LEADING_INVISIBLE_RE,
+  bareClaimLine,
   readClaimHead,
   severityOf,
 } from './lib/inline-counts.js';
 import { carriesCommentMarker } from './lib/review-footer.js';
-import { LEDGER_ID_SHAPE, LEDGER_ID_TOKEN } from './lib/ledger.js';
+import {
+  LEDGER_ID_SHAPE,
+  LEDGER_ID_TOKEN,
+  canonicalLedgerId,
+} from './lib/ledger.js';
 import { ledgerClaimLine } from './compose-review.js';
 import {
   aoneAccountName,
@@ -109,12 +113,10 @@ function extractCarriedIds(body: string): string[] {
     // its first line and the severity in the trailing invisible marker.
     // Without reading the id back off that line, a carried re-post lands
     // as a plain overlap and is dedup-dropped from round 3 onward, while
-    // the surviving id token bars the id-less fallback.
-    line = body
-      .trimStart()
-      .replace(LEADING_INVISIBLE_RE, '')
-      .split(/\r\n?|\n/)[0]
-      .trim();
+    // the surviving id token bars the id-less fallback. The ONE bare-leg
+    // read, shared with the thread matcher (`bareClaimLine`): an indented
+    // code block on the first line carries no claim (#9940 review, audit).
+    line = bareClaimLine(body);
   }
   // Through the head-slot tokeniser's own id read, the read the ledger
   // builder, the contradiction gate and the closure mint apply (#10291):
@@ -681,14 +683,29 @@ function classifyExistingComments(
   // cannot appear in a comment posted before this round, so every id here is
   // a genuine re-post signal, and `wantedIds.size === 1` below means exactly
   // one CARRIED finding at the location (#9212 review).
-  const carriedIdsByLocation = new Map<string, Set<string>>();
+  // Keyed by the CANONICAL spelling the readback compares against, each
+  // carrying the spellings the findings file actually wrote: the
+  // orchestrator exempts a finding by ITS id appearing in `matchedIds`, so
+  // a match found under `R3-2` must be reported as the `R03-2` the file
+  // said (and as `R3-2`, for a canonical reader) (#9940 review, audit).
+  const carriedIdsByLocation = new Map<string, Map<string, Set<string>>>();
   for (const f of newFindings) {
     if (f.id === undefined) continue;
     const key = `${f.path}:${f.line}`;
-    const ids = carriedIdsByLocation.get(key) ?? new Set<string>();
-    ids.add(f.id);
+    const ids = carriedIdsByLocation.get(key) ?? new Map<string, Set<string>>();
+    const canonical = canonicalLedgerId(f.id);
+    const raws = ids.get(canonical) ?? new Set<string>([canonical]);
+    raws.add(f.id);
+    ids.set(canonical, raws);
     carriedIdsByLocation.set(key, ids);
   }
+  /** Every spelling to report for a set of matched canonical ids. */
+  const spellings = (
+    wanted: Map<string, Set<string>>,
+    canonicals: Iterable<string>,
+  ): string[] => [
+    ...new Set([...canonicals].flatMap((c) => [...(wanted.get(c) ?? [c])])),
+  ];
 
   // Own-account Qwen comments per location at the current SHA. A count of
   // exactly one makes an id-less original unambiguous as a re-post target
@@ -767,11 +784,14 @@ function classifyExistingComments(
         currentUserLogin !== '' &&
         (c.user?.login ?? '').toLowerCase() === currentUserLogin.toLowerCase()
       ) {
-        const matchedIds = extractCarriedIds(c.body || '').filter((id) =>
+        const matched = extractCarriedIds(c.body || '').filter((id) =>
           wantedIds.has(id),
         );
-        if (matchedIds.length > 0) {
-          buckets.repost.push({ ...summary, matchedIds });
+        if (matched.length > 0) {
+          buckets.repost.push({
+            ...summary,
+            matchedIds: spellings(wantedIds, matched),
+          });
         } else if (
           !ANY_CARRIED_ID.test(c.body || '') &&
           wantedIds.size === 1 &&
@@ -788,7 +808,10 @@ function classifyExistingComments(
           // strict match; ambiguous cases (several id-less comments or
           // several carried ids at one line) keep the strict body match too,
           // staying dropped and visible in the drop log (#9212 review).
-          buckets.repost.push({ ...summary, matchedIds: [...wantedIds] });
+          buckets.repost.push({
+            ...summary,
+            matchedIds: spellings(wantedIds, wantedIds.keys()),
+          });
         }
       }
     } else {
@@ -831,10 +854,10 @@ function classifyExistingComments(
         continue;
       const wantedIds = carriedIdsByLocation.get(`${c.path}:${c.line}`);
       if (!wantedIds) continue;
-      const matchedIds = extractCarriedIds(c.body || '').filter((id) =>
+      const matched = extractCarriedIds(c.body || '').filter((id) =>
         wantedIds.has(id),
       );
-      if (matchedIds.length === 0) continue;
+      if (matched.length === 0) continue;
       buckets.repost.push({
         id: c.id,
         path: c.path ?? '',
@@ -842,7 +865,7 @@ function classifyExistingComments(
         commit_id: c.commit_id ?? '',
         body: (c.body || '').slice(0, 80),
         ...(c.user?.login ? { user: c.user.login } : {}),
-        matchedIds,
+        matchedIds: spellings(wantedIds, matched),
       });
     }
   }

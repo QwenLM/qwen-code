@@ -32,6 +32,7 @@ import {
   normalizeLedgerFinding,
   type Ledger,
   type LedgerFinding,
+  canonicalLedgerId,
 } from './ledger.js';
 
 const LEDGER: Ledger = {
@@ -1573,5 +1574,30 @@ describe('the finding axes (#10291)', () => {
     expect(axesOf({ d: 'c' })).toBe('certifies-falsely');
     expect(axesOf({ b: 'r' })).toBe('regression');
     expect(axesOf({})).toBe('');
+  });
+});
+
+describe('readClaim — the head-slot read over a multi-line claim', () => {
+  it('splits on a bare CR like every other line model — a second-line token never enters the head slot (#9940 review, audit)', () => {
+    expect(readClaim('R1-2:\r(fix-induced) the new hole')).toEqual({
+      id: 'R1-2',
+      fixInduced: false,
+      title: '',
+    });
+    expect(readClaim('R1-2: (fix-induced) x\rmore').fixInduced).toBe(true);
+  });
+});
+
+describe('canonical ledger ids at the marker (#9940 review, audit 2)', () => {
+  it('normalizeLedgerFinding and serializeLedger write the one spelling', () => {
+    const f = normalizeLedgerFinding({
+      id: 'R02-03',
+      sev: 'C',
+      file: 'src/a.ts',
+      title: 'x',
+    });
+    expect(f.id).toBe('R2-3');
+    expect(canonicalLedgerId('R0-1')).toBe('R0-1');
+    expect(canonicalLedgerId('R007-010')).toBe('R7-10');
   });
 });

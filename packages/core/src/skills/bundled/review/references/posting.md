@@ -127,6 +127,7 @@ Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
   downgradeApprove: boolean;        // submit COMMENT instead of APPROVE
   downgradeRequestChanges: boolean; // submit COMMENT instead of REQUEST_CHANGES (self-PR only)
   downgradeReasons: string[];       // human-readable; join with '; ' for body
+                                    // each capped at 400 code points; a longer one is cut and ends in `…`
   blockOnExistingComments: boolean; // one or more overlaps — drop those findings
                                     // (except carried-id re-posts, see below)
   findingsFileInvalid: boolean;     // the --new-findings file was unreadable:

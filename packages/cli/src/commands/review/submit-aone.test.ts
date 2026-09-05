@@ -2848,14 +2848,17 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     ]);
   });
 
-  it('degrades a built entry compose would refuse to the inert constant', () => {
-    // The enumerated guards cannot cover the unbounded entrance space: a
-    // lone CR inside the CLAIM passes them (the claim does not LEAD with
-    // a fence delimiter), but compose's ingestion normalizes the CR to a
-    // line break and the second line LEADS with a fence delimiter — the
-    // fence refusal fires mid-degrade. The built entry is validated
-    // against compose's OWN acceptance, and a refusal degrades the entry
-    // to the inert constant instead of refusing the whole post.
+  it('a lone CR ends the claim line — the fence on the next rendered line never enters the one-line channel', () => {
+    // A bare `\r` is a line break to every reader now (the line model,
+    // both readback legs, compose's ingestion), so the claim is the first
+    // RENDERED line and the fence that follows the CR is body, not claim:
+    // the built entry is the clean claim, and nothing is degraded. (The
+    // `\n`-only claim split used to carry `\r\`\`\`ts` into the entry, where
+    // compose's fence refusal fired and the gate fell back to the inert
+    // constant — the fallback stays as the authority of last resort for a
+    // shape this builder never anticipated, but no enumerated shape
+    // reaches it now: the claim is one rendered line, and a fence-leading
+    // claim or path is caught above; #9940 review, audit.)
     const crFenceClaim = {
       commit_id: 'abc123',
       comments: [
@@ -2873,7 +2876,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       }),
     ).not.toThrow();
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input['bodyCriticals']).toEqual(['finding — (no path):9999']);
+    expect(input['bodyCriticals']).toEqual(['leaked text — src/foo.ts:9999']);
   });
 
   it('keeps a carried ledger id at position 0 of the relocated entry', () => {
