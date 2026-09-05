@@ -41,6 +41,7 @@ const TUI_ONLY_SETTINGS = new Set([
   'general.outputLanguage',
   'ide.enabled',
   'ui.showLineNumbers',
+  'ui.showToolCallArgs',
   'ui.renderMode',
   'ui.useTerminalBuffer',
   'ui.mouseTracking',
@@ -127,13 +128,15 @@ function rejectWorkspaceRestrictedWrite(
   scope: string,
   key: string,
 ): boolean {
-  if (scope !== 'workspace' || !WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key))
-    return false;
-  res.status(400).json({
-    error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
-    code: 'workspace_restricted_setting',
-  });
-  return true;
+  if (scope !== 'workspace') return false;
+  if (WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key)) {
+    res.status(400).json({
+      error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
+      code: 'workspace_restricted_setting',
+    });
+    return true;
+  }
+  return false;
 }
 
 function getAllowedKeys(includeLiveVoice = false): Set<string> {

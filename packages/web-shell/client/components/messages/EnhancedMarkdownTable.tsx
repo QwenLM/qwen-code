@@ -1526,6 +1526,7 @@ export function EnhancedTable({
   } | null>(null);
   const columnContextMenuRef = useRef<HTMLDivElement | null>(null);
   const cellDialogRef = useRef<HTMLDivElement | null>(null);
+  const cellDialogValueRef = useRef<HTMLDivElement | null>(null);
   const cellDialogFocusReturnRef = useRef<HTMLElement | null>(null);
   const pendingSelectionRef = useRef<{
     rowIndex: number;
@@ -1563,6 +1564,48 @@ export function EnhancedTable({
     }
     setCopiedSelection(false);
   }, []);
+
+  // The dialog opens with focus on its own non-editable container, so a
+  // select-all keystroke falls through to the document and highlights the whole
+  // page instead of the one value the dialog exists to show. Scope it to the
+  // value box, which is what a read-only input would do.
+  const handleCellDialogKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
+      // Cmd/Ctrl+A only. The browser's own select-all is keyed to the physical
+      // key, so match `code` as well: on a Cyrillic or Greek layout the A key
+      // reports `key === 'ф'` and matching `key` alone would let the keystroke
+      // through to the unscoped default. Adding Shift or Alt makes it a
+      // different chord that the browser or the host page owns, so those are
+      // left alone.
+      const selectsAll =
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        (event.code === 'KeyA' || event.key.toLowerCase() === 'a');
+      if (!selectsAll) {
+        return;
+      }
+      const valueNode = cellDialogValueRef.current;
+      const selection = document.getSelection();
+      if (!valueNode || !selection) {
+        return;
+      }
+      // Engines that follow the Selection spec ignore a range rooted in a
+      // ShadowRoot, which is where the value box lives when the Web Shell is
+      // embedded with `shadowDom: true` (portals). Consuming the keystroke
+      // there would clear the old selection and select nothing, so leave that
+      // configuration on the browser default.
+      if (valueNode.getRootNode() !== valueNode.ownerDocument) {
+        return;
+      }
+      event.preventDefault();
+      const range = document.createRange();
+      range.selectNodeContents(valueNode);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    },
+    [],
+  );
 
   const resetCopiedCellDialog = useCallback(() => {
     copiedCellDialogGenRef.current += 1;
@@ -3041,6 +3084,7 @@ export function EnhancedTable({
               event.preventDefault();
               cellDialogRef.current?.focus();
             }}
+            onKeyDown={handleCellDialogKeyDown}
             tabIndex={-1}
           >
             <DialogClose asChild>
@@ -3057,7 +3101,10 @@ export function EnhancedTable({
             <DialogHeader>
               <DialogTitle>{t('markdownTable.cellDialogTitle')}</DialogTitle>
             </DialogHeader>
-            <div className="max-h-[200px] min-h-[100px] cursor-text overflow-auto rounded-lg border bg-background/70 p-3 leading-relaxed font-semibold whitespace-pre-wrap break-words select-text">
+            <div
+              ref={cellDialogValueRef}
+              className="max-h-[200px] min-h-[100px] cursor-text overflow-auto rounded-lg border bg-background/70 p-3 leading-relaxed font-semibold whitespace-pre-wrap break-words select-text"
+            >
               {currentCellDialogCell.content}
             </div>
             <DialogFooter>

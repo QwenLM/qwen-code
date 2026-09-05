@@ -100,6 +100,7 @@ import {
   gradeActiveWorkCoverage,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
@@ -3381,12 +3382,24 @@ describe('createAcpSessionBridge', () => {
                 state: {},
               };
             }
-            if (method === 'qwen/status/session/tasks') {
+            if (
+              method === 'qwen/status/session/tasks' ||
+              method === 'qwen/status/session/agents'
+            ) {
               return {
                 v: 1,
                 sessionId: params['sessionId'],
                 now: 1_700_000_000_000,
                 tasks: [],
+              };
+            }
+            if (method === 'qwen/status/session/agent_trace') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                nodes: [],
+                rootAgentIds: [params['rootAgentId']],
+                warnings: [],
               };
             }
             if (method === 'qwen/status/session/lsp') {
@@ -3466,6 +3479,19 @@ describe('createAcpSessionBridge', () => {
       tasks: [],
     });
     await expect(
+      bridge.getSessionAgentsStatus(session.sessionId),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      tasks: [],
+    });
+    await expect(
+      bridge.getSessionAgentTrace(session.sessionId, 'root-1'),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      rootAgentIds: ['root-1'],
+      nodes: [],
+    });
+    await expect(
       bridge.getSessionLspStatus(session.sessionId),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
@@ -3490,6 +3516,8 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/context',
       'qwen/status/session/supported_commands',
       'qwen/status/session/tasks',
+      'qwen/status/session/agents',
+      'qwen/status/session/agent_trace',
       'qwen/status/session/lsp',
       'qwen/status/session/resources',
     ]);
@@ -3869,6 +3897,113 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('flushes transcripts through the backward page barrier', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [],
+            hasMore: false,
+          };
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await bridge.flushSessionTranscript?.('session-1');
+
+    expect(handle.agent.extMethodCalls).toEqual([
+      {
+        method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+        params: {
+          cwd: WS_A,
+          sessionId: 'session-1',
+          direction: 'backward',
+          limit: 1,
+        },
+      },
+    ]);
+
+    await bridge.shutdown();
+  });
+
+  it('gets turn-index pages through workspace status without creating a session', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                snapshot: 'snapshot-1',
+                totalTurns: 1,
+                start: 0,
+                turns: [
+                  {
+                    ordinal: 0,
+                    turnId: 'record-1',
+                    kind: 'prompt',
+                    label: 'hello',
+                  },
+                ],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.getSessionTurnIndexPage({
+      sessionId: 'session-1',
+      snapshot: 'snapshot-1',
+      start: 0,
+      limit: 2,
+    });
+
+    expect(result).toEqual({
+      v: 1,
+      sessionId: 'session-1',
+      snapshot: 'snapshot-1',
+      totalTurns: 1,
+      start: 0,
+      turns: [
+        {
+          ordinal: 0,
+          turnId: 'record-1',
+          kind: 'prompt',
+          label: 'hello',
+        },
+      ],
+    });
+    expect(handles[0]?.agent.extMethodCalls).toEqual([
+      {
+        method: SERVE_STATUS_EXT_METHODS.sessionTurnIndex,
+        params: {
+          cwd: WS_A,
+          sessionId: 'session-1',
+          snapshot: 'snapshot-1',
+          start: 0,
+          limit: 2,
+        },
+      },
+    ]);
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.promptCalls).toHaveLength(0);
+    expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
   it('times out transcript page status requests', async () => {
     vi.useFakeTimers();
     try {
@@ -3887,6 +4022,41 @@ describe('createAcpSessionBridge', () => {
       });
 
       const request = bridge.getSessionTranscriptPage({
+        sessionId: 'session-1',
+      });
+      const rejection =
+        // eslint-disable-next-line vitest/valid-expect -- awaited via `rejection` below, after the fake timers advance (handler attached early so the timeout rejection is not unhandled)
+        expect(request).rejects.toBeInstanceOf(BridgeTimeoutError);
+      await callSeen.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await rejection;
+      expect(handle.agent.extMethodCalls).toHaveLength(1);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('times out turn-index page status requests', async () => {
+    vi.useFakeTimers();
+    try {
+      const callSeen = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+            callSeen.resolve();
+            return new Promise<never>(() => {});
+          }
+          throw new Error(`unexpected extMethod ${method}`);
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const request = bridge.getSessionTurnIndexPage({
         sessionId: 'session-1',
       });
       const rejection =
@@ -3945,6 +4115,27 @@ describe('createAcpSessionBridge', () => {
     ).rejects.toMatchObject({
       name: 'SessionNotFoundError',
       sessionId: 'missing-transcript',
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('maps a missing turn-index session (resourceNotFound) to SessionNotFoundError', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTurnIndex) {
+          throw RequestError.resourceNotFound('session:missing-turn-index');
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+    await expect(
+      bridge.getSessionTurnIndexPage({ sessionId: 'missing-turn-index' }),
+    ).rejects.toMatchObject({
+      name: 'SessionNotFoundError',
+      sessionId: 'missing-turn-index',
     });
 
     await bridge.shutdown();
@@ -4634,6 +4825,12 @@ describe('createAcpSessionBridge', () => {
     await expect(
       bridge.getSessionTasksStatus('missing'),
     ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(
+      bridge.getSessionAgentsStatus('missing'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(bridge.getSessionAgentTrace('missing')).rejects.toBeInstanceOf(
+      SessionNotFoundError,
+    );
     await expect(bridge.getSessionLspStatus('missing')).rejects.toBeInstanceOf(
       SessionNotFoundError,
     );
@@ -4865,6 +5062,7 @@ describe('createAcpSessionBridge', () => {
     const loaded = await bridge.loadSession({
       sessionId: 'persisted-1',
       workspaceCwd: WS_A,
+      suppressWorktreeContextRestore: true,
     });
 
     expect(loaded).toEqual({
@@ -4882,7 +5080,9 @@ describe('createAcpSessionBridge', () => {
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
       {
-        _meta: {},
+        _meta: {
+          [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+        },
         sessionId: 'persisted-1',
         cwd: WS_A,
         mcpServers: [],
@@ -9166,6 +9366,7 @@ describe('createAcpSessionBridge', () => {
     const resumed = await bridge.resumeSession({
       sessionId: 'persisted-2',
       workspaceCwd: WS_A,
+      suppressWorktreeContextRestore: true,
     });
 
     expect(resumed).toEqual({
@@ -9181,7 +9382,14 @@ describe('createAcpSessionBridge', () => {
     });
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toEqual([
-      { _meta: {}, sessionId: 'persisted-2', cwd: WS_A, mcpServers: [] },
+      {
+        _meta: {
+          [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
+        },
+        sessionId: 'persisted-2',
+        cwd: WS_A,
+        mcpServers: [],
+      },
     ]);
 
     await bridge.shutdown();
@@ -14250,6 +14458,148 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('defers a tracked restore prompt until the daemon integrity gate admits it', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.loadSession({
+        sessionId: 'persisted-auq-deferred',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      expect(restored.hasActivePrompt).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(true);
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(false);
+      await bridge.shutdown();
+    });
+
+    it('discards a deferred restore prompt rejected by the daemon integrity gate', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.loadSession({
+        sessionId: 'persisted-auq-discarded',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      bridge.discardDeferredRestoreAskUserQuestionPrompt?.(
+        restored.sessionId,
+        restored.clientId,
+      );
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
+    it('defers a tracked resume prompt until the daemon integrity gate admits it', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        resumeSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: 'persisted-auq-resume-deferred',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      expect(restored.hasActivePrompt).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(true);
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      await bridge.shutdown();
+    });
+
+    it('discards a deferred resume prompt rejected by the daemon integrity gate', async () => {
+      const handle = makeChannel({
+        promptImpl: () => new Promise(() => undefined),
+        resumeSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      const restored = await bridge.resumeSession({
+        sessionId: 'persisted-auq-resume-discarded',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+        deferRestoreAskUserQuestionPrompt: true,
+      });
+
+      bridge.discardDeferredRestoreAskUserQuestionPrompt?.(
+        restored.sessionId,
+        restored.clientId,
+      );
+      expect(
+        bridge.fireDeferredRestoreAskUserQuestionPrompt?.(
+          restored.sessionId,
+          restored.clientId,
+        ),
+      ).toBe(false);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
     it('does not fire a restore prompt without an attached client', async () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
@@ -15403,6 +15753,38 @@ describe('createAcpSessionBridge', () => {
         binaryReference,
       ]);
       await bridge.shutdown();
+    });
+
+    it('lists every attachment stored for a session', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({ promptImpl: () => ({ stopReason: 'end_turn' }) })
+            .channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const textReference = await bridge.storeSessionAttachment(
+          session.sessionId,
+          new TextEncoder().encode('hello'),
+          'text/plain',
+          { clientId: session.clientId },
+          'notes.txt',
+        );
+        const imageReference = await bridge.storeSessionAttachment(
+          session.sessionId,
+          Uint8Array.from([1, 2, 3]),
+          'image/png',
+          { clientId: session.clientId },
+        );
+
+        expect(
+          await bridge.listSessionAttachments(session.sessionId, {
+            clientId: session.clientId,
+          }),
+        ).toEqual(expect.arrayContaining([textReference, imageReference]));
+      } finally {
+        await bridge.shutdown();
+      }
     });
 
     it('keeps inline media bytes in echoes for legacy clients', async () => {
