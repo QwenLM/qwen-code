@@ -9393,17 +9393,23 @@ export class Session implements SessionContext {
     });
 
     // Session title recorded (auto-generated after a turn, or an in-process
-    // /rename) → notify attached clients. A title update is NOT an ACP
-    // `SessionUpdate` variant (the external @agentclientprotocol/sdk union
-    // would reject an unknown kind at validation), so — like
-    // `current_model_update` above — it goes over the agent→bridge
-    // `extNotification` side-channel. The bridge demuxes it into the
-    // canonical `session_metadata_updated` bus event so HTTP clients can
-    // refresh their session list immediately instead of discovering the
-    // new title on their next poll.
+    // /rename) → notify attached clients. Keep the Qwen notification for the
+    // bridge's HTTP session metadata event, and also emit the standard ACP
+    // update for clients that do not implement Qwen extensions.
     this.config
       .getChatRecordingService()
       ?.setTitleRecordedCallback((customTitle, titleSource, sessionId) => {
+        void this.client
+          .sessionUpdate({
+            sessionId,
+            update: {
+              sessionUpdate: 'session_info_update',
+              title: customTitle,
+            },
+          })
+          .catch(() => {
+            // Best-effort, matching the vendor notification below.
+          });
         void this.client
           .extNotification('qwen/notify/session/title-update', {
             v: 1,

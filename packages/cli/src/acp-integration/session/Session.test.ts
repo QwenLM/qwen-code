@@ -2622,6 +2622,13 @@ describe('Session', () => {
         titleSource: 'auto',
       },
     );
+    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'persisted-session-id',
+      update: {
+        sessionUpdate: 'session_info_update',
+        title: 'Durable title',
+      },
+    });
   });
 
   describe('managed auto-memory', () => {

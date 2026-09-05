@@ -6531,7 +6531,11 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
-  it.each(['available_commands_update', 'current_mode_update'] as const)(
+  it.each([
+    'available_commands_update',
+    'current_mode_update',
+    'session_info_update',
+  ] as const)(
     'keeps the turn error on refresh when an idle %s session_update lands after it',
     async (subtype) => {
       // Latest-wins state snapshots fan out to idle sessions (a workspace
@@ -6610,7 +6614,9 @@ describe('createAcpSessionBridge', () => {
                 availableCommands: [],
                 _meta: { availableSkills: [] },
               }
-            : { sessionUpdate: subtype, currentModeId: 'plan' },
+            : subtype === 'current_mode_update'
+              ? { sessionUpdate: subtype, currentModeId: 'plan' }
+              : { sessionUpdate: subtype, title: 'Durable title' },
       });
       await sawIdleUpdate;
 
