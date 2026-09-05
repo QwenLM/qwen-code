@@ -94,11 +94,14 @@ export function SessionWorkflowInspector({
   const selectedTools = selectedTodo
     ? (projection.agentToolsByTodo.get(selectedTodo.id) ?? [])
     : [];
-  // blockedBy is model-authored and can repeat an id; dedup before mapping
-  // so a repeated reference cannot emit a duplicate key or a second link.
+  // blockedBy is model-authored and can repeat an id — or name the todo
+  // itself. Dedup before mapping so a repeated reference cannot emit a
+  // duplicate key or a second link, and drop self-references with the same
+  // rule the projection's dependentsByTodo builder applies, so the
+  // inspector never shows a step blocked by itself.
   const upstream = selectedTodo
-    ? [...new Set(selectedTodo.blockedBy ?? [])].filter((id) =>
-        projection.todosById.has(id),
+    ? [...new Set(selectedTodo.blockedBy ?? [])].filter(
+        (id) => id !== selectedTodo.id && projection.todosById.has(id),
       )
     : undefined;
   // The projection already derives this for the graph's edges; recomputing it

@@ -1323,13 +1323,14 @@ export function PlanExecutionView({
                       disabled={documentMode}
                     >
                       {/* Status reaches assistive tech as words; the left
-                          rule that carries it visually is colour only. */}
+                          rule that carries it visually is colour only.
+                          Attention is announced beside the status word,
+                          never instead of it. */}
                       <span className={styles.nodeStatusText}>
-                        {t(
-                          state.attention
-                            ? 'planExecution.attention'
-                            : statusKey(state.status),
-                        )}
+                        {t(statusKey(state.status))}
+                        {state.attention
+                          ? `, ${t('planExecution.attention')}`
+                          : ''}
                       </span>
                       <div className={styles.nodeTop}>
                         <span className={styles.nodeNumber}>
