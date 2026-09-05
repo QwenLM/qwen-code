@@ -25,8 +25,6 @@
     "dist/sdk/types.d.ts",
     "dist/native-host.js",
     "dist/scripts/native-host-setup.js",
-    "skills",
-    "qwen-extension.json",
     "NOTICE"
   ],
   "engines": {
@@ -38,7 +36,7 @@
     "native-host:status": "node dist/scripts/native-host-setup.js status",
     "native-host:uninstall": "node dist/scripts/native-host-setup.js uninstall",
     "smoke:managed-chrome-preflight": "npm run build --workspace=@qwen-code/chrome-bridge && npm run build && node dist/scripts/managed-chrome-preflight.js",
-    "smoke:qwen-saucedemo": "npm run build --workspace=@qwen-code/node-repl-mcp && npm run build --workspace=@qwen-code/chrome-bridge && npm run build && node dist/scripts/smoke-qwen-saucedemo.js",
+    "smoke:qwen-saucedemo": "npm run build --workspace=@qwen-code/node-repl-mcp && npm run build --workspace=@qwen-code/chrome-bridge && npm run build && npm --prefix ../.. run bundle && node dist/scripts/smoke-qwen-saucedemo.js",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

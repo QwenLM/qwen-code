@@ -38,6 +38,7 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
 const cliOnly = process.argv.includes('--cli-only');
 
 // Build in dependency order:
+// 0. browser-use (built first so core can stage the builtin skill's runtime)
 // 1. core (foundation package, includes test-utils)
 // 2. web-templates (embeddable web templates - used by cli)
 // 3. channel-base (base channel infrastructure - used by channel adapters and cli)
@@ -51,6 +52,7 @@ const cliOnly = process.argv.includes('--cli-only');
 // 11. vscode-ide-companion (depends on webui)
 // 12. external-context integrations (private Qwen extensions)
 const buildOrder = [
+  'packages/browser-use',
   'packages/core',
   'packages/web-templates',
   'packages/channels/base',
@@ -68,7 +70,6 @@ const buildOrder = [
   'packages/channels/plugin-example',
   'packages/audio-capture',
   'packages/node-repl',
-  'packages/browser-use',
   'packages/acp-bridge',
   'packages/sdk-typescript',
   'packages/cli',

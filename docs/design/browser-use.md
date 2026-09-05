@@ -8,7 +8,7 @@ Chrome from Qwen Code.
 - The Browser SDK runs as a library inside the persistent Node Kernel exposed
   by the Node REPL MCP server.
 - `playwright-core` provides standard browser automation semantics.
-- The Qwen extension and `chrome.debugger` connect the runtime to Chrome.
+- The Qwen Chrome extension and `chrome.debugger` connect the runtime to Chrome.
 - The first release supports one active Browser Use session.
 
 ## Architecture
@@ -43,13 +43,15 @@ Playwright's browser-level CDP adapter.
 `chromium.connectOverCDP(transport)`. Qwen therefore keeps Native Messaging and
 does not add a local WebSocket server.
 
-The Browser Use extension is distributed as an npm package whose tarball ships
-the Browser SDK and its pinned Playwright dependency. Its skill uses the
-reported skill base directory to register the installed extension's
-`node_modules` with the existing Node REPL and imports the installed SDK
-directly; users do not install the SDK into each workspace. Raw source installs
-are unsupported because they do not contain built output or bundled
-dependencies.
+Browser Use ships with Qwen Code as a bundled skill and its runtime resources.
+No separate Qwen extension installation is required. The skill's `runtime/`
+directory contains the Browser SDK, Native Host, and pinned Playwright
+dependency. The skill registers `runtime/node_modules` with the existing Node
+REPL and imports `runtime/index.js`; the CLI does not execute browser logic.
+Source development, transpiled builds, and the published CLI use this same
+layout. The generic Node REPL MCP server must be configured, and the Qwen
+Chrome extension must be installed in the browser. Bundling does not connect
+to Chrome at CLI startup; the SDK connects when first used.
 
 Native Host registration is native-side product setup, not a Chrome-extension
 operation. On macOS and Linux, the first Browser runtime initialization
@@ -57,7 +59,7 @@ idempotently installs the launcher and manifests for existing Google Chrome,
 Chrome for Testing, and Chromium profile roots. It refuses to overwrite
 foreign files: a conflicting launcher aborts initialization, while a
 conflicting browser manifest is skipped. Running
-`node <extension-root>/dist/scripts/native-host-setup.js uninstall` removes
+`node <skill-base>/runtime/scripts/native-host-setup.js uninstall` removes
 files owned by Browser Use. The Chrome extension only opens the registered host
 through `connectNative()`.
 

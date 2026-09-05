@@ -6,10 +6,16 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { spawnMock, platformMock, existsSyncMock } = vi.hoisted(() => ({
-  spawnMock: vi.fn(() => ({ on: vi.fn() })),
-  platformMock: vi.fn(() => 'darwin'),
-  existsSyncMock: vi.fn(() => false),
+const { spawnMock, platformMock, existsSyncMock, copyBrowserUseAssetsMock } =
+  vi.hoisted(() => ({
+    spawnMock: vi.fn(() => ({ on: vi.fn() })),
+    platformMock: vi.fn(() => 'darwin'),
+    existsSyncMock: vi.fn(() => false),
+    copyBrowserUseAssetsMock: vi.fn(),
+  }));
+
+vi.mock('../copy-browser-use-assets.js', () => ({
+  copyBrowserUseAssets: copyBrowserUseAssetsMock,
 }));
 
 vi.mock('node:child_process', () => ({
@@ -78,6 +84,33 @@ describe('scripts/dev.js launcher', () => {
       '--help',
     ]);
     expect(options).toEqual(expect.objectContaining({ shell: false }));
+  });
+
+  it('stages the browser-use runtime under the source builtin skill', async () => {
+    await import('../dev.js?browser-use');
+
+    expect(copyBrowserUseAssetsMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringMatching(
+        /packages[/\\]core[/\\]src[/\\]skills[/\\]bundled[/\\]browser-use$/,
+      ),
+    );
+    expect(copyBrowserUseAssetsMock.mock.invocationCallOrder[0]).toBeLessThan(
+      spawnMock.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not launch with missing browser-use runtime assets', async () => {
+    copyBrowserUseAssetsMock.mockImplementationOnce(() => {
+      throw new Error(
+        'Run "npm run build --workspace=@qwen-code/browser-use" first.',
+      );
+    });
+
+    await expect(import('../dev.js?missing-browser-use')).rejects.toThrow(
+      'npm run build --workspace=@qwen-code/browser-use',
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
   });
 
   it('keeps shell fallback for Windows tsx.cmd resolution', async () => {

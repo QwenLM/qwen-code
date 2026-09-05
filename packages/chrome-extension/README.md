@@ -50,8 +50,9 @@ welcome screen for the chat UI automatically.
 
 ## Browser Use
 
-Browser Use uses the separate `@qwen-code/browser-use` package and Qwen's
-standard Node REPL. On macOS and Linux, its first initialization registers the
+Browser Use ships with Qwen Code as a built-in skill and SDK runtime, using
+Qwen's standard Node REPL. No separate Qwen extension installation is needed.
+On macOS and Linux, its first initialization registers the
 local Native Messaging host. It does not require `qwen serve`, does not expose
 a Chrome debugging port, and supports one active Browser Use session in this
 release.
@@ -72,8 +73,8 @@ QWEN_CDP_MCP_COMMAND=/path/to/cdp-mcp-adapter \
 qwen serve --allow-origin chrome-extension://<this-extension-id>
 ```
 
-No browser automation adapter is bundled with the main `@qwen-code/qwen-code`
-package. When `QWEN_CDP_MCP_COMMAND` is unset, the extension can still open the
+No adapter for this older CDP tunnel is bundled with `@qwen-code/qwen-code`.
+When `QWEN_CDP_MCP_COMMAND` is unset, the extension can still open the
 Web Shell, but the daemon will not register browser automation MCP tools.
 Install the adapter separately and point the daemon at its executable:
 

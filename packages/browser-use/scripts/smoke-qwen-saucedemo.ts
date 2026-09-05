@@ -6,7 +6,6 @@
  */
 
 import { spawn } from 'node:child_process';
-import { createServer, type Server } from 'node:http';
 import {
   access,
   chmod,
@@ -56,11 +55,25 @@ await withManagedChrome('sauce', async (chrome) => {
   assert(model, 'QWEN_BROWSER_USE_MODEL is required');
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
   const repositoryRoot = resolve(packageRoot, '../..');
+  const qwenEntry = join(repositoryRoot, 'dist/cli.js');
   const nodeReplEntry = join(
     repositoryRoot,
     'packages/node-repl/dist/index.js',
   );
-  await access(nodeReplEntry);
+  const builtinSkillRoot = join(repositoryRoot, 'dist/bundled/browser-use');
+  const browserRuntimeRoot = join(builtinSkillRoot, 'runtime');
+  const browserRuntimeEntry = join(browserRuntimeRoot, 'index.js');
+  const browserModuleRoot = join(browserRuntimeRoot, 'node_modules');
+  await Promise.all(
+    [
+      qwenEntry,
+      nodeReplEntry,
+      join(builtinSkillRoot, 'SKILL.md'),
+      browserRuntimeEntry,
+      join(browserRuntimeRoot, 'native-host.js'),
+      join(browserModuleRoot, 'playwright-core/package.json'),
+    ].map((path) => access(path)),
+  );
   const runId = new Date()
     .toISOString()
     .replaceAll(':', '')
@@ -129,71 +142,14 @@ await withManagedChrome('sauce', async (chrome) => {
       QWEN_HOME: qwenHome,
       QWEN_BROWSER_USE_SOCKET_PATH: chrome.socketPath,
     };
-    const pack = await runCommand(
-      'npm',
-      ['pack', packageRoot, '--json', '--pack-destination', temporaryRoot],
-      repositoryRoot,
-      environment,
-      120_000,
-    );
-    assertSuccess(pack, 'Browser Use package');
-    const packEntries = JSON.parse(pack.stdout) as unknown;
-    assert(
-      Array.isArray(packEntries) &&
-        isRecord(packEntries[0]) &&
-        typeof packEntries[0]['filename'] === 'string' &&
-        /^[^/\\]+\.tgz$/.test(packEntries[0]['filename']),
-      'npm pack returned an invalid archive name',
-    );
-    const packageArchive = join(temporaryRoot, packEntries[0]['filename']);
-    await access(packageArchive);
-    const command = parseCommand(
-      process.env['QWEN_BROWSER_USE_QWEN_COMMAND'] ?? 'qwen',
-    );
-    const registry = await startLocalNpmRegistry(packageArchive);
-    let install: CommandResult;
-    try {
-      install = await runCommand(
-        command.program,
-        [
-          ...command.prefix,
-          'extensions',
-          'install',
-          '@qwen-code/browser-use@0.1.0',
-          '--registry',
-          registry.url,
-          '--consent',
-          '--scope',
-          'user',
-        ],
-        workspace,
-        environment,
-        120_000,
-      );
-    } finally {
-      await closeServer(registry.server);
-    }
-    await writeFile(
-      join(runRoot, 'install-output.txt'),
-      install.stdout + install.stderr,
-      { mode: 0o600 },
-    );
-    assertSuccess(install, 'Qwen extension install');
-    const installedExtension = join(qwenHome, 'extensions/browser-use');
-    await access(join(installedExtension, 'dist/index.js'));
-    await access(join(installedExtension, 'node_modules/playwright-core'));
-    await access(join(installedExtension, 'skills/browser-use/SKILL.md'));
-
     const qwen = await runCommand(
-      command.program,
+      process.execPath,
       [
-        ...command.prefix,
+        qwenEntry,
         '--auth-type',
         'openai',
         '--model',
         model,
-        '--extensions',
-        'browser-use',
         '--allowed-mcp-server-names',
         'node-repl',
         '--core-tools',
@@ -265,11 +221,11 @@ await withManagedChrome('sauce', async (chrome) => {
     const checks = {
       existingNodeReplUsed: calls.length > 0,
       browserSdkImported:
-        joinedCode.includes('/extensions/browser-use/dist/index.js') &&
+        joinedCode.includes(browserRuntimeEntry) &&
         joinedCode.includes('setupBrowserRuntime()'),
-      extensionModuleRootRegistered: successfulToolUsed(
+      builtinModuleRootRegistered: successfulModuleRootRegistered(
         events,
-        'mcp__node-repl__node_repl_add_node_module_dir',
+        browserModuleRoot,
       ),
       checkoutCompletionObserved:
         completion.url === 'https://www.saucedemo.com/checkout-complete.html' &&
@@ -318,79 +274,6 @@ await withManagedChrome('sauce', async (chrome) => {
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
-
-function parseCommand(value: string): {
-  program: string;
-  prefix: string[];
-} {
-  const parts = value.trim().split(/\s+/).filter(Boolean);
-  const program = parts.shift();
-  if (!program) throw new Error('Qwen command is empty');
-  return { program, prefix: parts };
-}
-
-async function startLocalNpmRegistry(
-  packageArchive: string,
-): Promise<{ server: Server; url: string }> {
-  const archive = await readFile(packageArchive);
-  let registryUrl = '';
-  const server = createServer((request, response) => {
-    const pathname = decodeURIComponent(
-      new URL(request.url ?? '/', 'http://localhost').pathname,
-    );
-    if (pathname === '/@qwen-code/browser-use') {
-      const metadata = Buffer.from(
-        JSON.stringify({
-          'dist-tags': { latest: '0.1.0' },
-          versions: {
-            '0.1.0': {
-              dist: { tarball: `${registryUrl}/browser-use.tgz` },
-            },
-          },
-        }),
-      );
-      response.writeHead(200, {
-        'content-type': 'application/json',
-        'content-length': metadata.byteLength,
-      });
-      response.end(metadata);
-      return;
-    }
-    if (pathname === '/browser-use.tgz') {
-      response.writeHead(200, {
-        'content-type': 'application/octet-stream',
-        'content-length': archive.byteLength,
-      });
-      response.end(archive);
-      return;
-    }
-    response.writeHead(404).end();
-  });
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    const onError = (error: Error) => rejectPromise(error);
-    server.once('error', onError);
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', onError);
-      resolvePromise();
-    });
-  });
-  const address = server.address();
-  assert(
-    address !== null && typeof address === 'object',
-    'Local npm registry did not bind a TCP port',
-  );
-  registryUrl = `http://127.0.0.1:${address.port}`;
-  return { server, url: registryUrl };
-}
-
-async function closeServer(server: Server): Promise<void> {
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    server.close((error) => {
-      if (error) rejectPromise(error);
-      else resolvePromise();
-    });
-  });
-}
 
 async function runCommand(
   program: string,
@@ -530,7 +413,10 @@ function collectSuccessfulNodeReplCalls(events: unknown[]): NodeReplCall[] {
   return successful;
 }
 
-function successfulToolUsed(events: unknown[], toolName: string): boolean {
+function successfulModuleRootRegistered(
+  events: unknown[],
+  moduleRoot: string,
+): boolean {
   const calls = new Set<string>();
   for (const event of events) {
     if (!isRecord(event) || event['type'] !== 'assistant') continue;
@@ -540,7 +426,9 @@ function successfulToolUsed(events: unknown[], toolName: string): boolean {
       if (
         isRecord(block) &&
         block['type'] === 'tool_use' &&
-        block['name'] === toolName &&
+        block['name'] === 'mcp__node-repl__node_repl_add_node_module_dir' &&
+        isRecord(block['input']) &&
+        block['input']['path'] === moduleRoot &&
         typeof block['id'] === 'string'
       ) {
         calls.add(block['id']);

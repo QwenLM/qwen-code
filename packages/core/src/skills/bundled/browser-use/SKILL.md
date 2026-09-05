@@ -5,8 +5,9 @@ description: Control the user's Chrome through the existing persistent Node REPL
 
 # Browser Use
 
-Use the existing Node REPL MCP tools. Do not start a separate Browser Use MCP
-server.
+Browser Use is bundled with Qwen Code and uses the generic Node REPL MCP tools
+and the Qwen Chrome extension. Do not install a separate Qwen extension or
+start a separate Browser Use MCP server.
 
 ## Setup
 
@@ -20,19 +21,18 @@ Then tell the user to restart Qwen Code and stop. Do not start a separate
 Browser Use MCP server.
 
 Qwen reports the absolute `Base directory for this skill` when loading this
-file. Resolve the extension root two directories above it. The supported
-installation is the published npm package. Confirm that
-`<extension-root>/dist/index.js` and
-`<extension-root>/node_modules/playwright-core/package.json` exist. If either
-is missing, stop and ask the user to reinstall the npm package instead of
-installing dependencies into the workspace. Before the first Node REPL cell,
-call `node_repl_add_node_module_dir` once with the absolute
-`<extension-root>/node_modules` path. Import the SDK from the same installed
-extension, replacing the example root below with that absolute path:
+file. Use that directory as `<skill-base>`. Confirm that
+`<skill-base>/runtime/index.js` and
+`<skill-base>/runtime/node_modules/playwright-core/package.json` exist. If
+either is missing, stop and report an incomplete Browser Use runtime instead
+of installing dependencies into the workspace. Before the first Node REPL
+cell, call `node_repl_add_node_module_dir` once with the absolute
+`<skill-base>/runtime/node_modules` path. Import the bundled SDK, replacing the
+example skill base below with that absolute path:
 
 ```js
 globalThis.browserAgent ??= await (
-  await import('/absolute/extension/root/dist/index.js')
+  await import('/absolute/skill/base/runtime/index.js')
 ).setupBrowserRuntime();
 globalThis.browser ??= await browserAgent.browsers.get('chrome');
 nodeRepl.write(await browser.documentation());

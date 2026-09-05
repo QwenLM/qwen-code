@@ -28,11 +28,17 @@ import {
   readFileSync,
 } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
+import { copyBrowserUseAssets } from './copy-browser-use-assets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const cliPackageDir = join(root, 'packages', 'cli');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+
+copyBrowserUseAssets(
+  root,
+  join(root, 'packages', 'core', 'src', 'skills', 'bundled', 'browser-use'),
+);
 
 // Ensure qc-helper bundled skill can find user docs in dev mode.
 // In dev, import.meta.url resolves to the source tree, so the bundled skill
