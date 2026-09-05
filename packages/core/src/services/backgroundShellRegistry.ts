@@ -179,6 +179,17 @@ export interface ShellTask extends TaskBase {
    * window; always equals `outputFile`.
    */
   outputPath: string;
+  /**
+   * Set when a terminal notification could not be delivered because no
+   * notification callback was bound at emit time (e.g. the owning Session
+   * was disposed/recycled). Unlike `notified`, this is a *deferral*, not a
+   * consumption: the entry stays eligible for redelivery when a callback
+   * re-registers on session resume/rebind, so a background shell that
+   * finishes during a runtime transition can never silently plant its
+   * session (#11119). Entries settled by `abortAll()` shutdown cleanup
+   * never set this — those notifications are intentionally suppressed.
+   */
+  notificationPending?: boolean;
 }
 
 /**
@@ -259,6 +270,27 @@ export class BackgroundShellRegistry {
     cb: BackgroundShellNotificationCallback | undefined,
   ): void {
     this.notificationCallback = cb;
+    // Rebinding a consumer (session resume / new runtime generation) heals a
+    // deferred-notification wedge: replay any terminal notifications that
+    // were dropped while no callback was bound so a background shell that
+    // finished during a runtime transition still wakes its session (#11119).
+    if (cb) this.drainPendingNotifications();
+  }
+
+  /**
+   * Re-emit terminal notifications that were deferred by
+   * {@link emitNotification} because no callback was bound at the time. Each
+   * replayed entry is consumed exactly once (emitNotification flips
+   * `notified`), so this can never double-deliver. Entries settled by
+   * `abortAll()` never carry `notificationPending`, so suppressed shutdown
+   * cancellations are not resurrected here.
+   */
+  private drainPendingNotifications(): void {
+    for (const entry of Array.from(this.entries.values())) {
+      if (entry.notificationPending && entry.status !== 'running') {
+        this.emitNotification(entry);
+      }
+    }
   }
 
   /**
@@ -294,6 +326,7 @@ export class BackgroundShellRegistry {
     entry.outputFile = registration.outputPath;
     entry.outputOffset = 0;
     entry.notified = false;
+    entry.notificationPending = false;
     entry.todoWorkChainId ??= todoWorkChainContext.getStore();
     this.entries.set(entry.shellId, entry);
     this.writeStatusFile(entry);
@@ -476,14 +509,28 @@ export class BackgroundShellRegistry {
 
   private emitNotification(entry: ShellTask): void {
     if (entry.notified) return;
-    entry.notified = true;
 
     if (!this.notificationCallback) {
-      debugLogger.debug(
-        `Notification dropped for shell ${entry.shellId}: no callback registered`,
+      // No consumer is bound (the owning Session was disposed/recycled, or
+      // has not re-registered yet). Do NOT mark `notified`: consumption here
+      // would make the drop permanent — a later callback could never re-emit
+      // it, wedging the session silently (#11119). Defer instead so the
+      // notification is redelivered when a callback re-registers, and log at
+      // `warn` (not `debug`) so the break is observable rather than silent.
+      entry.notificationPending = true;
+      debugLogger.warn(
+        `No notification callback registered for shell ${entry.shellId}; ` +
+          `deferring terminal notification for redelivery on rebind`,
       );
       return;
     }
+
+    // A consumer is bound: consume the notification exactly once. Delivery
+    // itself is best-effort below — a throwing callback must not poison the
+    // registry, and we deliberately do not retry a callback that was reached
+    // but threw (matches the pre-existing fire-once semantics).
+    entry.notified = true;
+    entry.notificationPending = false;
 
     const statusText =
       entry.status === 'completed'

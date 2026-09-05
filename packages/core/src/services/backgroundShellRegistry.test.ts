@@ -724,6 +724,68 @@ describe('BackgroundShellRegistry', () => {
       expect(reg.get('a')!.notified).toBe(false);
       expect(reg.get('b')!.notified).toBe(false);
     });
+
+    it('defers a terminal notification dropped with no callback and redelivers it on rebind (#11119)', () => {
+      const reg = new BackgroundShellRegistry();
+      const outputPath = makeOutputFile('done\n');
+      reg.register(
+        makeEntry({ shellId: 'a', command: 'npm test', outputPath }),
+      );
+
+      // The shell finishes while no consumer is bound — the owning Session
+      // was disposed/recycled. Previously this was consumed and lost forever.
+      reg.complete('a', 0, 2000);
+
+      const dropped = reg.get('a')!;
+      expect(dropped.notified).toBe(false);
+      expect(dropped.notificationPending).toBe(true);
+
+      // A new Session re-registers a callback (resume / new runtime
+      // generation). The deferred notification must be replayed exactly once
+      // instead of silently planting the session.
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      const [displayText, modelText, meta] = callback.mock.calls[0];
+      expect(displayText).toBe('Background shell "npm test" completed.');
+      expect(modelText).toContain('<task-id>a</task-id>');
+      expect(modelText).toContain('<status>completed</status>');
+      expect(meta).toEqual({
+        shellId: 'a',
+        status: 'completed',
+        exitCode: 0,
+      });
+
+      const healed = reg.get('a')!;
+      expect(healed.notified).toBe(true);
+      expect(healed.notificationPending).toBe(false);
+    });
+
+    it('redelivers deferred notifications once and never resurrects abortAll cancellations (#11119)', () => {
+      const reg = new BackgroundShellRegistry();
+      // 'a' finishes while unbound → deferred. 'b' is settled by shutdown
+      // cleanup (abortAll), which intentionally emits no notification.
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.register(makeEntry({ shellId: 'b' }));
+      reg.complete('a', 0, 2000);
+      reg.abortAll();
+
+      expect(reg.get('a')!.notificationPending).toBe(true);
+      expect(reg.get('b')!.notificationPending).toBeFalsy();
+
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+
+      // Only the deferred 'a' replays; the suppressed 'b' stays silent.
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback.mock.calls[0][2]).toMatchObject({ shellId: 'a' });
+
+      // Rebinding a second time must not double-deliver the consumed 'a'.
+      const callback2 = vi.fn();
+      reg.setNotificationCallback(callback2);
+      expect(callback2).not.toHaveBeenCalled();
+    });
   });
 
   describe('requestCancel', () => {
