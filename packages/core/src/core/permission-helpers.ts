@@ -117,6 +117,36 @@ export interface PermissionEvalResult {
   pmForcedAsk: boolean;
 }
 
+/** Result of evaluating restrictive rules over one or more spellings. */
+export interface RestrictivePermissionEvalResult
+  extends PermissionEvalResult {
+  /** The context that produced the winning deny/ask decision, if any. */
+  matchedContext?: PermissionCheckContext;
+}
+
+/**
+ * Evaluate one permission context through the shared L4 decision core.
+ *
+ * This is intentionally the single place that couples `hasRelevantRules`,
+ * `evaluate`, and forced-ask detection so normal and MCP multi-context
+ * evaluation cannot drift apart as PermissionManager semantics evolve.
+ */
+async function evaluatePermissionContext(
+  pm: PermissionManager,
+  pmCtx: PermissionCheckContext,
+): Promise<PermissionEvalResult> {
+  if (!pm.hasRelevantRules(pmCtx)) {
+    return { finalPermission: 'default', pmForcedAsk: false };
+  }
+
+  const pmDecision = await pm.evaluate(pmCtx);
+  return {
+    finalPermission: pmDecision,
+    pmForcedAsk:
+      pmDecision === 'ask' && pm.hasMatchingAskRule(pmCtx),
+  };
+}
+
 /**
  * L4 — evaluate {@link PermissionManager} rules against the given context.
  *
@@ -128,24 +158,62 @@ export async function evaluatePermissionRules(
   defaultPermission: string,
   pmCtx: PermissionCheckContext,
 ): Promise<PermissionEvalResult> {
-  let finalPermission = defaultPermission;
-  let pmForcedAsk = false;
+  if (!pm || defaultPermission === 'deny') {
+    return { finalPermission: defaultPermission, pmForcedAsk: false };
+  }
 
-  if (pm && defaultPermission !== 'deny') {
-    if (pm.hasRelevantRules(pmCtx)) {
-      const pmDecision = await pm.evaluate(pmCtx);
-      if (pmDecision !== 'default') {
-        finalPermission = pmDecision;
-        // If PM explicitly forces 'ask', adding allow rules won't help
-        // because ask has higher priority. Hide "Always allow" options.
-        if (pmDecision === 'ask' && pm.hasMatchingAskRule(pmCtx)) {
-          pmForcedAsk = true;
-        }
-      }
+  const evaluated = await evaluatePermissionContext(pm, pmCtx);
+  if (evaluated.finalPermission === 'default') {
+    return { finalPermission: defaultPermission, pmForcedAsk: false };
+  }
+  return evaluated;
+}
+
+/**
+ * Evaluate restrictive permission rules across equivalent identity spellings.
+ *
+ * `deny` wins globally across all contexts, the first explicit `ask` is kept
+ * only when no deny matches, and `allow` is deliberately ignored. This is used
+ * for collision-safe MCP handling where restrictive legacy/provider spellings
+ * must remain fail-closed while grants are evaluated separately against the
+ * ambiguity-filtered context.
+ */
+export async function evaluateRestrictivePermissionRules(
+  pm: PermissionManager | null | undefined,
+  defaultPermission: string,
+  contexts: readonly PermissionCheckContext[],
+): Promise<RestrictivePermissionEvalResult> {
+  if (!pm || defaultPermission === 'deny') {
+    return { finalPermission: defaultPermission, pmForcedAsk: false };
+  }
+
+  let firstAsk:
+    | { context: PermissionCheckContext; pmForcedAsk: boolean }
+    | undefined;
+
+  for (const context of contexts) {
+    const evaluated = await evaluatePermissionContext(pm, context);
+    if (evaluated.finalPermission === 'deny') {
+      return {
+        finalPermission: 'deny',
+        pmForcedAsk: false,
+        matchedContext: context,
+      };
+    }
+    if (evaluated.finalPermission === 'ask' && !firstAsk) {
+      firstAsk = { context, pmForcedAsk: evaluated.pmForcedAsk };
     }
   }
 
-  return { finalPermission, pmForcedAsk };
+  if (firstAsk) {
+    return {
+      finalPermission: 'ask',
+      pmForcedAsk: firstAsk.pmForcedAsk,
+      matchedContext: firstAsk.context,
+    };
+  }
+
+  return { finalPermission: defaultPermission, pmForcedAsk: false };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1291,6 +1291,22 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'task')).toBe(false); // no specifier
   });
 
+  const matchesMcpRuleWithRawIdentity = (
+    ruleText: string,
+    rawToolName: string,
+  ): boolean =>
+    matchesRule(
+      parseRule(ruleText),
+      normalizeToolNameForProvider(rawToolName),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [rawToolName],
+    );
+
   // MCP tool matching
   it('MCP tool exact match', async () => {
     const rule = parseRule('mcp__puppeteer__puppeteer_navigate');
@@ -1303,7 +1319,7 @@ describe('matchesRule', () => {
     const providerSafeName = normalizeToolNameForProvider(legacyName);
 
     expect(providerSafeName).not.toBe(legacyName);
-    expect(matchesRule(parseRule(legacyName), providerSafeName)).toBe(true);
+    expect(matchesMcpRuleWithRawIdentity(legacyName, legacyName)).toBe(true);
   });
 
   it('keeps exact provider-safe MCP permission matches collision-safe', () => {
@@ -1313,8 +1329,8 @@ describe('matchesRule', () => {
     const slashedProviderName = normalizeToolNameForProvider(slashedName);
 
     expect(dottedProviderName).not.toBe(slashedProviderName);
-    expect(matchesRule(parseRule(dottedName), dottedProviderName)).toBe(true);
-    expect(matchesRule(parseRule(dottedName), slashedProviderName)).toBe(false);
+    expect(matchesMcpRuleWithRawIdentity(dottedName, dottedName)).toBe(true);
+    expect(matchesMcpRuleWithRawIdentity(dottedName, slashedName)).toBe(false);
   });
 
   it('MCP server-level match (2-part pattern)', async () => {
@@ -1328,12 +1344,11 @@ describe('matchesRule', () => {
     const rule = parseRule('mcp__zybio.db');
 
     expect(
-      matchesRule(
-        rule,
-        normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
-      ),
+      matchesMcpRuleWithRawIdentity(rule.raw, 'mcp__zybio.db__query_uniprot'),
     ).toBe(true);
-    expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
+    expect(
+      matchesMcpRuleWithRawIdentity(rule.raw, 'mcp__other__query_uniprot'),
+    ).toBe(false);
   });
 
   it('MCP wildcard match', async () => {
@@ -1346,12 +1361,11 @@ describe('matchesRule', () => {
     const rule = parseRule('mcp__zybio.db__*');
 
     expect(
-      matchesRule(
-        rule,
-        normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
-      ),
+      matchesMcpRuleWithRawIdentity(rule.raw, 'mcp__zybio.db__query_uniprot'),
     ).toBe(true);
-    expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
+    expect(
+      matchesMcpRuleWithRawIdentity(rule.raw, 'mcp__other__query_uniprot'),
+    ).toBe(false);
   });
 
   it('MCP intra-segment wildcard match (e.g. mcp__chrome__use_*)', async () => {
@@ -1780,6 +1794,7 @@ describe('PermissionManager', () => {
       expect(
         await pm2.evaluate({
           toolName: providerSafeName,
+          toolAliases: [legacyName],
         }),
       ).toBe('deny');
     });

@@ -760,9 +760,19 @@ export class AgentCore {
       const disallowed = this.toolConfig.disallowedTools;
       return toolsList.filter((t) => {
         if (!t.name) return true;
+        const registeredTool = toolRegistry.getTool(t.name) as
+          | { serverName?: unknown; serverToolName?: unknown }
+          | undefined;
+        const rawMcpToolName =
+          t.name.startsWith('mcp__') &&
+          typeof registeredTool?.serverName === 'string' &&
+          typeof registeredTool.serverToolName === 'string'
+            ? `mcp__${registeredTool.serverName}__${registeredTool.serverToolName}`
+            : undefined;
         return !disallowed.some((pattern) =>
           t.name!.startsWith('mcp__')
-            ? matchesMcpPattern(pattern, t.name!)
+            ? matchesMcpPattern(pattern, t.name!, rawMcpToolName) ||
+              matchesMcpPattern(pattern, t.name!)
             : pattern === t.name,
         );
       });
@@ -771,7 +781,7 @@ export class AgentCore {
     return toolsList;
   }
 
-  // ─── Reasoning Loop ───────────────────────────────────────
+  // ─── Reasoning Loop ────────────────────────────────────────
 
   /**
    * Runs the inner model reasoning loop.
