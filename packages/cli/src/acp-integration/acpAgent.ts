@@ -4580,12 +4580,12 @@ class QwenAgent implements Agent {
    * caller's decision at this level: callers that already hold deliberately
    * scoped settings (workspace MCP discovery, live-session scope checks,
    * session creation) pass them in. Per-request session-management handlers
-   * (list, delete, rename, transcript page, settled turn status, and the
-   * non-live branch of loadUpdates) must not make that decision themselves —
-   * they use `runWithPinnedRuntimeBaseDirForRequest` below. Session load and
-   * resume resolve the request's settings at the call site deliberately,
-   * under profiler instrumentation, because they adopt those settings for
-   * the session afterwards.
+   * (list, delete, rename, transcript page, turn index, settled turn status,
+   * and the non-live branch of loadUpdates) must not make that decision
+   * themselves — they use `runWithPinnedRuntimeBaseDirForRequest` below.
+   * Session load and resume resolve the request's settings at the call site
+   * deliberately, under profiler instrumentation, because they adopt those
+   * settings for the session afterwards.
    */
   private runWithPinnedRuntimeBaseDir<T>(
     settings: LoadedSettings,
@@ -9198,26 +9198,28 @@ class QwenAgent implements Agent {
         }
 
         try {
-          const settings = loadSettingsCached(cwd);
-          return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
-            if (rawSnapshot === undefined) {
-              await this.sessions
-                .get(sessionId)
-                ?.getConfig()
-                .getChatRecordingService()
-                ?.flush();
-            }
-            return (await new SessionTranscriptReader(cwd).readTurnIndexPage(
-              sessionId,
-              {
-                ...(typeof rawSnapshot === 'string'
-                  ? { snapshot: rawSnapshot }
-                  : {}),
-                ...(typeof rawStart === 'number' ? { start: rawStart } : {}),
-                ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
-              },
-            )) as unknown as Record<string, unknown>;
-          });
+          return await this.runWithPinnedRuntimeBaseDirForRequest(
+            cwd,
+            async () => {
+              if (rawSnapshot === undefined) {
+                await this.sessions
+                  .get(sessionId)
+                  ?.getConfig()
+                  .getChatRecordingService()
+                  ?.flush();
+              }
+              return (await new SessionTranscriptReader(cwd).readTurnIndexPage(
+                sessionId,
+                {
+                  ...(typeof rawSnapshot === 'string'
+                    ? { snapshot: rawSnapshot }
+                    : {}),
+                  ...(typeof rawStart === 'number' ? { start: rawStart } : {}),
+                  ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
+                },
+              )) as unknown as Record<string, unknown>;
+            },
+          );
         } catch (error) {
           if (
             error instanceof InvalidSessionTranscriptCursorError ||
