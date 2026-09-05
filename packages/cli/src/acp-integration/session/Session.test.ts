@@ -5795,7 +5795,7 @@ describe('Session', () => {
       );
     });
 
-    it('does not report a mode switch when persistence fails', async () => {
+    it('rolls back and does not report a mode switch when persistence fails', async () => {
       mockConfig.waitForSessionApprovalModePersistence = vi
         .fn()
         .mockRejectedValue(new Error('approval persistence failed'));
@@ -5806,6 +5806,14 @@ describe('Session', () => {
           modeId: 'auto-edit',
         }),
       ).rejects.toThrow('approval persistence failed');
+      expect(mockConfig.setApprovalMode).toHaveBeenNthCalledWith(
+        1,
+        ApprovalMode.AUTO_EDIT,
+      );
+      expect(mockConfig.setApprovalMode).toHaveBeenNthCalledWith(
+        2,
+        ApprovalMode.DEFAULT,
+      );
       expect(mockClient.extNotification).not.toHaveBeenCalledWith(
         'qwen/notify/session/mode-update',
         expect.anything(),

@@ -8697,15 +8697,18 @@ export class Config {
       return;
     }
     const payload = this.sessionApprovalModeSnapshot();
+    const persist = async () => {
+      const persisted = await recorder.recordSessionApprovalMode(payload);
+      if (!persisted) throw new SessionWriterUnavailableError();
+    };
     this.sessionApprovalModePersistenceTail =
-      this.sessionApprovalModePersistenceTail.then(async () => {
-        const persisted = await recorder.recordSessionApprovalMode(payload);
-        if (!persisted) throw new SessionWriterUnavailableError();
-      });
+      this.sessionApprovalModePersistenceTail.then(persist, persist);
     void this.sessionApprovalModePersistenceTail.catch(() => undefined);
   }
 
-  async enableSessionApprovalModePersistence(): Promise<void> {
+  async enableSessionApprovalModePersistence(
+    persistCurrentMode = true,
+  ): Promise<void> {
     if (isDerivedConfig(this)) return;
     const recorder = this.getChatRecordingService();
     if (!recorder) return;
@@ -8713,7 +8716,9 @@ export class Config {
       throw new SessionWriterUnavailableError();
     }
     this.sessionApprovalModePersistenceEnabled = true;
-    this.queueSessionApprovalModePersistence();
+    if (persistCurrentMode) {
+      this.queueSessionApprovalModePersistence();
+    }
     await this.waitForSessionApprovalModePersistence();
   }
 

@@ -10211,7 +10211,12 @@ export class Session implements SessionContext {
     }
     const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
-    await this.config.waitForSessionApprovalModePersistence?.();
+    try {
+      await this.config.waitForSessionApprovalModePersistence?.();
+    } catch (error) {
+      this.config.setApprovalMode(previousApprovalMode);
+      throw error;
+    }
     // Only plan-involving transitions touch the revision: entering PLAN starts
     // a fresh approval cycle and leaving PLAN abandons the draft, but an
     // approved workflow plan keeps executing in a non-plan mode — switching

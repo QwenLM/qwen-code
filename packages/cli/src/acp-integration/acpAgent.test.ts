@@ -4238,6 +4238,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         agent.newSession({ cwd: '/tmp', mcpServers: [] }),
       ).resolves.toMatchObject({ sessionId: 'test-session-id' });
       expect(mockSessionStartSpan.setAttribute).not.toHaveBeenCalled();
+      expect(
+        innerConfig.enableSessionApprovalModePersistence,
+      ).toHaveBeenCalledWith(false);
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
@@ -4451,6 +4454,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getAvailableModels: vi.fn().mockReturnValue([]),
       getModes: vi.fn().mockReturnValue([]),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      enableSessionApprovalModePersistence: vi
+        .fn()
+        .mockResolvedValue(undefined),
       setSessionWorkflowEnabledProvider: vi.fn(),
       getReasoningEffort: vi.fn().mockReturnValue(undefined),
       getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),

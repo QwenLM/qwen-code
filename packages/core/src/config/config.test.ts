@@ -10908,6 +10908,37 @@ describe('setApprovalMode with folder trust', () => {
       });
     });
 
+    it('can enable persistence without recording the current mode', async () => {
+      const config = new Config({
+        ...baseParams,
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      const recordSessionApprovalMode = vi.fn().mockResolvedValue(true);
+      const recorder = {
+        hasWriteOwnership: vi.fn().mockReturnValue(false),
+        recordSessionApprovalMode,
+        assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+      };
+      (
+        config as unknown as {
+          chatRecordingService: typeof recorder;
+        }
+      ).chatRecordingService = recorder;
+      vi.spyOn(config, 'getChatRecordingService').mockReturnValue(
+        recorder as never,
+      );
+
+      await config.enableSessionApprovalModePersistence(false);
+
+      expect(recordSessionApprovalMode).not.toHaveBeenCalled();
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      await config.waitForSessionApprovalModePersistence();
+      expect(recordSessionApprovalMode).toHaveBeenCalledOnce();
+      expect(recordSessionApprovalMode).toHaveBeenCalledWith({
+        mode: ApprovalMode.AUTO_EDIT,
+      });
+    });
+
     it('requires ownership when session writer leases are enabled', async () => {
       const config = new Config({
         ...baseParams,
@@ -10965,6 +10996,41 @@ describe('setApprovalMode with folder trust', () => {
       await expect(
         config.waitForSessionApprovalModePersistence(),
       ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+    });
+
+    it('persists a later mode after a recoverable write failure', async () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      const recordSessionApprovalMode = vi
+        .fn()
+        .mockResolvedValueOnce(false)
+        .mockResolvedValueOnce(true);
+      const internal = config as unknown as {
+        chatRecordingService: {
+          recordSessionApprovalMode: typeof recordSessionApprovalMode;
+          assertCanStartTurn: () => Promise<void>;
+        };
+        sessionApprovalModePersistenceEnabled: boolean;
+      };
+      internal.chatRecordingService = {
+        recordSessionApprovalMode,
+        assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+      };
+      internal.sessionApprovalModePersistenceEnabled = true;
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      await expect(
+        config.waitForSessionApprovalModePersistence(),
+      ).rejects.toBeInstanceOf(SessionWriterUnavailableError);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      await expect(
+        config.waitForSessionApprovalModePersistence(),
+      ).resolves.toBeUndefined();
+      expect(recordSessionApprovalMode).toHaveBeenNthCalledWith(2, {
+        mode: ApprovalMode.PLAN,
+        prePlanMode: ApprovalMode.AUTO_EDIT,
+      });
     });
 
     it('does not persist approval changes from a derived agent overlay', async () => {

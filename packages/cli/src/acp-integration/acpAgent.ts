@@ -5110,6 +5110,7 @@ class QwenAgent implements Agent {
                   : {}),
                 configProviderRevision,
                 approvalModeConvergenceBaseline,
+                persistInitialApprovalMode: requestedApprovalMode !== undefined,
               }),
             );
           } catch (error) {
@@ -14299,6 +14300,7 @@ class QwenAgent implements Agent {
       deferWorkspaceActivation?: boolean;
       configProviderRevision?: number;
       approvalModeConvergenceBaseline?: ApprovalMode;
+      persistInitialApprovalMode?: boolean;
       beforeDeferredWorkspaceActivation?: () => Promise<void>;
       prepareBeforeSessionCreate?: () => Promise<void>;
       beforeSessionPublish?: () => void;
@@ -14472,7 +14474,9 @@ class QwenAgent implements Agent {
         if (providerReloadRevision === this.modelProviderReloadRevision) break;
         forceAuthenticationRefresh = true;
       }
-      await config.enableSessionApprovalModePersistence?.();
+      await config.enableSessionApprovalModePersistence?.(
+        options.persistInitialApprovalMode,
+      );
       options.beforeSessionPublish?.();
       options.primeSession?.(session);
       if (options.deferWorkspaceActivation !== true) {
