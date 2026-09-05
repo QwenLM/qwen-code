@@ -23,6 +23,7 @@ import {
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
+import { ExtensionStorage } from './storage.js';
 
 // The git-subdir source clones a repo; stub the network clone so the security
 // guards around the cloned subdirectory can be exercised against a real fs.
@@ -225,6 +226,116 @@ describe('convertClaudePluginPackage', () => {
     // Clean up test directory
     if (fs.existsSync(testDir)) {
       fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it('cleans the temporary plugin staging directory after conversion', async () => {
+    const pluginSourceDir = path.join(testDir, 'root-plugin');
+    const marketplaceDir = path.join(pluginSourceDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'test-marketplace',
+        owner: { name: 'Owner' },
+        plugins: [
+          {
+            name: 'root-plugin',
+            version: '1.0.0',
+            source: './',
+          },
+        ],
+      }),
+      'utf-8',
+    );
+
+    const createTmpDir = ExtensionStorage.createTmpDir.bind(ExtensionStorage);
+    const tempDirs: string[] = [];
+    const createTmpDirSpy = vi
+      .spyOn(ExtensionStorage, 'createTmpDir')
+      .mockImplementation(async () => {
+        const tempDir = await createTmpDir();
+        tempDirs.push(tempDir);
+        return tempDir;
+      });
+    let outputDir: string | undefined;
+
+    try {
+      const result = await convertClaudePluginPackage(
+        pluginSourceDir,
+        'root-plugin',
+      );
+      outputDir = result.convertedDir;
+
+      expect(tempDirs).toHaveLength(2);
+      expect(outputDir).toBe(tempDirs[1]);
+      expect(fs.existsSync(tempDirs[0])).toBe(false);
+      expect(fs.existsSync(outputDir)).toBe(true);
+    } finally {
+      createTmpDirSpy.mockRestore();
+      for (const tempDir of tempDirs) {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it('treats a marketplace entry without source as the marketplace root', async () => {
+    const marketplaceDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'root-marketplace',
+        owner: { name: 'Owner' },
+        plugins: [{ name: 'root-plugin', version: '1.0.0' }],
+      }),
+    );
+
+    const result = await convertClaudePluginPackage(testDir, 'root-plugin');
+    try {
+      expect(result.config.name).toBe('root-plugin');
+      expect(result.config.version).toBe('1.0.0');
+    } finally {
+      fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('cleans the marketplace staging directory when conversion fails', async () => {
+    const marketplaceDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(marketplaceDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'strict-marketplace',
+        owner: { name: 'Owner' },
+        plugins: [
+          {
+            name: 'strict-root',
+            version: '1.0.0',
+            source: './',
+            strict: true,
+          },
+        ],
+      }),
+    );
+    const createTmpDir = ExtensionStorage.createTmpDir.bind(ExtensionStorage);
+    const tempDirs: string[] = [];
+    const createTmpDirSpy = vi
+      .spyOn(ExtensionStorage, 'createTmpDir')
+      .mockImplementation(async () => {
+        const tempDir = await createTmpDir();
+        tempDirs.push(tempDir);
+        return tempDir;
+      });
+
+    try {
+      await expect(
+        convertClaudePluginPackage(testDir, 'strict-root'),
+      ).rejects.toThrow('Strict mode requires plugin.json');
+      expect(tempDirs).toHaveLength(1);
+      expect(fs.existsSync(tempDirs[0])).toBe(false);
+    } finally {
+      createTmpDirSpy.mockRestore();
     }
   });
 
@@ -875,7 +986,8 @@ describe('convertClaudePluginPackage', () => {
     expect(
       (result.config.hooks!['PostToolUse']![0].hooks![0] as { command: string })
         .command,
-    ).toBe(`${pluginSourceDir}/scripts/post-install.sh`);
+    ).toBe(`${result.convertedDir}/scripts/post-install.sh`);
+    expect(fs.existsSync(result.convertedDir)).toBe(true);
 
     // Clean up converted directory
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
@@ -1067,6 +1179,51 @@ describe('convertClaudePluginStandalone', () => {
     expect(fs.existsSync(path.join(result.convertedDir, '.git'))).toBe(false);
 
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
+  });
+
+  it('stops a standalone conversion when its recursive copy is aborted', async () => {
+    const pluginDir = path.join(testDir, '.claude-plugin');
+    fs.mkdirSync(pluginDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'plugin.json'),
+      JSON.stringify({ name: 'abort-copy', version: '1.0.0' }),
+      'utf-8',
+    );
+    const sourceDir = path.join(testDir, 'assets');
+    fs.mkdirSync(sourceDir, { recursive: true });
+    fs.writeFileSync(path.join(sourceDir, 'one.txt'), 'one', 'utf-8');
+    fs.writeFileSync(path.join(sourceDir, 'two.txt'), 'two', 'utf-8');
+
+    const controller = new AbortController();
+    const reason = new Error('conversion cancelled');
+    const copyFile = fs.promises.copyFile.bind(fs.promises);
+    const copySpy = vi
+      .spyOn(fs.promises, 'copyFile')
+      .mockImplementation(async (...args) => {
+        await copyFile(...args);
+        controller.abort(reason);
+      });
+    const createTmpDir = ExtensionStorage.createTmpDir.bind(ExtensionStorage);
+    const tempDirs: string[] = [];
+    const createTmpDirSpy = vi
+      .spyOn(ExtensionStorage, 'createTmpDir')
+      .mockImplementation(async () => {
+        const tempDir = await createTmpDir();
+        tempDirs.push(tempDir);
+        return tempDir;
+      });
+
+    try {
+      await expect(
+        convertClaudePluginStandalone(testDir, false, controller.signal),
+      ).rejects.toBe(reason);
+      expect(copySpy).toHaveBeenCalledOnce();
+      expect(tempDirs).toHaveLength(1);
+      expect(fs.existsSync(tempDirs[0])).toBe(false);
+    } finally {
+      copySpy.mockRestore();
+      createTmpDirSpy.mockRestore();
+    }
   });
 
   it('throws when there is no .claude-plugin/plugin.json', async () => {

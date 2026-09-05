@@ -10,9 +10,15 @@ import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { redactUrlCredentials } from './redaction.js';
-import { loadMarketplaceConfigFromSource } from './marketplace.js';
+import {
+  loadMarketplaceConfigFromSource,
+  parseSourceAndPluginName,
+} from './marketplace.js';
 import { quarantineCorruptFile } from './corruptFile.js';
-import type { ExtensionInstallMetadata } from '../config/config.js';
+import type {
+  ExtensionInstallMetadata,
+  ExtensionPluginSourceKind,
+} from '../config/config.js';
 import type {
   ClaudeMarketplaceConfig,
   ClaudeMarketplacePluginConfig,
@@ -65,6 +71,10 @@ export interface DiscoveredPlugin {
   components?: DiscoveredPluginComponents;
   /** Source string suitable for `parseInstallSource`. */
   installSource: string;
+  /** Whether `pluginName` selects a marketplace entry or names a root plugin. */
+  pluginSourceKind?: ExtensionPluginSourceKind;
+  /** Stable install-source identity used to match direct-root aliases. */
+  installIdentity?: string;
   /** Whether an extension with this name is already installed. */
   installed: boolean;
 }
@@ -148,7 +158,63 @@ function isGitHubHost(url: string): boolean {
 }
 
 function isOwnerRepoShorthand(source: string): boolean {
-  return /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(source);
+  const match = source.match(/^([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)$/);
+  return Boolean(
+    match &&
+      match[1] !== '.' &&
+      match[1] !== '..' &&
+      match[2] !== '.' &&
+      match[2] !== '..',
+  );
+}
+
+/**
+ * Makes a plugin source from a remote marketplace unambiguously remote.
+ *
+ * `parseInstallSource` deliberately checks the filesystem before interpreting
+ * `owner/repo` shorthand. Leaving that shorthand untouched here would let a
+ * remote marketplace select a same-named directory below the process cwd.
+ */
+function normalizeRemotePluginSource(source: string): string | undefined {
+  const trimmed = source.trim();
+  const { repo, pluginName } = parseSourceAndPluginName(trimmed);
+  if (parseExtensionSourceType(repo) === 'local') {
+    return undefined;
+  }
+
+  const normalizedRepo = isOwnerRepoShorthand(repo)
+    ? `https://github.com/${repo}`
+    : repo;
+  return pluginName ? `${normalizedRepo}:${pluginName}` : normalizedRepo;
+}
+
+function classifyRemotePluginSource(
+  source: string,
+  fallbackPluginName?: string,
+): {
+  installSource: string;
+  pluginSourceKind: ExtensionPluginSourceKind;
+} {
+  const parsed = parseSourceAndPluginName(source);
+  if (parsed.pluginName) {
+    return {
+      installSource: source,
+      pluginSourceKind: 'marketplace-entry',
+    };
+  }
+  if (fallbackPluginName) {
+    return {
+      installSource: `${source}:${fallbackPluginName}`,
+      // The appended name is only an install alias for a direct plugin root.
+      // It must not turn a plain repo/transport source into a marketplace
+      // selector: Claude and Qoder roots do not contain marketplace.json.
+      pluginSourceKind: 'extension-root',
+    };
+  }
+  return {
+    installSource: source,
+    pluginSourceKind: 'extension-root',
+  };
 }
 
 /**
@@ -161,43 +227,55 @@ function isOwnerRepoShorthand(source: string): boolean {
 function resolveInstallSource(
   marketplace: ExtensionSource,
   plugin: ClaudeMarketplacePluginConfig,
-): string {
+): {
+  installSource: string;
+  pluginSourceKind: ExtensionPluginSourceKind;
+} {
   if (marketplace.type !== 'http') {
-    return `${marketplace.source}:${plugin.name}`;
+    return {
+      installSource: `${marketplace.source}:${plugin.name}`,
+      pluginSourceKind: 'marketplace-entry',
+    };
   }
   const src = plugin.source;
   if (typeof src === 'string') {
-    // A remote marketplace must not be able to point the installer at an
-    // arbitrary local filesystem path (e.g. "/opt/secret" or "../../etc").
-    if (path.isAbsolute(src) || src.startsWith('.') || src.startsWith('~')) {
+    const normalizedSource = normalizeRemotePluginSource(src);
+    if (!normalizedSource) {
       debugLogger.warn(
         `Ignoring local path source "${src}" from remote marketplace "${marketplace.source}".`,
       );
-      return plugin.name;
+      return { installSource: '', pluginSourceKind: 'extension-root' };
     }
-    return src.includes(':') ? src : `${src}:${plugin.name}`;
+    const isDirectUrl = /^https?:\/\//i.test(src.trim());
+    return classifyRemotePluginSource(
+      normalizedSource,
+      isDirectUrl ? undefined : plugin.name,
+    );
   }
-  if (src && src.source === 'github') {
-    return `${src.repo}:${plugin.name}`;
+  if (src && src.source === 'github' && typeof src.repo === 'string') {
+    const normalizedSource = normalizeRemotePluginSource(src.repo);
+    if (!normalizedSource) {
+      debugLogger.warn(
+        `Ignoring local path source "${src.repo}" from remote marketplace "${marketplace.source}".`,
+      );
+      return { installSource: '', pluginSourceKind: 'extension-root' };
+    }
+    return classifyRemotePluginSource(normalizedSource, plugin.name);
   }
-  if (src && src.source === 'url') {
-    // Same local-path guard as the string-source branch above: a remote
-    // marketplace must not be able to redirect the installer at a local
-    // filesystem path via the structured `{ source: 'url' }` form either.
-    if (
-      typeof src.url === 'string' &&
-      (path.isAbsolute(src.url) ||
-        src.url.startsWith('.') ||
-        src.url.startsWith('~'))
-    ) {
+  if (src && src.source === 'url' && typeof src.url === 'string') {
+    const normalizedSource = normalizeRemotePluginSource(src.url);
+    if (!normalizedSource) {
       debugLogger.warn(
         `Ignoring local path source "${src.url}" from remote marketplace "${marketplace.source}".`,
       );
-      return plugin.name;
+      return { installSource: '', pluginSourceKind: 'extension-root' };
     }
-    return src.url;
+    return classifyRemotePluginSource(normalizedSource);
   }
-  return plugin.name;
+  // A direct JSON document has no cloneable root for a missing/relative source.
+  // Keep the entry visible for provenance, but mark it non-installable instead
+  // of manufacturing a target that parseInstallSource cannot actually fetch.
+  return { installSource: '', pluginSourceKind: 'extension-root' };
 }
 
 /**
@@ -219,26 +297,60 @@ function sanitizeDisplay(text: string | undefined): string | undefined {
 function pluginsFromConfig(
   marketplace: ExtensionSource,
   config: ClaudeMarketplaceConfig,
-  installedNames: ReadonlySet<string>,
+  installedKeys: ReadonlySet<string>,
 ): DiscoveredPlugin[] {
-  return (config.plugins ?? []).map((plugin) => ({
-    marketplaceName: sanitizeDisplay(config.name || marketplace.name),
-    name: sanitizeDisplay(plugin.name),
-    description: sanitizeDisplay(plugin.description),
-    // `version` and `lastUpdated` render in the pre-consent Discover detail via
-    // `t()` (no escaping), so they need the same scrubbing as the other
-    // untrusted display fields. `category` has no sink today but is wrapped for
-    // consistency / future-proofing.
-    version: sanitizeDisplay(plugin.version),
-    author: sanitizeDisplay(plugin.author?.name),
-    homepage: sanitizeDisplay(plugin.homepage),
-    category: sanitizeDisplay(plugin.category),
-    lastUpdated: sanitizeDisplay(pluginLastUpdated(plugin)),
-    installs: pluginInstalls(plugin),
-    components: pluginComponents(plugin),
-    installSource: resolveInstallSource(marketplace, plugin),
-    installed: installedNames.has(plugin.name),
-  }));
+  return (config.plugins ?? []).map((plugin) => {
+    const installTarget = resolveInstallSource(marketplace, plugin);
+    return {
+      marketplaceName: sanitizeDisplay(config.name || marketplace.name),
+      name: sanitizeDisplay(plugin.name),
+      description: sanitizeDisplay(plugin.description),
+      // `version` and `lastUpdated` render in the pre-consent Discover detail
+      // via `t()` (no escaping), so they need the same scrubbing as the other
+      // untrusted display fields. `category` has no sink today but is wrapped
+      // for consistency / future-proofing.
+      version: sanitizeDisplay(plugin.version),
+      author: sanitizeDisplay(plugin.author?.name),
+      homepage: sanitizeDisplay(plugin.homepage),
+      category: sanitizeDisplay(plugin.category),
+      lastUpdated: sanitizeDisplay(pluginLastUpdated(plugin)),
+      installs: pluginInstalls(plugin),
+      components: pluginComponents(plugin),
+      ...installTarget,
+      installIdentity: installTarget.installSource
+        ? discoveredPluginInstallIdentity(
+            installTarget.installSource,
+            installTarget.pluginSourceKind,
+          )
+        : undefined,
+      installed:
+        installedKeys.has(plugin.name) ||
+        (installTarget.installSource !== '' &&
+          installedKeys.has(
+            discoveredPluginInstallIdentity(
+              installTarget.installSource,
+              installTarget.pluginSourceKind,
+            ),
+          )),
+    };
+  });
+}
+
+export function discoveredPluginInstallIdentity(
+  installSource: string,
+  pluginSourceKind?: ExtensionPluginSourceKind,
+): string {
+  const { repo, pluginName } = parseSourceAndPluginName(installSource);
+  const normalizedSource = /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repo)
+    ? `https://github.com/${repo}`
+    : repo;
+  return JSON.stringify({
+    source: normalizedSource,
+    ...(pluginSourceKind === 'marketplace-entry' && pluginName
+      ? { pluginName }
+      : {}),
+    pluginSourceKind,
+  });
 }
 
 /**
@@ -324,7 +436,7 @@ export class SourceRegistryStore {
  */
 export async function discoverPlugins(
   sources: readonly ExtensionSource[],
-  installedNames: ReadonlySet<string>,
+  installedKeys: ReadonlySet<string>,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<DiscoveredPlugin[]> {
   const results = await Promise.all(
@@ -342,7 +454,7 @@ export async function discoverPlugins(
           );
           return [];
         }
-        return pluginsFromConfig(marketplace, config, installedNames);
+        return pluginsFromConfig(marketplace, config, installedKeys);
       } catch (error) {
         debugLogger.error(
           `Failed to discover plugins from ${redactUrlCredentials(

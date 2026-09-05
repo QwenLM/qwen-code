@@ -57,6 +57,7 @@ import {
 } from './extensionPreferences.js';
 import {
   SourceRegistryStore,
+  discoveredPluginInstallIdentity,
   discoverPlugins,
   parseExtensionSourceType,
   type ExtensionSource,
@@ -1317,18 +1318,37 @@ export class ExtensionManager {
   async discoverPlugins(options?: {
     refresh?: boolean;
   }): Promise<DiscoveredPlugin[]> {
-    const installedNames = new Set(
-      this.getLoadedExtensions().map((ext) => ext.name),
+    const loadedExtensions = this.getLoadedExtensions();
+    const installedIdentities = new Set(
+      loadedExtensions.flatMap((extension) => {
+        const metadata = extension.installMetadata;
+        if (!metadata) return [];
+        const installSource = metadata.pluginName
+          ? `${metadata.source}:${metadata.pluginName}`
+          : metadata.source;
+        return [
+          discoveredPluginInstallIdentity(
+            installSource,
+            metadata.pluginSourceKind,
+          ),
+        ];
+      }),
     );
     if (this.discoverCache && !options?.refresh) {
       return this.discoverCache.map((plugin) => ({
         ...plugin,
-        installed: installedNames.has(plugin.name),
+        installed:
+          (plugin.installIdentity !== undefined &&
+            installedIdentities.has(plugin.installIdentity)) ||
+          loadedExtensions.some((extension) => extension.name === plugin.name),
       }));
     }
     const result = await discoverPlugins(
       this.getSources(),
-      installedNames,
+      new Set([
+        ...installedIdentities,
+        ...loadedExtensions.map((extension) => extension.name),
+      ]),
       this.networkPolicy,
     );
     this.discoverCache = result;
@@ -2123,12 +2143,14 @@ export class ExtensionManager {
       if (
         installMetadata.originSource === 'Claude' &&
         installMetadata.marketplaceConfig &&
+        installMetadata.pluginSourceKind !== 'extension-root' &&
         !installMetadata.pluginName
       ) {
         const pluginName = await this.requestChoicePlugin(
           installMetadata.marketplaceConfig,
         );
         installMetadata.pluginName = pluginName;
+        installMetadata.pluginSourceKind = 'marketplace-entry';
       }
 
       if (
@@ -2226,13 +2248,18 @@ export class ExtensionManager {
       signal?.throwIfAborted();
       try {
         const sourceBeforeConversion = localSourcePath;
-        const { extensionDir, originSource, externalContent } =
-          await convertCompatibleExtension(
-            sourceBeforeConversion,
-            installMetadata.pluginName,
-            installMetadata.networkPolicy,
-            signal,
-          );
+        const {
+          extensionDir,
+          originSource,
+          externalContent,
+          requiresClaudeFileAdaptation,
+        } = await convertCompatibleExtension(
+          sourceBeforeConversion,
+          installMetadata.pluginName,
+          installMetadata.networkPolicy,
+          signal,
+          installMetadata.pluginSourceKind,
+        );
         signal?.throwIfAborted();
 
         if (extensionDir !== sourceBeforeConversion) {
@@ -2443,7 +2470,9 @@ export class ExtensionManager {
             : null;
 
         const usesPluginVariables =
-          originSource === 'Claude' || originSource === 'Qoder';
+          originSource === 'Claude' ||
+          originSource === 'Qoder' ||
+          requiresClaudeFileAdaptation;
         if (
           usesPluginVariables &&
           (fs.existsSync(hooksDir) ||

@@ -34,6 +34,7 @@ import type {
 } from '../index.js';
 import { ExtensionStore } from './extension-store.js';
 import { ExtensionPreferencesStore } from './extensionPreferences.js';
+import { parseInstallSource } from './marketplace.js';
 import {
   AGENT_PLUGIN_MCP_SCHEMA,
   AGENT_PLUGIN_SCHEMA,
@@ -1201,6 +1202,163 @@ describe('extension tests', () => {
       expect(fs.existsSync(installed.path)).toBe(false);
     });
 
+    it('does not re-prompt for a marketplace plugin when the source is an extension root', async () => {
+      const sourceDir = path.join(tempWorkspaceDir, 'direct-root-source');
+      writeExtractedExtension(sourceDir, 'direct-root-extension');
+      const requestChoicePlugin = vi.fn(async () => 'wrong-subplugin');
+      const manager = createExtensionManager({ requestChoicePlugin });
+
+      const installed = await manager.installExtension(
+        {
+          type: 'local',
+          source: sourceDir,
+          originSource: 'Claude',
+          pluginSourceKind: 'extension-root',
+          marketplaceConfig: {
+            name: 'unrelated-marketplace',
+            owner: { name: 'Owner', email: 'owner@example.com' },
+            plugins: [
+              {
+                name: 'wrong-subplugin',
+                version: '1.0.0',
+                source: './plugins/wrong-subplugin',
+              },
+            ],
+          },
+        },
+        async () => {},
+      );
+
+      expect(requestChoicePlugin).not.toHaveBeenCalled();
+      expect(installed.name).toBe('direct-root-extension');
+    });
+
+    it('preserves the CLI marketplace-entry kind through a dual-manifest install', async () => {
+      const sourceDir = path.join(tempWorkspaceDir, 'cli-dual-source');
+      const manifestDir = path.join(sourceDir, '.claude-plugin');
+      const hooksDir = path.join(sourceDir, 'hooks');
+      fs.mkdirSync(manifestDir, { recursive: true });
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sourceDir, 'gemini-extension.json'),
+        JSON.stringify({
+          name: 'cli-dual',
+          version: '1.0.0',
+          contextFileName: 'AGENTS.md',
+          settings: [
+            {
+              name: 'Mode',
+              envVar: 'CLI_DUAL_MODE',
+              description: 'CLI dual mode',
+            },
+          ],
+        }),
+      );
+      fs.writeFileSync(path.join(sourceDir, 'AGENTS.md'), '# CLI dual');
+      const marketplaceConfig = {
+        name: 'cli-dual-marketplace',
+        owner: { name: 'Owner', email: 'owner@example.com' },
+        plugins: [{ name: 'cli-dual', version: '1.0.0', source: './' }],
+      };
+      fs.writeFileSync(
+        path.join(manifestDir, 'marketplace.json'),
+        JSON.stringify(marketplaceConfig),
+      );
+      fs.writeFileSync(
+        path.join(manifestDir, 'plugin.json'),
+        JSON.stringify({
+          name: 'cli-dual',
+          version: '1.0.0',
+          hooks: './hooks/hooks.json',
+        }),
+      );
+      fs.writeFileSync(
+        path.join(hooksDir, 'hooks.json'),
+        JSON.stringify({
+          hooks: {
+            SessionStart: [
+              { hooks: [{ type: 'command', command: 'session-start.sh' }] },
+            ],
+          },
+        }),
+      );
+
+      const installMetadata = await parseInstallSource(`${sourceDir}:cli-dual`);
+      expect(installMetadata.pluginSourceKind).toBe('marketplace-entry');
+      const manager = createExtensionManager();
+      const installed = await manager.installExtension(
+        installMetadata,
+        async () => {},
+        async () => 'enabled',
+      );
+      const persistedMetadata = JSON.parse(
+        fs.readFileSync(
+          path.join(installed.path, INSTALL_METADATA_FILENAME),
+          'utf-8',
+        ),
+      ) as ExtensionInstallMetadata;
+
+      expect(installed.config.contextFileName).toBe('AGENTS.md');
+      expect(installed.config.settings).toHaveLength(1);
+      expect(installed.hooks?.['SessionStart']).toHaveLength(1);
+      expect(persistedMetadata.pluginSourceKind).toBe('marketplace-entry');
+      expect(persistedMetadata.pluginName).toBe('cli-dual');
+    });
+
+    it('persists marketplace-entry after an interactive plugin choice', async () => {
+      const sourceDir = path.join(tempWorkspaceDir, 'prompt-marketplace');
+      const manifestDir = path.join(sourceDir, '.claude-plugin');
+      const childManifestDir = path.join(
+        sourceDir,
+        'plugins',
+        'chosen-plugin',
+        '.claude-plugin',
+      );
+      fs.mkdirSync(manifestDir, { recursive: true });
+      fs.mkdirSync(childManifestDir, { recursive: true });
+      const marketplaceConfig = {
+        name: 'prompt-marketplace',
+        owner: { name: 'Owner', email: 'owner@example.com' },
+        plugins: [
+          {
+            name: 'chosen-plugin',
+            version: '2.0.0',
+            source: './plugins/chosen-plugin',
+          },
+        ],
+      };
+      fs.writeFileSync(
+        path.join(manifestDir, 'marketplace.json'),
+        JSON.stringify(marketplaceConfig),
+      );
+      fs.writeFileSync(
+        path.join(childManifestDir, 'plugin.json'),
+        JSON.stringify({ name: 'chosen-plugin', version: '2.0.0' }),
+      );
+      const requestChoicePlugin = vi.fn(async () => 'chosen-plugin');
+      const manager = createExtensionManager({ requestChoicePlugin });
+
+      const installed = await manager.installExtension(
+        {
+          type: 'local',
+          source: sourceDir,
+          originSource: 'Claude',
+          marketplaceConfig,
+        },
+        async () => {},
+      );
+      const persistedMetadata = JSON.parse(
+        fs.readFileSync(
+          path.join(installed.path, INSTALL_METADATA_FILENAME),
+          'utf-8',
+        ),
+      ) as ExtensionInstallMetadata;
+
+      expect(requestChoicePlugin).toHaveBeenCalledOnce();
+      expect(persistedMetadata.pluginName).toBe('chosen-plugin');
+      expect(persistedMetadata.pluginSourceKind).toBe('marketplace-entry');
+    });
+
     it('commits workspace initial activation with the installed artifact', async () => {
       const archivePath = path.join(tempWorkspaceDir, 'workspace-ext.zip');
       fs.writeFileSync(archivePath, 'archive');
@@ -1483,6 +1641,100 @@ describe('extension tests', () => {
             ),
           ),
         ).toBe(path.join(prepared.destinationDirectory, 'scripts', 'setup.sh'));
+      } finally {
+        await manager.disposePreparedExtension(prepared);
+      }
+    });
+
+    it('adapts Claude hook files in a dual-manifest Gemini extension', async () => {
+      const archivePath = path.join(tempWorkspaceDir, 'dual-manifest.zip');
+      fs.writeFileSync(archivePath, 'archive');
+      mockExtractArchiveFile.mockImplementation(
+        async (_source: string, destination: string) => {
+          fs.mkdirSync(destination, { recursive: true });
+          fs.writeFileSync(
+            path.join(destination, 'gemini-extension.json'),
+            JSON.stringify({
+              name: 'dual-manifest',
+              version: '1.0.0',
+              settings: [
+                {
+                  name: 'Mode',
+                  envVar: 'DUAL_MODE',
+                  description: 'Dual mode',
+                },
+              ],
+            }),
+          );
+          const manifestDir = path.join(destination, '.claude-plugin');
+          const hooksDir = path.join(destination, 'hooks');
+          const scriptsDir = path.join(destination, 'scripts');
+          fs.mkdirSync(manifestDir, { recursive: true });
+          fs.mkdirSync(hooksDir, { recursive: true });
+          fs.mkdirSync(scriptsDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(manifestDir, 'plugin.json'),
+            JSON.stringify({
+              name: 'dual-manifest',
+              version: '1.0.0',
+              hooks: './hooks/hooks.json',
+            }),
+          );
+          fs.writeFileSync(
+            path.join(hooksDir, 'hooks.json'),
+            JSON.stringify({
+              hooks: {
+                SessionStart: [
+                  {
+                    hooks: [
+                      {
+                        type: 'command',
+                        command:
+                          '${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh',
+                      },
+                    ],
+                  },
+                ],
+              },
+            }),
+          );
+          fs.writeFileSync(
+            path.join(scriptsDir, 'session-start.sh'),
+            'jq \'.message.content | map(select(.type == "text"))\' ~/.claude/transcript\n',
+          );
+        },
+      );
+      const manager = createExtensionManager();
+      const prepared = await manager.prepareExtensionInstall({
+        installMetadata: { type: 'local', source: archivePath },
+        initialActivation: { scope: 'user' },
+        requestConsent: async () => {},
+        requestSetting: async () => 'enabled',
+      });
+
+      try {
+        const stagedConfig = JSON.parse(
+          fs.readFileSync(
+            path.join(prepared.stagingDirectory, EXTENSIONS_CONFIG_FILENAME),
+            'utf-8',
+          ),
+        ) as ExtensionConfig;
+        const stagedMetadata = JSON.parse(
+          fs.readFileSync(
+            path.join(prepared.stagingDirectory, INSTALL_METADATA_FILENAME),
+            'utf-8',
+          ),
+        ) as ExtensionInstallMetadata;
+        const script = fs.readFileSync(
+          path.join(prepared.stagingDirectory, 'scripts', 'session-start.sh'),
+          'utf-8',
+        );
+
+        expect(stagedMetadata.originSource).toBe('Gemini');
+        expect(stagedConfig.settings).toHaveLength(1);
+        expect(stagedConfig.hooks?.['SessionStart']).toHaveLength(1);
+        expect(script).toContain('.message.parts | map(select(has("text")))');
+        expect(script).toContain('~/.qwen/transcript');
       } finally {
         await manager.disposePreparedExtension(prepared);
       }

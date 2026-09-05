@@ -60,6 +60,7 @@ describe('DiscoverTab', () => {
       name: 'demo',
       marketplaceName: 'market',
       installSource: 'owner/demo',
+      pluginSourceKind: 'extension-root',
       installed: false,
     } as DiscoveredPlugin;
     const manager = {
@@ -95,6 +96,9 @@ describe('DiscoverTab', () => {
     });
 
     await waitFor(() => expect(manager.installExtension).toHaveBeenCalled());
+    expect(mockParseInstallSource).toHaveBeenCalledWith('owner/demo', {
+      pluginSourceKind: 'extension-root',
+    });
     expect(manager.installExtension).toHaveBeenCalledWith(
       { type: 'git', source: 'owner/demo' },
       undefined,
@@ -150,5 +154,53 @@ describe('DiscoverTab', () => {
         text: 'Installed 1 extension(s) with warnings: demo: preference denied',
       }),
     );
+  });
+
+  it('rejects a direct-JSON entry that has no installable source', async () => {
+    const plugin = {
+      name: 'missing-source',
+      marketplaceName: 'market',
+      installSource: '',
+      pluginSourceKind: 'extension-root',
+      installed: false,
+    } as DiscoveredPlugin;
+    const manager = {
+      discoverPlugins: vi.fn().mockResolvedValue([plugin]),
+      installExtension: vi.fn(),
+      setExtensionScope: vi.fn(),
+    };
+    const onStatus = vi.fn();
+
+    render(
+      <DiscoverTab
+        config={{ getExtensionManager: () => manager } as unknown as Config}
+        isActive
+        onLockChange={vi.fn()}
+        onStatus={onStatus}
+        onInstalled={vi.fn()}
+        reloadSignal={0}
+      />,
+    );
+    await waitFor(() => expect(manager.discoverPlugins).toHaveBeenCalled());
+
+    await act(async () => {
+      activeKeypress()({ name: 'return' } as Key);
+    });
+    const detailSelect = mockRadioButtonSelect.mock.calls.at(-1)?.[0] as
+      | SelectProps<'project'>
+      | undefined;
+    await act(async () => {
+      detailSelect?.onSelect('project');
+    });
+
+    await waitFor(() =>
+      expect(onStatus).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('no installable source'),
+        }),
+      ),
+    );
+    expect(mockParseInstallSource).not.toHaveBeenCalled();
+    expect(manager.installExtension).not.toHaveBeenCalled();
   });
 });

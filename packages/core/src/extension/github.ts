@@ -559,6 +559,12 @@ export async function checkForExtensionUpdate(
     if (installMetadata.source.startsWith('upload:')) {
       return ExtensionUpdateState.NOT_UPDATABLE;
     }
+    // A local marketplace can select content fetched from a separate remote
+    // repository. The outer local path does not pin or version that nested
+    // content, so an automatic update sweep must not refetch it implicitly.
+    if (installMetadata.externalContent === true) {
+      return ExtensionUpdateState.NOT_UPDATABLE;
+    }
     let latestConfig: ExtensionConfig | undefined;
     let tempDir: string | undefined;
     let convertedDir: string | undefined;
@@ -573,13 +579,18 @@ export async function checkForExtensionUpdate(
         signal?.throwIfAborted();
         extensionDir = tempDir;
       }
-      if (tempDir !== undefined || installMetadata.originSource === 'Qoder') {
+      if (
+        tempDir !== undefined ||
+        installMetadata.originSource === 'Qoder' ||
+        installMetadata.pluginSourceKind !== undefined
+      ) {
         const sourceBeforeConversion = extensionDir;
         const converted = await convertCompatibleExtension(
           sourceBeforeConversion,
           installMetadata.pluginName,
           installMetadata.networkPolicy,
           signal,
+          installMetadata.pluginSourceKind,
         );
         extensionDir = converted.extensionDir;
         if (extensionDir !== sourceBeforeConversion) {
@@ -620,6 +631,9 @@ export async function checkForExtensionUpdate(
     return checkNpmUpdate(installMetadata, signal);
   }
   if (installMetadata?.type === 'archive-url') {
+    if (installMetadata.externalContent === true) {
+      return ExtensionUpdateState.NOT_UPDATABLE;
+    }
     let tempDir: string | undefined;
     let convertedDir: string | undefined;
     try {
@@ -632,6 +646,7 @@ export async function checkForExtensionUpdate(
         installMetadata.pluginName,
         installMetadata.networkPolicy,
         signal,
+        installMetadata.pluginSourceKind,
       );
       const extensionDir = converted.extensionDir;
       if (extensionDir !== tempDir) {

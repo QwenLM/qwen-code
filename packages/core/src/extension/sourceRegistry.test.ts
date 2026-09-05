@@ -14,8 +14,13 @@ import {
   discoverPlugins,
   type ExtensionSource,
 } from './sourceRegistry.js';
-import { loadMarketplaceConfigFromSource } from './marketplace.js';
+import {
+  loadMarketplaceConfigFromSource,
+  parseSourceAndPluginName,
+} from './marketplace.js';
 import type { ClaudeMarketplaceConfig } from './claude-converter.js';
+import { convertCompatibleExtension } from './extension-converter.js';
+import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
 
 vi.mock('./marketplace.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./marketplace.js')>();
@@ -181,6 +186,7 @@ describe('discoverPlugins', () => {
     expect(pdf.installed).toBe(false);
     expect(pdf.homepage).toBe('https://example.com/pdf');
     expect(pdf.installSource).toBe('anthropics/skills:pdf');
+    expect(pdf.pluginSourceKind).toBe('marketplace-entry');
     expect(discovered.find((p) => p.name === 'docx')!.installed).toBe(true);
   });
 
@@ -294,6 +300,72 @@ describe('discoverPlugins', () => {
           version: '1.0.0',
           source: { source: 'url', url: 'https://example.com/p.tgz' },
         },
+        {
+          name: 'https-root',
+          version: '1.0.0',
+          source: 'https://github.com/someone/root-plugin',
+        },
+        {
+          name: 'url-github-root',
+          version: '1.0.0',
+          source: {
+            source: 'url',
+            url: 'https://github.com/someone/other-root-plugin',
+          },
+        },
+        {
+          name: 'selected-string-plugin',
+          version: '1.0.0',
+          source: 'someone/repo:selected',
+        },
+        {
+          name: 'selected-url-plugin',
+          version: '1.0.0',
+          source: {
+            source: 'url',
+            url: 'https://github.com/someone/repo:selected',
+          },
+        },
+        {
+          name: 'port-root',
+          version: '1.0.0',
+          source: 'https://example.com:8443/root-plugin',
+        },
+        {
+          name: 'port-selected',
+          version: '1.0.0',
+          source: 'https://example.com:8443/repo:selected',
+        },
+        {
+          name: 'bare-root',
+          version: '1.0.0',
+          source: 'someone/direct-root',
+        },
+        {
+          name: '2048-game',
+          version: '1.0.0',
+          source: 'git@github.com:someone/direct-root.git',
+        },
+        {
+          name: '2048-sso',
+          version: '1.0.0',
+          source: 'sso://team/direct-root',
+        },
+        {
+          name: '2048',
+          version: '1.0.0',
+          source: 'git@github.com:someone/numeric-root.git',
+        },
+        {
+          name: '4096',
+          version: '1.0.0',
+          source: { source: 'github', repo: 'someone/numeric-https-root' },
+        },
+        {
+          name: 'embedded-numeric',
+          version: '1.0.0',
+          source: 'someone/repo:2048',
+        },
       ]),
     );
 
@@ -303,17 +375,242 @@ describe('discoverPlugins', () => {
     );
 
     expect(discovered.find((p) => p.name === 'gh-plugin')!.installSource).toBe(
-      'someone/repo:gh-plugin',
+      'https://github.com/someone/repo:gh-plugin',
     );
+    expect(
+      discovered.find((p) => p.name === 'gh-plugin')!.pluginSourceKind,
+    ).toBe('extension-root');
     expect(discovered.find((p) => p.name === 'url-plugin')!.installSource).toBe(
       'https://example.com/p.tgz',
     );
+    expect(
+      discovered.find((p) => p.name === 'url-plugin')!.pluginSourceKind,
+    ).toBe('extension-root');
+    expect(discovered.find((p) => p.name === 'https-root')!.installSource).toBe(
+      'https://github.com/someone/root-plugin',
+    );
+    expect(
+      discovered.find((p) => p.name === 'https-root')!.pluginSourceKind,
+    ).toBe('extension-root');
+    expect(
+      discovered.find((p) => p.name === 'url-github-root')!.installSource,
+    ).toBe('https://github.com/someone/other-root-plugin');
+    expect(
+      discovered.find((p) => p.name === 'url-github-root')!.pluginSourceKind,
+    ).toBe('extension-root');
+    expect(
+      discovered.find((p) => p.name === 'selected-string-plugin')!
+        .installSource,
+    ).toBe('https://github.com/someone/repo:selected');
+    expect(
+      discovered.find((p) => p.name === 'selected-string-plugin')!
+        .pluginSourceKind,
+    ).toBe('marketplace-entry');
+    expect(
+      discovered.find((p) => p.name === 'selected-url-plugin')!.installSource,
+    ).toBe('https://github.com/someone/repo:selected');
+    expect(
+      discovered.find((p) => p.name === 'selected-url-plugin')!
+        .pluginSourceKind,
+    ).toBe('marketplace-entry');
+    expect(discovered.find((p) => p.name === 'port-root')!.installSource).toBe(
+      'https://example.com:8443/root-plugin',
+    );
+    expect(
+      discovered.find((p) => p.name === 'port-root')!.pluginSourceKind,
+    ).toBe('extension-root');
+    expect(
+      discovered.find((p) => p.name === 'port-selected')!.installSource,
+    ).toBe('https://example.com:8443/repo:selected');
+    expect(
+      discovered.find((p) => p.name === 'port-selected')!.pluginSourceKind,
+    ).toBe('marketplace-entry');
+    expect(discovered.find((p) => p.name === 'bare-root')).toMatchObject({
+      installSource: 'https://github.com/someone/direct-root:bare-root',
+      pluginSourceKind: 'extension-root',
+    });
+    expect(discovered.find((p) => p.name === '2048-game')).toMatchObject({
+      installSource: 'git@github.com:someone/direct-root.git:2048-game',
+      pluginSourceKind: 'extension-root',
+    });
+    expect(discovered.find((p) => p.name === '2048-sso')).toMatchObject({
+      installSource: 'sso://team/direct-root:2048-sso',
+      pluginSourceKind: 'extension-root',
+    });
+    expect(
+      parseSourceAndPluginName(
+        discovered.find((p) => p.name === '2048-game')!.installSource,
+      ),
+    ).toEqual({
+      repo: 'git@github.com:someone/direct-root.git',
+      pluginName: '2048-game',
+    });
+    expect(
+      parseSourceAndPluginName(
+        discovered.find((p) => p.name === '2048-sso')!.installSource,
+      ),
+    ).toEqual({
+      repo: 'sso://team/direct-root',
+      pluginName: '2048-sso',
+    });
+    expect(discovered.find((p) => p.name === '2048')).toMatchObject({
+      installSource: 'git@github.com:someone/numeric-root.git:2048',
+      pluginSourceKind: 'extension-root',
+    });
+    expect(
+      parseSourceAndPluginName(
+        discovered.find((p) => p.name === '2048')!.installSource,
+      ),
+    ).toEqual({
+      repo: 'git@github.com:someone/numeric-root.git',
+      pluginName: '2048',
+    });
+    const numericHttpsRoot = discovered.find((p) => p.name === '4096')!;
+    expect(numericHttpsRoot).toMatchObject({
+      installSource: 'https://github.com/someone/numeric-https-root:4096',
+      pluginSourceKind: 'extension-root',
+    });
+    expect(parseSourceAndPluginName(numericHttpsRoot.installSource)).toEqual({
+      repo: 'https://github.com/someone/numeric-https-root',
+      pluginName: '4096',
+    });
+    const embeddedNumeric = discovered.find(
+      (p) => p.name === 'embedded-numeric',
+    )!;
+    expect(embeddedNumeric).toMatchObject({
+      installSource: 'https://github.com/someone/repo:2048',
+      pluginSourceKind: 'marketplace-entry',
+    });
+    expect(parseSourceAndPluginName(embeddedNumeric.installSource)).toEqual({
+      repo: 'https://github.com/someone/repo',
+      pluginName: '2048',
+    });
+  });
+
+  it.each([
+    ['a structured GitHub source without repo', { source: 'github' }],
+    ['a structured URL source without url', { source: 'url' }],
+  ])('keeps valid siblings when %s is malformed', async (_, source) => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config('Remote', [
+        {
+          name: 'malformed',
+          version: '1.0.0',
+          source: source as never,
+        },
+        {
+          name: 'valid',
+          version: '1.0.0',
+          source: 'https://example.com/valid.tgz',
+        },
+      ]),
+    );
+
+    const discovered = await discoverPlugins(
+      [{ name: 'Remote', source: 'https://x/m.json', type: 'http' }],
+      new Set(),
+    );
+
+    expect(discovered).toHaveLength(2);
+    expect(
+      discovered.find((plugin) => plugin.name === 'malformed'),
+    ).toMatchObject({
+      installSource: '',
+      pluginSourceKind: 'extension-root',
+    });
+    expect(discovered.find((plugin) => plugin.name === 'valid')).toMatchObject({
+      installSource: 'https://example.com/valid.tgz',
+      pluginSourceKind: 'extension-root',
+    });
+  });
+
+  it('keeps a structured GitHub Qoder plugin installable as a direct root', async () => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config('Remote', [
+        {
+          name: 'qoder-alias',
+          version: '1.0.0',
+          source: { source: 'github', repo: 'someone/qoder-plugin' },
+        },
+      ]),
+    );
+    const [plugin] = await discoverPlugins(
+      [{ name: 'Remote', source: 'https://x/m.json', type: 'http' }],
+      new Set(),
+    );
+    const parsed = parseSourceAndPluginName(plugin.installSource);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qoder-discovery-'));
+    let convertedDir: string | undefined;
+
+    try {
+      fs.mkdirSync(path.join(root, '.qoder-plugin'), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, QODER_PLUGIN_MANIFEST),
+        JSON.stringify({ name: 'qoder-root', version: '1.2.3' }),
+        'utf-8',
+      );
+
+      const converted = await convertCompatibleExtension(
+        root,
+        parsed.pluginName,
+        undefined,
+        undefined,
+        plugin.pluginSourceKind,
+      );
+      convertedDir = converted.extensionDir;
+
+      expect(plugin).toMatchObject({
+        installSource: 'https://github.com/someone/qoder-plugin:qoder-alias',
+        pluginSourceKind: 'extension-root',
+      });
+      expect(converted.originSource).toBe('Qoder');
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(converted.extensionDir, 'qwen-extension.json'),
+            'utf-8',
+          ),
+        ),
+      ).toMatchObject({ name: 'qoder-root', version: '1.2.3' });
+    } finally {
+      if (convertedDir && convertedDir !== root) {
+        fs.rmSync(convertedDir, { recursive: true, force: true });
+      }
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('marks a direct-root alias installed by its source identity when names differ', async () => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config('Remote', [
+        {
+          name: 'catalog-alias',
+          version: '1.0.0',
+          source: { source: 'github', repo: 'someone/plugin-root' },
+        },
+      ]),
+    );
+
+    const [plugin] = await discoverPlugins(
+      [{ name: 'Remote', source: 'https://x/m.json', type: 'http' }],
+      new Set([
+        JSON.stringify({
+          source: 'https://github.com/someone/plugin-root',
+          pluginSourceKind: 'extension-root',
+        }),
+      ]),
+    );
+
+    expect(plugin).toMatchObject({
+      name: 'catalog-alias',
+      installed: true,
+      pluginSourceKind: 'extension-root',
+    });
   });
 
   it('rejects local-path sources from a remote (http) marketplace', async () => {
     // A hostile remote marketplace must not be able to point the installer at a
-    // local filesystem path — via either the bare-string source or the
-    // structured { source: 'url' } form. Both fall back to the plugin name.
+    // local filesystem path through any supported source shape.
     vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
       config('Remote', [
         { name: 'abs', version: '1.0.0', source: '/etc/passwd' },
@@ -330,6 +627,21 @@ describe('discoverPlugins', () => {
           source: { source: 'url', url: '../escape' },
         },
         {
+          name: 'githubabs',
+          version: '1.0.0',
+          source: { source: 'github', repo: '/home/user/secrets' },
+        },
+        {
+          name: 'githubrel',
+          version: '1.0.0',
+          source: { source: 'github', repo: 'foo/bar/baz' },
+        },
+        {
+          name: 'githubcwd',
+          version: '1.0.0',
+          source: { source: 'github', repo: 'foo/bar' },
+        },
+        {
           name: 'urlok',
           version: '1.0.0',
           source: { source: 'url', url: 'https://example.com/p.tgz' },
@@ -344,15 +656,41 @@ describe('discoverPlugins', () => {
 
     const src = (name: string) =>
       discovered.find((p) => p.name === name)!.installSource;
-    // String local paths fall back to the bare plugin name (no redirect).
-    expect(src('abs')).toBe('abs');
-    expect(src('rel')).toBe('rel');
-    expect(src('home')).toBe('home');
+    // Rejected local redirects remain visible but are not installable.
+    expect(src('abs')).toBe('');
+    expect(src('rel')).toBe('');
+    expect(src('home')).toBe('');
     // { source: 'url' } local paths are rejected too (previously bypassed).
-    expect(src('urlabs')).toBe('urlabs');
-    expect(src('urlrel')).toBe('urlrel');
+    expect(src('urlabs')).toBe('');
+    expect(src('urlrel')).toBe('');
+    expect(src('githubabs')).toBe('');
+    expect(src('githubrel')).toBe('');
+    // owner/repo is normalized before it reaches parseInstallSource, whose
+    // filesystem-first resolution would otherwise select ./foo/bar.
+    expect(src('githubcwd')).toBe('https://github.com/foo/bar:githubcwd');
     // A genuine remote URL is preserved.
     expect(src('urlok')).toBe('https://example.com/p.tgz');
+  });
+
+  it('marks a sourceless http entry as non-installable', async () => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config('Remote', [{ name: 'root-plugin', version: '1.0.0' }]),
+    );
+
+    const [plugin] = await discoverPlugins(
+      [
+        {
+          name: 'Remote',
+          source: 'https://github.com/someone/root-plugin',
+          type: 'http',
+        },
+      ],
+      new Set(),
+    );
+    expect(plugin).toMatchObject({
+      installSource: '',
+      pluginSourceKind: 'extension-root',
+    });
   });
 
   it('skips sources that fail to load without throwing', async () => {

@@ -672,13 +672,15 @@ export function registerWorkspaceExtensionRoutes(
         plugins: marketplace.plugins.map((plugin) => ({
           name: plugin.name,
           ...(plugin.description ? { description: plugin.description } : {}),
-          source: redactExtensionDisplaySource(
-            typeof plugin.source === 'string'
-              ? plugin.source
-              : plugin.source.source === 'github'
-                ? plugin.source.repo
-                : plugin.source.url,
-          ),
+          source: plugin.source
+            ? redactExtensionDisplaySource(
+                typeof plugin.source === 'string'
+                  ? plugin.source
+                  : plugin.source.source === 'github'
+                    ? plugin.source.repo
+                    : plugin.source.url,
+              )
+            : '.',
           ...(plugin.category ? { category: plugin.category } : {}),
           ...(plugin.tags ? { tags: plugin.tags } : {}),
         })),

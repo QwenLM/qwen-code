@@ -28,6 +28,12 @@ Hooks are user-defined scripts or programs that are automatically executed by Qw
 - Integrate with external systems and services
 - Modify tool inputs or responses programmatically
 
+### Hooks provided by extensions
+
+Extensions can provide hooks inline in `qwen-extension.json` or reference a hooks JSON file from the manifest. Claude-compatible extensions can likewise declare an inline `hooks` object or a relative hooks file in `.claude-plugin/plugin.json`.
+
+For extensions that contain both `gemini-extension.json` and a root `.claude-plugin/plugin.json`, Qwen Code keeps the Gemini extension resources, context file, and settings while also importing the Claude-compatible hooks for that root. For a named marketplace install, this merge happens only when the selected marketplace entry points to the repository root; fields on that entry still override `plugin.json` as usual. `${CLAUDE_PLUGIN_ROOT}` in imported hooks resolves to the installed extension directory. Install third-party extensions only from sources you trust because command hooks execute with your user permissions.
+
 ## Hook Types
 
 Qwen Code supports four hook executor types:
