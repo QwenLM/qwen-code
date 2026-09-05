@@ -38,6 +38,7 @@
 // remember.
 
 import type { CommandModule } from 'yargs';
+import { displayAnchor } from './lib/report.js';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -746,7 +747,7 @@ export function buildChunkAgentPrompt(
     const lines = [
       '',
       `**This is an INCREMENTAL round** — the diff holds only what changed since the ` +
-        `previous clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), ` +
+        `previous clean review round (anchor \`${inertPath(displayAnchor(incremental.anchor))}\`), ` +
         `plus still-clean files one import hop from a change. Your files' scopes:`,
     ];
     if (deltaHere.length > 0) {
@@ -1116,7 +1117,7 @@ function diffReadingBlock(
     ...(incremental
       ? [
           `**Incremental round.** This diff is scoped to what changed since the previous ` +
-            `clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), plus ` +
+            `clean review round (anchor \`${inertPath(displayAnchor(incremental.anchor))}\`), plus ` +
             `still-clean files one import hop from a change — each of those is in scope ` +
             `only for its interaction with what it imports. The rest of the change was ` +
             `reviewed clean last round and is deliberately absent; do not go find it. ` +

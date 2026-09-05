@@ -11,7 +11,15 @@
 // command that reports it stopped saying a file was skipped.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  readFileSync,
+  existsSync,
+  realpathSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { seedParseArgs } from './lib/test-utils.js';
@@ -75,7 +83,12 @@ function capture(over: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'capture-local-'));
+  // `realpathSync`: the candidate write now refuses a parent chain that
+  // traverses a symlink, and `tmpdir()` IS one on macOS
+  // (`/var/folders/…` → `/private/var/folders/…`). Without the wrap every
+  // test here would fail on a developer's Mac while CI stayed green on its
+  // real-path TMPDIR — the same trap this directory's sibling suites hit.
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'capture-local-')));
   cwd = process.cwd();
   process.chdir(dir);
   errs = [];
@@ -139,6 +152,44 @@ describe('capture-local (command boundary)', () => {
     expect(plan.untrackedFiles).toEqual(['src/pay.ts']);
     expect(existsSync(plan.diffPathAbsolute)).toBe(true);
     expect(readFileSync(plan.diffPathAbsolute, 'utf8')).toBe(DIFF);
+  });
+
+  it('drops the candidate — not the round — on a symlinked `.qwen/tmp`', () => {
+    // `noFollow` guards only the final element, and this path is
+    // deterministic and in-repo: a contributor branch can commit `.qwen/tmp`
+    // as a link (gitignore does not stop `git add -f`), and the atomic
+    // tmp+rename then lands the candidate wherever it points. That is worse
+    // than a clobbered file — the plan advertises the path as
+    // `cacheCandidatePath`, and `cache-commit` reads back a candidate the
+    // attacker wrote, promoting forged anchors past validation that is only
+    // shape-deep.
+    const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+    mkdirSync(join(dir, '.qwen'), { recursive: true });
+    symlinkSync(elsewhere, join(dir, '.qwen', 'tmp'));
+    try {
+      capture();
+      // The round COMPLETES — the guard costs the anchor, not the review.
+      // Letting it throw exited non-zero with no plan, no report and no diff
+      // after the capture, the hashing and the plan were all already done.
+      run(join(dir, 'plan.json'));
+      const plan = JSON.parse(
+        readFileSync(join(dir, 'plan.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(plan['diffPath']).toBeTruthy();
+      // …and says so, with the field ABSENT rather than naming a file this
+      // run refused to write: Step 8 branches on its presence, so a silent
+      // drop would send it promoting an earlier round's candidate.
+      expect(plan['cacheCandidatePath']).toBeUndefined();
+      expect(errs.join('\n')).toContain('Could not write the cache candidate');
+      // The CANDIDATE was not written through the link. That is the extent
+      // of this guard: the round's diff and plan writers predate it and
+      // still follow the link — tracked separately, not certified here.
+      expect(
+        existsSync(join(elsewhere, 'qwen-review-local-cache-candidate.json')),
+      ).toBe(false);
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
   });
 
   it('creates the output directory the caller chose', () => {
@@ -279,6 +330,28 @@ describe('capture-local (command boundary)', () => {
       existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
     ).toBe(false);
     expect(errs.join('')).toContain('the cache candidate is withheld');
+  });
+
+  it('escapes the classes JSON.stringify passes raw, not just C0', () => {
+    // This sink kept its own C0+DEL copy of the rule long after `inertText`
+    // was extracted "so the newer sinks cannot each re-derive it (and
+    // re-forget it)" — so U+2028 (a forged second line wherever the message
+    // is re-rendered), the 8-bit C1 introducers and the invisible Cf class
+    // all reached the terminal verbatim and UNQUOTED from here.
+    capture({
+      untracked: [
+        `evil${String.fromCodePoint(0x2028)}fake.ts`,
+        `bidi${String.fromCodePoint(0x202e)}.ts`,
+      ],
+      skipped: [],
+    });
+    run('plan.json');
+
+    const out = errs.join('');
+    expect(out).not.toContain(String.fromCodePoint(0x2028));
+    expect(out).not.toContain(String.fromCodePoint(0x202e));
+    expect(out).toContain('\\u2028');
+    expect(out).toContain('\\u202e');
   });
 
   it('escapes a filename carrying terminal control characters', () => {

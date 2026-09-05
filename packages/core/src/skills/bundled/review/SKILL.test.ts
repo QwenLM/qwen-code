@@ -1682,8 +1682,11 @@ describe('bundled review skill', () => {
     // conditions instead of re-enumerating them, so one definition serves
     // both writes and the two cannot drift.
     const body = skillBody();
+    // Located by THIS branch's opening for the same paragraph: the write
+    // became one command (`cache-commit`) for both flows, so the sentence the
+    // rule lives under changed while the rule did not.
     const start = body.indexOf(
-      '**A local or file-path review at high effort writes its cache the same way',
+      '**The write is one command, for PR and local alike',
     );
     const end = body.indexOf(
       '**The cache advances exactly when the marker anchored',

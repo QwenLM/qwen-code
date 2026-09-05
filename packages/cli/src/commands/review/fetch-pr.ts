@@ -26,6 +26,7 @@
 //      LLM reads to drive the rest of Step 1.
 
 import type { CommandModule } from 'yargs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -61,6 +62,7 @@ import { widenScope } from './lib/incremental-scope.js';
 import { containedWorktreeReader } from './lib/worktree-reader.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
+  assertUnredirectedParent,
   REVIEW_TMP_DIR,
   reviewBranch,
   tmpFile,
@@ -81,6 +83,7 @@ import {
 import { resolveMergeBase, type GitProbe } from './lib/merge-base.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { SHA_RE } from './lib/ledger.js';
+import { blobPairs } from './lib/file-verdicts.js';
 import {
   appendRunSession,
   ledgerResumeCount,
@@ -273,6 +276,24 @@ type FetchPrResult = PlanReport & {
    * pair is certified by the same declared fallback as before this field.
    */
   reviewModelId?: string;
+  /**
+   * Where this round's content-verdict candidate landed — the per-file
+   * `(base, head)` blob pairs of everything the plan covers, plus the commit
+   * anchor. Step 8 promotes it into the review cache on a clean high-effort
+   * end (via `cache-commit`). Absent when the capture had no diff to
+   * describe, when the blob listing failed, or when the write was refused —
+   * each said on stderr.
+   *
+   * PRODUCER SIDE ONLY at this commit, and the distinction matters because
+   * the docs used to read as though the feature had shipped. Nothing reads
+   * `fileVerdicts` back yet: the transfer was to be `rescope --cache`, and
+   * `rescope` is gone — its scoping moved into `fetch-pr --since`. So a
+   * rebase still degrades to a full review today; what the pairs buy is that
+   * the record exists and is sound (mode-aware, `.gitattributes`-aware,
+   * refusing an added-file pair) when the consumer lands on the `--since`
+   * path. Until then this field is groundwork, not rebase survival.
+   */
+  cacheCandidatePath?: string;
   /**
    * Present when `--since <sha>` was passed: the incremental-review scoping
    * decision, validated HERE so the orchestrator never hand-runs git against
@@ -1619,6 +1640,90 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         );
       }
     }
+    // The content-verdict candidate: what a clean end of THIS round would let a
+    // post-rebase round transfer. Computed here because this is the moment the
+    // reviewed pairs are defined — plan files at `mergeBaseSha..fetchedSha` —
+    // and written beside the plan unconditionally: promotion into the cache is
+    // Step 8's clean-high-effort decision, not the capture's.
+    let cacheCandidatePath: string | undefined;
+    if (diffPath !== null && mergeBaseSha) {
+      // Pinned to the repo root: the pathspec-scoped ls-tree inside resolves
+      // paths against git's cwd, and a fetch started from a subdirectory would
+      // otherwise record every pair as (absent, absent) — a candidate that
+      // later transfers clean verdicts over anything.
+      const pairs = blobPairs(
+        gitOpt('rev-parse', '--show-toplevel') ?? '.',
+        mergeBaseSha,
+        fetchedSha,
+        plan.files.map((f) => f.path),
+      );
+      if (pairs !== null) {
+        // Guarded for the reason the plan-partition step above is: this runs
+        // after the worktree exists and before the report is written, and a
+        // convenience artifact must never take the whole fetch with it.
+        try {
+          cacheCandidatePath = tmpFile(
+            `pr-${prNumber}`,
+            'cache-candidate.json',
+          );
+          // `noFollow` below guards the final element only, and this path is
+          // deterministic and in-repo: `.qwen/tmp` committed as a symlink
+          // (gitignore does not stop `git add -f`) redirects the write
+          // through the chain — and the plan then advertises that
+          // attacker-chosen path as `cacheCandidatePath` for `cache-commit`
+          // to read back, so a swapped candidate promotes forged anchors into
+          // the review cache, where every validation is shape-based. The same
+          // guard `cache-commit` already applies to its own `--out`, for the
+          // same reason its header gives.
+          assertUnredirectedParent(
+            cacheCandidatePath,
+            'cache candidate',
+            'fetch-pr',
+          );
+          atomicWriteFileSync(
+            cacheCandidatePath,
+            JSON.stringify(
+              {
+                v: 1,
+                target: `pr-${prNumber}`,
+                lastCommitSha: fetchedSha,
+                mergeBaseSha,
+                fileVerdicts: pairs,
+                // WHO certified this anchor, recorded HERE rather than merged
+                // in by Step 8 from `{{model}}`. That interpolates the BARE
+                // model id, while every identity this CLI compares is
+                // provider-qualified — two provider configurations exposing
+                // one model name wrote the same token and passed each other's
+                // same-model gate, which is the contract the anchor rests on.
+                // Empty when the runtime published nothing, which every
+                // consumer reads as a mismatch.
+                lastModelId: roundModelIdFrom(process.env),
+              },
+              null,
+              2,
+            ),
+            { noFollow: true },
+          );
+        } catch (err) {
+          cacheCandidatePath = undefined;
+          writeStderrLine(
+            `WARNING: could not write the cache candidate ` +
+              `(${(err as Error).message}); this round cannot anchor the next ` +
+              `one's rebase survival, but the review itself is unaffected.`,
+          );
+        }
+      } else {
+        // Out loud, like the write failure above: a listing that failed —
+        // an `ls-tree` error, or a filename the decode could not name
+        // faithfully — otherwise reads exactly like a PR with no diff.
+        writeStderrLine(
+          'WARNING: could not list the blob pairs for the cache candidate; ' +
+            "this round cannot anchor the next one's rebase survival, but " +
+            'the review itself is unaffected.',
+        );
+      }
+    }
+
     // Ruled once, up front: the report's `emptyDiff` flag below and the
     // prebuild gate after the write read the same answer (the rationale for
     // its two guards sits with the flag).
@@ -1712,6 +1817,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
       ...(fullSrcDiffLines === undefined ? {} : { fullSrcDiffLines }),
       ...(roundModelId ? { reviewModelId: roundModelId } : {}),
+      ...(cacheCandidatePath ? { cacheCandidatePath } : {}),
       ...(anchor ? { incremental: anchor.incremental } : {}),
       ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
         operatorRoundCap: operatorReviewSettings().reverseAuditRounds,

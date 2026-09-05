@@ -6,9 +6,16 @@
 
 import { describe, it, expect } from 'vitest';
 import { basename, dirname, join, resolve } from 'node:path';
-import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import {
+  assertUnredirectedParent,
   repoRelativeOf,
   inertPath,
   lastReviewEffortPath,
@@ -215,6 +222,66 @@ describe('repoRelativeOf — the repository root is inside the repository', () =
       expect(out.rel).toBe('');
       // …and a genuine escape still is one.
       expect(repoRelativeOf(root, '..', root).escapes).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('assertUnredirectedParent', () => {
+  it('refuses a write whose parent chain traverses a symlink', () => {
+    // `noFollow` protects the FINAL element only, and the threat is satisfied
+    // one layer up: plant `.qwen/tmp` (or `.qwen/review-cache`) as a link —
+    // gitignore does not stop `git add -f` — and `mkdirSync(…,
+    // {recursive:true})` succeeds through it while the atomic tmp+rename
+    // lands the file wherever the link points. Worse for a candidate: the
+    // plan then advertises that path, and `cache-commit` reads back a
+    // candidate the attacker wrote, promoting forged anchors past validation
+    // that is only shape-deep.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'redirect-')));
+    try {
+      const victim = join(root, 'victim');
+      mkdirSync(victim);
+      const link = join(root, 'linked');
+      symlinkSync(victim, link);
+      expect(() =>
+        assertUnredirectedParent(
+          join(link, 'candidate.json'),
+          'cache candidate',
+          'fetch-pr',
+        ),
+      ).toThrow(/resolves to .*Refusing/s);
+      // The command name rides the message: three writers share this guard,
+      // and a refusal that names none of them is one nobody can act on.
+      expect(() =>
+        assertUnredirectedParent(join(link, 'x.json'), 'cache', 'cache-commit'),
+      ).toThrow(/^cache-commit:/);
+
+      // A real directory passes.
+      expect(() =>
+        assertUnredirectedParent(
+          join(victim, 'candidate.json'),
+          'cache candidate',
+          'fetch-pr',
+        ),
+      ).not.toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a parent that cannot be resolved at all', () => {
+    // Unresolvable is not "fine": the write would create it, and what it
+    // creates through is exactly what this cannot see.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'redirect-')));
+    try {
+      expect(() =>
+        assertUnredirectedParent(
+          join(root, 'nope', 'candidate.json'),
+          'cache candidate',
+          'capture-local',
+        ),
+      ).toThrow(/cannot resolve the cache candidate directory/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

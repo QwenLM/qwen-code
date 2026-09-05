@@ -326,3 +326,14 @@ export interface IncrementalScope {
    */
   supersededPaths?: string[];
 }
+
+/**
+ * Render an incremental anchor for humans: truncate only sha-shaped labels.
+ * The label space holds 40-64-hex commit shas AND the literal
+ * `content-verdicts`; a blind 12-char slice printed `content-verd` into the
+ * summary line and every brief. One copy, because `agent-prompt`'s two call
+ * sites (the summary line and the chunk frames) must never drift.
+ */
+export function displayAnchor(label: string): string {
+  return /^[0-9a-f]{40,64}$/i.test(label) ? label.slice(0, 12) : label;
+}

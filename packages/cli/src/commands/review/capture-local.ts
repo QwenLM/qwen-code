@@ -22,14 +22,17 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  assertUnredirectedParent,
   repoRelativeOf,
   REVIEW_CACHE_DIR,
   REVIEW_TMP_DIR,
@@ -54,6 +57,7 @@ import {
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
 import { gitOpt } from './lib/git.js';
+import { inertText } from './lib/inert-text.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   changedSince,
@@ -100,8 +104,12 @@ type CaptureLocalResult = PlanReport & {
   skippedFiles: SkippedFile[];
   /** Present only when `--cache` scoped this capture incrementally. */
   incremental?: IncrementalBlock;
-  /** Where this round's content anchor landed — Step 8 promotes it on a clean run. */
-  cacheCandidatePath: string;
+  /**
+   * Where this round's content anchor landed — Step 8 promotes it on a clean
+   * run. ABSENT when the capture withheld the candidate (a mid-capture tree
+   * change), because Step 8 branches on this field's presence.
+   */
+  cacheCandidatePath?: string;
   /**
    * The written candidate's own `stateId`, for Step 8 to CHECK before
    * promoting. The candidate path is stable per target and local/file
@@ -131,11 +139,16 @@ type CaptureLocalResult = PlanReport & {
  * characters and quotes the result; the machine-readable report keeps the real
  * bytes.
  */
-function display(path: string): string {
-  // eslint-disable-next-line no-control-regex
-  const CONTROL = /[\u0000-\u001f\u007f]/;
-  return CONTROL.test(path) ? JSON.stringify(path) : path;
-}
+// …and it is `inertText`, not a copy of it. This function used to carry its
+// own C0+DEL class, which is the narrow one `inertText` was extracted to stop
+// people re-deriving — so U+2028 (a forged second line), the 8-bit C1
+// introducers and the invisible Cf class all passed through here verbatim and
+// UNQUOTED, out of the very sink the extraction's header names as protected.
+// Wrapped, not aliased: `inertText(value, maxChars = 200)` takes a second
+// argument, and this is used as `paths.map(display)` — which hands `map`'s
+// INDEX to `maxChars` and clips the first element to zero characters. The
+// arity is the whole reason for the wrapper.
+const display = (path: string): string => inertText(path);
 
 /**
  * Cached paths that dropped out of THIS capture while still on disk — and
@@ -726,7 +739,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     const inv = invisibleTracked();
     return inv !== null && inv.length === 0;
   };
-  const cacheCandidatePath = tmpFile(target, 'cache-candidate.json');
+  const candidatePath = tmpFile(target, 'cache-candidate.json');
+  // The field rides the plan ONLY when a candidate exists to promote: Step 8
+  // keys its cache-commit-vs-hand-write branch on the field's presence, and
+  // announcing a path to a file this run deliberately withheld would send it
+  // promoting a stale candidate from an earlier round.
+  let cacheCandidatePath: string | undefined;
   // Read the cache BEFORE the candidate write: the dropped-out-while-on-disk
   // set gates that write (below), and computing it after let a refused
   // anchor's round write a candidate that silently OMITTED the dropped path
@@ -782,16 +800,60 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     invisible.length === 0 &&
     vanishedPresent.length === 0;
   if (candidateWritten) {
-    writeFileSync(cacheCandidatePath, JSON.stringify(candidate, null, 2));
+    // Guarded as a whole, like the PR flow's candidate write and for the
+    // reason that one states: a convenience artefact must never take the
+    // round with it. The refusal below arrives AFTER the capture, the
+    // hashing and the plan are all done; letting it escape `runCaptureLocal`
+    // — which the yargs handler does not catch — exited non-zero with no
+    // plan, no report and no diff, over a check whose whole cost is supposed
+    // to be the next round's anchor. The pre-guard code wrote here with a
+    // plain `writeFileSync` and could not fail this way at all.
+    try {
+      // The PARENT chain first: `noFollow` below guards only the final
+      // element, and `.qwen/tmp` committed as a symlink redirects the write
+      // just as well — the plan then advertises that path as
+      // `cacheCandidatePath` and `cache-commit` reads a candidate the
+      // attacker wrote. Same guard the promoted cache gets.
+      assertUnredirectedParent(
+        candidatePath,
+        'cache candidate',
+        'capture-local',
+      );
+      // noFollow: a planted symlink at this deterministic path would redirect
+      // the candidate write onto its target (see cache-commit's note).
+      atomicWriteFileSync(candidatePath, JSON.stringify(candidate, null, 2), {
+        noFollow: true,
+      });
+      cacheCandidatePath = candidatePath;
+    } catch (err) {
+      // Said out loud, and the field stays absent: Step 8 branches on its
+      // presence, so a silent drop would send it promoting an earlier
+      // round's candidate.
+      writeStderrLine(
+        `Could not write the cache candidate ` +
+          `(${(err as Error).message}); this round cannot anchor the next ` +
+          `one, but the review itself is unaffected.`,
+      );
+    }
   } else {
     // The path is stable per target, so an earlier round's candidate still
     // sits under the `cacheCandidatePath` this plan publishes, and Step 8
     // would promote that stale anchor merged with this round's ledger.
     // Absent IS the withheld state — fail quiet.
     try {
-      unlinkSync(cacheCandidatePath);
+      // The same parent-chain guard the write branch applies: a planted
+      // `.qwen/tmp` link redirects a removal exactly as it redirects a
+      // write, and the victim file would go while stderr reported only the
+      // anchor cost. A refusal lands in the catch below — the absent field
+      // is what withholds; removing the stale file is a courtesy.
+      assertUnredirectedParent(
+        candidatePath,
+        'cache candidate',
+        'capture-local',
+      );
+      rmSync(candidatePath, { force: true });
     } catch {
-      // nothing to remove
+      // The absent field above is the load-bearing half.
     }
     if (!treeHeldStill) {
       writeStderrLine(
@@ -1281,8 +1343,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // `srclink/foo.ts` predicted `srclink_foo.ts.json`, found nothing, and
     // ruled on zero ledger entries over a Critical that still stood.
     cachePath,
-    cacheCandidatePath,
-    ...(candidateWritten ? { cacheCandidateStateId: candidate.stateId } : {}),
+    ...(cacheCandidatePath
+      ? { cacheCandidatePath, cacheCandidateStateId: candidate.stateId }
+      : {}),
     ...planEffortField(args.effort),
   };
 
