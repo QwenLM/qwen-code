@@ -205,6 +205,24 @@ describe('ChatRecordingService', () => {
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
       expect(record.provenance).toBe('real_user');
+      expect(record.promptId).toBeUndefined();
+    });
+
+    it('persists the daemon prompt identity before any turn result', async () => {
+      chatRecordingService.recordUserMessage(
+        [{ text: 'same prompt' }],
+        undefined,
+        undefined,
+        'daemon-prompt-1',
+      );
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(jsonl.writeLine).mock.calls[0][1]).toMatchObject({
+        type: 'user',
+        promptId: 'daemon-prompt-1',
+        message: { role: 'user', parts: [{ text: 'same prompt' }] },
+      });
     });
 
     it('preserves model-bound parts and records clean display text', async () => {
