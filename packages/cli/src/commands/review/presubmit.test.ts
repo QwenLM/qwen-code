@@ -415,6 +415,11 @@ describe('presubmitCommand', () => {
     ghApiAllMock.mockReturnValue(comments);
     ghApiMock.mockReturnValue(null);
     readFileSyncMock.mockReturnValue(JSON.stringify(newFindings));
+    // Per CALL, not only per test: a cell that runs several shapes reads
+    // the report of ITS run, not the first report written in the test —
+    // with the spy left uncleared, every later shape in a loop returned
+    // the first shape's report and passed vacuously (#9940 review, audit).
+    writeFileSyncMock.mockClear();
     const handler = presubmitCommand.handler;
     if (!handler) throw new Error('presubmit handler missing');
     await handler({
@@ -956,6 +961,31 @@ describe('presubmitCommand', () => {
       expect(result.blockOnExistingComments).toBe(false);
     });
 
+    it('does not admit a FOOTER-carrying reply — the fixed-ruling reply is a reply, not a finding (#9940 review, round 16)', async () => {
+      // The thread lifecycle's own fixed-ruling reply carries the visible
+      // footer and inherits its thread's commit_id, so on a same-SHA
+      // re-run it is not stale. Ungated, the footer disjunct bucketed it
+      // into overlap and the deterministic drop discarded a genuinely
+      // NEW finding at the location, citing the fixed note. Replies stay
+      // excluded on the footer disjunct too.
+      const result = await presubmitWithComments(
+        [
+          {
+            id: 5,
+            body: 'R3-2 fixed by the guard rewrite\n\n_— qwen3-max via Qwen Code /review (v0.21.3)_',
+            path: 'a.ts',
+            line: 12,
+            commit_id: 'abc123',
+            in_reply_to_id: 1,
+            user: { login: 'qwen-code-ci-bot' },
+          },
+        ],
+        FINDINGS,
+      );
+      expect(result.existingComments.total).toBe(0);
+      expect(result.blockOnExistingComments).toBe(false);
+    });
+
     it('ignores a footer-less, marker-less comment from another account', async () => {
       // No footer, no comment marker, and not the reviewing account's:
       // nothing presubmit can attribute — it stays outside the dedup set.
@@ -1079,6 +1109,241 @@ describe('presubmitCommand', () => {
       );
       expect(result.existingComments.byBucket.repost).toBe(1);
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('reads the carried id past a SOURCE tag placed before it — the head-slot read, like every other end (#9940 review, round 21)', async () => {
+      // `[probe] R3-2: …` is a head-slot shape #10291 admits and the
+      // ledger builder, the contradiction gate and the thread matcher all
+      // read; the anchored read over `.stripped` kept the source tag at
+      // position 0 and saw no id, so the standing re-post landed in the
+      // overlap bucket and was dedup-dropped every round — the re-post
+      // loop meanwhile counting it re-posted. Both posted shapes.
+      for (const body of [
+        '**[Critical]** [probe] R3-2: eq-form rescue asymmetry _— model via Qwen Code /review (v0.21.3)_',
+        '[probe] R3-2: eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+      ]) {
+        const result = await presubmitWithComments(
+          [{ ...CARRIED_COMMENT, body }],
+          [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+        );
+        expect(result.existingComments.byBucket.repost).toBe(1);
+        expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+      }
+    });
+
+    it('reads the carried id through a forged footer span between the marker and the id — the ledger projection (#9940 review, round 21)', async () => {
+      // Under attribution on `normalizeInlineComments` strips only the
+      // TRAILING footer, so a re-report drafted with a forged span ahead
+      // of its id posts with the span intact; `buildLedger`, the gate and
+      // the matcher read the id through `ledgerClaimLine` (spans
+      // stripped) and kept carrying R3-2 while this end read none, and
+      // the standing re-post was dedup-dropped every round.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** _— model via Qwen Code /review (v0.21.3)_ R3-2: eq-form rescue asymmetry',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('an own carry-reply carries the re-post exemption once its root is replied-to (#9940 review, round 24)', async () => {
+      // Three-round steady state: the lifecycle replied R1-2's carry INTO
+      // its root C_A (so C_A is replied-to → `resolved`, never a target),
+      // and a sibling root C_B carrying R1-3 overlaps the same location.
+      // The reply is the only comment still carrying R1-2 here; excluded
+      // outright, R1-2 had no carrier and the drop rule discarded its
+      // still-standing re-post as C_B's duplicate. Both posted shapes.
+      for (const replyBody of [
+        '**[Critical]** R1-2: still stands at HEAD _— model via Qwen Code /review (v0.21.3)_',
+        'R1-2: still stands at HEAD\n\n<!-- qwen-review critical -->',
+      ]) {
+        const result = await presubmitWithComments(
+          [
+            {
+              ...CARRIED_COMMENT,
+              id: 1,
+              body: '**[Critical]** R1-2: the guard drops a valid case _— model via Qwen Code /review (v0.21.3)_',
+            },
+            { ...CARRIED_COMMENT, id: 2, body: replyBody, in_reply_to_id: 1 },
+            {
+              ...CARRIED_COMMENT,
+              id: 3,
+              body: '**[Critical]** R1-3: the parser trusts unbounded input _— model via Qwen Code /review (v0.21.3)_',
+            },
+          ],
+          [
+            { path: 'src/parse-args.ts', line: 44, id: 'R1-2' },
+            { path: 'src/parse-args.ts', line: 44, id: 'R1-3' },
+          ],
+        );
+        expect(result.existingComments.byBucket).toMatchObject({
+          resolved: 1,
+          overlap: 1,
+          repost: 2,
+        });
+        const matched = (
+          result.existingComments.repost as Array<{ matchedIds: string[] }>
+        ).flatMap((r) => r.matchedIds);
+        expect(matched.sort()).toEqual(['R1-2', 'R1-3']);
+        // The reply is a carrier, not an overlap: the top-level count and
+        // the overlap list are untouched by it.
+        expect(result.existingComments.total).toBe(2);
+        expect(
+          (result.existingComments.overlap as Array<{ id: number }>).map(
+            (o) => o.id,
+          ),
+        ).toEqual([3]);
+        expect(result.blockOnExistingComments).toBe(true);
+      }
+    });
+
+    it('an own carry-reply keeps carrying after new commits — the root is stale, the reply is not SHA-gated (#9940 review, round 25)', async () => {
+      // A reply inherits its ROOT's commit id. Gated on the current SHA,
+      // the carry-reply stopped carrying the moment any commit landed
+      // while its root bucketed `stale`; a sibling own root posted at the
+      // current SHA then made the still-standing R1-2 re-post a duplicate
+      // of the sibling — the finding left the ledger, its thread stayed
+      // open forever.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            id: 1,
+            commit_id: 'old-sha',
+            body: '**[Critical]** R1-2: the guard drops a valid case _— model via Qwen Code /review (v0.21.3)_',
+          },
+          {
+            ...CARRIED_COMMENT,
+            id: 2,
+            commit_id: 'old-sha',
+            in_reply_to_id: 1,
+            body: '**[Critical]** R1-2: still stands at HEAD _— model via Qwen Code /review (v0.21.3)_',
+          },
+          {
+            ...CARRIED_COMMENT,
+            id: 3,
+            body: '**[Critical]** R1-3: the parser trusts unbounded input _— model via Qwen Code /review (v0.21.3)_',
+          },
+        ],
+        [
+          { path: 'src/parse-args.ts', line: 44, id: 'R1-2' },
+          { path: 'src/parse-args.ts', line: 44, id: 'R1-3' },
+        ],
+      );
+      expect(result.existingComments.byBucket).toMatchObject({
+        stale: 1,
+        resolved: 0,
+        overlap: 1,
+        repost: 2,
+      });
+      const matched = (
+        result.existingComments.repost as Array<{ matchedIds: string[] }>
+      ).flatMap((r) => r.matchedIds);
+      expect(matched.sort()).toEqual(['R1-2', 'R1-3']);
+      expect(
+        (result.existingComments.overlap as Array<{ id: number }>).map(
+          (o) => o.id,
+        ),
+      ).toEqual([3]);
+    });
+
+    it('a reply carries nothing from another account, or without a wanted id (#9940 review, round 24)', async () => {
+      const root = {
+        ...CARRIED_COMMENT,
+        id: 1,
+        body: '**[Critical]** R1-2: the guard drops a valid case _— model via Qwen Code /review (v0.21.3)_',
+      };
+      const sibling = {
+        ...CARRIED_COMMENT,
+        id: 3,
+        body: '**[Critical]** R1-3: the parser trusts unbounded input _— model via Qwen Code /review (v0.21.3)_',
+      };
+      const findings = [
+        { path: 'src/parse-args.ts', line: 44, id: 'R1-2' },
+        { path: 'src/parse-args.ts', line: 44, id: 'R1-3' },
+      ];
+      const carry =
+        '**[Critical]** R1-2: still stands at HEAD _— model via Qwen Code /review (v0.21.3)_';
+      for (const reply of [
+        // Another account's reply: ledger ids are per-account.
+        {
+          ...CARRIED_COMMENT,
+          id: 2,
+          body: carry,
+          in_reply_to_id: 1,
+          user: { login: 'someone-else' },
+        },
+        // A fixed-ruling reply: no marker, retired id — inert.
+        {
+          ...CARRIED_COMMENT,
+          id: 2,
+          body: 'R1-2 fixed by the guard rewrite\n\n_— model via Qwen Code /review (v0.21.3)_',
+          in_reply_to_id: 1,
+        },
+        // A reply carrying an id no finding wants.
+        {
+          ...CARRIED_COMMENT,
+          id: 2,
+          body: '**[Critical]** R1-9: unrelated _— model via Qwen Code /review (v0.21.3)_',
+          in_reply_to_id: 1,
+        },
+      ]) {
+        const result = await presubmitWithComments(
+          [root, reply, sibling],
+          findings,
+        );
+        const matched = (
+          result.existingComments.repost as Array<{ matchedIds: string[] }>
+        ).flatMap((r) => r.matchedIds);
+        expect(matched).toEqual(['R1-3']);
+        expect(result.existingComments.total).toBe(2);
+      }
+    });
+
+    it('matches a non-canonical id spelling to the canonical wanted id, and reads no id off a code block (#9940 review, audit)', async () => {
+      // `R03-2:` in a posted comment names R3-2 — one spelling for every
+      // join, or the re-post is a plain overlap and dedup-dropped.
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '**[Critical]** R03-2: eq-form rescue asymmetry _— model via Qwen Code /review (v0.21.3)_',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+      // An attribution-off post whose first line is an indented code block
+      // carries no claim — not a re-post target (the code merely starts
+      // with an id token).
+      const code = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '\n\n    R3-2: eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(code.existingComments.byBucket.repost).toBe(0);
+      expect(code.existingComments.byBucket.overlap).toBe(1);
+    });
+
+    it('reports a match under the spelling the findings file wrote — the orchestrator exempts by that id (#9940 review, audit 2)', async () => {
+      const result = await presubmitWithComments(
+        [CARRIED_COMMENT],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R03-2' }],
+      );
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(
+        expect.arrayContaining(['R03-2', 'R3-2']),
+      );
     });
 
     it('marks an id-matched overlap comment as a re-post target', async () => {
@@ -1212,6 +1477,25 @@ describe('presubmitCommand', () => {
           {
             ...CARRIED_COMMENT,
             body: 'R3-2: eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
+    it('extracts the carried id past a MULTI-line leading comment on the attribution-off shape', async () => {
+      // An attribution-off post of a draft whose residue sat between the
+      // marker and the id leads with that residue; the marker-less
+      // readback strips it BEFORE the line split, so a multi-line
+      // comment cannot cut the id off the first line (#9940 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '<!--\nrender-note\n-->R3-2: eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
           },
         ],
         [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],

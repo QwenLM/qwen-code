@@ -29,17 +29,17 @@ import {
 import { detectPlatformKind } from './lib/platform/registry.js';
 import { ensureAoneAuthenticated } from './lib/platform/aone-client.js';
 import {
-  LEADING_INVISIBLE_RE,
-  carriedClaimLine,
+  bareClaimLine,
   readClaimHead,
   severityOf,
 } from './lib/inline-counts.js';
 import { carriesCommentMarker } from './lib/review-footer.js';
 import {
-  LEDGER_ID_READBACK,
   LEDGER_ID_SHAPE,
   LEDGER_ID_TOKEN,
+  canonicalLedgerId,
 } from './lib/ledger.js';
+import { ledgerClaimLine } from './compose-review.js';
 import {
   aoneAccountName,
   getMrAuthorAndHead,
@@ -90,28 +90,45 @@ interface CommentSummary {
   matchedIds?: string[];
 }
 
-/** The carried id this comment's claim line leads with, if any. */
+/**
+ * The carried id this comment's claim line leads with, if any — read
+ * through the SAME projection every other consumer of a carried id applies
+ * (`ledgerClaimLine`: forged footer spans, comment-marker lines and leading
+ * render-nothing residue stripped; the head-slot tokeniser for the id), so
+ * this end can never call a posted comment id-less while the ledger
+ * builder, the contradiction gate and the thread matcher carry it. It did:
+ * a re-report drafted `**[Critical]** _— via Qwen Code /review_ R1-2: …`
+ * posts with the span intact under attribution on, and the plain claim
+ * line read here stopped at the `_` — the standing re-post landed in the
+ * overlap bucket and was dedup-dropped every round while the ledger kept
+ * carrying R1-2 (#9940 review, round 21). The marked leg keeps the
+ * `null` shape the bare-leg guard keys on.
+ */
 function extractCarriedIds(body: string): string[] {
-  let line = carriedClaimLine(body);
+  const marked = ledgerClaimLine(body);
+  let line: string | null = marked === '' ? null : marked;
   if (line === null && carriesCommentMarker(body)) {
     // The attribution-off POSTED shape: `submit` strips the severity
     // prefix before posting, so the marker-less body carries the claim on
     // its first line and the severity in the trailing invisible marker.
     // Without reading the id back off that line, a carried re-post lands
     // as a plain overlap and is dedup-dropped from round 3 onward, while
-    // the surviving id token bars the id-less fallback.
-    line = body
-      .trimStart()
-      .split(/\r\n?|\n/)[0]
-      .replace(LEADING_INVISIBLE_RE, '')
-      .trim();
+    // the surviving id token bars the id-less fallback. The ONE bare-leg
+    // read, shared with the thread matcher (`bareClaimLine`): an indented
+    // code block on the first line carries no claim (#9940 review, audit).
+    line = bareClaimLine(body);
   }
-  // Through the claim-head strip the ledger builder applies (#10291): a
-  // re-post whose claim line leads with the axis tags before its carried
-  // id must still read as that id's re-post, or it lands in the plain
-  // overlap bucket and is dedup-dropped every round.
-  const carried = LEDGER_ID_READBACK.exec(readClaimHead(line ?? '').stripped);
-  return carried ? [carried[1]] : [];
+  // Through the head-slot tokeniser's own id read, the read the ledger
+  // builder, the contradiction gate and the closure mint apply (#10291):
+  // a re-post whose claim line leads with the axis tags OR a source tag
+  // (`[probe] R1-2: …`) before its carried id must still read as that
+  // id's re-post, or it lands in the plain overlap bucket and is
+  // dedup-dropped every round. The anchored read over `.stripped` kept
+  // the source tag at position 0 and read no id there (#9940 review,
+  // round 21). The slot grammar keeps a mid-body mention ("see R3-2 for
+  // context") non-carried, so the id-less fallback below stays safe.
+  const carried = readClaimHead(line ?? '').id;
+  return carried === undefined ? [] : [carried];
 }
 
 /**
@@ -648,6 +665,12 @@ function classifyExistingComments(
   newFindings: FindingAnchor[],
   commitSha: string,
   currentUserLogin: string,
+  /**
+   * The reviewing account's own REPLIES that carry a posting signal —
+   * the thread lifecycle's carry re-posts (`submit`, #9906). Re-post
+   * carriers only: see the leg at the end of this function.
+   */
+  ownReplies: RawComment[] = [],
 ) {
   const buckets: Record<
     'stale' | 'resolved' | 'overlap' | 'repost' | 'noConflict',
@@ -660,14 +683,29 @@ function classifyExistingComments(
   // cannot appear in a comment posted before this round, so every id here is
   // a genuine re-post signal, and `wantedIds.size === 1` below means exactly
   // one CARRIED finding at the location (#9212 review).
-  const carriedIdsByLocation = new Map<string, Set<string>>();
+  // Keyed by the CANONICAL spelling the readback compares against, each
+  // carrying the spellings the findings file actually wrote: the
+  // orchestrator exempts a finding by ITS id appearing in `matchedIds`, so
+  // a match found under `R3-2` must be reported as the `R03-2` the file
+  // said (and as `R3-2`, for a canonical reader) (#9940 review, audit).
+  const carriedIdsByLocation = new Map<string, Map<string, Set<string>>>();
   for (const f of newFindings) {
     if (f.id === undefined) continue;
     const key = `${f.path}:${f.line}`;
-    const ids = carriedIdsByLocation.get(key) ?? new Set<string>();
-    ids.add(f.id);
+    const ids = carriedIdsByLocation.get(key) ?? new Map<string, Set<string>>();
+    const canonical = canonicalLedgerId(f.id);
+    const raws = ids.get(canonical) ?? new Set<string>([canonical]);
+    raws.add(f.id);
+    ids.set(canonical, raws);
     carriedIdsByLocation.set(key, ids);
   }
+  /** Every spelling to report for a set of matched canonical ids. */
+  const spellings = (
+    wanted: Map<string, Set<string>>,
+    canonicals: Iterable<string>,
+  ): string[] => [
+    ...new Set([...canonicals].flatMap((c) => [...(wanted.get(c) ?? [c])])),
+  ];
 
   // Own-account Qwen comments per location at the current SHA. A count of
   // exactly one makes an id-less original unambiguous as a re-post target
@@ -746,11 +784,14 @@ function classifyExistingComments(
         currentUserLogin !== '' &&
         (c.user?.login ?? '').toLowerCase() === currentUserLogin.toLowerCase()
       ) {
-        const matchedIds = extractCarriedIds(c.body || '').filter((id) =>
+        const matched = extractCarriedIds(c.body || '').filter((id) =>
           wantedIds.has(id),
         );
-        if (matchedIds.length > 0) {
-          buckets.repost.push({ ...summary, matchedIds });
+        if (matched.length > 0) {
+          buckets.repost.push({
+            ...summary,
+            matchedIds: spellings(wantedIds, matched),
+          });
         } else if (
           !ANY_CARRIED_ID.test(c.body || '') &&
           wantedIds.size === 1 &&
@@ -767,14 +808,87 @@ function classifyExistingComments(
           // strict match; ambiguous cases (several id-less comments or
           // several carried ids at one line) keep the strict body match too,
           // staying dropped and visible in the drop log (#9212 review).
-          buckets.repost.push({ ...summary, matchedIds: [...wantedIds] });
+          buckets.repost.push({
+            ...summary,
+            matchedIds: spellings(wantedIds, wantedIds.keys()),
+          });
         }
       }
     } else {
       buckets.noConflict.push(summary);
     }
   }
+
+  // Own-account REPLIES as re-post carriers — never as overlap carriers.
+  // The thread lifecycle answers a still-standing carry INSIDE its
+  // original thread (`submit`, #9906), which makes the root replied-to —
+  // bucketed `resolved` above, never a target — while the reply, now the
+  // only comment at the location still carrying the id, is excluded from
+  // the top-level set (a fixed-ruling reply must not act as an overlap
+  // drop carrier — #9940 review, round 16). With another own root
+  // overlapping the location, the carried finding then had NO carrier and
+  // the deterministic drop discarded its re-post as that root's duplicate
+  // every round while the ledger kept carrying it (#9940 review, round
+  // 24). A reply contributes exactly what a root's id match contributes —
+  // a `repost` entry keyed on the ids it carries — and nothing else: not
+  // the overlap bucket (a reply is not a finding at the location), not
+  // the id-less ambiguity count (it is not an original), not the id-less
+  // fallback (a reply carrying no id names nothing). Two gates from the
+  // root match — this account only (ledger ids are per-account) and an
+  // id the findings actually carry — and deliberately NOT the SHA gate:
+  // a reply inherits its ROOT's commit id, so after any new commit the
+  // carry-reply would fail a current-SHA test forever while its root
+  // buckets `stale`, and a still-standing carried finding would be
+  // dedup-dropped whenever any current-SHA own comment overlapped its
+  // location (#9940 review, round 25). The wanted-id match is the
+  // evidence that matters: the current round still carries the finding
+  // at that location, and the lifecycle answers it inside the same
+  // thread whatever commit the root was posted at. A fixed-ruling reply
+  // stays inert either way: it carries no marker, and its id is retired
+  // — no finding wants it.
+  if (currentUserLogin !== '') {
+    for (const c of ownReplies) {
+      if (
+        (c.user?.login ?? '').toLowerCase() !== currentUserLogin.toLowerCase()
+      )
+        continue;
+      const wantedIds = carriedIdsByLocation.get(`${c.path}:${c.line}`);
+      if (!wantedIds) continue;
+      const matched = extractCarriedIds(c.body || '').filter((id) =>
+        wantedIds.has(id),
+      );
+      if (matched.length === 0) continue;
+      buckets.repost.push({
+        id: c.id,
+        path: c.path ?? '',
+        line: c.line ?? 0,
+        commit_id: c.commit_id ?? '',
+        body: (c.body || '').slice(0, 80),
+        ...(c.user?.login ? { user: c.user.login } : {}),
+        matchedIds: spellings(wantedIds, matched),
+      });
+    }
+  }
   return buckets;
+}
+
+/**
+ * The reviewing account's own replies that carry a posting signal — the
+ * shape the thread lifecycle's carry re-post has (a severity marker, or
+ * the attribution-off trailing marker, or the footer). Stated once for
+ * both platform paths; the account gate is what keeps a foreign reply
+ * from ever carrying an exemption.
+ */
+function ownSignalReplies(comments: RawComment[], me: string): RawComment[] {
+  if (me === '') return [];
+  return comments.filter(
+    (c) =>
+      !!c.in_reply_to_id &&
+      (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
+      (/via Qwen Code \/review/.test(c.body ?? '') ||
+        carriesCommentMarker(c.body ?? '') ||
+        severityOf(c) !== null),
+  );
 }
 
 /**
@@ -933,12 +1047,19 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   // whitespace must still be recognized here) — while a hand-written comment
   // by the same account is not a posted finding: admitting one lets a
   // same-line hand comment trip the overlap gate into silently dropping a
-  // genuinely new finding. Replies stay excluded either way. Attribution-off
+  // genuinely new finding. Replies stay excluded either way — the footer
+  // disjunct included: the thread lifecycle's fixed-ruling REPLY carries
+  // the same footer (`R<id> fixed by …`), inherits its thread's commit_id,
+  // and an ungated footer match bucketed it into `overlap`, where the drop
+  // rule discarded a genuinely NEW finding at the location citing the fixed
+  // note (#9940 review, round 16). Own-account replies still reach the
+  // classifier separately, as re-post EXEMPTION carriers only (round 24 —
+  // see `ownSignalReplies`). Attribution-off
   // posts from OTHER accounts still escape detection — no footer, no
   // authorship signal — and the setting's description says so.
   const qwenComments = allComments.filter(
     (c) =>
-      /via Qwen Code \/review/.test(c.body ?? '') ||
+      (!c.in_reply_to_id && /via Qwen Code \/review/.test(c.body ?? '')) ||
       (!c.in_reply_to_id &&
         me !== '' &&
         (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
@@ -956,6 +1077,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     newFindings ?? [],
     commitSha,
     me,
+    ownSignalReplies(allComments, me),
   );
 
   writePresubmitReport({
@@ -1067,9 +1189,11 @@ function writePresubmitReport(input: {
       // the drop rule exempts those findings (#9208). Matched by the carried
       // ledger id the comment's claim line leads with, or — when the target
       // is unambiguous — by the id-less fallback for a truly id-less
-      // own-account original (#9212 review). A comment appears here IN
-      // ADDITION TO `overlap`; the double count is deliberate (one comment,
-      // two roles).
+      // own-account original (#9212 review). A top-level comment appears
+      // here IN ADDITION TO `overlap`; the double count is deliberate (one
+      // comment, two roles). An own-account REPLY carrying a wanted id
+      // appears here ONLY — the thread lifecycle's carry re-post is an
+      // exemption carrier, never an overlap (#9940 review, round 24).
       repost: buckets.repost,
       stale: buckets.stale,
       resolved: buckets.resolved,
@@ -1210,14 +1334,17 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
   // comments; the mapping and recognition signals are the GitHub ones (the
   // footer is qwen's own provenance string and matches regardless of
   // account; the short marker/severity shapes match only the reviewing
-  // account's own top-level comments).
+  // account's own top-level comments; replies stay excluded on every
+  // disjunct, the footer one included — the fixed-ruling reply carries the
+  // footer too, #9940 review, round 16 — and reach the classifier only as
+  // re-post exemption carriers, round 24).
   const allRaw = listMrComments(mrId, ownerRepo);
   const allComments = allRaw.map((c) =>
     aoneCommentToPresubmitComment(c, commitSha),
   );
   const qwenComments = allComments.filter(
     (c) =>
-      /via Qwen Code \/review/.test(c.body ?? '') ||
+      (!c.in_reply_to_id && /via Qwen Code \/review/.test(c.body ?? '')) ||
       (!c.in_reply_to_id &&
         me !== '' &&
         (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
@@ -1249,6 +1376,7 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
     newFindings ?? [],
     commitSha,
     me,
+    ownSignalReplies(allComments, me),
   );
 
   writePresubmitReport({

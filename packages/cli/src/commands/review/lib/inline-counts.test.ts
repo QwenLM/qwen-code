@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   carriedClaimLine,
   countInlineFindings,
+  markerStrippedBody,
   severityOf,
   stripSeverityPrefix,
   unmarkedComments,
@@ -61,6 +62,79 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
     expect(stripSeverityPrefix('<!-- x -->**[Critical]** text')).toBe('text');
   });
 
+  it('consumes the residue-and-colon separator the readback consumes — the fixpoints agree (#9940 review)', () => {
+    // The readback projection (markerStrippedBody) strips residue before
+    // its \s-wide colon; the post-time strip's [ \t] colon stopped at the
+    // newline, so a newline-then-colon stacked draft read back as
+    // carrying the id — the ledger carried it, the stamp stayed off —
+    // while its attribution-off post led with `\n:\n…`: a root no later
+    // carry or fixed ruling could ever reach (#9940 review).
+    const stacked = '**[Critical]**\n:\n**[Suggestion]** R1-2: claim';
+    expect(stripSeverityPrefix(stacked)).toBe('R1-2: claim');
+    expect(stripSeverityPrefix(stacked)).toBe(markerStrippedBody(stacked));
+    expect(carriedClaimLine(stacked)).toBe(stripSeverityPrefix(stacked));
+    // Residue around the separator colon is the same machine grammar.
+    const residue = '**[Critical]** <!-- x -->: R1-2: claim';
+    expect(stripSeverityPrefix(residue)).toBe('R1-2: claim');
+    expect(stripSeverityPrefix(residue)).toBe(markerStrippedBody(residue));
+    expect(carriedClaimLine(residue)).toBe(stripSeverityPrefix(residue));
+  });
+
+  it('consumes a MULTI-line residue after the separator colon — the fixpoints still agree (#9940 review)', () => {
+    // The separator's residue arm spans newlines and whole comments, but
+    // the readback stripped residue only BEFORE its separator step and
+    // then split on the newline: a multi-line comment between the colon
+    // and the carried id truncated the claim line to `<!--` while the
+    // attribution-off post exposed the id — the draft re-minted a fresh
+    // id while the post led with the carried one, unreachable by the
+    // ^-anchored ledger readback: one finding, two names, and the
+    // original thread orphaned (#9940 review, round 10).
+    const residueAfter = '**[Critical]** : <!--\nx\n--> R1-2: claim';
+    expect(stripSeverityPrefix(residueAfter)).toBe('R1-2: claim');
+    expect(markerStrippedBody(residueAfter)).toBe('R1-2: claim');
+    expect(carriedClaimLine(residueAfter)).toBe(
+      stripSeverityPrefix(residueAfter),
+    );
+  });
+
+  it('a residue-led draft with NO colon strips in bounded time — the separator regex stays linear (#9940 review, round 14)', () => {
+    // The separator's residue-before-colon arm used a lazy comment token
+    // that could stretch across the comments after it, giving a run of N
+    // comments 2^N decompositions; with no colon to find, the engine
+    // explored them all — ~30 leading comments hung a submit for minutes
+    // (this runs on EVERY GitHub submit via stampCarriedId and every
+    // attribution-off post). The unambiguous comment token keeps the
+    // whole match linear; residue before plain content is still model
+    // text the post keeps.
+    const body = '**[Critical]** ' + '<!-- x -->'.repeat(64) + ' claim';
+    const t0 = performance.now();
+    const stripped = stripSeverityPrefix(body);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    expect(stripped).toBe('<!-- x -->'.repeat(64) + ' claim');
+  });
+
+  it('a Cf-led draft with NO colon strips in bounded time too — the residue class is unambiguous (#9940 review, round 18)', () => {
+    // The sibling ambiguity of the cell above, in the character half of
+    // the token: `\s` and `\p{Cf}` both match U+FEFF (the only codepoint
+    // in both), so as two ALTERNATIVES a FEFF run had the same 2^N
+    // decompositions and the colon-less draft wedged the submit — the
+    // R14-1 cell exercises comment runs only and stayed green. One
+    // merged class matches each character exactly one way; the accepted
+    // codepoint set is unchanged, so a FEFF run is still residue.
+    const body = '**[Critical]** ' + '\uFEFF'.repeat(64) + ' claim';
+    const t0 = performance.now();
+    const stripped = stripSeverityPrefix(body);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    expect(stripped).toBe('\uFEFF'.repeat(64) + ' claim');
+    // Still residue everywhere else the shared token is read: leading
+    // FEFF must not defeat the carried-id anchor, and the two
+    // marker-strip fixpoints must keep agreeing on it.
+    const carried = '**[Critical]**\uFEFF:\uFEFFR1-2: claim';
+    expect(stripSeverityPrefix(carried)).toBe('R1-2: claim');
+    expect(stripSeverityPrefix(carried)).toBe(markerStrippedBody(carried));
+    expect(severityOf({ body: '\uFEFF**[Critical]** x' })).toBe('critical');
+  });
+
   it('a marker-only body strips to the empty string — the submit gate refuses it first', () => {
     expect(stripSeverityPrefix('**[Critical]**')).toBe('');
     expect(stripSeverityPrefix('**[Suggestion]**\n')).toBe('');
@@ -74,6 +148,20 @@ describe('stripSeverityPrefix — the attribution-off posted shape', () => {
 });
 
 describe('carriedClaimLine — the shared readback strip', () => {
+  it('reads no claim off an indented code block, and a canonical id off a variant spelling (#9940 review, audit)', () => {
+    expect(carriedClaimLine('**[Critical]**\n\n    R1-2: code')).toBe('');
+    // One break and a tab is a lazy continuation, not code (audit 5).
+    expect(carriedClaimLine('**[Critical]**\n\tR1-2: code')).toBe('R1-2: code');
+    expect(carriedClaimLine('**[Critical]**\n\n\tR1-2: code')).toBe('');
+    expect(carriedClaimLine('**[Critical]**\n  R1-2: not code')).toBe(
+      'R1-2: not code',
+    );
+    expect(carriedClaimLine('**[Critical]** R1-2: x\rsecond')).toBe('R1-2: x');
+    expect(readClaimHead('R02-3: the guard').id).toBe('R2-3');
+    expect(readClaimHead('[probe] R007-010: the guard').id).toBe('R7-10');
+    expect(readClaimHead('R0-1: the guard').id).toBe('R0-1');
+  });
+
   it('reads the claim through every shape the classifier admits', () => {
     // Leading residue: severityOf classifies through it, so the slice
     // must too — slicing the raw bytes cut mid-marker and garbled the
@@ -100,6 +188,22 @@ describe('carriedClaimLine — the shared readback strip', () => {
     expect(carriedClaimLine('**[Suggestion]** plain')).toBe('plain');
     expect(carriedClaimLine('**[Critical]** first\nsecond')).toBe('first');
     expect(carriedClaimLine('no marker')).toBe(null);
+  });
+
+  it('strips the WHOLE stacked marker run — the readback and the post-time strip agree (#9940 review)', () => {
+    // A looping model drafts stacked markers, and the strips that decide
+    // what POSTS iterate them to a fixpoint; a readback that stopped at
+    // the first marker hid a carried id behind the second — the gate saw
+    // no re-post while the relocate leg carried the id standing.
+    expect(
+      carriedClaimLine('**[Critical]** **[Suggestion]** R1-2: still stands'),
+    ).toBe('R1-2: still stands');
+    expect(
+      carriedClaimLine('**[Suggestion]** **[Critical]** R3-4: the claim'),
+    ).toBe('R3-4: the claim');
+    expect(
+      carriedClaimLine('**[Critical]**<!-- x -->**[Suggestion]** R1-2: claim'),
+    ).toBe('R1-2: claim');
   });
 });
 

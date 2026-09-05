@@ -21,7 +21,7 @@ import {
   FINDING_BASELINES,
   FINDING_DIRECTIONS,
 } from '@qwen-code/qwen-code-core';
-import { LEDGER_ID_READBACK } from './ledger.js';
+import { LEDGER_ID_READBACK, canonicalLedgerId } from './ledger.js';
 
 /** The severity prefixes the skill mandates on every posted inline comment. */
 export const CRITICAL_PREFIX = '**[Critical]**';
@@ -39,7 +39,22 @@ export interface DraftedComment {
 // and the loop converges with a bare machine marker intact. Stated once:
 // the leading strip, the marker-only test, and the ledger's title read all
 // project this same shape.
-const INVISIBLE_RESIDUE = String.raw`(?:\s|<!--[\s\S]*?(?:-->|$)|\p{Cf})`;
+//
+// The token admits exactly ONE parse per residue run, so a
+// `RESIDUE*[:：]` quantification stays linear when the colon is absent —
+// otherwise the failed colon makes the engine enumerate every
+// decomposition of the run, and `stripSeverityPrefix` (every stamped
+// GitHub submit, every attribution-off post) wedges synchronously on a
+// draft its own gates accept. Both ambiguities are closed: the comment
+// alternative's inner loop cannot cross a `-->` (the lazy
+// `[\s\S]*?(?:-->|$)` form let one token stretch across the comments
+// after it — #9940 review R14-1), and whitespace and format characters
+// share ONE class, because `\s` and `\p{Cf}` overlap — U+FEFF is in
+// both, the only such codepoint, and as two alternatives it gave a FEFF
+// run the same 2^N decompositions (#9940 review R18-1). The merged class
+// accepts the identical codepoint set: a character matches it once or
+// not at all.
+const INVISIBLE_RESIDUE = String.raw`(?:[\s\p{Cf}]|<!--(?:(?!-->)[\s\S])*(?:-->|$))`;
 
 /** Leading residue — stripped before classifying and re-stripping. */
 export const LEADING_INVISIBLE_RE = new RegExp(`^${INVISIBLE_RESIDUE}+`, 'u');
@@ -51,6 +66,271 @@ export const LEADING_INVISIBLE_RE = new RegExp(`^${INVISIBLE_RESIDUE}+`, 'u');
  * text to reach `$`, reading `<!-- x -->text` as residue-only.
  */
 const ALL_INVISIBLE_RE = new RegExp(INVISIBLE_RESIDUE, 'gu');
+
+/**
+ * The separator a marker can trail: residue, an optional colon, residue
+ * again — the acceptance the readback projection (`markerStrippedBody`)
+ * applies after each marker, so the two marker-strip fixpoints agree on
+ * what a stacked-marker run hides. Residue is consumed only when the
+ * colon is present: residue before PLAIN content is model text the post
+ * keeps (the stamp lands before it), while residue around a separator
+ * colon is machine grammar. A `[ \t]`-only colon stopped at the newline
+ * the readback's `\s` colon consumed — a newline-then-colon stacked
+ * draft read back as carrying its id while the attribution-off post led
+ * with `\n:\n…`, a root no later readback could match (#9940 review).
+ */
+const MARKER_SEPARATOR_RE = new RegExp(
+  String.raw`^(?:${INVISIBLE_RESIDUE}*[:：]${INVISIBLE_RESIDUE}*|[ \t]*)`,
+  'u',
+);
+
+/**
+ * The line breaks inside a run of render-nothing residue that sit OUTSIDE
+ * its HTML comments — the breaks the rendered page has. A break inside a
+ * comment stays render-invisible (the comment spans it), so it is not a
+ * new rendered line. Stated once for every reader that asks "does this
+ * residue move the content to a later line": the stamp's skip, the
+ * indented-code test below.
+ */
+export function residueLineBreaks(
+  residue: string,
+): Array<{ index: number; length: number }> {
+  // One ordered walk over both lists — a break-by-span scan was quadratic
+  // on a body of thousands of one-line comments (#9940 review, audit).
+  const spans = [...residue.matchAll(/<!--[\s\S]*?(?:-->|$)/g)];
+  const out: Array<{ index: number; length: number }> = [];
+  let i = 0;
+  for (const m of residue.matchAll(/\r\n?|\n/g)) {
+    while (
+      i < spans.length &&
+      spans[i]!.index + spans[i]![0].length <= m.index
+    ) {
+      i++;
+    }
+    const span = spans[i];
+    if (span !== undefined && span.index <= m.index) continue;
+    out.push({ index: m.index, length: m[0].length });
+  }
+  return out;
+}
+
+/**
+ * The text with every HTML comment replaced by spaces of the same length —
+ * positions preserved, so an index found in the masked text addresses the
+ * original. For the reads that must not see grammar INSIDE a comment: a
+ * severity marker or a separator colon quoted in one is comment content,
+ * not a marker or a separator (#9940 review, audit).
+ */
+export function maskHtmlComments(text: string): string {
+  return text.replace(/<!--[\s\S]*?(?:-->|$)/g, (m) => ' '.repeat(m.length));
+}
+
+/**
+ * Whether a run of render-nothing residue holds a BLOCK BOUNDARY — a blank
+ * line (two breaks with only spaces and tabs between), or an HTML-comment
+ * line up to three columns in (a block of its own; at four it is indented
+ * code, no boundary). Without one, a line after the residue is a lazy
+ * continuation of the paragraph before it (indented code cannot interrupt
+ * a paragraph); with one, it opens the block its shape says. The ONE
+ * statement the stamp and both readback legs share (#9940 review, audit).
+ */
+export function blockBoundaryIn(residue: string): boolean {
+  const breaks = residueLineBreaks(residue);
+  for (let i = 1; i < breaks.length; i++) {
+    const prev = breaks[i - 1]!;
+    const between = residue.slice(prev.index + prev.length, breaks[i]!.index);
+    if (/^[ \t]*$/.test(between) || /^ {0,3}<!--/.test(between)) return true;
+  }
+  return false;
+}
+
+/**
+ * The separator after a severity marker, split for the strip: `strip` is
+ * how much of `afterLead` (the text after the marker and its leading
+ * residue) the strip removes, and `codeKept` says an indented code block
+ * follows — the separator colon, a block boundary, then four columns of
+ * indentation. There the strip keeps the last line's indentation: the
+ * block is the content's structure, not separator grammar, and a strip
+ * that swallowed it posted the block's first line as prose (the
+ * attribution-off exit) or read it as the claim (the marked leg) while the
+ * stamp kept the block (#9940 review, audit). Without the boundary the
+ * indented line is a lazy continuation — prose — on every projection, so
+ * the whole separator goes.
+ */
+export function separatorStrip(
+  afterMarker: string,
+  /**
+   * Whether the marker's own line is an HTML block (a comment opens it up
+   * to three columns in): that line is no paragraph, so the line after it
+   * is never a lazy continuation — an indented one is a code block.
+   */
+  markerLineIsHtmlBlock = false,
+): {
+  strip: number;
+  codeKept: boolean;
+} {
+  const separator = MARKER_SEPARATOR_RE.exec(afterMarker)?.[0] ?? '';
+  const colonAt = separatorColonAt(separator);
+  // With no colon the residue before the content is the separator only
+  // where it carries a line break: the soft break and the continuation
+  // indentation after it go (a lazy continuation folds onto the marker
+  // line), while a block boundary and four columns is an indented code
+  // block of the content's own, kept. Same-line residue with no colon is
+  // model text the post keeps — only spaces and tabs go.
+  const run =
+    colonAt === -1
+      ? (LEADING_INVISIBLE_RE.exec(afterMarker)?.[0] ?? '')
+      : separator.slice(colonAt + 1);
+  const base = colonAt === -1 ? 0 : colonAt + 1;
+  const codeAt = codeBlockStartIn(run, markerLineIsHtmlBlock);
+  if (codeAt !== -1) return { strip: base + codeAt, codeKept: true };
+  if (colonAt === -1 && residueLineBreaks(run).length === 0) {
+    return {
+      strip: /^[ \t]*/.exec(afterMarker)?.[0].length ?? 0,
+      codeKept: false,
+    };
+  }
+  return { strip: base + residueStripLength(run), codeKept: false };
+}
+
+/**
+ * Where the separator colon sits in a separator run, or -1: the search runs
+ * with comments masked (a colon quoted in one is comment content), and a
+ * colon on an indented code line behind a block boundary is code, not the
+ * separator — `\n\n    : colon-led` is a code block whose text starts with
+ * a colon (#9940 review, audit 5).
+ */
+export function separatorColonAt(separator: string): number {
+  const colonAt = maskHtmlComments(separator).search(/[:：]/);
+  if (colonAt === -1) return -1;
+  const before = separator.slice(0, colonAt);
+  return blockBoundaryIn(before) && codeIndentedAfter(before, false)
+    ? -1
+    : colonAt;
+}
+
+/**
+ * Where an indented code block begins inside a run of residue, or -1: the
+ * offset just past a line break that follows a block boundary and leads a
+ * line of four or more columns — the residue's own last line (the
+ * indentation the content sits on), or an earlier comment LINE at four
+ * columns, which is visible code, not render-nothing residue (a quoted
+ * `    <!-- qwen-review -->` line vanished from the attribution-off post)
+ * (#9940 review, audit 6).
+ */
+export function codeBlockStartIn(run: string, boundaryBefore = false): number {
+  const breaks = residueLineBreaks(run);
+  let boundary = boundaryBefore;
+  for (let i = 0; i < breaks.length; i++) {
+    const start = breaks[i]!.index + breaks[i]!.length;
+    const last = i === breaks.length - 1;
+    const segment = run.slice(start, last ? run.length : breaks[i + 1]!.index);
+    if (
+      boundary &&
+      indentColumns(segment) >= 4 &&
+      (last || segment.trim() !== '')
+    ) {
+      return start;
+    }
+    if (/^[ \t]*$/.test(segment) || /^ {0,3}<!--/.test(segment))
+      boundary = true;
+  }
+  return -1;
+}
+
+/**
+ * Whether the line a marker sits on opens as an HTML block: the residue
+ * before the marker, on the marker's own line, starts with a comment up to
+ * three columns in (#9940 review, audit 6).
+ */
+export function markerLineOpensHtmlBlock(leading: string): boolean {
+  const breaks = residueLineBreaks(leading);
+  const last = breaks[breaks.length - 1];
+  const line = leading.slice(last === undefined ? 0 : last.index + last.length);
+  return /^ {0,3}<!--/.test(line);
+}
+
+/**
+ * How much of a separator's residue run the strip removes: all of it, except
+ * that after the LAST line break only spaces and tabs go — a format
+ * character or NBSP leading the content line is the line's own text (it
+ * shields a `#` or `>` from opening a construct), and a comment there is a
+ * line-leading HTML block; consuming them re-shaped the line the content
+ * renders on (#9940 review, audit 5).
+ */
+function residueStripLength(run: string): number {
+  const breaks = residueLineBreaks(run);
+  if (breaks.length === 0) return run.length;
+  const last = breaks[breaks.length - 1]!;
+  const end = last.index + last.length;
+  return end + (/^[ \t]*/.exec(run.slice(end))?.[0].length ?? 0);
+}
+
+/**
+ * CommonMark's indentation of a line: spaces count one column, a tab
+ * advances to the next multiple of four; counting stops at the first other
+ * character. Four or more columns is an indented code block. The ONE
+ * statement every indentation test applies — a character-counting test
+ * (`/^(?: {4,}|\t)/`) disagreed with this on tab-mixed indents such as
+ * `  \t`, and the two readback legs disagreed with each other (#9940
+ * review, audit). The line model (`scanLines`) still counts characters —
+ * its `code` class differs from this only on tab-mixed indents, and only
+ * where the gate is more permissive.
+ */
+export function indentColumns(line: string): number {
+  let columns = 0;
+  for (const ch of line) {
+    if (ch === ' ') columns += 1;
+    else if (ch === '\t') columns += 4 - (columns % 4);
+    else break;
+  }
+  return columns;
+}
+
+/**
+ * Whether the content after a run of render-nothing residue begins as an
+ * INDENTED CODE BLOCK: the residue puts the content at the start of a
+ * rendered line (a break outside comments — or the residue opens the
+ * body, `atLineStart`), and the spaces and tabs after that reach four
+ * columns before anything visible (`indentColumns`). CommonMark renders
+ * that line as an indented code block; no claim lives there, so a code
+ * block that happens to start `R1-2:` is not a carried id — read as one, a
+ * fresh finding was diverted into R1-2's thread as a re-post (#9940
+ * review, audit).
+ */
+export function codeIndentedAfter(
+  residue: string,
+  atLineStart: boolean,
+): boolean {
+  const breaks = residueLineBreaks(residue);
+  let tail: string;
+  if (breaks.length > 0) {
+    const last = breaks[breaks.length - 1]!;
+    tail = residue.slice(last.index + last.length);
+  } else if (atLineStart) {
+    tail = residue;
+  } else {
+    return false;
+  }
+  return indentColumns(tail) >= 4;
+}
+
+/**
+ * The claim line of a MARKER-LESS body — the attribution-off posted shape,
+ * where the visible marker was stripped and the claim leads the first
+ * rendered line — or null when no claim line exists there: the first
+ * visible line is indented code. The ONE statement of the bare readback
+ * leg, shared by the thread matcher and presubmit's carried-id extractor
+ * so the two cannot drift (#9940 review, audit).
+ */
+export function bareClaimLine(body: string): string | null {
+  const lead = LEADING_INVISIBLE_RE.exec(body)?.[0] ?? '';
+  if (codeIndentedAfter(lead, true)) return null;
+  return body
+    .slice(lead.length)
+    .split(/\r\n?|\n/)[0]!
+    .trim();
+}
 
 /**
  * Which severity marker a drafted comment opens with — or null for neither.
@@ -69,8 +349,14 @@ const ALL_INVISIBLE_RE = new RegExp(INVISIBLE_RESIDUE, 'gu');
 export function severityOf(
   c: DraftedComment,
 ): 'critical' | 'suggestion' | null {
-  const body =
-    typeof c?.body === 'string' ? c.body.replace(LEADING_INVISIBLE_RE, '') : '';
+  if (typeof c?.body !== 'string') return null;
+  const leading = LEADING_INVISIBLE_RE.exec(c.body)?.[0] ?? '';
+  // A marker on an indented code line is code — an earlier comment quoted
+  // as a code block, not this one's marker. Decided HERE, in the one
+  // predicate every strip, readback and stamp consult, so none of them can
+  // read a marker the others do not (#9940 review, audit 4 and 5).
+  if (codeIndentedAfter(leading, true)) return null;
+  const body = c.body.slice(leading.length);
   if (body.startsWith(CRITICAL_PREFIX)) return 'critical';
   if (body.startsWith(SUGGESTION_PREFIX)) return 'suggestion';
   return null;
@@ -98,27 +384,54 @@ export function severityOf(
  */
 export function carriedClaimLine(body: string): string | null {
   const rest = markerStrippedBody(body);
-  return rest === null ? null : rest.split('\n')[0].trim();
+  if (rest === null) return null;
+  // The strip keeps the indentation of a content line that opens an
+  // indented code block (see `markerStrippedBody`): that line is code,
+  // not a claim — the empty claim line, like a marker-only body's.
+  if (indentColumns(rest) >= 4) return '';
+  return rest.split(/\r\n?|\n/)[0]!.trim();
 }
 
 /**
- * The WHOLE body past the severity marker (and any colon/whitespace right
- * after it) — the multi-line form of the readback strip above, and the same
- * ONE statement: `carriedClaimLine` is its first line, and the floor
+ * The WHOLE body past the severity marker (and the residue-and-colon
+ * separator trailing it) — the multi-line form of the readback strip
+ * above, and the same ONE statement: `carriedClaimLine` is its first
+ * line, and the floor
  * enforcement's moved-record title is its collapsed whole. A second
  * restatement of the marker slice in either consumer is the drift class
  * this file's header exists to prevent. Null when the body opens with
  * neither marker.
+ *
+ * The strip iterates the WHOLE stacked marker run: a looping model drafts
+ * stacked markers, and every strip that decides what POSTS iterates them to
+ * a fixpoint (`stripSeverityPrefix`) — a readback that stopped at the first
+ * marker hid a carried id behind the second, so the gate saw no re-post
+ * while the Aone relocate leg carried the id standing (#9940 review).
  */
 export function markerStrippedBody(body: string): string | null {
-  const sev = severityOf({ body });
-  if (!sev) return null;
-  const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
-  return body
-    .replace(LEADING_INVISIBLE_RE, '')
-    .slice(marker.length)
-    .replace(LEADING_INVISIBLE_RE, '')
-    .replace(/^\s*[:：]?\s*/, '');
+  if (severityOf({ body }) === null) return null;
+  let current = body;
+  for (;;) {
+    const sev = severityOf({ body: current });
+    if (sev === null) return current;
+    const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
+    const leading = LEADING_INVISIBLE_RE.exec(current)?.[0] ?? '';
+    const afterMarker = current.slice(leading.length + marker.length);
+    // The separator after the marker — with or without a colon — goes;
+    // an indented code block behind a block boundary keeps its indentation
+    // (`separatorStrip`): the block is the content's structure, and
+    // `carriedClaimLine` reads no claim off such a line (#9940 review,
+    // audit). Kept code is content, not a further marker to strip.
+    const { strip, codeKept } = separatorStrip(
+      afterMarker,
+      markerLineOpensHtmlBlock(leading),
+    );
+    current = afterMarker.slice(strip);
+    if (codeKept) return current;
+    // The readback reads past render-nothing residue the post keeps (a
+    // same-line comment before the claim renders as nothing either way).
+    current = current.replace(LEADING_INVISIBLE_RE, '');
+  }
 }
 
 /** How many drafted comments open with each severity marker. */
@@ -148,22 +461,48 @@ export function countInlineFindings(comments: readonly DraftedComment[]): {
  * statement. A body that is nothing but markers strips to the empty string;
  * `submit`'s consistency gate refuses exactly that shape before the post
  * transform runs, so an empty result never reaches GitHub.
+ *
+ * The separator each marker trails matches the readback's acceptance
+ * (`MARKER_SEPARATOR_RE`), so a draft the ledger reads as CARRIED posts
+ * leading with the same claim the readback read (#9940 review).
  */
 export function stripSeverityPrefix(body: string): string {
   let current = body;
+  let stripped = false;
+  let kept = false;
   for (;;) {
+    // `severityOf` reads no marker off an indented code line — a body that
+    // opens with one (an earlier comment quoted as code), or a kept block
+    // the strip before left leading (#9940 review, audit 4).
     const severity = severityOf({ body: current });
-    if (severity === null) return current;
-    const visible = current.replace(LEADING_INVISIBLE_RE, '');
+    if (severity === null) break;
+    stripped = true;
+    const leading = LEADING_INVISIBLE_RE.exec(current)?.[0] ?? '';
     const prefix =
       severity === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
-    const rest = visible
-      .trimStart()
-      .slice(prefix.length)
-      .replace(/^[ \t]*[:：]?[ \t]*/, '');
-    if (rest.replace(ALL_INVISIBLE_RE, '') === '') return '';
-    current = rest;
+    const afterMarker = current.slice(leading.length + prefix.length);
+    // The separator after the marker goes; an indented code block behind
+    // a block boundary keeps its indentation (`separatorStrip`) and is
+    // content, not a further marker to strip.
+    const { strip, codeKept } = separatorStrip(
+      afterMarker,
+      markerLineOpensHtmlBlock(leading),
+    );
+    current = afterMarker.slice(strip);
+    if (codeKept) {
+      kept = true;
+      break;
+    }
   }
+  // A body that was nothing but markers and residue strips to the empty
+  // string. Tested ONCE, at the fixpoint: testing the remainder after every
+  // marker scanned the whole body per marker, and a run of twenty thousand
+  // stacked markers took nine seconds (#9940 review, audit). A kept code
+  // block is visible by construction — a comment on a code line is text.
+  if (stripped && !kept && current.replace(ALL_INVISIBLE_RE, '') === '') {
+    return '';
+  }
+  return current;
 }
 
 /**
@@ -191,9 +530,16 @@ export function unmarkedComments(
  * The fix-induced marking, read from the head of the CLAIM — after the id
  * and its separator, never inside the id grammar. Case-insensitive, and
  * tolerant of inner spacing, because it governs only whether a comment
- * counts as first-time work — never which finding it is.
+ * counts as first-time work — never which finding it is. The token is
+ * stated ONCE, unanchored (`FIX_INDUCED_TOKEN_RE`): the readback anchors
+ * it at the head slot, and the stamp removes it from a FRESH claim it
+ * would otherwise promote into a marking (#9940 review, round 26).
  */
-export const FIX_INDUCED_READBACK = /^\(\s*fix-induced\s*\)[:.,-]?\s*/i;
+export const FIX_INDUCED_TOKEN_RE = /\(\s*fix-induced\s*\)[:.,-]?\s*/i;
+export const FIX_INDUCED_READBACK = new RegExp(
+  `^${FIX_INDUCED_TOKEN_RE.source}`,
+  'i',
+);
 
 // Built from the core lists, never spelled a fourth time: a value added
 // there that this tokeniser did not know would stop the head scan at the
@@ -260,7 +606,8 @@ export function readClaimHead(line: string): ClaimHead {
     if (id === undefined) {
       const m = LEDGER_ID_READBACK.exec(rest);
       if (m) {
-        id = m[1];
+        // The one spelling every join compares (#9940 review, audit).
+        id = canonicalLedgerId(m[1]!);
         stripped.push(m[0]);
         rest = rest.slice(m[0].length);
         continue;

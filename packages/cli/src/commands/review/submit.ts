@@ -51,6 +51,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import {
+  currentUser,
   ghWithInput,
   HOSTNAME_RE,
   isOwnerRepo,
@@ -69,8 +70,22 @@ import {
   normalizeSeverityFloor,
   tryIngestBodyCriticals,
   tryToCount,
+  toDeferredEntries,
+  bodyCriticalClaim,
   type ComposeReviewInput,
+  type DeferredEntry,
+  type FixedFinding,
+  escapeTagOpeners,
 } from './compose-review.js';
+import {
+  carriedFindingOf,
+  fetchReviewThreads,
+  fixedRulingLine,
+  planThreadActions,
+  postReviewReply,
+  resolveReviewThread,
+  stampCarriedId,
+} from './lib/thread-lifecycle.js';
 import {
   recordedSeverityFloor,
   reviewWriteAuthorization,
@@ -93,8 +108,8 @@ import {
   SUGGESTION_PREFIX,
   carriedClaimLine,
   countInlineFindings,
+  readClaimHead,
   severityOf,
-  stripSeverityPrefix,
 } from './lib/inline-counts.js';
 import { validateNewSideAnchors } from './lib/anchors.js';
 import {
@@ -200,11 +215,10 @@ function relocatedAoneCriticalEntry(c: ReviewComment): string {
   // footer text and post it as the claim (the separator strip eats the
   // newline+colon and the footer's first line becomes the "claim").
   const body = typeof c.body === 'string' ? stripReviewFooter(c.body) : null;
-  const rawClaim = body === null ? null : carriedClaimLine(body);
-  // A looping model drafts stacked markers and every other strip iterates
-  // to a fixpoint; compose quotes this entry as-is behind the template
+  // The readback strip iterates the WHOLE stacked-marker run a looping
+  // model drafts; compose quotes this entry as-is behind the template
   // marker, so a carried second marker would post inside the blocker line.
-  const claim = rawClaim === null ? null : stripSeverityPrefix(rawClaim);
+  const claim = body === null ? null : carriedClaimLine(body);
   // The gate only relocates bodies with substance past the marker, but the
   // claim line itself can still be empty (content on a later line) or a
   // fence delimiter (a marker-alone body leading into a fence) — junk the
@@ -389,6 +403,37 @@ function compose(
    * `payload.comments`, so the indices line up by construction.
    */
   floorEnforced: number[];
+  /**
+   * The deferral entries the floor enforcement constructed, index-aligned
+   * with `floorEnforced` — the retitled record where a rerouted Critical's
+   * carried id surfaces (the title collapses the whole marker-stripped
+   * body). The contradiction gate scans these against the `fixed` rulings
+   * (#9940 review, round 14).
+   */
+  floorEnforcedEntries: DeferredEntry[];
+  /** The body without the inline-Suggestions clause — see compose-review. */
+  bodyWithoutInlineClause: string | undefined;
+  /**
+   * Step 6's `fixed` rulings, validated by the compose — the thread
+   * lifecycle's resolve list. Rides the composed result rather than being
+   * re-read from the raw state, so the validation and the consumption are
+   * one list.
+   */
+  fixedFindings: FixedFinding[];
+  /**
+   * The ledger id the compose's marker records per drafted comment —
+   * index-aligned with the floor-enforcement-reduced posting set the
+   * marker describes; the stamp's input. Undefined when no ledger marker
+   * rides the body (the ids exist to be carried).
+   */
+  draftedIds: Array<string | undefined> | undefined;
+  /**
+   * The ids the compose's ledger MINTS fresh this round — never the
+   * carried ones. Undefined exactly when `draftedIds` is: no ledger
+   * marker rides the body. The contradiction gate refuses a `fixed`
+   * ruling naming one (#9940 review).
+   */
+  mintedIds: string[] | undefined;
 } {
   const comments = payload.comments ?? [];
   const state = payload.state ?? ({} as ComposeReviewInput);
@@ -439,6 +484,11 @@ function compose(
     body: r.body,
     cappedBy: r.cappedBy,
     floorEnforced: r.floorEnforced,
+    floorEnforcedEntries: r.floorEnforcedEntries ?? [],
+    bodyWithoutInlineClause: r.bodyWithoutInlineClause,
+    fixedFindings: r.fixedFindings,
+    draftedIds: r.draftedIds,
+    mintedIds: r.mintedIds,
   };
 }
 
@@ -616,9 +666,163 @@ function inconsistencies(
    * JSON, not its post-removal position.
    */
   authoredIndices?: number[],
+  /**
+   * Step 6's `fixed` rulings (validated by the compose), beside the payload
+   * AS THE MODEL AUTHORED IT. A ruling retires a finding; a re-report under
+   * the same id re-asserts it as standing; one payload doing both has ruled
+   * one finding two ways. Posted, the pair would reply "fixed" into the
+   * very thread its re-report just revived (an Aone-relocated Critical
+   * would carry the id into the ledger beside the closed thread); left
+   * unposted by a reroute or a discard, it is still the model's own state
+   * contradicting itself, and the re-compose loop is told which comment to
+   * settle. The gate refuses exactly the RE-REPORTS: the channels
+   * whose ids the ledger builder carries, read through the same
+   * readback it applies — a drafted comment's claim line
+   * (`**[Critical]** R1-2: …`, `carriedFindingOf`), a body Critical
+   * leading with its id (`bodyCriticalClaim`), and a deferred
+   * Critical's title, which the relocation leg carries into the body
+   * renumbered — plus a ruling naming an id this same pass MINTS,
+   * the round-off-by-one. It reads the comments the
+   * model authored rather than the posting set, so a comment the Aone
+   * anchor gate degraded or the floor enforcement rerouted still counts
+   * as the assertion it is, and the refusal cites the index in the model's
+   * own payload JSON — the one the re-compose loop fixes against.
+   *
+   * Nothing else is a channel. A retired id MENTIONED in prose — a
+   * cannot-tell about the fix, a duplicate-drop note, a Suggestion
+   * deferral's title or path (a Critical deferral is the relocation
+   * channel above), a downgrade reason, a budget-gap line, a `by`
+   * clause naming a sibling — is a cross-reference, not a re-report:
+   * the ledger does not carry it, the next round rules on nothing
+   * under it, and the thread it names is legitimately closed. A
+   * token scan over such text refused self-consistent payloads over
+   * prose no re-compose could redraft (a transcript-derived gap line)
+   * and over text the body never rendered (#9940 review, round 6);
+   * prose stays the model's responsibility — the ruling section of
+   * SKILL.md — and fails open here.
+   */
+  fixedFindings: FixedFinding[] = [],
+  authored?: { comments: ReviewComment[]; bodyCriticals: unknown },
+  /**
+   * The ids this pass MINTS fresh — the ledger's own account, never the
+   * carried ones. A fixed ruling retires an EARLIER finding, so one naming
+   * a minted id is the round-off-by-one this gate polices (#9940 review).
+   */
+  mintedIds: readonly string[] = [],
+  /**
+   * The floor enforcement's rerouted entries, each beside the authored
+   * index of the drafted comment it records. The RETITLED record is
+   * scanned, not the drafted body: the reroute collapses the whole
+   * marker-stripped body into the title, so a carried id the claim line
+   * hid on a later line (`**[Critical]** [fails-closed] [new-surface]\n
+   * R1-2: …`) leads the record — the shape the comment leg's claim-line
+   * read cannot see (#9940 review, round 14).
+   */
+  floorRerouted: ReadonlyArray<{ entry: DeferredEntry; at: number }> = [],
 ): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
+
+  if (fixedFindings.length > 0) {
+    const fixedIds = new Set(fixedFindings.map((f) => f.id));
+    const contradiction = (at: string, id: string): string =>
+      `${at} re-posts ${id}, which \`state.fixedFindings\` rules fixed — ` +
+      `a finding is either still standing (re-reported under its id) or ` +
+      `fixed (retired); rule it one way`;
+    // A fixed ruling retires a PREVIOUS round's entry. An id this same
+    // pass mints for a fresh finding — inline or body-Critical — cannot
+    // be one: the ruling would resolve nothing on the PR while this pass
+    // opens the id's thread as a standing defect, and the next round
+    // rules on it as a live defect nobody fixed (#9940 review).
+    for (const id of mintedIds) {
+      if (fixedIds.has(id)) {
+        problems.push(
+          `state.fixedFindings rules ${id} fixed, but this same pass ` +
+            `mints ${id} for a fresh finding — a fixed ruling retires a ` +
+            `previous round's entry; rule the new finding itself`,
+        );
+      }
+    }
+    // The drafted comments as authored: every one the model wrote, at
+    // its authored index. Without the authored set (a caller that ran
+    // no removal) the posting set IS the authored set.
+    const drafted = authored?.comments ?? comments;
+    drafted.forEach((c, i) => {
+      const carried = carriedFindingOf(c.body);
+      if (carried !== null && fixedIds.has(carried.id)) {
+        problems.push(
+          contradiction(
+            `comments[${authored ? i : (authoredIndices?.[i] ?? i)}]`,
+            carried.id,
+          ),
+        );
+      }
+    });
+    // The still-standing re-post's other channel — Step 6's rule for an
+    // UNANCHORABLE carried finding sends it to the body with its id, and
+    // buildLedger carries it from there. The same read the builder
+    // performs: the entries pass through compose's ingestion first — the
+    // collapsed one-line shape whose rejoined forged footer span strips,
+    // where the raw multi-line entry can hide the id behind a hard break
+    // (#9940 review) — and the id LEADS the entry, or the entry carries
+    // none. Ingestion is index-preserving, so the refusal cites the
+    // authored position; a field compose itself refuses carries nothing
+    // this gate could contradict.
+    const ingestedCriticals = tryIngestBodyCriticals(
+      authored ? authored.bodyCriticals : payload.state?.bodyCriticals,
+    );
+    ingestedCriticals?.forEach((entry, i) => {
+      const { id } = bodyCriticalClaim(entry);
+      if (id !== undefined && fixedIds.has(id)) {
+        problems.push(contradiction(`state.bodyCriticals[${i}]`, id));
+      }
+    });
+    // The deferral channel — EVERY entry, whatever its severity. A
+    // deferred Critical is RELOCATED into the composed body's Criticals,
+    // and the relocation's `path:line — [source]` prefix strips the
+    // carried id from position 0 — buildLedger carries the claim
+    // renumbered, and no scan above sees the id. A deferred Suggestion
+    // is not relocated, but it is still a finding channel: the body's
+    // deferral list publishes its title as a standing (deferred) claim,
+    // `deferredCount` counts it as a finding, and the closure mint reads
+    // its id-bearing title as a re-post of the entry it names — severity,
+    // path and wording are irrelevant to that readback. So the gate reads
+    // the same population the mint reads, or one pass could resolve the
+    // thread as fixed while the body re-voices the claim deferred and the
+    // mint carries its lineage (#9940 review, rounds 12 and 21). An
+    // id-less title still names nothing and posts.
+    toDeferredEntries(payload.state?.deferredSuggestions).forEach((e, i) => {
+      // Through the head-slot tokeniser's own id read — the same read the
+      // closure mint applies: a title leading with its axis tags still
+      // names the claim it re-posts (#10291), and so does one leading
+      // with a SOURCE tag (`[probe] R1-1: …`) — the anchored read over
+      // `.stripped` kept the source tag at position 0 and missed exactly
+      // that shape (#9940 review, rounds 12 and 15).
+      const id = readClaimHead(e.title).id;
+      if (id !== undefined && fixedIds.has(id)) {
+        problems.push(contradiction(`state.deferredSuggestions[${i}]`, id));
+      }
+    });
+    // The floor reroute's leg — the CLI's own deferrals, beside the
+    // model-written channel above, and every entry of it for the same
+    // reason: a rerouted comment leaves the posting set but still lands
+    // in the body's deferral list as a standing assertion the closure
+    // mint reads as a re-post; a rerouted Critical's record title is
+    // where a below-the-claim-line carried id surfaces. Same head-slot
+    // id read as the legs above, refusing with the authored comment
+    // index the comment leg cites (#9940 review, rounds 14 and 21).
+    for (const { entry, at } of floorRerouted) {
+      if (entry === undefined) continue;
+      const id = readClaimHead(entry.title).id;
+      // A rerouted comment whose id already LEADS its claim line was named
+      // by the comment leg above with the identical text — one refusal
+      // line per contradiction (#9940 review, audit).
+      const line = contradiction(`comments[${at}]`, id ?? '');
+      if (id !== undefined && fixedIds.has(id) && !problems.includes(line)) {
+        problems.push(line);
+      }
+    }
+  }
 
   if (!EVENTS.has(event)) {
     // Unreachable through `composeReview`, which returns one of the three. Kept
@@ -981,9 +1185,10 @@ function submit(
   // compose" is a poor way to say "you gave me no state".
   const structural = structuralProblems(payload);
   if (structural.length > 0) {
-    throw new Error(
+    refuse(
       `The review payload contradicts itself; refusing to post it:\n` +
         structural.map((p) => `  - ${p}`).join('\n'),
+      'payload-contradicts-itself',
     );
   }
 
@@ -995,6 +1200,16 @@ function submit(
       cliVersion,
       attribution,
     ),
+  };
+  // The payload as the model authored it — normalized like everything the
+  // gates read, captured BEFORE the Aone anchor gate and the floor
+  // enforcement rewrite the posting set. The fixed-vs-re-post gate reads
+  // this: a degraded or rerouted comment is still the assertion the model
+  // made, and a refusal must cite the index of the model's own JSON, which
+  // no reduced array carries (#9940 review).
+  const authored = {
+    comments: payload.comments ?? [],
+    bodyCriticals: payload.state?.bodyCriticals,
   };
 
   // The Aone anchor gate. GitHub validates every anchor server-side and
@@ -1254,8 +1469,23 @@ function submit(
   let body: string;
   let cappedBy: string[];
   let floorEnforced: number[];
+  let floorEnforcedEntries: DeferredEntry[];
+  let bodyWithoutInlineClause: string | undefined;
+  let fixedFindings: FixedFinding[];
+  let draftedIds: Array<string | undefined> | undefined;
+  let mintedIds: string[] | undefined;
   try {
-    ({ event, body, cappedBy, floorEnforced } = compose(
+    ({
+      event,
+      body,
+      cappedBy,
+      floorEnforced,
+      floorEnforcedEntries,
+      bodyWithoutInlineClause,
+      fixedFindings,
+      draftedIds,
+      mintedIds,
+    } = compose(
       payload,
       cliVersion,
       attribution,
@@ -1282,10 +1512,19 @@ function submit(
   // gate: a rerouted comment is no longer posting, so it is no longer the
   // gate's business (an unmarked comment is never rerouted and still
   // refuses below).
+  // The rerouted entries, each beside the AUTHORED index of the comment it
+  // records — mapped through the same base the removal below keeps, so the
+  // contradiction gate's refusal cites the position the model authored,
+  // exactly as the comment leg does (#9940 review, round 14).
+  let floorRerouted: Array<{ entry: DeferredEntry; at: number }> = [];
   if (floorEnforced.length > 0) {
     const drop = new Set(floorEnforced);
     const comments = payload.comments ?? [];
     const base = authoredIndices ?? comments.map((_, i) => i);
+    floorRerouted = floorEnforced.map((i, k) => ({
+      entry: floorEnforcedEntries[k],
+      at: base[i] ?? i,
+    }));
     payload = {
       ...payload,
       comments: comments.filter((_, i) => !drop.has(i)),
@@ -1318,12 +1557,75 @@ function submit(
     event,
     attribution,
     authoredIndices,
+    fixedFindings,
+    authored,
+    mintedIds ?? [],
+    floorRerouted,
   );
   if (problems.length > 0) {
-    throw new Error(
+    refuse(
       `The review payload contradicts itself; refusing to post it:\n` +
         problems.map((p) => `  - ${p}`).join('\n'),
+      'payload-contradicts-itself',
     );
+  }
+
+  // The thread lifecycle matches threads by the id that LEADS their root
+  // comment, and a freshly drafted finding carries none — its id is minted
+  // only into the ledger marker at compose time. Stamp each id-less draft
+  // with the id the marker records for it (the claim-line shape Step 6
+  // writes on carried re-reports), so a thread is reachable from the round
+  // it is born: a later `still stands` replies into it, a `fixed` ruling
+  // resolves it (#9940 review). GitHub only — the Aone write path has no
+  // review-thread graph to reach into. The insertion preserves every
+  // property the gate above validated — the severity marker, visibility
+  // and fence / HTML-block state all sit behind it, untouched — because
+  // a body whose code fence, HTML block, blockquote, heading, list item,
+  // thematic break or raw-HTML opener OPENS on the marker's
+  // first line takes no stamp at all (stampCarriedId leaves it
+  // un-stamped, disclosed below): text before the construct would stop
+  // the posted first line leading it, flipping the structure the gate
+  // validated (#9940 review).
+  const stampedFresh = new Set<number>();
+  let stampSkippedFence = 0;
+  if (!aoneWrite && draftedIds !== undefined) {
+    const comments = payload.comments ?? [];
+    payload = {
+      ...payload,
+      // Index space: `draftedIds` aligns with the posting set AFTER the
+      // floor-enforcement removal — compose built the ledger off that same
+      // reduced set — so the post-removal position IS the lookup, never
+      // the authored index.
+      comments: comments.map((c, i) => {
+        const id = draftedIds[i];
+        if (id === undefined || typeof c.body !== 'string') return c;
+        const body = stampCarriedId(c.body, id);
+        if (body === c.body) {
+          // Unchanged although an id was owed: the body carries one
+          // already (the model's carry stays verbatim) or it opens a
+          // line-leading construct on its first line (or a block that
+          // cannot interrupt a paragraph right under the marker) and the stamp
+          // was skipped — only the latter is a disclosure (#9940
+          // review).
+          if (carriedFindingOf(c.body) === null) stampSkippedFence++;
+          return c;
+        }
+        stampedFresh.add(i);
+        return { ...c, body };
+      }),
+    };
+    if (stampSkippedFence > 0) {
+      writeStderrLine(
+        `Thread lifecycle: ${stampSkippedFence} draft(s) open a code ` +
+          `fence, HTML block, blockquote, heading, list item or thematic ` +
+          `break on their first line (or an indented code block / ` +
+          `non-\`1.\` ordered list right under the marker) and were left ` +
+          `un-stamped — a stamp there would break the structure the ` +
+          `gate validated. Their ` +
+          `thread roots carry no ledger id, so no later carry or ` +
+          `fixed ruling can reach them; resolve such threads by hand.`,
+      );
+    }
   }
 
   // What the platform receives: the caller's findings, under the verdict
@@ -1358,11 +1660,183 @@ function submit(
         };
       });
 
+  // The thread lifecycle (GitHub only — #9906). Two postings this pass
+  // makes BEYOND the review itself, both into threads this account opened
+  // in earlier rounds:
+  //
+  //  - A carried finding — Step 6's `still stands`, re-drafted under its
+  //    original id — REPLIES into that id's original thread instead of
+  //    riding the Create Review `comments[]`: the API opens a NEW thread
+  //    per comment, so re-posting multiplied one finding into one
+  //    unresolved thread per round it survived (#9659's R1-15 had four).
+  //    Only an UNRESOLVED own-account thread qualifies — a resolved or
+  //    foreign original leaves the re-post inline, where a still-standing
+  //    finding belongs — and a `(fix-induced)` re-report is never
+  //    diverted: it is a NEW defect wearing the id (the ledger's fresh
+  //    count reads it as first-time work), and new work gets its own
+  //    thread.
+  //  - A Step 6 `fixed` ruling replies its one line (`R1-2 fixed by
+  //    <what>`) into every live own thread under the id and resolves it,
+  //    so the unresolved list reads as "still standing" again.
+  //
+  // The read runs BEFORE the write: a failed thread query aborts the
+  // submit (retryable, nothing posted) rather than planning half a pass.
+  // First rounds short-circuit — no carried id, no fixed ruling, no
+  // extra API call at all.
+  let reviewComments = finalComments;
+  let carriedReplies: Array<{ commentId: number; body: string }> = [];
+  let fixedResolves: Array<{
+    threadId: string;
+    commentId: number;
+    body: string;
+  }> = [];
+  if (aoneWrite) {
+    if (fixedFindings.length > 0) {
+      writeStderrLine(
+        `Note: ${fixedFindings.length} fixed ruling(s) name threads to ` +
+          `resolve, but the thread lifecycle is GitHub-only — Aone's MR ` +
+          `discussions stay as posted.`,
+      );
+    }
+  } else {
+    const carried = finalComments
+      .map((c, index) => ({ index, finding: carriedFindingOf(c.body) }))
+      // A stamped-fresh id was minted THIS round; no existing thread can
+      // carry it, so it is no carry candidate — left in, it would pay the
+      // thread read on every round with new findings for a match that
+      // cannot exist, and cost a first round its short-circuit.
+      .filter((x) => !stampedFresh.has(x.index))
+      .filter(
+        (
+          x,
+        ): x is {
+          index: number;
+          finding: { id: string; fixInduced: boolean };
+        } => x.finding !== null && !x.finding.fixInduced,
+      );
+    if (carried.length > 0 || fixedFindings.length > 0) {
+      const threads = fetchReviewThreads(args.repo, args.pr);
+      const plan = planThreadActions(
+        threads,
+        currentUser(),
+        carried.map(({ index, finding }) => ({ index, id: finding.id })),
+        fixedFindings,
+      );
+      if (plan.replies.length > 0) {
+        const diverted = new Set(plan.replies.map((r) => r.index));
+        reviewComments = finalComments.filter((_, i) => !diverted.has(i));
+        // The opener's "Suggestions are inline." was keyed to the count
+        // compose took from the PRE-diversion posting set; when the
+        // diversion drains every inline Suggestion into thread replies,
+        // the clause would post beside an empty comments array — the
+        // count-beside-the-thing collision this file's header describes,
+        // reproduced by a transformation that runs after the compose.
+        // Reconcile the CLAUSE only: the event stays keyed to the
+        // confirmed count, carried findings included — a diverted finding
+        // still stands, it just answers in its own thread (#9940 review,
+        // round 23). Counted on the MARKED posting set, never on the
+        // posted bodies: under attribution off the rewrite above already
+        // stripped the visible markers `severityOf` classifies by, so the
+        // posted arrays counted zero Suggestions whatever they carried and
+        // the guard never fired there — the clause posted over an empty
+        // array on exactly the attribution-off runs (#9940 review, round
+        // 24). `finalComments` is a 1:1 map over the marked set, so the
+        // diverted indices address both.
+        const marked = payload.comments ?? [];
+        if (
+          countInlineFindings(marked).suggestionsInline > 0 &&
+          countInlineFindings(marked.filter((_, i) => !diverted.has(i)))
+            .suggestionsInline === 0
+        ) {
+          if (bodyWithoutInlineClause !== undefined) {
+            body = bodyWithoutInlineClause;
+          }
+        }
+        carriedReplies = plan.replies.map((r) => ({
+          commentId: r.commentId,
+          // The normalized drafted body, footer and all — the same text
+          // the re-post would have carried inline.
+          body: finalComments[r.index].body ?? '',
+        }));
+        // A PLAN, like the resolve line below: nothing is written yet.
+        writeStderrLine(
+          `Thread lifecycle: ${plan.replies.length} carried finding(s) ` +
+            `to reply into their original thread instead of opening a ` +
+            `new one (one finding, one thread).`,
+        );
+      }
+      // Threads opened before id-stamping shipped carry no ledger id the
+      // matcher can reach — the ONE case a fixed ruling retires an entry
+      // while its original thread stays open forever, and nothing else
+      // names it. Stated once: every branch a ruling can take must carry
+      // it, or the disclosure misfires exactly in the state it exists for
+      // (#9940 review).
+      const preStampCaveat =
+        'Threads this account opened before id-stamping shipped carry ' +
+        'no ledger id and cannot be matched — if such an original is ' +
+        'still open, resolve it by hand.';
+      if (plan.resolves.length > 0) {
+        // The `by` clause is model text posted into a thread, so it takes
+        // the SAME two strips an inline comment's body takes: the trailing
+        // footer at normalize time, and under attribution off the whole
+        // unattributed-post projection (mid-line footer spans included)
+        // the posted bodies get — a `by` cannot carry into the thread
+        // what the comments may not. A clause that was nothing but a
+        // forged footer reads as no clause. The real footer is then
+        // appended under attribution exactly as `normalizeInlineComments`
+        // appends it to every comment.
+        const modelId = payload.state?.modelId;
+        fixedResolves = plan.resolves.map((r) => {
+          // The strips first, the escape last: an `&lt;` made before the
+          // attribution-off strip lengthened a forged footer span past the
+          // cap that strip enforces (#9940 review, audit 6).
+          const by =
+            r.by === undefined
+              ? ''
+              : escapeTagOpeners(
+                  stripReviewFooter(
+                    attribution ? r.by : stripForUnattributedPost(r.by),
+                  ).trim(),
+                );
+          const line = fixedRulingLine(r.id, by);
+          return {
+            threadId: r.threadId,
+            commentId: r.commentId,
+            body:
+              normalizeInlineComments(
+                [{ body: line }],
+                modelId,
+                cliVersion,
+                attribution,
+              )[0]?.body ?? line,
+          };
+        });
+        // Phrased as a PLAN: the line is written before the dry-run
+        // check and before any write, and a resolve mutation can still
+        // fail — a past-tense "resolved" here would claim what the
+        // bookkeeping below may then deny in the same stream (#9940
+        // review).
+        writeStderrLine(
+          `Thread lifecycle: ${plan.resolves.length} thread(s) to resolve ` +
+            `for ${fixedFindings.length} fixed ruling(s). ` +
+            preStampCaveat,
+        );
+      }
+      for (const id of plan.unmatchedFixed) {
+        writeStderrLine(
+          `Thread lifecycle: fixed ruling ${id} matched no live thread ` +
+            `this account opened — already resolved, or never posted. ` +
+            `Nothing to resolve. ${preStampCaveat}`,
+        );
+      }
+    }
+  }
+
   const post = {
     commit_id: payload.commit_id,
     event,
     body,
-    comments: finalComments,
+    comments: reviewComments,
   };
 
   const target = aoneWrite
@@ -1390,6 +1864,12 @@ function submit(
           event,
           cappedBy,
           floorEnforced: floorEnforced.length,
+          ...(carriedReplies.length > 0
+            ? { carriedRepliesPlanned: carriedReplies.length }
+            : {}),
+          ...(fixedResolves.length > 0
+            ? { threadsResolvedPlanned: fixedResolves.length }
+            : {}),
           // Aone-only gate counts — the GitHub server performs this
           // validation itself; the fields exist only where the gate ran.
           ...(aoneWrite && !anchorsUnchecked
@@ -1714,6 +2194,56 @@ function submit(
       '.' +
       (reviewUrl ? ` ${reviewUrl}` : ''),
   );
+  // The thread bookkeeping, after the atomic verdict landed. Replies and
+  // resolves are N independent calls — unlike the review, there is no
+  // all-or-nothing — so each failure is named and counted, never silently
+  // dropped and never fatal to the review that already posted. A failed
+  // carried reply leaves the finding on the ledger marker (the next round
+  // re-rules it); a failed fixed REPLY skips that thread's resolve too —
+  // resolving without the `fixed by` note would close the thread with no
+  // record of why.
+  let carriedRepliesPosted = 0;
+  let threadsResolved = 0;
+  let threadActionFailures = 0;
+  for (const reply of carriedReplies) {
+    try {
+      postReviewReply(args.repo, args.pr, reply.commentId, reply.body);
+      carriedRepliesPosted++;
+    } catch (err) {
+      threadActionFailures++;
+      writeStderrLine(
+        `WARNING: carried reply into thread comment ${reply.commentId} ` +
+          `failed: ${(err as Error).message} — the finding stays on the ` +
+          `ledger and is re-ruled next round.`,
+      );
+    }
+  }
+  for (const resolve of fixedResolves) {
+    try {
+      postReviewReply(args.repo, args.pr, resolve.commentId, resolve.body);
+    } catch (err) {
+      threadActionFailures++;
+      writeStderrLine(
+        `WARNING: fixed-ruling reply into thread comment ` +
+          `${resolve.commentId} failed: ${(err as Error).message} — the ` +
+          `thread is left UNRESOLVED; resolve it by hand — a later round ` +
+          `re-rules it only if the blocker re-check re-promotes the ` +
+          `thread's root.`,
+      );
+      continue;
+    }
+    try {
+      resolveReviewThread(resolve.threadId);
+      threadsResolved++;
+    } catch (err) {
+      threadActionFailures++;
+      writeStderrLine(
+        `WARNING: resolveReviewThread(${resolve.threadId}) failed: ` +
+          `${(err as Error).message} — the reply landed; resolve the ` +
+          `thread by hand.`,
+      );
+    }
+  }
   writeStdoutLine(
     JSON.stringify(
       {
@@ -1722,6 +2252,11 @@ function submit(
         cappedBy,
         inlineComments: post.comments.length,
         floorEnforced: floorEnforced.length,
+        ...(carriedRepliesPosted > 0
+          ? { carriedReplies: carriedRepliesPosted }
+          : {}),
+        ...(threadsResolved > 0 ? { threadsResolved } : {}),
+        ...(threadActionFailures > 0 ? { threadActionFailures } : {}),
         ...(reviewUrl ? { url: reviewUrl } : {}),
       },
       null,

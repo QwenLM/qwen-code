@@ -215,6 +215,22 @@ function postedJson(): PostedJson {
 }
 
 /**
+ * The refusal shape every gate in the command speaks (#9940 review): a
+ * stderr line naming the offence, the `{"posted": false}` JSON on
+ * stdout, exit 3.
+ */
+function expectRefusal(run: () => void, message: RegExp): void {
+  run();
+  expect(process.exitCode).toBe(3);
+  const stderr = stderrMock.mock.calls.map((c) => String(c[0])).join('\n');
+  expect(stderr).toMatch(message);
+  expect(postedJson()).toEqual({
+    posted: false,
+    reason: 'payload-contradicts-itself',
+  });
+}
+
+/**
  * The captured diff the Aone anchor gate validates against — submit reads
  * it at the fetch-pr convention path, cwd-relative, so the suite chdirs
  * into its temp dir. One hunk of `src/foo.ts` covering new-side lines
@@ -280,6 +296,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
   });
 
@@ -368,6 +385,95 @@ describe('submit posts an authorised Aone target through a1', () => {
     );
   });
 
+  it('a fixed ruling on an Aone target is NAMED as GitHub-only — no thread read, no resolve', () => {
+    // The thread lifecycle is GitHub-only: an Aone submit carrying Step 6
+    // `fixed` rulings must not fire a GitHub GraphQL read at the wrong
+    // platform, and must say the rulings were not applied.
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+      fixedFindings: [{ id: 'R1-2', by: 'the guard rewrite' }],
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    const stderr = stderrMock.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderr).toContain('thread lifecycle is GitHub-only');
+    expect(stderr).toContain('1 fixed ruling(s)');
+  });
+
+  it('a carried finding on an Aone target posts inline — no thread read on the wrong platform (#9940 review)', () => {
+    // The thread-read trigger has TWO legs — carried comments as well as
+    // fixed rulings. Both live inside the GitHub arm: an Aone submit
+    // carrying a carried re-post must post it inline, never fire a
+    // GitHub GraphQL read on a host where GitHub is not the platform.
+    const review = writeReview({
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      state: { suggestionsDiscarded: 1, modelId: 'test-model' },
+    });
+    expect(() =>
+      runSubmit(base({ review }), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    expect(req.comments).toEqual([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: expect.stringContaining('R1-2: still stands at HEAD'),
+      },
+    ]);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('an Aone submit never stamps ledger ids into the posted bodies', () => {
+    // The stamp exists for the GitHub review-thread graph; the Aone
+    // write path has none, so the `!aoneWrite` half of the stamp guard
+    // must hold even when compose minted ids (#9940 review).
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+      fixedFindings: [],
+      draftedIds: ['R1-1'],
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    // The marker and claim stay adjacent — a stamp would splice its id
+    // between them — and no id prefix rides the body anywhere.
+    expect(req.comments).toEqual([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: expect.stringContaining(
+          '**[Critical]** Off-by-one in the loop bound.',
+        ),
+      },
+    ]);
+    expect((req.comments as Array<{ body: string }>)[0].body).not.toMatch(
+      /R\d+-\d+:/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
   it('the contextUnavailable claim crosses the Aone seam unchanged, in BOTH directions', () => {
     // true stays true — a run that never read the MR keeps its cap.
     expect(() =>
@@ -393,6 +499,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
     authMock.mockReturnValue({
       ok: true,
@@ -1423,6 +1530,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'No issues found. LGTM!',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
     submitAoneMock.mockReturnValue({
       ...AONE_RESULT,
@@ -1453,6 +1561,7 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'No issues found. LGTM!',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
     submitAoneMock.mockReturnValue({
       ...AONE_RESULT,
@@ -1616,6 +1725,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
   });
 
@@ -1812,11 +1922,16 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(input['bodyCriticals']).toEqual(['finding — src/foo.ts:9999']);
   });
 
-  it('relocates an empty-claim draft through the placeholder (attribution off)', () => {
-    // A body whose substance sits AFTER a separator the strip eats
-    // (marker, then newline+colon) reduces the claim line to '' — the
-    // placeholder keeps the entry from posting as a dangling `path:line — `.
-    const emptyClaim = {
+  it('a separator-only draft is marker-only — the renders-as-nothing refusal owns it, attribution off (#9940 review)', () => {
+    // A marker whose ONLY follower is separator grammar (newline+colon)
+    // carries no finding text: the post-time strip consumes the same
+    // separator the readback always consumed, so the renders-as-nothing
+    // projection sees nothing and the consistency gate refuses — the
+    // marker-only policy the bare-marker arm below pins. The old `[ \t]`
+    // colon stopped at the newline and let the separator survive as
+    // false substance, relocating a claimless placeholder blocker
+    // instead of the refusal the operator is owed (#9940 review).
+    const separatorOnly = {
       commit_id: 'abc123',
       comments: [
         {
@@ -1827,14 +1942,15 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(emptyClaim) }), 'unknown', {
-        defaultComment: false,
-        attribution: false,
-      }),
-    ).not.toThrow();
-    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input['bodyCriticals']).toEqual(['finding — src/foo.ts:9999']);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(separatorOnly) }), 'unknown', {
+          defaultComment: false,
+          attribution: false,
+        }),
+      /renders as nothing/,
+    );
+    expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
   it('merges gate discards into an existing suggestionsDiscarded count', () => {
@@ -1873,11 +1989,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(unmarked) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/neither \*\*\[Critical\]\*\* nor \*\*\[Suggestion\]\*\*/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(unmarked) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /neither \*\*\[Critical\]\*\* nor \*\*\[Suggestion\]\*\*/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -1896,11 +2014,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(malformed) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/has no usable `line`/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(malformed) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /has no usable `line`/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -1926,11 +2046,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(renumbered) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/comments\[1\] has no usable `line`/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(renumbered) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /comments\[1\] has no usable `line`/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -1952,11 +2074,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(reversed) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/cannot end before it begins/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(reversed) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /cannot end before it begins/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2134,11 +2258,116 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(markerOnly) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/renders as nothing/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(markerOnly) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /renders as nothing/,
+    );
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('a contradiction refusal cites the AUTHORED comment index past the anchor degrade (#9940 review)', () => {
+    // The degrade discards comments[1] and renumbers the posting set; the
+    // fixed-vs-re-post gate reads the payload as authored, so the refusal
+    // names comments[2] — the entry the re-compose loop can find in the
+    // model's own JSON — never the reduced position 1.
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+    });
+    const review = writeReview({
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Critical]** Anchors fine — stays inline.',
+        },
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]** Beyond EOF — discarded.',
+        },
+        {
+          path: 'src/foo.ts',
+          line: 13,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    });
+    runSubmit(base({ review }), 'unknown', { defaultComment: false });
+    expect(process.exitCode).toBe(3);
+    const message = stderrMock.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(message).toMatch(/comments\[2\] re-posts R1-2/);
+    expect(message).not.toMatch(/comments\[1\]/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('a relocated Critical re-posting a fixed id is refused at its comment index, never as a fabricated body entry (#9940 review)', () => {
+    // The degrade relocates an unanchorable Critical into `bodyCriticals`
+    // — an entry the authored state never had. The gate reads the
+    // authored payload, so the refusal cites comments[0], the culprit the
+    // model wrote, not a `state.bodyCriticals[0]` that exists only in the
+    // degraded copy.
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+    });
+    const review = writeReview({
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 4,
+          body: '**[Critical]** R1-2: still stands — old-side number.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    });
+    runSubmit(base({ review }), 'unknown', { defaultComment: false });
+    expect(process.exitCode).toBe(3);
+    const message = stderrMock.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(message).toMatch(/comments\[0\] re-posts R1-2/);
+    expect(message).not.toContain('bodyCriticals');
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('a stacked-marker carried re-post is refused — the gate reads the whole marker run the relocate leg strips (#9940 review)', () => {
+    // The relocate leg strips markers to a fixpoint, so the relocated
+    // entry leads with R1-2 and the ledger carries it standing; the gate
+    // stopped at ONE marker and saw no id, posting a body that re-asserts
+    // R1-2 as a blocker while the same pass resolves R1-2's thread fixed.
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+    });
+    const review = writeReview({
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 4,
+          body: '**[Critical]** **[Suggestion]** R1-2: still stands',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    });
+    runSubmit(base({ review }), 'unknown', { defaultComment: false });
+    expect(process.exitCode).toBe(3);
+    const message = stderrMock.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(message).toMatch(/comments\[0\] re-posts R1-2/);
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2290,11 +2519,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       comments: [{ path: 42, line: 12, body: '**[Critical]** Garbage path.' }],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(garbagePath) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/has no `path`/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(garbagePath) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /has no `path`/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2311,12 +2542,14 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(fence) }), 'unknown', {
-        defaultComment: false,
-        attribution: false,
-      }),
-    ).toThrow(/leaves a code fence open/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(fence) }), 'unknown', {
+          defaultComment: false,
+          attribution: false,
+        }),
+      /leaves a code fence open/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2337,11 +2570,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(noSide) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/sets `start_line` without/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(noSide) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /sets `start_line` without/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2430,15 +2665,14 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     ]);
   });
 
-  it('relocates through the PLACEHOLDER when the claim line is empty — never the footer', () => {
-    // The body has substance past the marker (the ':' survives the
-    // renders-as-nothing projection), but the marker-stripped FIRST line
-    // reduces to empty once the separator strip eats the newline+colon.
-    // The extraction must strip the appended footer FIRST and then fall
-    // back to the placeholder — without the footer strip, the extraction
-    // falls THROUGH into the footer's first line and posts it as the
-    // claim.
-    const emptyClaim = {
+  it('a separator-only draft is marker-only under attribution ON too — refused, never a footer-placeholder relocation (#9940 review)', () => {
+    // The attribution-on arm of the separator-only refusal: the draft's
+    // only follower past the marker is the newline+colon separator, and
+    // a body the renders-as-nothing projection reduces to nothing is
+    // the consistency gate's refusal — landing BEFORE the anchor gate's
+    // relocation could fall back to the placeholder and post the
+    // appended footer's first line as the claim (#9940 review).
+    const separatorOnly = {
       commit_id: 'abc123',
       comments: [
         {
@@ -2449,13 +2683,14 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(emptyClaim) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).not.toThrow();
-    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input['bodyCriticals']).toEqual(['finding — src/foo.ts:9999']);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(separatorOnly) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /renders as nothing/,
+    );
+    expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
   it('relocates a range whose START sits outside every hunk and END inside', () => {
@@ -2527,11 +2762,13 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       ],
       state: { modelId: 'test-model' },
     };
-    expect(() =>
-      runSubmit(base({ review: writeReview(emptyPath) }), 'unknown', {
-        defaultComment: false,
-      }),
-    ).toThrow(/has no `path`/);
+    expectRefusal(
+      () =>
+        runSubmit(base({ review: writeReview(emptyPath) }), 'unknown', {
+          defaultComment: false,
+        }),
+      /has no `path`/,
+    );
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2611,14 +2848,17 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     ]);
   });
 
-  it('degrades a built entry compose would refuse to the inert constant', () => {
-    // The enumerated guards cannot cover the unbounded entrance space: a
-    // lone CR inside the CLAIM passes them (the claim does not LEAD with
-    // a fence delimiter), but compose's ingestion normalizes the CR to a
-    // line break and the second line LEADS with a fence delimiter — the
-    // fence refusal fires mid-degrade. The built entry is validated
-    // against compose's OWN acceptance, and a refusal degrades the entry
-    // to the inert constant instead of refusing the whole post.
+  it('a lone CR ends the claim line — the fence on the next rendered line never enters the one-line channel', () => {
+    // A bare `\r` is a line break to every reader now (the line model,
+    // both readback legs, compose's ingestion), so the claim is the first
+    // RENDERED line and the fence that follows the CR is body, not claim:
+    // the built entry is the clean claim, and nothing is degraded. (The
+    // `\n`-only claim split used to carry `\r\`\`\`ts` into the entry, where
+    // compose's fence refusal fired and the gate fell back to the inert
+    // constant — the fallback stays as the authority of last resort for a
+    // shape this builder never anticipated, but no enumerated shape
+    // reaches it now: the claim is one rendered line, and a fence-leading
+    // claim or path is caught above; #9940 review, audit.)
     const crFenceClaim = {
       commit_id: 'abc123',
       comments: [
@@ -2636,7 +2876,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       }),
     ).not.toThrow();
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input['bodyCriticals']).toEqual(['finding — (no path):9999']);
+    expect(input['bodyCriticals']).toEqual(['leaked text — src/foo.ts:9999']);
   });
 
   it('keeps a carried ledger id at position 0 of the relocated entry', () => {
@@ -2682,6 +2922,16 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [0],
+      floorEnforcedEntries: [
+        {
+          file: 'src/foo.ts',
+          line: 12,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'B — floor enforcement drops me.',
+        },
+      ],
+      fixedFindings: [],
     });
     const renumbered = {
       commit_id: 'abc123',
@@ -2846,6 +3096,7 @@ describe('the Aone submit receipt (producer half of the audit contract)', () => 
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      fixedFindings: [],
     });
   });
 

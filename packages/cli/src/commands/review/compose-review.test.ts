@@ -62,6 +62,11 @@ import {
   type ComposeReviewResult,
   type DeferredEntry,
   type PrBodyFetcher,
+  FIXED_BY_MAX,
+  INLINE_SUGGESTIONS_CLAUSE,
+  DOWNGRADE_REASON_MAX_CHARS,
+  bodyCriticalClaim,
+  escapeTagOpeners,
 } from './compose-review.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -3165,7 +3170,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time)',
       );
 
       // With a recorded predecessor the previous round rides along.
@@ -3180,7 +3185,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time) (previous round: 9)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time) (previous round: 9)',
       );
 
       // A CONVERGED predecessor: zero is a recorded value, not an absence.
@@ -3198,7 +3203,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time) (previous round: 0)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time) (previous round: 0)',
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -3908,7 +3913,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       });
       // The total ROSE — this is exactly the input the old window fired on.
       expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
-        '6 inline comment(s) this round (4 reported for the first time) (previous round: 5)',
+        '6 comment(s) this round (4 reported for the first time) (previous round: 5)',
       );
       expect(
         stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
@@ -3986,7 +3991,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
-        '3 inline comment(s) this round (0 reported for the first time) (previous round: 5)',
+        '3 comment(s) this round (0 reported for the first time) (previous round: 5)',
       );
       expect(
         stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
@@ -6077,11 +6082,13 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       cappedBy: [],
       downgraded: false,
       floorEnforced: [],
+      floorEnforcedEntries: [],
       postedInline: 0,
       postedFresh: 0,
       downgradedFrom: null,
       remediation: [],
       deferredCount: 0,
+      fixedFindings: [],
       bodyTrim: {
         sections: 0,
         deferralList: false,
@@ -6195,6 +6202,614 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       'Verdict: Approve — low signal: none of the 11 review agents reported ' +
         'a finding on a non-trivial diff (642 source diff lines)',
     );
+  });
+});
+
+// `fixedFindings` decides nothing in the verdict — a fixed entry weighs
+// nothing by its absence from every findings channel — but it rides the
+// result for `submit`'s thread lifecycle, so the boundary validates its
+// shape: one acceptance table for the state JSON and the artifact read-back.
+describe('composeReview — fixedFindings', () => {
+  it('passes valid rulings through, unchanged by the verdict', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [
+          { id: 'R1-2', by: 'the guard rewrite' },
+          { id: 'R2-7' },
+        ],
+      }),
+    );
+    expect(r.event).toBe('APPROVE');
+    expect(r.fixedFindings).toEqual([
+      { id: 'R1-2', by: 'the guard rewrite' },
+      { id: 'R2-7' },
+    ]);
+  });
+
+  it('reads absent and null as no rulings', () => {
+    expect(composeReview(base({})).fixedFindings).toEqual([]);
+    expect(
+      composeReview(base({ fixedFindings: null as never })).fixedFindings,
+    ).toEqual([]);
+  });
+
+  it('trims and caps `by` — the clause becomes a one-line PR reply', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [{ id: 'R1-2', by: `  ${'x'.repeat(300)}  ` }],
+      }),
+    );
+    expect(r.fixedFindings[0]!.by).toHaveLength(240);
+  });
+
+  it('caps `by` by code point — the cut never orphans a surrogate pair', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [{ id: 'R1-2', by: `${'x'.repeat(239)}😀tail` }],
+      }),
+    );
+    const by = r.fixedFindings[0]!.by!;
+    expect([...by]).toHaveLength(240);
+    expect(by.endsWith('😀')).toBe(true);
+  });
+
+  it('refuses a non-array field', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: 'R1-2' as never })),
+    ).toThrow(/`fixedFindings` must be an array/);
+  });
+
+  it('refuses an entry with no ledger id — a ruling must name what it retires', () => {
+    for (const id of [
+      'not-a-ledger-id',
+      'R1-2 extra',
+      '',
+      42,
+      undefined,
+      // The serializer's bounds beside its shape (#9940 review, round
+      // 14): an over-long id is one the normalizer would cut (a cut id
+      // is a different id), a round of 0 or past LEDGER_MAX_ROUND names
+      // an entry no ledger can hold — `isLedgerFinding` refuses all of
+      // them, so a ruling naming one could never retire a real entry.
+      'R1-' + '9'.repeat(30),
+      'R0-1',
+      'R999999-1',
+      // Non-canonical spellings the shape tolerates but no entry carries:
+      // every join is raw-string equality, so `R01-2` retires nothing and
+      // slips past the two-way refusal beside a still-standing `R1-2`
+      // (#9940 review, round 25).
+      'R01-2',
+      'R1-02',
+      'R1-0',
+    ] as const) {
+      // A leading-zero spelling of a real shape is refused with the
+      // canonical spelling named; every other shape with the bounds.
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id } as never] })),
+      ).toThrow(/carries no ledger id|spells its id non-canonically/);
+    }
+  });
+
+  it('refuses a `by` that is not one non-empty line', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: [{ id: 'R1-2', by: '' }] })),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: 'line one\nline two' }] }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(base({ fixedFindings: [{ id: 'R1-2', by: 7 as never }] })),
+    ).toThrow(/ONE non-empty line/);
+  });
+
+  it('refuses a `by` that renders as nothing — the reply must say what fixed it (#9940 review, round 14)', () => {
+    // A comment-only clause, and a Cf run `.trim()` keeps: either posts
+    // `R<id> fixed by` with no visible account, on the thread the same
+    // pass resolves — the body-Criticals boundary already refuses the
+    // identical texts through the same renders-as-nothing rule.
+    expect(() =>
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '<!-- the guard rewrite -->' }],
+        }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    expect(() =>
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: '\u200b'.repeat(3) }] }),
+      ),
+    ).toThrow(/ONE non-empty line/);
+    // Residue AHEAD of visible text stays admitted, like everywhere else.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '<!-- x --> the guard rewrite' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: '<!-- x --> the guard rewrite' }]);
+  });
+
+  it('refuses a `by` the EXIT strips to nothing — a bare severity marker (#9940 review, round 21)', () => {
+    // `submit` posts the reply through the attribution-off strip chain
+    // and the footer strip, so the gate projects through the same exit
+    // closure the body-Criticals boundary uses (`rendersAsNothingAtExit`):
+    // a bare marker renders as prose to the plain test and as nothing at
+    // the exit — under attribution off the reply posted bare `R1-2 fixed`
+    // beside a resolve, under attribution on the machine marker posted
+    // verbatim.
+    for (const by of ['**[Critical]**', '**[Suggestion]**: ']) {
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] })),
+      ).toThrow(/ONE non-empty line/);
+    }
+  });
+
+  it('refuses a `by` carrying the comment-marker grammar or an unterminated comment; strips a leading severity marker (#9940 review, audit)', () => {
+    // The marker grammar would end the attribution-off reply and make
+    // presubmit read the fixed ruling as a posted finding carrying its
+    // id — a re-post carrier for the id the ruling retires.
+    expect(() =>
+      composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: 'the rewrite <!-- qwen-review critical -->' },
+          ],
+        }),
+      ),
+    ).toThrow(/comment-marker grammar/);
+    // An unterminated comment swallows the footer appended after the clause.
+    expect(() =>
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: 'the real parser <!--' }] }),
+      ),
+    ).toThrow(/never closes/);
+    // A balanced comment beside visible text is still admitted.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: 'the <!-- note --> real parser' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: 'the <!-- note --> real parser' }]);
+    // `by` is prose: a leading severity marker is machine grammar the reply
+    // would post verbatim under attribution on — stripped, like every
+    // posted body strips it; a marker-only clause still refuses.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '**[Critical]** the real parser' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2', by: 'the real parser' }]);
+  });
+
+  it('renders the clause-less body variant beside the body whenever the opener carries the inline-Suggestions clause (#9940 review, audit 3)', () => {
+    const withSuggestion = composeReview(base({ suggestionsInline: 1 }));
+    expect(withSuggestion.body).toContain(INLINE_SUGGESTIONS_CLAUSE.en);
+    expect(withSuggestion.bodyWithoutInlineClause).toBeDefined();
+    expect(withSuggestion.bodyWithoutInlineClause).not.toContain(
+      INLINE_SUGGESTIONS_CLAUSE.en,
+    );
+    expect(withSuggestion.bodyWithoutInlineClause).not.toContain(
+      INLINE_SUGGESTIONS_CLAUSE.zh,
+    );
+    // The variant differs from the body by the clause alone.
+    expect(
+      withSuggestion.body
+        .replace(` ${INLINE_SUGGESTIONS_CLAUSE.en}`, '')
+        .replace(` ${INLINE_SUGGESTIONS_CLAUSE.zh}`, '')
+        .replace(`${INLINE_SUGGESTIONS_CLAUSE.en} `, '')
+        .replace(`${INLINE_SUGGESTIONS_CLAUSE.zh} `, ''),
+    ).toBe(withSuggestion.bodyWithoutInlineClause);
+    expect(composeReview(base({})).bodyWithoutInlineClause).toBeUndefined();
+  });
+
+  it('the clause-less variant is the body minus the clause at EVERY budget rung — one render decides both (#9940 review, audit 4)', () => {
+    let sawFold = false;
+    for (const size of [1000, 32384, 32390, 32400, 63706, 64740, 65000]) {
+      // `base()` rewrites the plan file; the Han plan must be written AFTER.
+      const input = base({
+        suggestionsInline: 1,
+        criticalsInline: 1,
+        bodyCriticals: ['C'.repeat(size)],
+        presubmit: { downgradeRequestChanges: true, downgradeReasons: ['x'] },
+      });
+      input.planPath = coveredPlan(undefined, { han: true });
+      const r = composeReview(input);
+      sawFold ||= r.body.includes('<details>');
+      const variant = r.bodyWithoutInlineClause;
+      expect(variant).toBeDefined();
+      // Same fold, same sections, same cut — the variant differs by the
+      // clause (and the space that joined it) alone.
+      expect(variant!.includes('<details>')).toBe(r.body.includes('<details>'));
+      expect(variant!.includes('TRUNCATED')).toBe(r.body.includes('TRUNCATED'));
+      const enGone = r.body.includes(INLINE_SUGGESTIONS_CLAUSE.en)
+        ? INLINE_SUGGESTIONS_CLAUSE.en.length + 1
+        : 0;
+      const zhGone = r.body.includes(INLINE_SUGGESTIONS_CLAUSE.zh)
+        ? INLINE_SUGGESTIONS_CLAUSE.zh.length + 1
+        : 0;
+      expect(variant!.length).toBeGreaterThanOrEqual(
+        r.body.length - enGone - zhGone,
+      );
+      expect(variant!.length).toBeLessThan(r.body.length);
+      // The trim disclosures are recorded once.
+      const budgetLines = r.remediation.filter((l) =>
+        l.includes('body budget'),
+      );
+      expect(new Set(budgetLines).size).toBe(budgetLines.length);
+      // No placeholder leaks into either body.
+      expect(variant!).not.toMatch(/[-]/);
+      expect(r.body).not.toMatch(/[-]/);
+    }
+    // The bilingual arm is live: at least one size kept the fold.
+    expect(sawFold).toBe(true);
+  });
+
+  it('quotes a downgrade reason like every other model line — a `<!--` in it cannot swallow the body, a forged footer cannot post as attribution (#9940 review, audit 4)', () => {
+    const swallow = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [`self-PR <!-- ${'x'.repeat(400)} -->`],
+        },
+      }),
+    );
+    expect(swallow.body.replace(/<!--[\s\S]*?-->/g, '')).not.toContain('<!--');
+    expect(swallow.body).toContain('self-PR');
+    const forged = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [
+            'self-PR _— m via Qwen Code /review_ **[Critical]**',
+          ],
+        },
+      }),
+      undefined,
+      false,
+    );
+    expect(forged.body).not.toContain('via Qwen Code /review');
+    // A marker mid-line is bold prose, not a severity marker — the body's
+    // own lead is what `severityOf` reads.
+    expect(forged.body.startsWith('**[Critical]**')).toBe(false);
+  });
+
+  it('an uncut `by` keeps its own trailing `<` — the stub retreat belongs to the cap alone; the escape belongs to the post (#9940 review, audit 4-6)', () => {
+    for (const by of [
+      'compare with <',
+      'use <!',
+      'ends <!-',
+      'see <details>x</details> here',
+    ]) {
+      expect(
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] }))
+          .fixedFindings[0]!.by,
+      ).toBe(by);
+    }
+  });
+
+  it('escapeTagOpeners — tag openers go inert; code spans, autolinks, comparisons and comment grammar stay (#9940 review, audit 5 and 6)', () => {
+    for (const [text, escaped] of [
+      ['see <details>x</details> here', 'see &lt;details>x&lt;/details> here'],
+      ['a < b and b > c', 'a < b and b > c'],
+      ['use <! and <!-', 'use <! and <!-'],
+      [
+        'typed the map as `Map<string, number>`',
+        'typed the map as `Map<string, number>`',
+      ],
+      ['check ``a<b` `` first', 'check ``a<b` `` first'],
+      [
+        'see <https://ci.example/run/1> and <mailto:a@b.co>',
+        'see <https://ci.example/run/1> and <mailto:a@b.co>',
+      ],
+      ['mail <dev@example.com>', 'mail <dev@example.com>'],
+      ['<?php echo 1 ?> and </div>', '&lt;?php echo 1 ?> and &lt;/div>'],
+      ['`unclosed <b>', '`unclosed &lt;b>'],
+    ] as const) {
+      expect(escapeTagOpeners(text)).toBe(escaped);
+    }
+  });
+
+  it('opensUnclosedComment — the linear form agrees with the closed-comment-removal reference on generated grammar (#9940 review, audit 4)', () => {
+    // Closed comments are MASKED, not deleted: deleting joined `<!` to a
+    // following `-->` into grammar no renderer sees.
+    const reference = (text: string): boolean =>
+      text
+        .replace(/<!--(?:>|->|[\s\S]*?-->)/g, (m) => ' '.repeat(m.length))
+        .includes('<!--');
+    // Reached through the gate: a refused `by` is one the reference refuses.
+    const linear = (text: string): boolean => {
+      try {
+        composeReview(
+          base({ fixedFindings: [{ id: 'R1-2', by: `a ${text} z` }] }),
+        );
+        return false;
+      } catch (e) {
+        return /never closes/.test(String(e));
+      }
+    };
+    let seed = 20260905;
+    const rand = (): number => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed / 0x7fffffff;
+    };
+    const atoms = ['<!--', '-->', '<!', '--', '>', '-', 'a', ' '];
+    for (let i = 0; i < 300; i++) {
+      const len = 1 + Math.floor(rand() * 6);
+      const text = Array.from(
+        { length: len },
+        () => atoms[Math.floor(rand() * atoms.length)]!,
+      ).join('');
+      expect({ text, unclosed: linear(text) }).toEqual({
+        text,
+        unclosed: reference(`a ${text} z`),
+      });
+    }
+  });
+
+  it('bodyCriticalClaim reads no id off an indented code line — the rule the comment readback applies (#9940 review, audit 4)', () => {
+    expect(
+      bodyCriticalClaim('**[Critical]**:\n\n    R1-2: code').id,
+    ).toBeUndefined();
+    expect(bodyCriticalClaim('    R1-2: code').id).toBeUndefined();
+    expect(bodyCriticalClaim('**[Critical]**: R1-2: the guard').id).toBe(
+      'R1-2',
+    );
+  });
+
+  it('caps the downgrade-reason LIST too, disclosing what it left out, and makes tag openers inert (#9940 review, audit 5)', () => {
+    const many = composeReview(
+      base({
+        criticalsInline: 1,
+        suggestionsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: Array.from(
+            { length: 300 },
+            (_, i) => `r${i} ${'w'.repeat(390)}`,
+          ),
+        },
+      }),
+    );
+    expect(many.bodyTrim.truncated).toBe(false);
+    expect(many.body).toContain(INLINE_SUGGESTIONS_CLAUSE.en);
+    expect(many.body).not.toContain('r299 ');
+    expect(
+      many.remediation.some((l) => /downgrade reasons: \d+ of 300/.test(l)),
+    ).toBe(true);
+    const html = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [
+            `${'x'.repeat(360)}<details><summary>s</summary>hidden hidden hidden hidden</details> more`,
+          ],
+        },
+      }),
+    );
+    expect(html.body).not.toContain('<details><summary>');
+    expect(html.body).toContain('&lt;details>');
+  });
+
+  it('a downgrade reason is one line of prose — a fence or `<!DOCTYPE` in it cannot reach a line start (#9940 review, audit 6)', () => {
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: [
+            'x\n```\ncode',
+            'y\n<!DOCTYPE z',
+            'w\n\n# heading',
+          ],
+        },
+      }),
+    );
+    // `<!` is comment/declaration grammar the escape leaves alone; mid-line
+    // and unclosed it is literal text.
+    expect(r.body).toContain('x ``` code; y <!DOCTYPE z; w # heading');
+    expect(r.body).not.toMatch(/^```/m);
+    expect(r.body).not.toMatch(/^# heading/m);
+  });
+
+  it('reasons past the list budget are disclosed only where the sentence renders (#9940 review, audit 6)', () => {
+    const kept = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeApprove: true,
+          downgradeReasons: [
+            ...Array.from({ length: 5 }, () => 'r'.repeat(400)),
+            'f',
+          ],
+        },
+      }),
+    );
+    expect(kept.event).toBe('REQUEST_CHANGES');
+    expect(kept.remediation.some((l) => l.includes('downgrade reasons'))).toBe(
+      false,
+    );
+    // Downgraded, everything fitting: nothing to disclose either.
+    const fits = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['a', 'b'],
+        },
+      }),
+    );
+    expect(fits.downgraded).toBe(true);
+    expect(fits.remediation.some((l) => l.includes('downgrade reasons'))).toBe(
+      false,
+    );
+  });
+
+  it('`<!-->` and `<!--->` are empty comments, not unclosed openers (#9940 review, audit 5)', () => {
+    for (const by of ['fixed via <!--> retry', 'fixed via <!---> retry']) {
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] })),
+      ).not.toThrow();
+    }
+  });
+
+  it('caps a downgrade reason at DOWNGRADE_REASON_MAX_CHARS code points, disclosing the cut (#9940 review, audit 3)', () => {
+    const r = composeReview(
+      base({
+        criticalsInline: 1,
+        presubmit: {
+          downgradeRequestChanges: true,
+          downgradeReasons: ['r'.repeat(DOWNGRADE_REASON_MAX_CHARS + 500)],
+        },
+      }),
+    );
+    expect(r.body).toContain(`${'r'.repeat(DOWNGRADE_REASON_MAX_CHARS)}…`);
+    expect(r.body).not.toContain('r'.repeat(DOWNGRADE_REASON_MAX_CHARS + 1));
+  });
+
+  it('refuses a `by` whose attribution-off EXIT would post the marker grammar — the gate reads the exit projection too (#9940 review, audit 2)', () => {
+    // A forged footer span splitting `<!-` from `- qwen-review …` carries
+    // no marker as written; the exit's footer-span strip joins the two
+    // halves and the posted reply read as a finding carrying its id.
+    expect(() =>
+      composeReview(
+        base({
+          fixedFindings: [
+            {
+              id: 'R1-2',
+              by: 'x <!-_— model via Qwen Code /review (v1)_- qwen-review critical -->',
+            },
+          ],
+        }),
+      ),
+    ).toThrow(/comment-marker grammar/);
+    // A non-canonical id spelling is refused with a message naming the
+    // canonical one.
+    expect(() =>
+      composeReview(base({ fixedFindings: [{ id: 'R02-3' }] })),
+    ).toThrow(/write R2-3/);
+    // A cap landing inside `<!--` leaves no `<!-` stub either.
+    const r = composeReview(
+      base({
+        fixedFindings: [{ id: 'R1-2', by: `${'x'.repeat(237)} <!-- c -->` }],
+      }),
+    );
+    expect(r.fixedFindings[0]!.by).toBe('x'.repeat(237));
+    // A cap cut landing right after `qwen-review` inside a comment the
+    // gate passed (`<!-- qwen-reviewer -->` carries no marker) would leave
+    // the marker's opening on the attribution-off exit — the capped
+    // clause degrades to a by-less ruling.
+    const tail = '<!-_— model via Qwen Code /review (v1)_- qwen-review';
+    const capped = composeReview(
+      base({
+        fixedFindings: [
+          {
+            id: 'R1-2',
+            by: `${'x'.repeat(FIXED_BY_MAX - [...tail].length - 1)} ${tail}er -->`,
+          },
+        ],
+      }),
+    );
+    expect(capped.fixedFindings).toEqual([{ id: 'R1-2' }]);
+  });
+
+  it('the unclosed-comment gate reads openers, not counts — `--> <!--` is refused; a cap leaves no `<` stub (#9940 review, audit 3)', () => {
+    for (const by of [
+      'the switch to the real parser --> <!-- see thread',
+      '<!-- a --> b --> <!-- c',
+    ]) {
+      expect(() =>
+        composeReview(base({ fixedFindings: [{ id: 'R1-2', by }] })),
+      ).toThrow(/never closes/);
+    }
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: `${'a'.repeat(239)}<!-- b -->` }],
+        }),
+      ).fixedFindings[0]!.by,
+    ).toBe('a'.repeat(239));
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: `x --> ${'a'.repeat(230)}<!-- b -->` },
+          ],
+        }),
+      ).fixedFindings[0]!.by,
+    ).toBe(`x --> ${'a'.repeat(230)}`);
+  });
+
+  it('a cap that lands inside a comment retreats to before it — no dangling `<!--` (#9940 review, audit)', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [
+          { id: 'R1-2', by: `the rewrite <!-- ${'c'.repeat(300)} --> landed` },
+        ],
+      }),
+    );
+    expect(r.fixedFindings).toEqual([{ id: 'R1-2', by: 'the rewrite' }]);
+  });
+
+  it('degrades a `by` whose visible tail sits past the cap to a by-less ruling (#9940 review, round 21)', () => {
+    // The gate ran on the clause as written — visible `fixed it` at the
+    // end — and the cap then cut exactly that tail off, leaving forty
+    // complete `&nbsp;` entities: the invisible-only reply the gate
+    // refuses. The cut is the tool's, not the model's, so the ruling
+    // degrades to the by-less form (`R<id> fixed`) instead of refusing.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [{ id: 'R1-2', by: '&nbsp;'.repeat(40) + 'fixed it' }],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2' }]);
+    // A long comment ahead of the text slices into an UNTERMINATED
+    // comment — the same invisible-only shape.
+    expect(
+      composeReview(
+        base({
+          fixedFindings: [
+            { id: 'R1-2', by: `<!-- ${'c'.repeat(250)} --> the guard rewrite` },
+          ],
+        }),
+      ).fixedFindings,
+    ).toEqual([{ id: 'R1-2' }]);
+    // The ordinary cap keeps a visible clause, capped (the sibling cells
+    // above pin the length and the code-point cut).
+    expect(
+      composeReview(
+        base({ fixedFindings: [{ id: 'R1-2', by: 'x'.repeat(300) }] }),
+      ).fixedFindings[0]!.by,
+    ).toHaveLength(240);
+  });
+
+  it('refuses a non-object entry', () => {
+    expect(() =>
+      composeReview(base({ fixedFindings: ['R1-2'] as never })),
+    ).toThrow(/is not an object/);
+  });
+
+  it('keeps the FIRST ruling per id — a duplicate would reply and resolve twice', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [
+          { id: 'R1-2', by: 'the guard rewrite' },
+          { id: 'R1-2', by: 'the revert' },
+          { id: 'R2-7' },
+        ],
+      }),
+    );
+    expect(r.fixedFindings).toEqual([
+      { id: 'R1-2', by: 'the guard rewrite' },
+      { id: 'R2-7' },
+    ]);
   });
 });
 
@@ -7545,6 +8160,27 @@ describe('buildLedger', () => {
         title: '`src/d.ts` unanchorable blocker',
       },
     ]);
+  });
+
+  it('records the minted id per drafted comment, aligned by index (#9940)', () => {
+    // `draftedIds` is the stamp `submit` applies before posting: the id at
+    // a marked slot equals the ledger entry's id, an unmarked slot stays
+    // undefined, and a carried id reads through unchanged.
+    const l = buildLedger(
+      3,
+      [
+        { path: 'src/a.ts', line: 12, body: '**[Critical]** double free' },
+        { path: 'src/x.ts', line: 1, body: 'no marker — not a finding' },
+        {
+          path: 'src/b.ts',
+          line: 4,
+          body: '**[Suggestion]** R1-2: still stands',
+        },
+      ],
+      [],
+    );
+    expect(l.draftedIds).toEqual(['R3-1', undefined, 'R1-2']);
+    expect(l.findings.map((f) => f.id)).toEqual(['R3-1', 'R1-2']);
   });
 
   it('flags the real file spelled like a stand-in, not the stand-in', () => {
@@ -14530,6 +15166,41 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // … so its still-standing original mints no closure — while a truly
     // vanished same-file Critical beside it still does.
     expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/auth.ts' }]);
+  });
+
+  it('reads a SOURCE tag before the id on the deferral channel — the re-post join is the head-slot read (#9940 review, round 15)', () => {
+    // The join reads the id through the head-slot tokeniser's own id
+    // (`readClaimHead(title).id`), so a title leading with a source tag
+    // (`[probe] R10-1: …`) still names the claim it re-posts; the anchored
+    // read over `.stripped` kept the source tag at position 0 and saw no
+    // id — `repostUnidentified` then withheld EVERY closure of the round,
+    // the truly vanished sibling included. The axis-tag twin below cannot
+    // pin this: axis tags are stripped from `.stripped`, source tags are
+    // not.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'sparse wedge' },
+          { id: 'R10-2', sev: 'C', file: 'src/other.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/f.ts',
+          line: 8,
+          source: 'probe',
+          severity: 'Critical',
+          title: '[probe] R10-1: sparse wedge',
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/other.ts' }]);
   });
 
   it('mints no closure for a Critical re-voiced as a floor-stripped Suggestion', () => {
