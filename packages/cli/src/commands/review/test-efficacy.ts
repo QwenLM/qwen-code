@@ -55,6 +55,7 @@ import {
   readFileSync,
   rmSync,
   lstatSync,
+  statSync,
   existsSync,
   realpathSync,
 } from 'node:fs';
@@ -2088,6 +2089,14 @@ function newSideLength(header: string): number {
  * disk escapes nothing — the read or write fails on its own.
  */
 /**
+ * The largest `.git` gitfile this identity will read rather than size.
+ *
+ * git writes `gitdir: <path>\n`; anything past a few hundred bytes is a
+ * plant, and reading it is work an attacker chooses for us.
+ */
+const MAX_GITFILE_BYTES = 4096;
+
+/**
  * The probe tree root's identity, for re-asking immediately before a spawn.
  *
  * Every root-escape verdict in this file is taken once and then acted on
@@ -2109,7 +2118,41 @@ function newSideLength(header: string): number {
 function probeRootIdentity(probeTree: string): string | null {
   try {
     if (lstatSync(probeTree).isSymbolicLink()) return null;
-    return realpathSync(probeTree);
+    // A PATH is not an identity. `realpathSync` answers "what does this name
+    // resolve to", which a rename does not change: `mv <probe> <probe>.gone`
+    // followed by `mv <victim> <probe>` leaves both the path and its realpath
+    // untouched while the directory underneath is somebody else's. The inode
+    // pair is the identity; the realpath stays because it is what the refusal
+    // is about.
+    //
+    // Composite on purpose, and not because any one part is sufficient: the
+    // strength of `dev`/`ino` is a platform question (they are what libuv
+    // reports, and that is not the same guarantee everywhere), so the gitfile
+    // marker and the realpath are not fallbacks to be trimmed later — they
+    // each catch a swap the others can miss.
+    const st = statSync(probeTree);
+    // And the gitfile, because the root staying itself is not enough: the
+    // probe tree is a LINKED worktree, so `.git` is a file naming the
+    // repository every spawn below resolves through. Rewrite it mid-walk and
+    // `checkout --force HEAD -- .` materialises whatever HEAD means in the
+    // attacker's repository, into a tree whose root never moved. Read rather
+    // than stat'ed: an inode-preserving rewrite of the same length would pass
+    // a stat comparison, and this file is normally a few dozen bytes.
+    //
+    // (The revert's twin is not exposed this way — it checks out a base SHA,
+    // which is content-addressed, under `GIT_NO_REPLACE_OBJECTS=1` — but it
+    // shares this helper, and a shared answer is cheaper than two.)
+    const dotGit = join(probeTree, '.git');
+    const gitSt = lstatSync(dotGit);
+    const marker = !gitSt.isFile()
+      ? `<${gitSt.isDirectory() ? 'dir' : 'other'}>`
+      : gitSt.size > MAX_GITFILE_BYTES
+        ? // Not read: a gitfile this large is not one git wrote, and reading
+          // an attacker-sized file here would be its own denial of service.
+          // The size still moves if it is rewritten, which is what is needed.
+          `<oversized:${gitSt.size}>`
+        : readFileSync(dotGit, 'utf8');
+    return [realpathSync(probeTree), st.dev, st.ino, marker].join('\u0000');
   } catch {
     return null;
   }

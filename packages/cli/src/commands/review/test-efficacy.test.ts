@@ -39,6 +39,8 @@ import {
   mkdtempSync,
   mkdirSync,
   chmodSync,
+  statSync,
+  realpathSync,
   writeFileSync,
   appendFileSync,
   symlinkSync,
@@ -850,6 +852,155 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
         rmSync(`${dir}.real`, { recursive: true, force: true });
         rmSync(dir, { recursive: true, force: true });
         rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // POSIX-only: the swap is driven from a `#!/bin/sh` shim.
+  it.skipIf(process.platform === 'win32')(
+    'refuses when the root is RENAMED away mid-screen, not just relinked',
+    () => {
+      // A path is not an identity. `mv <probe> <probe>.gone` followed by
+      // `mv <victim> <probe>` leaves the path and its realpath untouched while
+      // the directory underneath is somebody else's — so a check built on
+      // realpath alone passes and the spawns run in the swapped tree. The
+      // sibling relink test does not cover this: it swaps in a SYMLINK, which
+      // the lstat arm catches.
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-rename-'));
+      const victim = mkdtempSync(join(tmpdir(), 'qwen-rvictim-'));
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-renshim-'));
+      const isolation = isolateHostGitConfig();
+      const savedPath = process.env['PATH'];
+      try {
+        writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+        asCheckout(dir);
+        writeFileSync(join(dir, 'a.ts'), 'dirtied\n');
+        writeFileSync(join(victim, 'tracked.ts'), 'shared\n');
+        asCheckout(victim);
+        writeFileSync(join(victim, 'PRECIOUS'), 'do not delete\n');
+        const realGit = execFileSync('which', ['git'], {
+          encoding: 'utf8',
+        }).trim();
+        writeFileSync(
+          join(shimDir, 'git'),
+          `#!/bin/sh
+case "$*" in
+  *--file*)
+    if [ ! -e ${shimDir}/done ]; then
+      touch ${shimDir}/done
+      mv ${dir} ${dir}.gone && mv ${victim} ${dir}
+    fi
+    ;;
+esac
+exec ${realGit} "$@"
+`,
+        );
+        chmodSync(join(shimDir, 'git'), 0o755);
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        let detail = '';
+        try {
+          detail = runOneMutant(
+            dir,
+            { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+            ['a.test.ts'],
+          ).detail;
+        } catch (e) {
+          detail = e instanceof Error ? e.message : String(e);
+        }
+
+        // Damage first: the swapped-in tree keeps its untracked file.
+        expect(existsSync(join(dir, 'PRECIOUS'))).toBe(true);
+        expect(detail).toContain('stopped being its own root');
+      } finally {
+        process.env['PATH'] = savedPath;
+        isolation.dispose();
+        rmSync(shimDir, { recursive: true, force: true });
+        rmSync(`${dir}.gone`, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true });
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // POSIX-only: the rewrite is driven from a `#!/bin/sh` shim.
+  it.skipIf(process.platform === 'win32')(
+    'refuses when the .git gitfile is repointed mid-screen',
+    () => {
+      // The probe tree is a linked worktree, so `.git` is a FILE naming the
+      // repository every spawn below resolves through. Repoint it during the
+      // screen walk and the root never moves — path, inode and realpath all
+      // agree — while `checkout --force HEAD -- .` resolves HEAD in the
+      // attacker's repository and materialises its content here.
+      // realpath'd: the linked-worktree path walks its ancestors for symlinks,
+      // and on macOS `/var` is one — an unrelated refusal that would mask this
+      // test's own.
+      const base = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-gitfile-')));
+      const shimDir = mkdtempSync(join(tmpdir(), 'qwen-gfshim-'));
+      const isolation = isolateHostGitConfig();
+      const savedPath = process.env['PATH'];
+      try {
+        // A real repository with a linked worktree, so `.git` is a gitfile.
+        const main = join(base, 'main');
+        mkdirSync(main);
+        writeFileSync(join(main, 'a.ts'), 'gone.clear();\n');
+        asCheckout(main);
+        const probe = join(base, 'probe');
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-q', '--detach', probe, 'HEAD'],
+          { cwd: main },
+        );
+        writeFileSync(join(probe, 'a.ts'), 'dirtied\n');
+        expect(statSync(join(probe, '.git')).isFile()).toBe(true);
+
+        // The attacker's repository, whose HEAD carries different content.
+        const atk = join(base, 'atk');
+        mkdirSync(atk);
+        writeFileSync(join(atk, 'a.ts'), 'ATTACKER CONTENT\n');
+        asCheckout(atk);
+
+        const realGit = execFileSync('which', ['git'], {
+          encoding: 'utf8',
+        }).trim();
+        writeFileSync(
+          join(shimDir, 'git'),
+          `#!/bin/sh
+case "$*" in
+  *--file*)
+    if [ ! -e ${shimDir}/done ]; then
+      touch ${shimDir}/done
+      printf 'gitdir: %s\\n' "${atk}/.git" > ${probe}/.git
+    fi
+    ;;
+esac
+exec ${realGit} "$@"
+`,
+        );
+        chmodSync(join(shimDir, 'git'), 0o755);
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+
+        let detail = '';
+        try {
+          detail = runOneMutant(
+            probe,
+            { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+            ['a.test.ts'],
+          ).detail;
+        } catch (e) {
+          detail = e instanceof Error ? e.message : String(e);
+        }
+
+        // Damage first: the probe tree never took the attacker's content.
+        expect(readFileSync(join(probe, 'a.ts'), 'utf8')).not.toContain(
+          'ATTACKER CONTENT',
+        );
+        expect(detail).toContain('stopped being its own root');
+      } finally {
+        process.env['PATH'] = savedPath;
+        isolation.dispose();
+        rmSync(shimDir, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
       }
     },
   );
