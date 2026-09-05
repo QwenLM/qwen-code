@@ -6,7 +6,11 @@
 
 import { describe, it, expect } from 'vitest';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
-import { sessionMatchesGitQuery } from './sessionSearch';
+import {
+  mergeSessionContentHits,
+  sessionMatchesGitQuery,
+  sessionMatchesSource,
+} from './sessionSearch';
 
 function session(
   overrides: Partial<DaemonSessionSummary>,
@@ -82,5 +86,115 @@ describe('sessionMatchesGitQuery', () => {
 
   it('returns false when nothing matches', () => {
     expect(sessionMatchesGitQuery(session({}), 'anything')).toBe(false);
+  });
+});
+
+describe('sessionMatchesSource', () => {
+  it('scopes the channel tab to channel-source sessions', () => {
+    expect(
+      sessionMatchesSource(session({ sourceType: 'channel' }), 'channel'),
+    ).toBe(true);
+    expect(sessionMatchesSource(session({}), 'channel')).toBe(false);
+    expect(
+      sessionMatchesSource(session({ sourceType: 'default' }), 'channel'),
+    ).toBe(false);
+  });
+
+  it('scopes the default tab to unattributed and default-source sessions', () => {
+    expect(sessionMatchesSource(session({}), 'default')).toBe(true);
+    expect(
+      sessionMatchesSource(session({ sourceType: 'default' }), 'default'),
+    ).toBe(true);
+    expect(
+      sessionMatchesSource(session({ sourceType: 'channel' }), 'default'),
+    ).toBe(false);
+  });
+
+  it('lists everything without an active filter', () => {
+    expect(
+      sessionMatchesSource(session({ sourceType: 'channel' }), undefined),
+    ).toBe(true);
+    expect(sessionMatchesSource(session({}), undefined)).toBe(true);
+  });
+});
+
+describe('mergeSessionContentHits', () => {
+  function hit(
+    sessionId: string,
+    overrides: Partial<DaemonSessionSummary> = {},
+  ): { session: DaemonSessionSummary; snippet: string } {
+    return {
+      session: session({ sessionId, ...overrides }),
+      snippet: `hit for ${sessionId}`,
+    };
+  }
+
+  it('returns the local matches unchanged when there are no hits', () => {
+    const local = [session({ sessionId: 'a' })];
+    expect(mergeSessionContentHits([], local, new Map(), undefined)).toEqual(
+      local,
+    );
+  });
+
+  it('appends ghost hits after local matches in server order', () => {
+    const hits = new Map([
+      ['g1', hit('g1')],
+      ['g2', hit('g2')],
+    ]);
+    const merged = mergeSessionContentHits(
+      [],
+      [session({ sessionId: 'a' })],
+      hits,
+      undefined,
+    );
+    expect(merged.map((s) => s.sessionId)).toEqual(['a', 'g1', 'g2']);
+  });
+
+  it('keeps the catalog entry for a hit the loaded catalog carries', () => {
+    const catalogEntry = session({
+      sessionId: 's1',
+      displayName: 'live catalog name',
+      isPinned: true,
+    });
+    const merged = mergeSessionContentHits(
+      [catalogEntry],
+      [],
+      new Map([['s1', hit('s1', { displayName: 'stale search name' })]]),
+      undefined,
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toBe(catalogEntry);
+  });
+
+  it('renders a session matched by both paths exactly once', () => {
+    const catalogEntry = session({ sessionId: 's1', displayName: 'qdrant' });
+    const local = [catalogEntry];
+    const merged = mergeSessionContentHits(
+      [catalogEntry],
+      local,
+      new Map([['s1', hit('s1')]]),
+      undefined,
+    );
+    expect(merged).toHaveLength(1);
+  });
+
+  it('drops ghost hits outside the source scope but keeps scoped ones', () => {
+    const hits = new Map([
+      ['def', hit('def')],
+      ['chan', hit('chan', { sourceType: 'channel' })],
+    ]);
+    const merged = mergeSessionContentHits([], [], hits, 'channel');
+    expect(merged.map((s) => s.sessionId)).toEqual(['chan']);
+  });
+
+  it('applies the mapSession overlay to ghost hits', () => {
+    const merged = mergeSessionContentHits(
+      [],
+      [],
+      new Map([['g1', hit('g1')]]),
+      undefined,
+      (s) => ({ ...s, isPinned: true }),
+    );
+    expect(merged[0]?.isPinned).toBe(true);
   });
 });

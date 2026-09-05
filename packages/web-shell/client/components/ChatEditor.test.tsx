@@ -404,7 +404,6 @@ interface ChatEditorRenderProps {
   builtinAtProviders?: WebShellCustomization['builtinAtProviders'];
   atProviders?: WebShellCustomization['atProviders'];
   skills?: Array<{ name: string; description: string }>;
-  language?: WebShellLanguage;
   reasoning?: DaemonReasoningControls;
   onSelectReasoningEffort?: (value: ReasoningSelection) => Promise<void> | void;
 }
@@ -422,7 +421,6 @@ function renderChatEditorInto(
     language = 'en',
     renderComposerTagTooltip,
     onComposerTagClick,
-    language = 'en',
     ...chatEditorProps
   } = props;
   if (composerTags) {

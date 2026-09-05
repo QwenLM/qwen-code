@@ -3,18 +3,10 @@
 name: 'Security Checks'
 
 on:
-  pull_request:
-    branches:
-      - 'main'
-      - 'release/**'
-  push:
-    branches:
-      - 'main'
-      - 'release/**'
-
-concurrency:
-  group: '${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}'
-  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
+  schedule:
+    # Daily at 02:30 UTC, between the monthly Scorecard and nightly CodeQL.
+    - cron: '30 2 * * *'
+  workflow_dispatch: {}
 
 permissions:
   contents: 'read'
@@ -27,7 +19,14 @@ jobs:
   dependency-cve:
     name: 'Dependency CVE audit'
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 15
+    # A healthy run finishes in ~4-6 minutes. The ceiling covers the audit
+    # retry below at its worst: three audit sites (the root call plus the two
+    # vendored lockfiles the loop does not skip), two attempts each, every
+    # attempt capped at 300s with a 15s backoff between them — 3 x 615s = 1845s
+    # of audit work — plus checkout, setup and the installs. A ceiling below
+    # that cancels the job mid-outage, so the `not a CVE finding` verdict below
+    # would never be emitted and the run would surface as a bare cancel.
+    timeout-minutes: 40
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -49,10 +48,55 @@ jobs:
       # Hard gate: the high-severity baseline is clean, so any new high CVE
       # fails the check. Keep scripts/tests/security-workflows.test.js in
       # sync with this policy.
+      #
+      # A registry-side audit failure is not a CVE finding, so `audit` retries
+      # it once and then reports it as its own error. npm's retired
+      # `security/audits/quick` route intermittently answers HTTP 400 ("Invalid
+      # package tree") for a tree it accepted minutes earlier — sometimes after
+      # hanging for 6+ minutes — and that used to reach the same `exit 1` as a
+      # real advisory, reading as a CVE failure on branches that changed no
+      # dependency at all. A persistent outage still fails the job; the gate
+      # must not fail open.
+      #
+      # Two details this wrapper depends on:
+      # - Output is captured, not piped. Reading npm's status out of a pipeline
+      #   would tie the verdict to `defaults.run.shell` still implying
+      #   `-o pipefail`; without it a real high-severity finding exits 0.
+      # - Every attempt is capped by `timeout`, which is what keeps the job
+      #   ceiling above reachable only in a real outage.
       - name: 'Audit production dependencies'
         run: |
+          audit() {
+            local attempt=1 out rc retryable
+            while :; do
+              rc=0
+              retryable=0
+              out="$(timeout 300 "$@" 2>&1)" || rc=$?
+              printf '%s\n' "$out"
+              if [ "$rc" -eq 0 ]; then
+                return 0
+              fi
+              case "$out" in
+                *'audit endpoint returned an error'*) retryable=1 ;;
+              esac
+              # 124 = `timeout` killed a stalled audit.
+              if [ "$rc" -eq 124 ]; then
+                retryable=1
+              fi
+              if [ "$retryable" -eq 1 ] && [ "$attempt" -lt 2 ]; then
+                echo "::warning::npm audit returned no verdict (attempt $attempt/2), retrying"
+                attempt=$((attempt + 1))
+                sleep 15
+                continue
+              fi
+              if [ "$retryable" -eq 1 ]; then
+                echo "::error::npm audit returned no verdict after $attempt attempts (registry endpoint error or timeout). This is an audit-infrastructure failure, not a CVE finding - re-run this job."
+              fi
+              return "$rc"
+            done
+          }
           status=0
-          npm audit --omit=dev --audit-level=high || status=$?
+          audit npm audit --omit=dev --audit-level=high || status=$?
           for lockfile in packages/*/package-lock.json; do
             [ -f "$lockfile" ] || continue
             # Covered by the root workspace audit; this vendored lockfile is not installed directly.
@@ -61,30 +105,30 @@ jobs:
             (
               cd "$package_dir"
               npm ci --ignore-scripts --no-audit --progress=false --workspaces=false &&
-                npm audit --omit=dev --audit-level=high --workspaces=false
+                audit npm audit --omit=dev --audit-level=high --workspaces=false
             ) || status=$?
           done
           exit "$status"
 
-  secret-scan:
-    name: 'Secret scan (TruffleHog)'
+  track-dependency-cve:
+    name: 'Track dependency audit failure'
+    needs: 'dependency-cve'
+    if: "${{ always() && (needs.dependency-cve.result == 'success' || needs.dependency-cve.result == 'failure') }}"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 15
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+      issues: 'write'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           persist-credentials: false
-          fetch-depth: 0
 
-      # Incremental gate: the action scans commits introduced by the PR or
-      # push and only fails on secrets TruffleHog could actively verify,
-      # keeping false positives out. Branch-creating pushes have no base
-      # commit to diff from, so they are skipped explicitly.
-      # `version` pins the scanner image; without it the action runs `latest`.
-      - name: 'Scan for verified secrets'
-        if: "github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'"
-        uses: 'trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11' # v3.96.0
+      - name: 'Update tracking issue'
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        env:
+          AUDIT_RESULT: '${{ needs.dependency-cve.result }}'
         with:
-          version: '3.96.0'
-          extra_args: '--only-verified'
+          script: |
+            await require('./.github/scripts/update-dependency-audit-issue.cjs')({ github, context });

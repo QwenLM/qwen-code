@@ -3,6 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { act, renderHook } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
@@ -47,6 +48,40 @@ const makeSuccess = (
   displayName: string,
   responseMedia: Part[] = [],
 ): TrackedToolCall => makeCompleted('success', displayName, responseMedia);
+
+describe('mapToDisplay — raw args (ui.showToolCallArgs)', () => {
+  it('carries the request args through to the display object', () => {
+    const call = {
+      status: 'success',
+      request: {
+        callId: 'call-1',
+        name: 'edit',
+        args: { file_path: 'a.ts', old_string: 'x', new_string: 'y' },
+      },
+      tool: { displayName: 'Edit', isOutputMarkdown: false },
+      invocation: { getDescription: () => 'a.ts' },
+      response: { resultDisplay: 'ok', responseParts: [] },
+    } as unknown as TrackedToolCall;
+
+    // `description` summarizes the args away (Edit shows only the filename);
+    // the raw args are what the setting renders instead.
+    expect(mapToDisplay(call).tools[0].args).toEqual({
+      file_path: 'a.ts',
+      old_string: 'x',
+      new_string: 'y',
+    });
+  });
+
+  it('carries args through the error branch too', () => {
+    const call = {
+      status: 'error',
+      request: { callId: 'call-2', name: 'broken', args: { a: 1 } },
+      response: { resultDisplay: 'boom', responseParts: [] },
+    } as unknown as TrackedToolCall;
+
+    expect(mapToDisplay(call).tools[0].args).toEqual({ a: 1 });
+  });
+});
 
 describe('mapToDisplay — detailedDisplay (§4.9 live path)', () => {
   it('extracts detailedDisplay for a collapsible (read/search/list) tool', () => {

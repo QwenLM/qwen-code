@@ -82,9 +82,17 @@ checks the SHA git reports as dropped — git has no identity-addressed
 drop — and if the slots shifted under it, the other entry is `git stash
 store`d back and ours is reported as kept; should even that store fail,
 the displaced entry's SHA and the command that brings it back are in the
-output. Every notice about a kept entry carries its SHA.
+output. Every notice about a kept entry carries its SHA. A stored-back
+entry lands on top of the stack rather than in its old slot — position is
+not part of any identity here, and the output says what happened — so a
+terminal relying on `git stash pop` order should read `git stash list`
+first.
 
-A plain pull — no option — is byte-for-byte the previous behavior.
+A plain pull — no option — runs the exact git invocation it always has;
+the only response-level change is that its `output` is now path-redacted
+like every other response. The three options are mutually exclusive:
+`stash`+`force` and `fetchOnly` combined with either are refused as 400s
+rather than silently dropping one of them.
 
 ## Non-goals (deliberate)
 

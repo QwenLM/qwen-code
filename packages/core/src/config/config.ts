@@ -1088,6 +1088,8 @@ export interface ConfigParameters {
    * listing the tool in the `coreTools` allowlist also re-enables it.
    */
   lsToolEnabled?: boolean;
+  /** Opt-in flag for the built-in `todo_write` tool. */
+  todoWriteEnabled?: boolean;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
   /** Enable the opt-in ACP/Web Shell Session Workflow gate. */
@@ -2362,6 +2364,7 @@ export class Config {
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
   private readonly cronRecurringMaxAgeDays: number;
   private readonly lsToolEnabled: boolean = false;
+  private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactAutoOpen: boolean = true;
@@ -2681,6 +2684,7 @@ export class Config {
       params.cronRecurringMaxAgeDays,
     );
     this.lsToolEnabled = params.lsToolEnabled ?? false;
+    this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
@@ -2991,7 +2995,9 @@ export class Config {
   }
 
   /**
-   * Must only be called once, throws if called again.
+   * Must only be called once, throws if called again after the first call
+   * settled. Callers arriving while the first call is still in flight join
+   * that flight instead of throwing.
    * @param options Optional initialization options including sendSdkMcpMessage callback
    */
   async initialize(options?: ConfigInitializeOptions): Promise<void> {
@@ -2999,6 +3005,14 @@ export class Config {
       throw new Error('Derived Configs cannot be initialized');
     }
     if (this.initialized) {
+      // Joining the in-flight run matters: callers that swallow the old
+      // throw (the OpenTUI submit path, slash-command loading) proceeded on
+      // a config whose chat had not started yet, and the first prompt died
+      // with "Chat not initialized" (#11002).
+      if (!this.initializationSettled) {
+        await this.initializationPromise;
+        return;
+      }
       throw Error('Config was already initialized');
     }
     if (this.shutdownRequested) {
@@ -4671,11 +4685,12 @@ export class Config {
   /** Serialize the peer inbox address with every other registry patch. */
   async updateSessionRegistryIpcPath(
     ipcPath: string | undefined,
+    ipcToken?: string,
   ): Promise<void> {
     if (!this.sessionRegistryActive) return;
     let applied = false;
     this.queueSessionRegistryWrite(async () => {
-      applied = await patchSessionRecord({ ipcPath });
+      applied = await patchSessionRecord({ ipcPath, ipcToken });
       if (ipcPath === undefined || applied) return;
       // The advertise is one-shot: no later patch re-asserts ipcPath, and
       // every skip is transient (the fd-pressure window on this process's
@@ -4684,7 +4699,7 @@ export class Config {
       // session would keep a live inbox no peer can ever discover.
       for (let attempt = 0; attempt < 2 && !applied; attempt += 1) {
         await delay(250);
-        applied = await patchSessionRecord({ ipcPath });
+        applied = await patchSessionRecord({ ipcPath, ipcToken });
       }
       if (!applied) {
         this.debugLogger.warn(
@@ -5806,7 +5821,17 @@ export class Config {
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
     this.fileDiscoveryService = null;
+    // The pr-bound callback is registered once at session init; relocation
+    // resets the service, so carry it onto the replacement instance — a
+    // later `gh pr create` in this session must still reach the bridge.
+    const sessionPrBoundCallback =
+      this.sessionService?.getSessionPrBoundCallback();
     this.sessionService = undefined;
+    if (sessionPrBoundCallback) {
+      this.getSessionService().setSessionPrBoundCallback(
+        sessionPrBoundCallback,
+      );
+    }
     this.fileHistoryService = undefined;
     this.getFileReadCache().clear();
 
@@ -7681,6 +7706,10 @@ export class Config {
     );
   }
 
+  isTodoWriteEnabled(): boolean {
+    return this.todoWriteEnabled;
+  }
+
   isAgentTeamEnabled(): boolean {
     // Agent team is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
@@ -9546,10 +9575,12 @@ export class Config {
       const { ShellTool } = await import('../tools/shell.js');
       return new ShellTool(this);
     });
-    await registerLazy(ToolNames.TODO_WRITE, async () => {
-      const { TodoWriteTool } = await import('../tools/todoWrite.js');
-      return new TodoWriteTool(this);
-    });
+    if (this.isTodoWriteEnabled()) {
+      await registerLazy(ToolNames.TODO_WRITE, async () => {
+        const { TodoWriteTool } = await import('../tools/todoWrite.js');
+        return new TodoWriteTool(this);
+      });
+    }
     await registerLazy(ToolNames.REPORT_FINDINGS, async () => {
       const { ReportFindingsTool } = await import(
         '../tools/report-findings.js'
