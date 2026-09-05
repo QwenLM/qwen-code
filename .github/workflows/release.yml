@@ -337,15 +337,26 @@ jobs:
   quality_static:
     name: 'Quality Checks (Static)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # Priced from the reserved host, not the suite, the way workspace_tests
-    # below is: the same two steps measured 17s + 141s on a quiet hk4 runner
-    # (run 33741188587) and 928s + 645s eight hours earlier than the run where
-    # they measured 1348s of prettier with eslint still going when the old flat
-    # 30-minute ceiling landed (run 33941624603, then 33963757913). That cut
-    # down attempts 1, 3 and 5 on three different runners with no lint
-    # diagnostic or failing test in any of them, and each cancelled lane failed
-    # the quality aggregate, which opened #11121. The knob is a variable for
-    # the same reason: this number tracks how busy the pool is, not the tree.
+    # Priced from the reserved host, not the suite: the same steps measured
+    # 17s + 141s on a quiet hk4 runner (run 33741188587), and on a contended
+    # one `npm run format` alone took 21 minutes — run 33963757913 lost this
+    # lane at 30m13s in Run Lint and quality_build at 45m13s in Pack Build
+    # Outputs with no failing step, a timeout kill reports as 'cancelled',
+    # and the quality aggregate fails closed on it, which opened #11121. The
+    # worst measured composition is ~40 minutes, so the default moved 30 ->
+    # 60: ~50% headroom over the worst the pool has done to this lane, still
+    # under the 90 ci.yml gives its heavier static lane on the same pool.
+    # Same knob as workspace_tests: an operator can retune it without a PR,
+    # because this number tracks how busy the pool is, not the tree.
+    # The knob is free text under a name ending in MINUTES: a bare positive
+    # integer. `1h` is an expression error — GitHub never creates the job and
+    # the run blames 'a workflow file issue' instead of the variable — while
+    # `70 minutes` silently means 70, because fromJSON keeps the leading
+    # number and drops the rest. The aggregate still fails closed on a lane
+    # that never ran, so a bad value refuses a release rather than shipping
+    # one unvalidated. `0` is not 'no limit' either — the string '0' is
+    # truthy in a GitHub `||`, so the knob wins and GitHub then ignores the
+    # zero bound it was handed.
     timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}"
     needs: 'prepare'
     if: |-
@@ -361,6 +372,17 @@ jobs:
       # Shared ECS runners can retain root-owned files from an earlier
       # containerized job. Restore the reusable workspace before checkout.
       - *restore_release_workspace
+
+      # A budget the run never states is indistinguishable from a budget
+      # nobody set: a misspelled variable name renders '' and this lane
+      # dies at its default again, with nothing in the log to reconcile
+      # the two.
+      - name: 'Report timeout budget'
+        env:
+          BUDGET: "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}"
+          VARIABLE_SET: "${{ vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES != '' }}"
+        run: |-
+          echo "::notice::quality_static timeout budget: ${BUDGET} minutes (QWEN_RELEASE_STATIC_TIMEOUT_MINUTES set=${VARIABLE_SET})"
 
       - &checkout_release_validation
         name: 'Checkout'
@@ -410,7 +432,9 @@ jobs:
   quality_build:
     name: 'Quality Checks (Build)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 45
+    # Same operator knob as quality_static, including the value format and
+    # the failure modes its comment names.
+    timeout-minutes: "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}"
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
@@ -420,6 +444,14 @@ jobs:
 
     steps:
       - *restore_release_workspace
+
+      - name: 'Report timeout budget'
+        env:
+          BUDGET: "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}"
+          VARIABLE_SET: "${{ vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES != '' }}"
+        run: |-
+          echo "::notice::quality_build timeout budget: ${BUDGET} minutes (QWEN_RELEASE_BUILD_TIMEOUT_MINUTES set=${VARIABLE_SET})"
+
       - *checkout_release_validation
       - *setup_release_node_hosted
       - *setup_release_node_self_hosted

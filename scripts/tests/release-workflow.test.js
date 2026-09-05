@@ -639,18 +639,42 @@ describe('release workflow', () => {
     );
   });
 
-  it('lets an operator retune the static lane timeout without a PR', () => {
-    // The static lane's runtime tracks the reserved host the same way a
-    // shard's does: prettier measured 17s on a quiet hk4 runner (run
-    // 33741188587) and 1348s on a contended one, where the old flat 30
-    // beheaded attempts 1, 3 and 5 with eslint still running and no test
-    // failing anywhere (run 33963757913, #11121).
-    expect(workflow).toContain(
-      `timeout-minutes: "\${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}"`,
+  it('lets an operator retune the quality lane timeouts without a PR', () => {
+    // Run 33963757913 lost both lanes at their timeout boundary on a
+    // contended hk4 with no failing step: quality_static at 30m13s in Run
+    // Lint, quality_build at 45m13s in Pack Build Outputs. A timeout kill
+    // reports as 'cancelled', the quality aggregate fails closed on it, and
+    // the release failure was filed against a tree with nothing to fix. Same
+    // remedy as workspace_tests: a runtime knob. The static default moved
+    // 30 -> 60 on the pricing evidence its lane comment records (#11121);
+    // the build default stays a fleet-load call for the operator.
+    expect(releaseYaml.jobs.quality_static['timeout-minutes']).toBe(
+      "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}",
     );
-    expect(releaseYaml.jobs.quality_static['timeout-minutes']).toContain(
-      'fromJSON(',
+    expect(releaseYaml.jobs.quality_build['timeout-minutes']).toBe(
+      "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}",
     );
+    // A budget the run never states is indistinguishable from a budget nobody
+    // set: a misspelled variable name renders '' and the lane dies at its
+    // default again, with nothing in the log to reconcile the two. Each
+    // tunable lane reports the bound it resolved — through the SAME expression
+    // the timeout uses, so the trace cannot drift from what the runner
+    // enforces — and whether the variable reached the job at all.
+    for (const [id, variable] of [
+      ['quality_static', 'QWEN_RELEASE_STATIC_TIMEOUT_MINUTES'],
+      ['quality_build', 'QWEN_RELEASE_BUILD_TIMEOUT_MINUTES'],
+    ]) {
+      const bound = releaseYaml.jobs[id]['timeout-minutes'];
+      const report = releaseYaml.jobs[id].steps.find(
+        (step) => step.env?.BUDGET === bound,
+      );
+      expect(report?.name, id).toBe('Report timeout budget');
+      expect(report.run, id).toContain(`::notice::${id} timeout budget`);
+      expect(report.run, id).toContain(`${variable} set=\${VARIABLE_SET}`);
+      expect(report.env.VARIABLE_SET, id).toBe(
+        `\${{ vars.${variable} != '' }}`,
+      );
+    }
   });
 
   it('names which failure this is, and never changes the exit code', () => {
@@ -1447,11 +1471,12 @@ describe('release workflow', () => {
       ),
     ).toEqual({
       prepare: 30,
-      // The two bounds an operator can retune without a PR; each default is
-      // pinned by its own test above.
+      // The three bounds an operator can retune without a PR; their defaults
+      // are pinned by their own tests above.
       quality_static:
         "${{ fromJSON(vars.QWEN_RELEASE_STATIC_TIMEOUT_MINUTES || '60') }}",
-      quality_build: 45,
+      quality_build:
+        "${{ fromJSON(vars.QWEN_RELEASE_BUILD_TIMEOUT_MINUTES || '45') }}",
       quality_typecheck: 30,
       workspace_tests:
         "${{ fromJSON(vars.QWEN_RELEASE_WORKSPACE_TIMEOUT_MINUTES || '45') }}",
