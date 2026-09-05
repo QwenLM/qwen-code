@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionAgentTaskStatus } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
+import styles from './PlanExecutionView.module.css';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import {
   getActiveAgents,
@@ -14,6 +15,7 @@ import {
   layerPlanTodos,
   nestedAgentToolsForTool,
   nestedTasksForTool,
+  PLAN_STATUS_GLYPH,
   PlanExecutionView,
 } from './PlanExecutionView';
 
@@ -497,7 +499,49 @@ describe('PlanExecutionView', () => {
       );
     });
 
-    expect(container.textContent).toContain('Depends on: research');
+    // The drawn edge is the dependency statement, so the node face does not
+    // restate it. The step-details panel still does, asserted below.
+    const buildNode = container
+      .querySelector('[data-plan-node-id="build"]')
+      ?.closest('article');
+    expect(buildNode?.textContent).not.toContain('Depends on');
+    // Content leads the node; the step number matches the inspector list and
+    // the dependency chips, and the agent count and elapsed carry the "is
+    // this alive" signal onto the face.
+    expect(buildNode?.textContent).toContain('Build');
+    expect(buildNode?.textContent).toContain('1 agent');
+    expect(buildNode?.textContent).toContain('1m 5s');
+    // The singular branch above and the plural branch here are separate
+    // formatter paths; `1 agents` would ship green with only one of them.
+    const researchNode = container
+      .querySelector('[data-plan-node-id="research"]')
+      ?.closest('article');
+    expect(buildNode?.textContent).not.toContain('1 agents');
+    expect(researchNode?.textContent ?? '').not.toContain('1 agents');
+    // Status is colour on the left rule, so it stays in the accessibility
+    // tree as words rather than being dropped. Asserted on a node with no
+    // linked agent, so the word can only come from the node's own status
+    // element and not from an execution row inside it.
+    const verifyNode = container
+      .querySelector('[data-plan-node-id="verify"]')
+      ?.closest('article');
+    // `verify` has no linked tool call in this fixture, so its whole text is
+    // the status word, the number, the content and the status glyph.
+    expect(verifyNode?.textContent).toBe(
+      `Blocked3Verify${PLAN_STATUS_GLYPH.blocked}`,
+    );
+    // The glyph is the non-colour status channel: the left rule that carries
+    // status visually is colour only, so without a shape beside it the graph
+    // would lose status entirely under colour-blindness, high-contrast mode
+    // or a greyscale screenshot. Pinned per status, not just as "a glyph".
+    expect(buildNode?.textContent).toContain(PLAN_STATUS_GLYPH.running);
+    expect(
+      container
+        .querySelector('[data-plan-node-id="research"]')
+        ?.closest('article')?.textContent,
+    ).toContain(PLAN_STATUS_GLYPH.completed);
+    expect(PLAN_STATUS_GLYPH.blocked).not.toBe(PLAN_STATUS_GLYPH.running);
+    expect(PLAN_STATUS_GLYPH.running).not.toBe(PLAN_STATUS_GLYPH.completed);
     expect(container.textContent).toContain('33%');
     expect(container.textContent).toContain('1 / 3');
     // 3, not 2: the strip now derives from the same source as the node
@@ -516,8 +560,26 @@ describe('PlanExecutionView', () => {
     const details = container.querySelector('[data-plan-step-details]');
     expect(details?.textContent).toContain('Step details');
     expect(details?.textContent).toContain('Build');
-    expect(details?.textContent).toContain('Depends on: research');
-    expect(details?.textContent).toContain('Unblocks: verify');
+    // Outside the node's own button, so these references are real controls:
+    // each names the step by number and title, and selects it on click.
+    const upstreamLink = details?.querySelector<HTMLButtonElement>(
+      '[data-plan-dependency="research"]',
+    );
+    expect(upstreamLink?.tagName).toBe('BUTTON');
+    // The host keyboard handlers isolate plan controls through this marker
+    // (ToolApproval/TasksStatusMessage early-return on it), so these buttons
+    // must carry it like every other control in the view.
+    expect(upstreamLink?.hasAttribute('data-plan-interactive')).toBe(true);
+    expect(upstreamLink?.textContent).toBe('1Research');
+    expect(
+      details?.querySelector('[data-plan-dependency="verify"]')?.textContent,
+    ).toBe('3Verify');
+    expect(
+      details
+        ?.querySelector('[data-plan-dependency="verify"]')
+        ?.hasAttribute('data-plan-interactive'),
+    ).toBe(true);
+    expect(details?.textContent).not.toContain('Depends on: research');
     expect(details?.textContent).toContain('Subagents');
     expect(details?.textContent).toContain(
       'Current activity:Inspecting the implementation',
@@ -531,6 +593,183 @@ describe('PlanExecutionView', () => {
     );
     act(() => button?.click());
     expect(onOpen).toHaveBeenCalledWith(agentTool('build'));
+
+    // The downstream block wires its own onClick; witness it before the
+    // upstream click below moves the selection off `build`. Dropping that
+    // handler must turn this red.
+    act(() =>
+      details
+        ?.querySelector<HTMLButtonElement>('[data-plan-dependency="verify"]')
+        ?.click(),
+    );
+    expect(
+      container
+        .querySelector('[data-plan-node-id="verify"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+    // That click selected `verify` and re-rendered the panel around it, so
+    // bring the selection back to `build` before exercising the upstream
+    // reference.
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-plan-node-id="build"]')
+        ?.click();
+    });
+    expect(
+      container
+        .querySelector('[data-plan-node-id="build"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+
+    // Last, because it moves the selection: following an upstream reference
+    // selects the step it names, which is what makes the dependency list the
+    // graph's navigation rather than a run of text.
+    act(() =>
+      details
+        ?.querySelector<HTMLButtonElement>('[data-plan-dependency="research"]')
+        ?.click(),
+    );
+    expect(
+      container
+        .querySelector('[data-plan-node-id="research"]')
+        ?.getAttribute('aria-pressed'),
+    ).toBe('true');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('drops unresolvable dependency ids from the step-details controls', () => {
+    // blockedBy is model-authored todo_write output parsed without
+    // normalization, so it can name a step that does not exist. Such an id
+    // must not render as a control: clicking it would select a ghost id,
+    // empty selectedTodo, and hide the panel mid-navigation.
+    const ghostTodos = todos.map((todo) =>
+      todo.id === 'build'
+        ? { ...todo, blockedBy: ['research', 'ghost-step'] }
+        : todo,
+    );
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView todos={ghostTodos} tools={[]} tasks={[]} />
+        </I18nProvider>,
+      );
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-plan-node-id="build"]')
+        ?.click();
+    });
+    const details = container.querySelector('[data-plan-step-details]');
+    expect(details).not.toBeNull();
+    // The resolvable dependency stays a working control…
+    expect(
+      details?.querySelector('[data-plan-dependency="research"]'),
+    ).not.toBeNull();
+    // …while the ghost id renders none at all.
+    expect(
+      details?.querySelector('[data-plan-dependency="ghost-step"]'),
+    ).toBeNull();
+    expect(details?.textContent).not.toContain('ghost-step');
+    // The ellipsis lives on `.dependencyTitle`; pin the class wiring so a
+    // dropped className cannot re-clip titles while these text assertions
+    // stay green.
+    expect(
+      Array.from(
+        details
+          ?.querySelector('[data-plan-dependency="research"]')
+          ?.querySelectorAll('span') ?? [],
+      ).some((span) => span.classList.contains(styles.dependencyTitle)),
+    ).toBe(true);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('announces attention beside the status word, not instead of it', () => {
+    // A failed descendant puts the node into attention while its own status
+    // stays running. The sr-only span must keep announcing the status word
+    // too — attention is additive for assistive tech, never a replacement.
+    const runningRoot = task('running');
+    const failedChild = task('failed', {
+      id: 'agent-child',
+      toolUseId: 'call-child',
+      parentAgentId: runningRoot.id,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={todos}
+            tools={[agentTool('build')]}
+            tasks={[runningRoot, failedChild]}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buildNode = container
+      .querySelector('[data-plan-node-id="build"]')
+      ?.closest('article');
+    expect(buildNode?.textContent).toContain('Running');
+    expect(buildNode?.textContent).toContain('Needs attention');
+    expect(
+      buildNode
+        ?.querySelector(`.${styles.nodeStatusText}`)
+        ?.textContent?.trim(),
+    ).toBe('Running, Needs attention');
+    // The attribute is the hook the `.node[data-attention='true']` colour
+    // rule selects on; dropping it keeps the word but silently loses the
+    // attention tone the stylesheet derives from this state.
+    expect(buildNode?.getAttribute('data-attention')).toBe('true');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('pluralizes the agent count when two agents share one node', () => {
+    // Every other fixture links a single agent per node, so the EN
+    // template's plural branch ships unobserved: a template that always
+    // emits `${count} agent` renders "2 agent" and nothing turns red.
+    // Link two root agents to one step and pin the plural rendering.
+    const secondBuildTool: ACPToolCall = {
+      ...agentTool('build'),
+      callId: 'call-build-2',
+      title: 'Agent build 2',
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={todos}
+            tools={[agentTool('build'), secondBuildTool]}
+            tasks={[
+              task('running'),
+              task('running', {
+                id: 'agent-second',
+                label: 'Second agent',
+                toolUseId: 'call-build-2',
+              }),
+            ]}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buildNode = container
+      .querySelector('[data-plan-node-id="build"]')
+      ?.closest('article');
+    expect(buildNode?.textContent).toContain('2 agents');
 
     act(() => root.unmount());
     container.remove();
@@ -794,7 +1033,11 @@ describe('PlanExecutionView', () => {
         }
         if (this.tagName === 'ARTICLE') {
           const [left, top] =
-            positions[this.querySelector('span')!.textContent!]!;
+            positions[
+              this.querySelector('[data-plan-node-id]')!.getAttribute(
+                'data-plan-node-id',
+              )!
+            ]!;
           return scaledRect(100 + left * 0.72, 50 + top * 0.72, 144, 57.6);
         }
         return scaledRect(0, 0, 0, 0);
@@ -877,7 +1120,11 @@ describe('PlanExecutionView', () => {
         }
         if (this.tagName === 'ARTICLE') {
           const [left, top] =
-            positions[this.querySelector('span')!.textContent!]!;
+            positions[
+              this.querySelector('[data-plan-node-id]')!.getAttribute(
+                'data-plan-node-id',
+              )!
+            ]!;
           return rect(100 + left, 50 + top, 200, 80);
         }
         return rect(0, 0, 0, 0);
@@ -914,6 +1161,14 @@ describe('PlanExecutionView', () => {
       (match) => Number(match[1]),
     );
     expect(Math.max(...routedYs)).toBeGreaterThan(200);
+    // ...and arrives at the target's own row, not merely at its column. The
+    // `release` node sits at y 10 with height 80 inside a viewport whose
+    // origin is (100, 50), so its vertical centre is 50. Without this, a tail
+    // drawn from the return lane's `routeY` instead of the edge's `endY`
+    // lands ~170px below the node while the column and clearance assertions
+    // above both still pass.
+    expect(spanningEdge).toMatch(/ 50 H 876$/);
+    expect(routedYs).toContain(50);
 
     act(() => root.unmount());
     container.remove();
@@ -1012,7 +1267,11 @@ describe('PlanExecutionView', () => {
         }
         if (this.tagName === 'ARTICLE') {
           const [left, top] =
-            positions[this.querySelector('span')!.textContent!]!;
+            positions[
+              this.querySelector('[data-plan-node-id]')!.getAttribute(
+                'data-plan-node-id',
+              )!
+            ]!;
           return rect(100 + left, 50 + top, 200, 80);
         }
         return rect(0, 0, 0, 0);
@@ -1284,6 +1543,12 @@ describe('PlanExecutionView', () => {
               ),
             }),
       }),
+    ).map((todo) =>
+      // blockedBy is model-authored and can repeat an id; the chip row must
+      // dedup it like the topology builder does.
+      todo.id === 'dense-1'
+        ? { ...todo, blockedBy: ['dense-0', 'dense-0'] }
+        : todo,
     );
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -1298,13 +1563,30 @@ describe('PlanExecutionView', () => {
 
     expect(container.querySelector('[data-plan-workflow]')).not.toBeNull();
     expect(container.querySelectorAll('[data-plan-edge]')).toHaveLength(0);
-    expect(
-      container.querySelectorAll('[data-plan-input], [data-plan-output]'),
-    ).toHaveLength(0);
+    expect(container.querySelectorAll('[data-plan-output]')).toHaveLength(0);
     expect(container.textContent).toContain('Dense 32');
     // Lines disappearing with no explanation reads as a broken render, so the
     // skip is stated rather than silent.
     expect(container.textContent).toContain('Too many dependencies to draw');
+    // With no edges drawn, the node's dependency row is the only statement of
+    // the dependency, so it must survive here even though a node whose edges
+    // ARE drawn drops it. Each reference reads as the step it names — number
+    // and title, matching the inspector — not as a raw id.
+    const denseNode = container
+      .querySelector('[data-plan-node-id="dense-1"]')
+      ?.closest('article');
+    expect(denseNode?.textContent).toContain('Depends on');
+    expect(denseNode?.textContent).toContain('Dense 0');
+    // The repeated id renders one chip, not two.
+    expect((denseNode?.textContent ?? '').split('Dense 0').length - 1).toBe(1);
+    // The truncation rule targets `.dependencyTitle`; pin the class wiring
+    // so a dropped className cannot re-clip titles while text assertions
+    // stay green.
+    expect(
+      Array.from(denseNode?.querySelectorAll('span') ?? []).some((span) =>
+        span.classList.contains(styles.dependencyTitle),
+      ),
+    ).toBe(true);
 
     act(() => root.unmount());
     container.remove();
