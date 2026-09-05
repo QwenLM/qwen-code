@@ -54,7 +54,7 @@ export class BrowserSdkContext {
     const image = await this.call<ScreenshotEnvelope>(method, args);
     return {
       bytes: Uint8Array.from(Buffer.from(image.base64, 'base64')),
-      mimeType: 'image/png',
+      mimeType: image.mimeType,
       metadata: {
         width: image.width,
         height: image.height,

@@ -301,7 +301,7 @@ export interface TabScreenshotOptions {
 
 export interface BrowserScreenshot {
   readonly bytes: Uint8Array;
-  readonly mimeType: 'image/png';
+  readonly mimeType: 'image/jpeg';
   readonly metadata: {
     readonly width: number;
     readonly height: number;

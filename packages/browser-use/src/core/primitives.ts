@@ -40,6 +40,7 @@ export interface Box {
 
 export interface ScreenshotEnvelope {
   base64: string;
+  mimeType: 'image/jpeg';
   width: number;
   height: number;
   viewport: {

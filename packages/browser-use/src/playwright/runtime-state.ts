@@ -23,14 +23,6 @@ export interface DiscoveredTab extends BrowserUserTabInfo {
   providerTabId: number;
 }
 
-export interface ScreenshotMetrics {
-  width: number;
-  height: number;
-  contentWidth: number;
-  contentHeight: number;
-  devicePixelRatio: number;
-}
-
 export interface TabState {
   id: string;
   providerTabId: number;

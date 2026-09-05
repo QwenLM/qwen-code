@@ -721,66 +721,32 @@ describe('PlaywrightRuntime command contracts', () => {
 
     const screenshot = (await fixture.runtime.dispatch('tab.screenshot', {
       tabId: tab.id,
+      clip: { x: 0, y: 0, width: 2, height: 3 },
     })) as ScreenshotEnvelope;
 
-    expect(fixture.page.screenshot).toHaveBeenCalledWith({
-      type: 'png',
-      scale: 'css',
-    });
-    expect(Buffer.from(screenshot.base64, 'base64')).toEqual(png(2, 3));
+    expect(fixture.page.screenshot).not.toHaveBeenCalled();
+    expect(fixture.request).toHaveBeenCalledWith(
+      'cdp.send',
+      {
+        tabId: 17,
+        method: 'Page.captureScreenshot',
+        params: {
+          format: 'jpeg',
+          quality: 80,
+          captureBeyondViewport: true,
+          clip: { x: 0, y: 0, width: 2, height: 3, scale: 0.5 },
+        },
+      },
+      5_000,
+    );
+    expect(Buffer.from(screenshot.base64, 'base64')).toEqual(jpeg(2, 3));
     expect(screenshot).toMatchObject({
+      mimeType: 'image/jpeg',
       width: 2,
       height: 3,
       viewport: { width: 800, height: 600 },
       devicePixelRatio: 2,
       coordinateSpace: 'css-pixels',
-    });
-  });
-
-  it('keeps screenshot clips in viewport coordinates after scrolling', async () => {
-    const fixture = await runtimeFixture();
-    const tab = await createTab(fixture.runtime);
-    fixture.page.evaluate.mockResolvedValueOnce({
-      width: 800,
-      height: 600,
-      contentWidth: 1_600,
-      contentHeight: 2_400,
-      devicePixelRatio: 2,
-      scrollX: 120,
-      scrollY: 700,
-    });
-    fixture.page.screenshot.mockResolvedValueOnce(png(200, 100));
-
-    await fixture.runtime.dispatch('tab.screenshot', {
-      tabId: tab.id,
-      clip: { x: 10, y: 20, width: 200, height: 100 },
-    });
-
-    expect(fixture.page.screenshot).toHaveBeenCalledWith({
-      type: 'png',
-      scale: 'css',
-      clip: { x: 10, y: 20, width: 200, height: 100 },
-    });
-  });
-
-  it('captures a large viewport without changing its coordinate scale', async () => {
-    const fixture = await runtimeFixture();
-    const tab = await createTab(fixture.runtime);
-    fixture.page.evaluate.mockResolvedValueOnce({
-      width: 2_560,
-      height: 1_440,
-      contentWidth: 2_560,
-      contentHeight: 1_440,
-      devicePixelRatio: 2,
-    });
-    fixture.page.screenshot.mockResolvedValueOnce(png(2_560, 1_440));
-
-    await expect(
-      fixture.runtime.dispatch('tab.screenshot', { tabId: tab.id }),
-    ).resolves.toBeDefined();
-    expect(fixture.page.screenshot).toHaveBeenCalledWith({
-      type: 'png',
-      scale: 'css',
     });
   });
 
@@ -1003,6 +969,20 @@ async function runtimeFixture(
         };
       }
       if (method === 'tabs.queryDerived') return [];
+      if (method === 'cdp.send' && params.method === 'Page.getLayoutMetrics')
+        return {
+          cssVisualViewport: {
+            clientWidth: 800,
+            clientHeight: 600,
+            pageX: 0,
+            pageY: 0,
+          },
+          cssContentSize: { x: 0, y: 0, width: 800, height: 600 },
+        };
+      if (method === 'cdp.send' && params.method === 'Runtime.evaluate')
+        return { result: { value: 2 } };
+      if (method === 'cdp.send' && params.method === 'Page.captureScreenshot')
+        return { data: jpeg(2, 3).toString('base64') };
       if (method === 'cdp.send' && params.method === 'Target.getTargetInfo') {
         return {
           targetInfo: {
@@ -1153,7 +1133,9 @@ function fakePage(
       contentHeight: 600,
       devicePixelRatio: 2,
     })),
-    screenshot: vi.fn(async () => png(2, 3)),
+    screenshot: vi.fn(async () => {
+      throw new Error('Screenshots must not use Playwright capture');
+    }),
     ariaSnapshot: vi.fn(async () => '- button "Save" [ref=e1]'),
     waitForURL: vi.fn(async () => undefined),
     waitForNavigation: vi.fn(async () => null),
@@ -1187,10 +1169,11 @@ function fakePage(
   };
 }
 
-function png(width: number, height: number): Buffer {
-  const buffer = Buffer.alloc(24);
-  Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(buffer);
-  buffer.writeUInt32BE(width, 16);
-  buffer.writeUInt32BE(height, 20);
+function jpeg(width: number, height: number): Buffer {
+  const buffer = Buffer.from([
+    0xff, 0xd8, 0xff, 0xc0, 0, 11, 8, 0, 0, 0, 0, 1, 1, 0x11, 0, 0xff, 0xd9,
+  ]);
+  buffer.writeUInt16BE(width, 9);
+  buffer.writeUInt16BE(height, 7);
   return buffer;
 }

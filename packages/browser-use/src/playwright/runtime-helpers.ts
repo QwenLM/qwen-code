@@ -222,16 +222,35 @@ export function isClip(value: unknown): value is {
   );
 }
 
-export function pngDimensions(buffer: Buffer): {
+export function jpegDimensions(buffer: Buffer): {
   width: number;
   height: number;
 } {
-  if (buffer.length < 24 || buffer.toString('ascii', 1, 4) !== 'PNG')
-    throw new BrowserRuntimeError(
-      'OPERATION_FAILED',
-      'Playwright returned an invalid PNG screenshot',
-    );
-  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  if (buffer.length >= 4 && buffer.readUInt16BE(0) === 0xffd8) {
+    let offset = 2;
+    while (offset + 4 <= buffer.length && buffer[offset] === 0xff) {
+      const marker = buffer[offset + 1];
+      if (marker === 0xff) {
+        offset++;
+        continue;
+      }
+      if (marker === 0xda || marker === 0xd9) break;
+      const length = buffer.readUInt16BE(offset + 2);
+      if (length < 2 || offset + 2 + length > buffer.length) break;
+      if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+        if (length < 8) break;
+        return {
+          width: buffer.readUInt16BE(offset + 7),
+          height: buffer.readUInt16BE(offset + 5),
+        };
+      }
+      offset += 2 + length;
+    }
+  }
+  throw new BrowserRuntimeError(
+    'OPERATION_FAILED',
+    'Chrome returned an invalid JPEG screenshot',
+  );
 }
 
 export function staleTabError(): BrowserRuntimeError {

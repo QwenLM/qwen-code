@@ -210,7 +210,7 @@ export class PlaywrightRuntime {
         await this.session.closeTab(this.tab(args));
         return null;
       case 'tab.screenshot':
-        return await captureTabScreenshot(this.tab(args), args);
+        return await captureTabScreenshot(this.tab(args), args, this.bridge);
       case 'tab.getJsDialog': {
         const dialog = this.tab(args).dialog;
         return dialog === undefined

@@ -68,6 +68,30 @@ class FakeBridge implements ChromeBridge {
 }
 
 describe('QwenPlaywrightTransport', () => {
+  it('leaves screenshot frames to the runtime without Playwright acknowledgements', async () => {
+    const bridge = new FakeBridge();
+    const transport = new QwenPlaywrightTransport(bridge);
+    await transport.registerTab(7);
+    const onmessage = vi.fn();
+    transport.onmessage = onmessage;
+    for (const method of [
+      'Page.screencastFrame',
+      'Page.screencastVisibilityChanged',
+    ]) {
+      bridge.emit({ type: 'event', tabId: 7, method, params: {} });
+    }
+    expect(onmessage).not.toHaveBeenCalled();
+    bridge.emit({
+      type: 'event',
+      tabId: 7,
+      method: 'Page.loadEventFired',
+      params: { timestamp: 1 },
+    });
+    expect(onmessage).toHaveBeenCalledWith(
+      expect.objectContaining({ method: 'Page.loadEventFired' }),
+    );
+    transport.close();
+  });
   it('adapts a Node REPL VM transport into the host realm Playwright expects', () => {
     const foreignTransport = runInNewContext(`({
       open() {},

@@ -34,7 +34,8 @@ const backend = vi.hoisted(() => ({
     if (method.startsWith('dom_cua.') || method.startsWith('cua.')) return null;
     if (method === 'tab.screenshot') {
       return {
-        base64: 'iVBORw0KGgo=',
+        base64: '/9j/2Q==',
+        mimeType: 'image/jpeg',
         width: 1280,
         height: 720,
         viewport: { width: 1280, height: 720 },
@@ -284,12 +285,10 @@ describe('Browser SDK in the existing Node REPL', () => {
     const screenshot = await tab.screenshot();
 
     expect(screenshot.bytes).toBeInstanceOf(Uint8Array);
-    expect(Buffer.from(screenshot.bytes).toString('base64')).toBe(
-      'iVBORw0KGgo=',
-    );
+    expect(Buffer.from(screenshot.bytes).toString('base64')).toBe('/9j/2Q==');
     expect(screenshot).toEqual({
       bytes: screenshot.bytes,
-      mimeType: 'image/png',
+      mimeType: 'image/jpeg',
       metadata: {
         width: 1280,
         height: 720,

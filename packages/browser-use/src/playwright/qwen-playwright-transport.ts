@@ -33,6 +33,13 @@ export class QwenPlaywrightTransport implements ConnectOverCDPTransport {
     this.model = new BrowserModel(bridge);
     this.model.connect((message) => this.emit(message));
     this.removeEventListener = bridge.onEvent((event) => {
+      // The screenshot runtime owns these frames. Playwright otherwise ACKs
+      // them even when no Playwright video recording is active.
+      if (
+        event.method === 'Page.screencastFrame' ||
+        event.method === 'Page.screencastVisibilityChanged'
+      )
+        return;
       void this.model.onBridgeEvent(event).catch((error: unknown) => {
         this.closeWithReason(
           error instanceof Error

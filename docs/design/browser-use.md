@@ -27,7 +27,7 @@ flowchart TB
     Playwright --> PWTransport["QwenPlaywrightTransport"]
     PWTransport --> ExtensionTransport["ChromeExtensionTransport"]
 
-    Runtime -.->|"Qwen control"| ExtensionTransport
+    Runtime -.->|"Qwen control and screenshots"| ExtensionTransport
   end
 
   ExtensionTransport -->|"local socket"| Host["Native Host"]
@@ -35,9 +35,9 @@ flowchart TB
   Extension -->|"CDP and extension APIs"| Chrome["User's existing Chrome<br/>tabs, profile, signed-in state"]
 ```
 
-Standard browser actions pass through Playwright. Qwen-specific browser
-control operations share the same Native Messaging path but bypass
-Playwright's CDP command model.
+Standard browser actions pass through Playwright. Browser control operations
+and screenshot acquisition share the same Native Messaging path but bypass
+Playwright's browser-level CDP adapter.
 
 `playwright-core@1.62.1` accepts a public custom CDP transport through
 `chromium.connectOverCDP(transport)`. Qwen therefore keeps Native Messaging and
@@ -49,8 +49,8 @@ does not add a local WebSocket server.
 | -------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | Node REPL                  | Generic process isolation, persistent bindings, cancellation, and output budgets. It contains no browser logic. |
 | Browser SDK                | Model-facing task API. Its private adapter enforces the JSON boundary without exposing transport details.       |
-| Browser runtime            | Command validation, Qwen tab lifecycle, output budgets, and diagnostics.                                        |
-| `playwright-core`          | Locators, AI accessibility snapshots and refs, frames, navigation waits, actions, screenshots, and events.      |
+| Browser runtime            | Command validation, Qwen tab lifecycle, screenshot acquisition, output budgets, and diagnostics.                |
+| `playwright-core`          | Locators, AI accessibility snapshots and refs, frames, navigation waits, actions, and events.                   |
 | `QwenPlaywrightTransport`  | Adapts Playwright's browser-level CDP connection to Qwen tab and child-session identifiers.                     |
 | `ChromeExtensionTransport` | Owns the local socket and directly exchanges requests and events with the Native Host.                          |
 | Native Host                | Minimal framed relay between the local socket and Chrome Native Messaging.                                      |
@@ -66,8 +66,9 @@ extension.
 
 The SDK and browser runtime share one internal command contract. SDK objects
 translate model calls into validated commands, and the runtime executes those
-commands against a Playwright `Page`. Playwright objects, CDP sessions, and
-transport details are not exposed through the SDK.
+commands against a Playwright `Page` or the screenshot/control adapters.
+Playwright objects, CDP sessions, and transport details are not exposed through
+the SDK.
 
 Every SDK object is bound to the runtime session that created it. Closing that
 runtime marks its Agent, Browser, Tab, and Locator objects stale; initializing a
@@ -106,12 +107,24 @@ and the JSON transport envelope remain runtime implementation details rather
 than model-facing options.
 
 Viewport screenshots return an image object accepted by `nodeRepl.emitImage()`.
-Its metadata carries the original PNG dimensions, viewport, device pixel ratio,
+Its metadata carries the original JPEG dimensions, viewport, device pixel ratio,
 and CSS-pixel coordinate space so visual coordinates remain usable when a model
 client resizes the preview. Viewport screenshots are limited by their encoded
 byte size rather than rejected from viewport dimensions alone. Explicit clips
 and full-page captures retain a pixel budget because their dimensions are
 caller-controlled or potentially unbounded.
+
+Screenshot acquisition follows the Codex Browser Use strategy independently of
+Playwright's screenshot preparation. A short, bounded rendering synchronization
+lets pending paint catch up before capture. Normal viewport capture requests a
+fresh CDP screencast frame with a two-second frame deadline, then falls back to
+`Page.captureScreenshot` with a five-second command timeout. Clips and full-page
+captures use the latter directly. Frames predating the request are discarded;
+captures on each tab are serialized and their event listeners and screencasts
+are cleaned up. The runtime owns these events so Playwright does not acknowledge
+the same frames. Images use JPEG quality 80, retain CSS-pixel coordinates, and
+never require activating the tab or bringing Chrome to the foreground. An
+individual screenshot timeout does not detach the browser session.
 
 Locator `downloadMedia()` triggers a media or file-link download, while
 `waitForEvent("download")` provides synchronization for downloads triggered
