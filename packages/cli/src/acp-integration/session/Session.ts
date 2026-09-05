@@ -12613,16 +12613,11 @@ export class Session implements SessionContext {
                 if (
                   isTrustedAskUserQuestionTool &&
                   isApproveOutcome(outcome) &&
-                  confirmationDetails.type === 'ask_user_question' &&
-                  output.answers !== undefined &&
-                  output.answers !== null &&
-                  typeof output.answers === 'object' &&
-                  !Array.isArray(output.answers) &&
-                  Object.keys(output.answers).length > 0
+                  confirmationDetails.type === 'ask_user_question'
                 ) {
                   this.config
                     .getLlmClient?.()
-                    ?.recordTrustedUserAnswers?.(
+                    ?.recordTrustedUserAnswers(
                       callId,
                       confirmationDetails.questions,
                       output.answers,

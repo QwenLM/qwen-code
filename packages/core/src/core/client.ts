@@ -2279,9 +2279,6 @@ export class LlmClient {
             history,
             this.config.getChatRecordingService(),
             uiTelemetryService,
-            () => {
-              if (this.chat === chat) this.trustedUserAnswers.clear();
-            },
           ),
       );
       chat.enableManualPlanExitNotices();

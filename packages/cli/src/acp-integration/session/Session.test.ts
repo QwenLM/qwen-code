@@ -30319,15 +30319,6 @@ describe('Session', () => {
         },
       ],
       [
-        'missing answers',
-        async () => {
-          vi.mocked(mockClient.requestPermission).mockResolvedValue({
-            outcome: { outcome: 'selected', optionId: 'proceed_once' },
-          });
-          await runAskUserQuestion();
-        },
-      ],
-      [
         'aborted response',
         async () => {
           const controller = new AbortController();

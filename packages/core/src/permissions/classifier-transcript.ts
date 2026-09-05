@@ -177,19 +177,8 @@ export function buildClassifierContents(
           });
         }
       }
-    } else if (msg.role === 'function') {
-      for (const part of msg.parts ?? []) {
-        const trustedAnswer = findTrustedAnswerForResponse(
-          part as Part,
-          trustedAnswersByCallId,
-          pendingAskUserQuestionCallIds,
-          projectedAnswerCallIds,
-        );
-        if (trustedAnswer) {
-          transcript.push(formatTrustedUserAnswerContent(trustedAnswer));
-        }
-      }
     }
+    // role === 'function' (tool results) and any other roles → fully stripped.
   }
 
   applyHistoricalActionsBudget(transcript, historical);
@@ -217,10 +206,15 @@ function findTrustedAnswerForResponse(
   pendingAskUserQuestionCallIds: ReadonlySet<string>,
   projectedAnswerCallIds: Set<string>,
 ): TrustedUserAnswerRecord | undefined {
-  const callId = part.functionResponse?.id;
+  const functionResponse = part.functionResponse;
+  const callId = functionResponse?.id;
   if (
     typeof callId !== 'string' ||
-    part.functionResponse?.name !== ToolNames.ASK_USER_QUESTION ||
+    functionResponse?.name !== ToolNames.ASK_USER_QUESTION ||
+    // Cancellation and orphan repair both synthesize a response under the
+    // original (id, name) with `error` set, so the pair anchor alone would
+    // project an answer that never reached execution.
+    typeof functionResponse?.response?.['error'] === 'string' ||
     !pendingAskUserQuestionCallIds.has(callId) ||
     projectedAnswerCallIds.has(callId)
   ) {
@@ -243,7 +237,6 @@ function formatTrustedUserAnswerContent(
     : {
         host_confirmed_user_answers: record.answers.map((answer) => ({
           assistant_question: answer.question,
-          selected_option_context: answer.selectedOptions,
           user_answer: answer.answer,
         })),
       };

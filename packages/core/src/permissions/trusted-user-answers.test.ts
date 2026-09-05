@@ -7,14 +7,20 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_TRUSTED_USER_ANSWER_CALLS,
+  MAX_TRUSTED_USER_ANSWER_QUESTION_CHARS,
   MAX_TRUSTED_USER_ANSWERS_TOTAL_CHARS,
   TrustedUserAnswers,
   normalizeTrustedUserAnswers,
 } from './trusted-user-answers.js';
 
+/**
+ * Shaped like the built-in tool's `Question`; the store reads only `question`,
+ * so both hosts can forward their confirmation details unchanged.
+ */
 const questions = [
   {
     question: 'Create the marker?',
+    header: 'Marker',
     options: [
       { label: 'Yes', description: 'Only create /tmp/marker.' },
       { label: 'No', description: 'Do not create it.' },
@@ -23,17 +29,13 @@ const questions = [
 ];
 
 describe('normalizeTrustedUserAnswers', () => {
-  it('keeps exact answers and selected option context', () => {
+  it('keeps the exact answer without the model-authored option context', () => {
     expect(normalizeTrustedUserAnswers(questions, { '0': 'No' })).toEqual([
-      {
-        question: 'Create the marker?',
-        selectedOptions: [{ label: 'No', description: 'Do not create it.' }],
-        answer: 'No',
-      },
+      { question: 'Create the marker?', answer: 'No' },
     ]);
   });
 
-  it('keeps non-empty custom input without guessing an option', () => {
+  it('keeps non-empty custom input', () => {
     expect(
       normalizeTrustedUserAnswers(questions, {
         '0': 'Yes, but only after tests pass',
@@ -41,10 +43,20 @@ describe('normalizeTrustedUserAnswers', () => {
     ).toEqual([
       {
         question: 'Create the marker?',
-        selectedOptions: [],
         answer: 'Yes, but only after tests pass',
       },
     ]);
+  });
+
+  it('caps the model-authored question text', () => {
+    const long = 'q'.repeat(MAX_TRUSTED_USER_ANSWER_QUESTION_CHARS + 50);
+    const [answer] = normalizeTrustedUserAnswers([{ question: long }], {
+      '0': 'Yes',
+    });
+    expect(answer!.question).toBe(
+      long.slice(0, MAX_TRUSTED_USER_ANSWER_QUESTION_CHARS) + '…',
+    );
+    expect(answer!.answer).toBe('Yes');
   });
 
   it('rejects malformed, out-of-range, empty, and non-string answers', () => {
@@ -59,41 +71,13 @@ describe('normalizeTrustedUserAnswers', () => {
     ).toEqual([]);
   });
 
-  it('does not guess selected options from ambiguous multi-select text', () => {
-    expect(
-      normalizeTrustedUserAnswers([{ ...questions[0], multiSelect: true }], {
-        '0': 'Yes, No',
-      }),
-    ).toEqual([
-      {
-        question: 'Create the marker?',
-        selectedOptions: [],
-        answer: 'Yes, No',
-      },
-    ]);
-  });
-
-  it('does not attach context for an ambiguous duplicate option label', () => {
-    expect(
-      normalizeTrustedUserAnswers(
-        [
-          {
-            question: 'Which target?',
-            options: [
-              { label: 'Same', description: 'First target.' },
-              { label: 'Same', description: 'Second target.' },
-            ],
-          },
-        ],
-        { '0': 'Same' },
-      ),
-    ).toEqual([
-      {
-        question: 'Which target?',
-        selectedOptions: [],
-        answer: 'Same',
-      },
-    ]);
+  it('rejects a missing, null, array, or empty payload', () => {
+    expect(normalizeTrustedUserAnswers(questions, undefined)).toEqual([]);
+    expect(normalizeTrustedUserAnswers(questions, null)).toEqual([]);
+    expect(normalizeTrustedUserAnswers(questions, [{ '0': 'Yes' }])).toEqual(
+      [],
+    );
+    expect(normalizeTrustedUserAnswers(questions, {})).toEqual([]);
   });
 });
 
@@ -105,6 +89,17 @@ describe('TrustedUserAnswers', () => {
     expect(first.record('', questions, { '0': 'Yes' })).toBe(false);
     expect(first.record('call-1', questions, { '0': 'Yes' })).toBe(true);
     expect(second.snapshot()).toEqual([]);
+  });
+
+  it('rejects a payload the normalizer drops', () => {
+    const store = new TrustedUserAnswers();
+
+    expect(store.record('call-1', questions, undefined)).toBe(false);
+    expect(store.record('call-1', questions, [{ '0': 'Yes' }])).toBe(false);
+    expect(store.record('call-1', questions, {})).toBe(false);
+    expect(store.record('call-1', questions, { '9': 'Yes' })).toBe(false);
+
+    expect(store.snapshot()).toEqual([]);
   });
 
   it('does not overwrite an accepted call and snapshots by value', () => {
@@ -120,15 +115,7 @@ describe('TrustedUserAnswers', () => {
     expect(snapshot).toEqual([
       {
         callId: 'call-1',
-        answers: [
-          {
-            question: 'Create the marker?',
-            selectedOptions: [
-              { label: 'Yes', description: 'Only create /tmp/marker.' },
-            ],
-            answer: 'Yes',
-          },
-        ],
+        answers: [{ question: 'Create the marker?', answer: 'Yes' }],
         omitted: false,
       },
     ]);

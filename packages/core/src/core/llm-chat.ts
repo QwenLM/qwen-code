@@ -2047,7 +2047,6 @@ export class LlmChat {
    * @param telemetryService - Optional UI telemetry service. When provided,
    *   prompt token counts are reported on each API response. Pass `undefined`
    *   for sub-agent chats to avoid overwriting the main agent's context usage.
-   * @param onHistoryReplaced - Optional main-session lifecycle callback.
    */
   constructor(
     private readonly config: Config,
@@ -2055,7 +2054,6 @@ export class LlmChat {
     private history: Content[] = [],
     private readonly chatRecordingService?: ChatRecordingService,
     private readonly telemetryService?: UiTelemetryService,
-    private readonly onHistoryReplaced?: () => void,
   ) {
     validateHistory(history);
     this.redactApprovedPlansFromLoadedHistory();
@@ -5041,7 +5039,6 @@ export class LlmChat {
 
   setHistory(history: Content[]): void {
     this.history = history;
-    this.onHistoryReplaced?.();
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
     // marker MUST be cleared — otherwise `popPendingPartialAssistantTurn` could find

@@ -139,10 +139,10 @@ function createMockConfig(
     fileReadCache?: Partial<FileReadCache>;
     llmClient?: {
       isInitialized?: () => boolean;
-      setHistory?: (h: unknown[]) => void;
       getChat?: () => {
         getHistoryShallow?: () => unknown[];
         getHistory?: () => unknown[];
+        setHistory?: (h: unknown[]) => void;
       };
     } | null;
     clearContextOnIdle?: {
@@ -156,10 +156,10 @@ function createMockConfig(
     overrides.llmClient === undefined
       ? {
           isInitialized: () => true,
-          setHistory: vi.fn(),
           getChat: () => ({
             getHistoryShallow: () => [],
             getHistory: () => [],
+            setHistory: vi.fn(),
           }),
         }
       : overrides.llmClient;
@@ -1250,10 +1250,10 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           llmClient: {
             isInitialized: () => false,
-            setHistory,
             getChat: () => ({
               getHistoryShallow: () => [{ role: 'user' }],
               getHistory: () => [{ role: 'user' }],
+              setHistory,
             }),
           },
         }),
@@ -1274,10 +1274,10 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           llmClient: {
             isInitialized: () => true,
-            setHistory,
             getChat: () => ({
               getHistoryShallow: () => originalHistory,
               getHistory: () => [...originalHistory],
+              setHistory,
             }),
           },
         }),
@@ -1298,10 +1298,10 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           llmClient: {
             isInitialized: () => true,
-            setHistory,
             getChat: () => ({
               getHistoryShallow: () => [],
               getHistory: () => [],
+              setHistory,
             }),
           },
         }),
@@ -1394,9 +1394,9 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           llmClient: {
             isInitialized: () => true,
-            setHistory,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,
+              setHistory,
             }),
           },
           fileReadCache: {
@@ -1471,9 +1471,9 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           llmClient: {
             isInitialized: () => true,
-            setHistory,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,
+              setHistory,
             }),
           },
           fileReadCache: {
@@ -1531,9 +1531,9 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           llmClient: {
             isInitialized: () => true,
-            setHistory,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,
+              setHistory,
             }),
           },
           fileReadCache: {
@@ -1591,9 +1591,9 @@ describe('MemoryPressureMonitor', () => {
         createMockConfig({
           llmClient: {
             isInitialized: () => true,
-            setHistory,
             getChat: () => ({
               getHistoryShallow: () => toolHistory,
+              setHistory,
             }),
           },
           fileReadCache: {

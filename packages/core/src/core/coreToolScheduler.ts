@@ -4138,16 +4138,11 @@ export class CoreToolScheduler {
       if (
         isApproveOutcome(outcome) &&
         waitingToolCall.tool instanceof AskUserQuestionTool &&
-        waitingToolCall.confirmationDetails.type === 'ask_user_question' &&
-        payload?.answers !== undefined &&
-        payload.answers !== null &&
-        typeof payload.answers === 'object' &&
-        !Array.isArray(payload.answers) &&
-        Object.keys(payload.answers).length > 0
+        waitingToolCall.confirmationDetails.type === 'ask_user_question'
       ) {
         this.config
           .getLlmClient?.()
-          ?.recordTrustedUserAnswers?.(
+          ?.recordTrustedUserAnswers(
             callId,
             waitingToolCall.confirmationDetails.questions,
             payload?.answers,

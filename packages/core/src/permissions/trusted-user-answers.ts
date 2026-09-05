@@ -5,24 +5,21 @@
  */
 
 export const MAX_TRUSTED_USER_ANSWER_CALLS = 8;
-export const MAX_TRUSTED_USER_ANSWER_RECORD_CHARS = 8_000;
 export const MAX_TRUSTED_USER_ANSWERS_TOTAL_CHARS = 32_000;
+/**
+ * Cap on the projected question text. The question is model-authored, so it
+ * is bounded like a classifier user hint (`MAX_USER_HINT_LENGTH`) rather than
+ * like the user's own answer.
+ */
+export const MAX_TRUSTED_USER_ANSWER_QUESTION_CHARS = 200;
+const MAX_TRUSTED_USER_ANSWER_RECORD_CHARS = 8_000;
 
 export interface TrustedUserAnswerQuestion {
   readonly question: string;
-  readonly options: ReadonlyArray<{
-    readonly label: string;
-    readonly description: string;
-  }>;
-  readonly multiSelect?: boolean;
 }
 
 export interface TrustedUserAnswer {
   readonly question: string;
-  readonly selectedOptions: ReadonlyArray<{
-    readonly label: string;
-    readonly description: string;
-  }>;
   readonly answer: string;
 }
 
@@ -67,23 +64,12 @@ export function normalizeTrustedUserAnswers(
     if (typeof value !== 'string' || value.trim().length === 0) continue;
     const questionIndex = parseAnswerQuestionIndex(key, questions.length);
     if (questionIndex === undefined) continue;
-    const question = questions[questionIndex]!;
-    const matchingOptions =
-      question.multiSelect === true
-        ? []
-        : question.options.filter((option) => option.label === value);
-    const selectedOptions =
-      matchingOptions.length === 1
-        ? [
-            {
-              label: matchingOptions[0]!.label,
-              description: matchingOptions[0]!.description,
-            },
-          ]
-        : [];
+    const question = questions[questionIndex]!.question;
     answers.push({
-      question: question.question,
-      selectedOptions,
+      question:
+        question.length > MAX_TRUSTED_USER_ANSWER_QUESTION_CHARS
+          ? question.slice(0, MAX_TRUSTED_USER_ANSWER_QUESTION_CHARS) + '…'
+          : question,
       answer: value,
     });
   }
@@ -108,11 +94,7 @@ export class TrustedUserAnswers {
     const answers = normalizeTrustedUserAnswers(questions, rawAnswers);
     if (answers.length === 0) return false;
 
-    let record: TrustedUserAnswerRecord = {
-      callId,
-      answers,
-      omitted: false,
-    };
+    let record: TrustedUserAnswerRecord = { callId, answers, omitted: false };
     let chars = JSON.stringify(record).length;
     if (chars > MAX_TRUSTED_USER_ANSWER_RECORD_CHARS) {
       record = { callId, answers: [], omitted: true };
@@ -120,7 +102,15 @@ export class TrustedUserAnswers {
       if (chars > MAX_TRUSTED_USER_ANSWER_RECORD_CHARS) return false;
     }
 
-    this.records.set(callId, { record, chars });
+    this.records.set(callId, {
+      chars,
+      record: Object.freeze({
+        ...record,
+        answers: Object.freeze(
+          record.answers.map((answer) => Object.freeze(answer)),
+        ),
+      }),
+    });
     this.totalChars += chars;
     this.enforceLimits();
     return this.records.has(callId);
@@ -128,25 +118,7 @@ export class TrustedUserAnswers {
 
   snapshot(): TrustedUserAnswerSnapshot {
     return Object.freeze(
-      [...this.records.values()].map(({ record }) =>
-        Object.freeze({
-          callId: record.callId,
-          omitted: record.omitted,
-          answers: Object.freeze(
-            record.answers.map((answer) =>
-              Object.freeze({
-                question: answer.question,
-                answer: answer.answer,
-                selectedOptions: Object.freeze(
-                  answer.selectedOptions.map((option) =>
-                    Object.freeze({ ...option }),
-                  ),
-                ),
-              }),
-            ),
-          ),
-        }),
-      ),
+      [...this.records.values()].map(({ record }) => record),
     );
   }
 
@@ -160,12 +132,9 @@ export class TrustedUserAnswers {
       this.records.size > MAX_TRUSTED_USER_ANSWER_CALLS ||
       this.totalChars > MAX_TRUSTED_USER_ANSWERS_TOTAL_CHARS
     ) {
-      const oldest = this.records.entries().next().value as
-        | [string, { record: TrustedUserAnswerRecord; chars: number }]
-        | undefined;
-      if (!oldest) return;
-      this.records.delete(oldest[0]);
-      this.totalChars -= oldest[1].chars;
+      const oldest = this.records.keys().next().value!;
+      this.totalChars -= this.records.get(oldest)!.chars;
+      this.records.delete(oldest);
     }
   }
 }

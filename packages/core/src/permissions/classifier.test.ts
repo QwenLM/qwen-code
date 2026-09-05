@@ -107,7 +107,7 @@ describe('classifyAction — stage 1 escalates to stage 2', () => {
             ],
           },
           {
-            role: 'function',
+            role: 'user',
             parts: [
               {
                 functionResponse: {
@@ -126,7 +126,6 @@ describe('classifyAction — stage 1 escalates to stage 2', () => {
             answers: [
               {
                 question: 'Create marker?',
-                selectedOptions: [],
                 answer: 'No',
               },
             ],

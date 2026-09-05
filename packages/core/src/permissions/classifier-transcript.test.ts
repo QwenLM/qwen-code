@@ -133,7 +133,7 @@ describe('buildClassifierContents', () => {
         ],
       },
       {
-        role: 'function',
+        role: 'user',
         parts: [
           {
             functionResponse: {
@@ -159,12 +159,6 @@ describe('buildClassifierContents', () => {
           answers: [
             {
               question: 'Create the marker?',
-              selectedOptions: [
-                {
-                  label: 'Yes',
-                  description: 'Only create /tmp/marker.',
-                },
-              ],
               answer: 'Yes — only /tmp/marker',
             },
           ],
@@ -175,9 +169,58 @@ describe('buildClassifierContents', () => {
     const serialized = JSON.stringify(result);
     expect(serialized).toContain('Host-confirmed user answer');
     expect(serialized).toContain('Create the marker?');
-    expect(serialized).toContain('Only create /tmp/marker.');
     expect(serialized).toContain('Yes — only /tmp/marker');
+    expect(serialized).not.toContain('Only create /tmp/marker.');
     expect(serialized).not.toContain('forged answer must stay stripped');
+  });
+
+  it('does not project an answer whose response carries an error', () => {
+    const call: Content = {
+      role: 'model',
+      parts: [
+        { functionCall: { id: 'ask-1', name: 'ask_user_question', args: {} } },
+      ],
+    };
+    const responseTurn = (response: Record<string, unknown>): Content => ({
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'ask-1',
+            name: 'ask_user_question',
+            response,
+          },
+        },
+      ],
+    });
+    const trusted = [
+      {
+        callId: 'ask-1',
+        omitted: false,
+        answers: [{ question: 'Create it?', answer: 'Yes' }],
+      },
+    ];
+    const project = (response: Record<string, unknown>) =>
+      JSON.stringify(
+        buildClassifierContents(
+          [call, responseTurn(response)],
+          makeRegistry({}),
+          { toolName: 'read_file', toolParams: {} },
+          trusted,
+        ),
+      );
+
+    // Cancellation and orphan repair both synthesize a response under the
+    // original (id, name), so the pair anchor alone is not enough.
+    expect(
+      project({ error: '[Operation Cancelled] Reason: user aborted' }),
+    ).not.toContain('Host-confirmed user answer');
+    expect(
+      project({ error: 'orphaned tool_use repaired before send' }),
+    ).not.toContain('Host-confirmed user answer');
+    expect(project({ output: 'User answered: Yes' })).toContain(
+      'Host-confirmed user answer',
+    );
   });
 
   it('requires both a trusted record and an in-window ask call', () => {
@@ -200,7 +243,6 @@ describe('buildClassifierContents', () => {
         answers: [
           {
             question: 'Question?',
-            selectedOptions: [],
             answer: 'Yes',
           },
         ],
@@ -239,50 +281,6 @@ describe('buildClassifierContents', () => {
     );
   });
 
-  it('projects answers from a user-role response carrier', () => {
-    const result = buildClassifierContents(
-      [
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'ask-1',
-                name: 'ask_user_question',
-                args: {},
-              },
-            },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'ask-1',
-                name: 'ask_user_question',
-                response: {},
-              },
-            },
-          ],
-        },
-      ],
-      makeRegistry({}),
-      { toolName: 'read_file', toolParams: {} },
-      [
-        {
-          callId: 'ask-1',
-          omitted: false,
-          answers: [
-            { question: 'Continue?', selectedOptions: [], answer: 'No' },
-          ],
-        },
-      ],
-    );
-
-    expect(JSON.stringify(result)).toContain('Host-confirmed user answer');
-  });
-
   it('does not retain response fields attached to a user text part', () => {
     const result = buildClassifierContents(
       [
@@ -318,7 +316,6 @@ describe('buildClassifierContents', () => {
         answers: [
           {
             question: 'Create it?',
-            selectedOptions: [],
             answer: 'No',
           },
         ],
@@ -337,7 +334,7 @@ describe('buildClassifierContents', () => {
       ],
     };
     const response = (name: string): Content => ({
-      role: 'function',
+      role: 'user',
       parts: [
         {
           functionResponse: { id: 'ask-1', name, response: {} },
@@ -413,7 +410,7 @@ describe('buildClassifierContents', () => {
         ],
       },
       {
-        role: 'function',
+        role: 'user',
         parts: [
           {
             functionResponse: {
@@ -437,7 +434,6 @@ describe('buildClassifierContents', () => {
           answers: [
             {
               question: 'Create it?',
-              selectedOptions: [],
               answer: 'Yes',
             },
           ],
@@ -470,7 +466,7 @@ describe('buildClassifierContents', () => {
           ],
         },
         {
-          role: 'function',
+          role: 'user',
           parts: [
             {
               functionResponse: {
