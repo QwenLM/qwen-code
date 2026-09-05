@@ -1,3 +1,7 @@
+---
+description: "Qwen Code task tool reference. Manage complex multi-step coding tasks with the AI agent's structured task execution capabilities."
+---
+
 # Agent Tool (`agent`)
 
 This document describes the `agent` tool for Qwen Code.

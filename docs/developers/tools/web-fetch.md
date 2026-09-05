@@ -1,3 +1,7 @@
+---
+description: "Qwen Code web_fetch tool reference. Fetch and process web content programmatically for AI-powered research and data gathering."
+---
+
 # Web Fetch Tool (`web_fetch`)
 
 This document describes the `web_fetch` tool for Qwen Code.

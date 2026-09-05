@@ -1,3 +1,7 @@
+---
+description: "Explore Qwen Code documentation for installation, IDE integration, MCP servers, workflows, and automation. Start faster with clear AI coding agent guides."
+---
+
 # Qwen Code Documentation
 
 Welcome to the Qwen Code documentation. Qwen Code is an agentic coding tool that lives in your terminal and helps you turn ideas into code faster than ever before.

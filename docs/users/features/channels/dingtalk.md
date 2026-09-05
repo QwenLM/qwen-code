@@ -1,3 +1,7 @@
+---
+description: "Set up a Qwen Code channel on DingTalk. Connect your AI coding agent to 钉钉 for messaging-based code assistance from any device."
+---
+
 # DingTalk (Dingtalk)
 
 This guide covers setting up a Qwen Code channel on DingTalk (钉钉).

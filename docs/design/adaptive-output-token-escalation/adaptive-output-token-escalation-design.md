@@ -1,3 +1,7 @@
+---
+description: "Optimize Qwen Code output tokens with Adaptive Escalation. Reduce GPU costs by 4x using low default + escalation strategy for smarter token management."
+---
+
 # Output Token Limit and Escalation Design
 
 > Defaults to the model's declared output limit unless the user or environment configures `max_tokens`, then uses escalation and multi-turn recovery only when a response still hits `MAX_TOKENS`.

@@ -1,3 +1,7 @@
+---
+description: "Connect Qwen Code to JetBrains IDEs through ACP. Use AI-powered coding assistance with real-time suggestions and conversation history in IntelliJ, PyCharm, and more."
+---
+
 # JetBrains IDEs
 
 > JetBrains IDEs provide native support for AI coding assistants through the Agent Client Protocol (ACP). This integration allows you to use Qwen Code directly within your JetBrains IDE with real-time code suggestions.

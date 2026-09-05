@@ -1,3 +1,7 @@
+---
+description: "Qwen Code LLM request timing telemetry design. Capture TTFT, setup time, sampling duration, and retry visibility for slow request analysis."
+---
+
 # LLM Request Timing Decomposition Design (P3 Phase 4)
 
 > **GenAI attribute migration:**

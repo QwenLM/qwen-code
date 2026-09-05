@@ -1,3 +1,7 @@
+---
+description: "Read Qwen Code's Terms of Service and Privacy Policy. Understand how your data is handled across authentication methods and AI services."
+---
+
 # Qwen Code: Terms of Service and Privacy Notice
 
 Qwen Code is an open-source AI coding assistant tool maintained by the Qwen Code team. This document outlines the terms of service and privacy policies that apply when using Qwen Code's authentication methods and AI model services.

@@ -1,3 +1,7 @@
+---
+description: "Qwen Code OpenRouter integration design. Understand the auth flow and model management architecture for multi-provider AI access."
+---
+
 # OpenRouter Auth and Model Management Design
 
 This document captures the design intent behind the OpenRouter auth flow and the

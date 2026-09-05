@@ -1,3 +1,7 @@
+---
+description: "Design an IDE daemon adapter for Qwen Code companion extensions that connect to qwen serve through DaemonSessionClient."
+---
+
 # IDE Daemon Adapter Draft
 
 ## Goal

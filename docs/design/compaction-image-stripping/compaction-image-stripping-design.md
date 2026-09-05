@@ -1,3 +1,7 @@
+---
+description: "Qwen Code compaction image stripping design. Remove inline binary payloads from compression prompts and fix token estimation for attachments."
+---
+
 # Compaction Image Stripping + Token Estimation Fix
 
 ## Problem Statement

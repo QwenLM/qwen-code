@@ -1,3 +1,7 @@
+---
+description: "Qwen Code structured output design. Implement --json-schema with a synthetic validation tool for reliable machine-readable headless results."
+---
+
 # Structured Output (`--json-schema`) — Design
 
 This document captures the implementation decisions behind the

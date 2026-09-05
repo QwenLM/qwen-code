@@ -1,3 +1,7 @@
+---
+description: "Qwen Code virtual viewport design for long terminal conversations. Improve rendering performance with bounded history and scroll behavior."
+---
+
 # Virtual viewport for long conversations on ink 7
 
 Status: **implemented**, PR #4146 ships:

@@ -1,3 +1,7 @@
+---
+description: "Boost Qwen Code's accuracy with LSP support. Enable go-to-definition, find references, and diagnostics for smarter AI coding assistance."
+---
+
 # Language Server Protocol (LSP) Support
 
 Qwen Code provides native Language Server Protocol (LSP) support, enabling advanced code intelligence features like go-to-definition, find references, diagnostics, and code actions. This integration allows the AI agent to understand your code more deeply and provide more accurate assistance.

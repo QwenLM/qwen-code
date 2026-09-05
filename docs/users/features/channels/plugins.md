@@ -1,3 +1,7 @@
+---
+description: "Build custom channel plugins for Qwen Code. Connect any messaging platform, webhook, or transport to extend your AI coding agent beyond the terminal."
+---
+
 # Custom Channel Plugins
 
 You can extend the channel system with custom platform adapters packaged as [extensions](../../extension/introduction). This lets you connect Qwen Code to any messaging platform, webhook, or custom transport.

@@ -1,3 +1,7 @@
+---
+description: "Secure Qwen Code with Trusted Folders. Control which projects can run full AI features to protect against malicious code execution."
+---
+
 # Trusted Folders
 
 The Trusted Folders feature is a security setting that gives you control over which projects can use the full capabilities of the Qwen Code. It prevents potentially malicious code from running by asking you to approve a folder before the CLI loads any project-specific configurations from it.

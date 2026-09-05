@@ -1,3 +1,7 @@
+---
+description: "Connect Qwen Code with VS Code in minutes. Learn workspace context, native diff review, and IDE commands to speed up AI coding without losing control."
+---
+
 # IDE Integration
 
 Qwen Code can integrate with your IDE to provide a more seamless and context-aware experience. This integration allows the CLI to understand your workspace better and enables powerful features like native in-editor diffing.
