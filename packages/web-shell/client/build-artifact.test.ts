@@ -334,20 +334,24 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('vaul');
   });
 
-  it('does not pull the daemon provider stack into the transcript entry', () => {
-    // The entry advertises "no daemon providers". It did not hold: the
-    // transcript imported transcriptBlocksToLocalizedMessages from
-    // hooks/useMessages, which value-imports useConnection /
-    // useTranscriptBlocks / useWorkspace from the daemon-react-sdk barrel, so
-    // dist/transcript.js still carried the provider guards. The projection now
-    // lives in adapters/localizedMessages.ts. These strings are provider
-    // invariant messages, which survive minification verbatim.
+  it('keeps the transcript entry a fraction of the interactive entry', () => {
+    // The daemon hook runtime is NOT absent from this entry — MessageList
+    // renders McpStatusMessage, TasksStatusMessage and the artifact turn
+    // outputs, and those call the strict useDaemonActions /
+    // useDaemonWorkspace hooks, so the provider guards ship. Asserting their
+    // absence would assert something this entry does not deliver (see the
+    // docblock in client/transcript.ts and #11100).
+    //
+    // What the entry does deliver is a bounded payload, so bound it. The JS
+    // remainder measured 1,140,948 bytes at 1d94060f5 (a reviewer's local
+    // build of this branch), against 7,021,715 for dist/index.js in the same
+    // build. The ceiling is that measurement plus headroom; re-measure and
+    // lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js).not.toContain('DaemonSessionProvider');
-    expect(js).not.toContain('DaemonWorkspaceProvider');
+    expect(js.length).toBeLessThan(1_300_000);
   });
 
   it('still carries what a transcript actually renders', () => {
