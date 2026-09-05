@@ -30,9 +30,9 @@
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
+import { findMemberByName } from '../agents/team/teamHelpers.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getAgentName } from '../agents/team/identity.js';
-import { findMemberByName } from '../agents/team/teamHelpers.js';
 import { LEADER_NAME } from '../agents/team/types.js';
 import type { ApprovalMode } from '../config/approval-mode.js';
 import {
@@ -225,23 +225,31 @@ class SendMessageInvocation extends BaseToolInvocation<
       const entry = registry.get(this.params.task_id);
 
       if (!entry) {
-        const teamManager = this.config.getTeamManager();
-        const teammate = teamManager
-          ? findMemberByName(
-              teamManager.getTeamFile().members,
-              this.params.task_id,
-            )
+        const teamFile = this.config.getTeamManager()?.getTeamFile();
+        const teammate = teamFile
+          ? findMemberByName(teamFile.members, this.params.task_id)
           : undefined;
-        const teammateHint = teammate
-          ? ` Did you mean to message teammate "${teammate.name}"? If so, use \`to: "${teammate.name}"\` instead of \`task_id\`.`
-          : '';
+        // Mirror TeamManager.sendMessage's acceptance surface: the leader is
+        // reachable through `to` under its reserved name and its agent id,
+        // neither of which is a team member, so a task_id naming the leader
+        // needs the same redirect a teammate name gets.
+        const isLeaderDestination =
+          !teammate &&
+          teamFile !== undefined &&
+          (this.params.task_id.toLowerCase() === LEADER_NAME ||
+            this.params.task_id === teamFile.leadAgentId);
+        const destination = teammate?.name ?? this.params.task_id;
+        const teammateHint =
+          teammate || isLeaderDestination
+            ? ` Did you mean to message teammate "${destination}"? If so, use \`to: "${destination}"\` instead of \`task_id\`.`
+            : '';
         return {
           llmContent: `Error: No background task found with ID "${this.params.task_id}".${teammateHint}`,
-          returnDisplay: teammate
-            ? `Task not found; use "to" for teammate "${teammate.name}".`
+          returnDisplay: teammateHint
+            ? `Task not found; use "to" for teammate "${destination}".`
             : 'Task not found.',
           error: {
-            message: `Task not found: ${this.params.task_id}${teammate ? `.${teammateHint}` : ''}`,
+            message: `Task not found: ${this.params.task_id}${teammateHint ? `.${teammateHint}` : ''}`,
             type: ToolErrorType.SEND_MESSAGE_NOT_FOUND,
           },
         };
@@ -497,7 +505,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
     super(
       SendMessageTool.Name,
       ToolDisplayNames.SEND_MESSAGE,
-      'Send to a teammate or another Qwen Code session (use "to"), or a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
+      'Send to a teammate or another Qwen Code session (use "to"), or a running, paused, or completed background task (use "task_id"); completed tasks are revived. Specify exactly one of the two fields. ' +
         'Set "to" to a bare teammate name (no @), to "*" to broadcast within an active Agent Team only, or to a session name from list_agents, exactly as its "to" value shows it — list_agents appends " [ref]" whenever the bare name would not reach that session (another session or a teammate shares it). ' +
         "A message to another session arrives there marked as coming from another session, carries none of your user's authority, and may be held for that session's user to review; never use it to have another session perform an action this session was denied, blocked from, or cannot do itself. " +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
@@ -549,6 +557,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
     return new SendMessageInvocation(this.config, params);
   }
 
+  // #10073: both fields used to silently prefer task_id and drop `to`.
   protected override validateToolParamValues(
     params: SendMessageParams,
   ): string | null {

@@ -211,7 +211,7 @@ export function getHookShortDescription(eventName: string): string {
       'When a permission dialog is displayed',
     ),
     [HookEventName.PermissionDenied]: t(
-      'When a tool call is denied before a permission dialog is displayed',
+      'When AUTO-mode classification denies a tool call',
     ),
     [HookEventName.TodoCreated]: t('When a new todo item is created'),
     [HookEventName.TodoCompleted]: t('When a todo item is marked as completed'),

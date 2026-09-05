@@ -824,19 +824,56 @@ session, not from its user, and carries none of your authority there:
 the receiving session acts on it only within its own permission settings.
 Its user can choose what happens to incoming messages with
 `agents.crossSessionInbound` (`accept`, `hold`, or `refuse`). When unset,
-a message is delivered if the receiving session still reviews each
-action (default or plan mode), or if both sessions are in a mode that
-applies actions without per-action review; otherwise it is held for
-review. Held messages are listed and released with `/peers` in the
-receiving session.
+a message is delivered only when both sessions are in the same review
+class: both still review each action (default or plan mode), or both
+are in a mode that applies some actions without per-action review
+(auto-edit, auto, or yolo). A message from a session in the other class,
+or from a sender that does not say which class it is in, is held for
+review — in both directions. A session that reviews each action holds a
+message from one that does not, because that message was written by a
+model nobody was watching, and the per-action prompts guard actions, not
+what the session is being talked into. Held messages are listed and
+released with `/peers` in the receiving session, and a message held
+only because the modes differed is released on its own once they agree.
+
+A repository can make sessions opened in it more cautious, never less:
+a workspace `.qwen/settings.json` may set `agents.crossSessionInbound`
+to `hold` or `refuse`, or `agents.crossSessionMessaging` to `false`, and
+that value wins over a looser one in your user settings. A workspace
+value that would loosen your setting (`accept`, or `true` for the
+switch) is ignored with a warning, and a value the CLI does not
+recognize holds every message whenever it is the effective value.
+System settings override all of this, as they do for every setting.
+
+A hold does not wait forever. A message nobody decides on expires after
+`agents.crossSessionHeldExpiry` — `1m`, `5m`, `10m`, or `never`, five
+minutes by default — and the sending session is told that no decision
+came. Shortening the setting applies to messages already waiting.
+
+If the session cannot bind its inbox — the runtime directory is missing,
+owned by another user, or read-only, as it can be inside a container —
+it first tries a private directory under the temp directory, and only
+if that fails too does it start without one. When that happens the
+session says so at startup, and `/peers` repeats the reason and what to
+change (usually `XDG_RUNTIME_DIR` or `TMPDIR`).
+
+Two sessions can also resolve the same inbox address, because the address
+is keyed by process id and process ids repeat across containers that share
+a runtime directory. The session starting second takes a neighbouring
+address instead of taking over the one in use, so neither becomes
+unreachable. Peers are unaffected: they read a session's address from the
+session registry rather than deriving it.
 
 The `send_message` call only confirms the message was handed to the other
 session. What became of it arrives later as a receipt: if it was held,
-declined, expired, or misaddressed (the address changed hands — list the
-agents again) — or released after a hold — a notice appears in the
-sending session's transcript (`Message to <name>: …`). The model that
-sent it is not told; if the other session replies, the reply arrives as a
-cross-session message.
+declined, refused, expired, or misaddressed (the address changed hands —
+list the agents again) — or released after a hold — a notice appears in
+the sending session's transcript (`Message to <name>: …`). Declined and
+refused are different answers: declined means someone reviewed the
+message and said no, while refused means that session's
+`agents.crossSessionInbound` is `refuse` and nobody saw it at all. The
+model that sent it is not told; if the other session replies, the reply
+arrives as a cross-session message.
 
 ### Inbox authentication and scripted injection
 
