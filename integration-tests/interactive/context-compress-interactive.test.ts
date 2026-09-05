@@ -7,6 +7,29 @@
 import { expect, describe, it, beforeEach, afterEach } from 'vitest';
 import { TestRig, type } from '../test-helper.js';
 
+// The background memory extractor fires a second live model call (measured
+// 40-52s) while this suite is timing the compression round trip. With it on,
+// the first attempt exhausted the event budget below and only a retry passed
+// (293s for the file); with it off both live tests pass first attempt (171s).
+// Sibling interactive suites disable it for the same reason.
+const SUITE_SETTINGS = {
+  memory: {
+    enableManagedAutoMemory: false,
+  },
+  security: {
+    auth: {
+      selectedType: 'openai',
+    },
+  },
+};
+
+// /compress is a live model call whose cost depends on which path the
+// compression service takes: measured at 9.8s for the cold side-query (611
+// output tokens) and 63.6s for the cache-sharing request (4138 output tokens)
+// on an otherwise quiet machine. The old 90s left a 1.4x margin over the slow
+// path, which is what reddened the shard in #11088.
+const COMPRESSION_EVENT_TIMEOUT_MS = 150_000;
+
 describe('Interactive Mode', () => {
   let rig: TestRig;
 
@@ -22,13 +45,7 @@ describe('Interactive Mode', () => {
     'should trigger chat compression with /compress command',
     async () => {
       await rig.setup('interactive-compress-test', {
-        settings: {
-          security: {
-            auth: {
-              selectedType: 'openai',
-            },
-          },
-        },
+        settings: SUITE_SETTINGS,
       });
 
       const { ptyProcess } = rig.runInteractive();
@@ -58,7 +75,7 @@ describe('Interactive Mode', () => {
 
       const foundEvent = await rig.waitForTelemetryEvent(
         'chat_compression',
-        90000,
+        COMPRESSION_EVENT_TIMEOUT_MS,
       );
       expect(foundEvent, 'chat_compression telemetry event was not found').toBe(
         true,
@@ -68,13 +85,7 @@ describe('Interactive Mode', () => {
 
   it.skip('should handle compression failure on token inflation', async () => {
     await rig.setup('interactive-compress-test', {
-      settings: {
-        security: {
-          auth: {
-            selectedType: 'openai',
-          },
-        },
-      },
+      settings: SUITE_SETTINGS,
     });
 
     const { ptyProcess } = rig.runInteractive();
@@ -94,7 +105,7 @@ describe('Interactive Mode', () => {
 
     const foundEvent = await rig.waitForTelemetryEvent(
       'chat_compression',
-      90000,
+      COMPRESSION_EVENT_TIMEOUT_MS,
     );
     expect(foundEvent).toBe(true);
 
@@ -110,13 +121,7 @@ describe('Interactive Mode', () => {
     'should forward /compress instructions through to the side-query',
     async () => {
       await rig.setup('interactive-compress-instructions-test', {
-        settings: {
-          security: {
-            auth: {
-              selectedType: 'openai',
-            },
-          },
-        },
+        settings: SUITE_SETTINGS,
       });
 
       const { ptyProcess } = rig.runInteractive();
@@ -150,7 +155,7 @@ describe('Interactive Mode', () => {
 
       const foundEvent = await rig.waitForTelemetryEvent(
         'chat_compression',
-        90000,
+        COMPRESSION_EVENT_TIMEOUT_MS,
       );
       expect(foundEvent, 'chat_compression telemetry event was not found').toBe(
         true,
