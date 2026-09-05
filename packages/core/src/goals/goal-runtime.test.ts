@@ -3122,6 +3122,37 @@ describe('goal runtime', () => {
     });
   });
 
+  it('releases a turn without restarting after a requested pause cannot persist', async () => {
+    const writerLost = new Error('writer lost');
+    const journal = fakeGoalJournal({
+      appendErrors: [undefined, writerLost],
+    });
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const permit = host.started[0];
+
+    await expect(
+      runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      }),
+    ).rejects.toMatchObject({ cause: writerLost });
+    await expect(
+      runtime.releaseTurn(`goal-runtime:${permit.turnId}`, {
+        requeue: false,
+      }),
+    ).resolves.toBe(true);
+
+    expect(host.started).toHaveLength(1);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: { status: 'active' },
+    });
+  });
+
   it('serializes reservation release behind an in-flight turn commit', async () => {
     const appendReached = deferred<void>();
     const appendGate = deferred<void>();
@@ -3895,6 +3926,36 @@ describe('goal runtime', () => {
     expect(observed.some((value) => value.activity === 'verifying')).toBe(
       false,
     );
+  });
+
+  it('journals a pause reason and schedules no continuation after it', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const permit = host.started[0];
+
+    await runtime.dispatch({
+      action: 'pause',
+      expectedGoalId: permit.goalId,
+      expectedRevision: permit.revision,
+      reason: 'Interrupted by the user.',
+    });
+
+    const paused = journal.appended.at(-1);
+    expect(paused?.cause).toBe('pause');
+    expect(paused?.snapshot.goal?.status).toBe('paused');
+    expect(paused?.snapshot.goal?.lastReason).toBe('Interrupted by the user.');
+    expect(runtime.getSnapshot().goal?.lastReason).toBe(
+      'Interrupted by the user.',
+    );
+
+    // A release arriving after the pause -- the host settling the turn the
+    // user just interrupted -- must not restart the loop behind their back.
+    await runtime.releaseTurn('goal-runtime:' + permit.turnId);
+    expect(host.started).toHaveLength(1);
+    expect(runtime.getSnapshot().goal?.status).toBe('paused');
   });
 
   it('lets ordinary user input claim the queued slot before continuation and reuses its permit', async () => {

@@ -257,6 +257,13 @@ export type GoalControlRequest =
       action: 'pause';
       expectedGoalId: string;
       expectedRevision: number;
+      /**
+       * Why the Goal is being paused, in the user's words rather than the
+       * model's. A pause without one clears `lastReason`: a stopped Goal
+       * showing the previous turn's verifier rejection reads as the reason
+       * it stopped, which it is not.
+       */
+      reason?: string;
     }
   | {
       action: 'resume';
@@ -327,6 +334,101 @@ export function validateGoalProposalReason(reason: string): string | null {
     return `Goal proposal reason exceeds ${GOAL_PROPOSAL_REASON_MAX_BYTES} UTF-8 bytes`;
   }
   return null;
+}
+
+/** Upper bound on a pause reason, which a user reads in a card. */
+export const GOAL_PAUSE_REASON_MAX_CHARACTERS = 500;
+
+export function validateGoalPauseReason(reason: string): string | null {
+  if (!reason.trim()) return 'Goal pause reason must not be empty';
+  // The bound is in code points, but UTF-16 length is an upper bound on the
+  // code-point count, so a short string is legal without counting at all.
+  // Only a candidate that could still be over gets walked, and the walk stops
+  // one past the limit -- this route is network-reachable and synchronous on
+  // the CLI's event loop, so the work has to scale with the limit rather than
+  // with whatever the caller sent.
+  if (reason.length > GOAL_PAUSE_REASON_MAX_CHARACTERS) {
+    let codePoints = 0;
+    for (const _codePoint of reason) {
+      if (++codePoints > GOAL_PAUSE_REASON_MAX_CHARACTERS) {
+        return `Goal pause reason exceeds ${GOAL_PAUSE_REASON_MAX_CHARACTERS} characters`;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The pause reasons every host shares.
+ *
+ * They are constants rather than per-host prose so that the same event reads
+ * the same way in the TUI card, `/goal`, an ACP client, and a headless
+ * `goal_state` event -- and so a test can assert on the event rather than on
+ * one host's wording.
+ */
+export const GOAL_PAUSE_REASON_USER_INTERRUPT =
+  'Interrupted by the user. Run /goal resume to continue.';
+export const GOAL_PAUSE_REASON_COMMAND = 'Paused with /goal pause.';
+export const GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT =
+  'The session token limit was exceeded before the model request. Start a new session or increase sessionTokenLimit in settings.json before resuming the Goal.';
+export const GOAL_PAUSE_REASON_STOP_HOOK_CAP =
+  'A Stop hook blocked this session too many times in a row. Run /goal resume to continue.';
+/**
+ * A session that began closing while its Goal turn was in flight. The close
+ * can still be abandoned -- a drain timeout or a failed flush releases the
+ * gate and the session keeps serving -- so this states what is durably true
+ * at the moment of the stop rather than asserting the session is gone.
+ */
+export const GOAL_PAUSE_REASON_SESSION_DISPOSED =
+  'The session started closing before the turn finished. Run /goal resume to continue.';
+/**
+ * A headless run that ended while its Goal was still going. It is not a
+ * failure, and it must not tell the reader to run a slash command in a
+ * process that has already exited.
+ */
+export const GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED =
+  'The headless run finished before the Goal did. Resume the Goal in a later run.';
+
+function truncateGoalPauseReason(reason: string): string {
+  const codePoints = [...reason];
+  return codePoints.length <= GOAL_PAUSE_REASON_MAX_CHARACTERS
+    ? reason
+    : `${codePoints.slice(0, GOAL_PAUSE_REASON_MAX_CHARACTERS - 1).join('')}\u2026`;
+}
+
+/** The pause reason for a Goal turn that failed rather than being stopped. */
+export function goalPauseReasonForFailure(message: string): string {
+  const detail = message.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The Goal turn could not finish: ${detail}. Run /goal resume to continue.`
+      : 'The Goal turn could not finish. Run /goal resume to continue.',
+  );
+}
+
+/**
+ * The pause reason for a headless Goal turn that died with an error. Same
+ * register as `GOAL_PAUSE_REASON_HEADLESS_RUN_ENDED` -- it names the failure
+ * without claiming the run ended cleanly, and without pointing at a slash
+ * command in a process that has already exited.
+ */
+export function goalPauseReasonForHeadlessFailure(message: string): string {
+  const detail = message.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The headless run stopped: ${detail}. Resume the Goal in a later run.`
+      : 'The headless run stopped before the Goal turn finished. Resume the Goal in a later run.',
+  );
+}
+
+/** The pause reason for a headless run that hit one of its own budgets. */
+export function goalPauseReasonForRunBudget(budget: string): string {
+  const detail = budget.trim();
+  return truncateGoalPauseReason(
+    detail
+      ? `The headless run stopped at its ${detail} budget. Resume the Goal in a later run.`
+      : 'The headless run stopped at a budget. Resume the Goal in a later run.',
+  );
 }
 
 export type GoalStateCause =

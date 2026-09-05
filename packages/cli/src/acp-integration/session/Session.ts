@@ -181,6 +181,11 @@ import {
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
   GoalPersistenceUnavailableError,
+  GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
+  GOAL_PAUSE_REASON_SESSION_DISPOSED,
+  GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
   ambientGoalToolResultProvenance,
   goalTurnContext,
   sessionIdContext,
@@ -2548,7 +2553,11 @@ export class Session implements SessionContext {
       // goal hangs in `claimGoalTurn` behind the leaked permit. Settling is
       // safe to repeat -- it no-ops once the permit is no longer current,
       // and it swallows its own errors.
-      await this.#settleGoalTurn(turn, undefined, true);
+      await this.#settleGoalTurn(
+        turn,
+        undefined,
+        error instanceof Error ? error.message : String(error),
+      );
       debugLogger.warn(
         `ACP Goal turn failed: ${
           error instanceof Error ? error.message : String(error)
@@ -2588,7 +2597,7 @@ export class Session implements SessionContext {
   async #settleGoalTurn(
     turn: AcpGoalTurn,
     result: PromptResponse | undefined,
-    failed: boolean,
+    failureMessage: string | undefined,
   ): Promise<void> {
     try {
       const runtime = await this.config.getGoalRuntimeReady();
@@ -2597,14 +2606,28 @@ export class Session implements SessionContext {
       }
       if (!turn.modelStarted) {
         if (
-          turn.controller.signal.reason === USER_CANCEL_ABORT_REASON &&
+          (turn.controller.signal.reason === USER_CANCEL_ABORT_REASON ||
+            turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON) &&
           runtime.getSnapshot().goal?.status === 'active'
         ) {
-          await runtime.dispatch({
-            action: 'pause',
-            expectedGoalId: turn.permit.goalId,
-            expectedRevision: turn.permit.revision,
-          });
+          try {
+            await runtime.dispatch({
+              action: 'pause',
+              expectedGoalId: turn.permit.goalId,
+              expectedRevision: turn.permit.revision,
+              reason:
+                turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
+                  ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+                  : GOAL_PAUSE_REASON_USER_INTERRUPT,
+            });
+          } catch (error) {
+            debugLogger.warn(
+              `Failed to record pre-model ACP Goal turn settlement: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+            await runtime.releaseTurn(turn.turnKey, { requeue: false });
+          }
         } else {
           await runtime.releaseTurn(turn.turnKey);
         }
@@ -2640,12 +2663,22 @@ export class Session implements SessionContext {
       // landed, and the paused branch silently stops the autonomous loop.
       const supersededByNewPrompt =
         turn.controller.signal.reason === NEW_PROMPT_ABORT_REASON;
-      const shouldPause =
-        !supersededByNewPrompt &&
-        (failed ||
-          result?.stopReason === 'max_tokens' ||
-          cancelledByUser ||
-          turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON);
+      // One list, not two: the cause that decides whether to pause is the same
+      // cause that names the pause. Enumerating them separately means a fifth
+      // cause can compile, pause correctly, and fall through to the failure
+      // arm -- mislabelling the stop in the journal, the `_meta.goalState`
+      // update and the card, with no test able to see it.
+      const pauseReason = supersededByNewPrompt
+        ? undefined
+        : cancelledByUser
+          ? GOAL_PAUSE_REASON_USER_INTERRUPT
+          : result?.stopReason === 'max_tokens'
+            ? GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT
+            : turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
+              ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+              : failureMessage !== undefined
+                ? goalPauseReasonForFailure(failureMessage)
+                : undefined;
       // Same latched-write-failure hazard as the flush above, one step later:
       // `pause` and `finishTurn` both persist through
       // `appendRecordStrict`, which re-throws the latched failure forever.
@@ -2654,11 +2687,15 @@ export class Session implements SessionContext {
       // prompt hangs in `claimGoalTurn`. Fall back to `releaseTurn`, which is
       // in-memory only, so the loop survives the already-degraded session.
       try {
-        if (shouldPause && runtime.getSnapshot().goal?.status === 'active') {
+        if (
+          pauseReason !== undefined &&
+          runtime.getSnapshot().goal?.status === 'active'
+        ) {
           await runtime.dispatch({
             action: 'pause',
             expectedGoalId: turn.permit.goalId,
             expectedRevision: turn.permit.revision,
+            reason: pauseReason,
           });
           return;
         }
@@ -2669,7 +2706,14 @@ export class Session implements SessionContext {
             error instanceof Error ? error.message : String(error)
           }`,
         );
-        await runtime.releaseTurn(turn.turnKey);
+        if (
+          cancelledByUser ||
+          turn.controller.signal.reason === SESSION_DISPOSE_ABORT_REASON
+        ) {
+          await runtime.releaseTurn(turn.turnKey, { requeue: false });
+        } else {
+          await runtime.releaseTurn(turn.turnKey);
+        }
       }
     } catch (error) {
       debugLogger.warn(
@@ -2696,6 +2740,7 @@ export class Session implements SessionContext {
         action: 'pause',
         expectedGoalId: goal.goalId,
         expectedRevision: goal.revision,
+        reason: GOAL_PAUSE_REASON_STOP_HOOK_CAP,
       });
     } catch (error) {
       debugLogger.warn(
@@ -4422,14 +4467,18 @@ export class Session implements SessionContext {
     }
 
     this.todoStopGuard.suspend();
+    const abortReason =
+      this.closing || this.disposed
+        ? SESSION_DISPOSE_ABORT_REASON
+        : USER_CANCEL_ABORT_REASON;
 
     if (this.pendingPrompt) {
-      this.pendingPrompt.abort(USER_CANCEL_ABORT_REASON);
+      this.pendingPrompt.abort(abortReason);
       this.pendingPrompt = null;
     }
 
     for (const turn of queuedGoalTurns) {
-      turn.controller.abort(USER_CANCEL_ABORT_REASON);
+      turn.controller.abort(abortReason);
     }
 
     // Cancel any in-progress cron execution
@@ -4462,6 +4511,10 @@ export class Session implements SessionContext {
             action: 'pause',
             expectedGoalId: queuedGoalTurn.permit.goalId,
             expectedRevision: queuedGoalTurn.permit.revision,
+            reason:
+              abortReason === SESSION_DISPOSE_ABORT_REASON
+                ? GOAL_PAUSE_REASON_SESSION_DISPOSED
+                : GOAL_PAUSE_REASON_USER_INTERRUPT,
           });
         }
       } catch (error) {
@@ -4796,7 +4849,7 @@ export class Session implements SessionContext {
 
     let rejectedByLoopProtection = false;
     let promptResult: PromptResponse | undefined;
-    let promptFailed = false;
+    let promptFailureMessage: string | undefined;
     if (turnRecording) turnRecording.startedAt = Date.now();
     try {
       const result = await this.#executePrompt(
@@ -4864,7 +4917,8 @@ export class Session implements SessionContext {
       }
       return completedResult;
     } catch (error) {
-      promptFailed = true;
+      promptFailureMessage =
+        error instanceof Error ? error.message : String(error);
       if (error instanceof SessionWriterError) {
         throw new RequestError(error.rpcCode, error.message, {
           errorKind: error.errorKind,
@@ -4893,7 +4947,11 @@ export class Session implements SessionContext {
         void this.#drainNotificationQueue();
       }
       if (goalTurn) {
-        await this.#settleGoalTurn(goalTurn, promptResult, promptFailed);
+        await this.#settleGoalTurn(
+          goalTurn,
+          promptResult,
+          promptFailureMessage,
+        );
       } else if (reservedGoalRuntime && reservedGoalTurnKey) {
         await reservedGoalRuntime.releaseTurn(reservedGoalTurnKey);
       }

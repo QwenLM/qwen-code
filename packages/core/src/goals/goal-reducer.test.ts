@@ -11,6 +11,9 @@ import {
   goalLimitKindForReason,
   goalTokenBudgetReason,
   goalRequiresExactPermit,
+  GOAL_PAUSE_REASON_COMMAND,
+  GOAL_PAUSE_REASON_MAX_CHARACTERS,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
   type GoalControlRequest,
   type GoalRecord,
   type GoalSnapshotV2,
@@ -212,6 +215,93 @@ describe('goal reducer', () => {
     }
   });
 
+  it('records the pause reason a host supplies', () => {
+    const paused = reduceGoalControl(
+      goalRecord({ lastReason: 'the verifier wanted the test output pasted' }),
+      {
+        request: {
+          action: 'pause',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+          reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+        },
+        now: 150,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-150' },
+      },
+    );
+
+    expect(paused?.status).toBe('paused');
+    expect(paused?.lastReason).toBe(GOAL_PAUSE_REASON_USER_INTERRUPT);
+  });
+
+  it('clears a stale reason when a pause supplies none', () => {
+    // The value it would otherwise keep is the previous turn's verifier
+    // rejection, which explains why the Goal was still running rather than
+    // why it stopped -- so a reasonless pause must not inherit it.
+    const paused = reduceGoalControl(
+      goalRecord({ lastReason: 'the verifier wanted the test output pasted' }),
+      {
+        request: {
+          action: 'pause',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        now: 150,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-150' },
+      },
+    );
+
+    expect(paused?.status).toBe('paused');
+    expect(paused?.lastReason).toBeUndefined();
+  });
+
+  it('parses a pause reason, and rejects one that is empty, oversized, or misplaced', () => {
+    expect(
+      parseGoalControlRequest({
+        action: 'pause',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+        reason: GOAL_PAUSE_REASON_COMMAND,
+      }),
+    ).toEqual({
+      action: 'pause',
+      expectedGoalId: 'g-1',
+      expectedRevision: 1,
+      reason: GOAL_PAUSE_REASON_COMMAND,
+    });
+
+    for (const reason of [
+      '   ',
+      '',
+      'x'.repeat(GOAL_PAUSE_REASON_MAX_CHARACTERS + 1),
+      42,
+      { text: 'nope' },
+    ]) {
+      expect(
+        parseGoalControlRequest({
+          action: 'pause',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+          reason,
+        }),
+      ).toBeUndefined();
+    }
+
+    // Only a pause carries one: resume and clear stay exact-key requests.
+    for (const action of ['resume', 'clear'] as const) {
+      expect(
+        parseGoalControlRequest({
+          action,
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+          reason: GOAL_PAUSE_REASON_COMMAND,
+        }),
+      ).toBeUndefined();
+    }
+  });
+
   it('pauses and resumes without changing revision or evidence cursor', () => {
     const paused = reduceGoalControl(goalRecord(), {
       request: {
@@ -244,6 +334,54 @@ describe('goal reducer', () => {
       revision: 1,
       evidenceCursor: { recordId: 'r-100' },
     });
+  });
+
+  it('clears the pause reason when a paused goal resumes', () => {
+    const paused = reduceGoalControl(goalRecord(), {
+      request: {
+        action: 'pause',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+        reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+      },
+      now: 150,
+      nextGoalId: 'unused',
+      cursor: { recordId: 'r-150' },
+    });
+    expect(paused?.lastReason).toBe(GOAL_PAUSE_REASON_USER_INTERRUPT);
+
+    const resumed = reduceGoalControl(paused, {
+      request: {
+        action: 'resume',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+      },
+      now: 200,
+      nextGoalId: 'unused',
+      cursor: { recordId: 'r-200' },
+    });
+
+    expect(resumed?.status).toBe('active');
+    expect(resumed?.lastReason).toBeUndefined();
+  });
+
+  it("keeps a blocked goal's reason when it resumes", () => {
+    const resumed = reduceGoalControl(
+      goalRecord({ status: 'blocked', lastReason: 'Waiting on a credential.' }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed?.status).toBe('active');
+    expect(resumed?.lastReason).toBe('Waiting on a credential.');
   });
 
   it('rejects resuming an already-active goal', () => {

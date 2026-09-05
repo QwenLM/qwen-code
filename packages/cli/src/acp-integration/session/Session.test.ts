@@ -38,6 +38,11 @@ import type {
 import {
   ApprovalMode,
   AuthType,
+  GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
+  GOAL_PAUSE_REASON_SESSION_DISPOSED,
+  GOAL_PAUSE_REASON_STOP_HOOK_CAP,
+  GOAL_PAUSE_REASON_USER_INTERRUPT,
+  goalPauseReasonForFailure,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
@@ -23034,6 +23039,14 @@ describe('Session', () => {
           expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
         });
 
+        // A turn that ends with no pausing cause must not pause at all. This
+        // is what keeps the pause decision and the pause reason one list: a
+        // future cause that pauses without being named would land on the
+        // failure arm, and nothing else in the suite would see it.
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({ action: 'pause' }),
+        );
+
         const optionsFor = (callId: string) =>
           mockChatRecordingService.recordToolResult.mock.calls.find(
             (call: unknown[]) =>
@@ -24368,11 +24381,374 @@ describe('Session', () => {
             action: 'pause',
             expectedGoalId: permit.goalId,
             expectedRevision: permit.revision,
+            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
           });
         });
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
         expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalledWith(turnKey);
+      });
+
+      it('releases a pre-model Goal permit when recording its pause fails', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-close-write-failure',
+        };
+        const turnKey = 'goal-runtime:turn-close-write-failure';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockGoalRuntime.dispatch.mockRejectedValueOnce(
+          new Error('write failed'),
+        );
+        let cancelClose: (() => void) | undefined;
+        mockChatRecordingService.recordGoalRuntimeMessage.mockImplementation(
+          () => {
+            cancelClose = session.beginClose();
+            void session.cancelPendingPrompt();
+          },
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey, {
+            requeue: false,
+          });
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        cancelClose?.();
+      });
+
+      it('records the model failure that pauses an ACP Goal turn', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-provider-failure',
+        };
+        const turnKey = 'goal-runtime:turn-provider-failure';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            yield* [];
+            throw new Error('provider stream failed');
+          })(),
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: permit.goalId,
+            expectedRevision: permit.revision,
+            reason: goalPauseReasonForFailure('provider stream failed'),
+          });
+        });
+      });
+
+      it('records the session token limit that pauses an ACP Goal turn before the model request', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-output-limit',
+        };
+        const turnKey = 'goal-runtime:turn-output-limit';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockLlmClient.tryCompressChat.mockResolvedValue({
+          originalTokenCount: 999,
+          newTokenCount: 999,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: permit.goalId,
+            expectedRevision: permit.revision,
+            reason: GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
+          });
+        });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('does not restart a model-started Goal when recording session closure fails', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-session-close',
+        };
+        const turnKey = 'goal-runtime:turn-session-close';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(
+            async (
+              _model: string,
+              request: { config: { abortSignal: AbortSignal } },
+            ) =>
+              (async function* () {
+                if (!request.config.abortSignal.aborted) {
+                  await new Promise<void>((resolve) =>
+                    request.config.abortSignal.addEventListener(
+                      'abort',
+                      () => resolve(),
+                      { once: true },
+                    ),
+                  );
+                }
+                yield* [];
+              })(),
+          );
+        mockGoalRuntime.dispatch.mockRejectedValueOnce(
+          new Error('write failed'),
+        );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        });
+        const cancelClose = session.beginClose();
+        await session.cancelPendingPrompt();
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: permit.goalId,
+            expectedRevision: permit.revision,
+            reason: GOAL_PAUSE_REASON_SESSION_DISPOSED,
+          });
+        });
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+          }),
+        );
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey, {
+          requeue: false,
+        });
+        cancelClose();
+      });
+
+      it('does not claim the session closed when a started close is abandoned', async () => {
+        // A close can be abandoned -- a drain timeout or a failed flush
+        // releases the gate and the session keeps serving -- so the reason
+        // this stop records has to stay true in that outcome too.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-close-abandoned',
+        };
+        const turnKey = 'goal-runtime:turn-close-abandoned';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(
+            async (
+              _model: string,
+              request: { config: { abortSignal: AbortSignal } },
+            ) =>
+              (async function* () {
+                if (!request.config.abortSignal.aborted) {
+                  await new Promise<void>((resolve) =>
+                    request.config.abortSignal.addEventListener(
+                      'abort',
+                      () => resolve(),
+                      { once: true },
+                    ),
+                  );
+                }
+                yield* [];
+              })(),
+          );
+
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        });
+        const cancelClose = session.beginClose();
+        await session.cancelPendingPrompt();
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith(
+            expect.objectContaining({ action: 'pause' }),
+          );
+        });
+
+        // The close is abandoned; the session is serving again.
+        cancelClose();
+        const reopen = session.beginClose();
+        reopen();
+
+        const pauseCall = mockGoalRuntime.dispatch.mock.calls.find(
+          (call) => call[0].action === 'pause',
+        ) as [{ reason?: string }];
+        expect(pauseCall[0].reason).toBe(GOAL_PAUSE_REASON_SESSION_DISPOSED);
+        // The session did not close, so the record must not say it did.
+        expect(pauseCall[0].reason).not.toMatch(/^The session closed/);
+      });
+
+      it('records session closure for a Goal turn still waiting in the queue', async () => {
+        // `beginClose` stops the queue draining but leaves what is already
+        // queued, so this arm settles a turn that never reached the model.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-queued-close',
+        };
+        const turnKey = 'goal-runtime:turn-queued-close';
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: permit.goalId,
+            revision: permit.revision,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+          key === turnKey ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        const cancelClose = session.beginClose();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+        await session.cancelPendingPrompt();
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+            action: 'pause',
+            expectedGoalId: permit.goalId,
+            expectedRevision: permit.revision,
+            reason: GOAL_PAUSE_REASON_SESSION_DISPOSED,
+          });
+        });
+        expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
+          }),
+        );
+        cancelClose();
       });
 
       it('releases a claimed Goal permit when the prompt is cancelled in the claim window', async () => {
@@ -24719,6 +25095,7 @@ describe('Session', () => {
           action: 'pause',
           expectedGoalId: permit.goalId,
           expectedRevision: permit.revision,
+          reason: GOAL_PAUSE_REASON_USER_INTERRUPT,
         });
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
@@ -29077,6 +29454,7 @@ describe('Session', () => {
             action: 'pause',
             expectedGoalId: 'goal-1',
             expectedRevision: 3,
+            reason: GOAL_PAUSE_REASON_STOP_HOOK_CAP,
           });
         });
 
