@@ -525,6 +525,23 @@ export default {
   'Auto Edit': 'Edició automàtica',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activa/desactiva el mode Vim',
+  'Focus mode is not supported by this renderer.':
+    'El mode de concentració no és compatible amb aquesta interfície.',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'activa/desactiva el mode focus (amaga el raonament i el soroll de crides d’eines)',
+  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.':
+    'Mode focus activat. Ctrl+O mostra tots els detalls; tanqueu aquesta vista per aplicar el focus. Executeu /focus de nou per desactivar-lo.',
+  'Focus mode disabled.': 'Mode focus desactivat.',
+  '1 tool call hidden (Ctrl+O for details)':
+    '1 crida d’eina amagada (Ctrl+O per als detalls)',
+  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
+    'Eines: {{count}}, errors: {{failed}} (Ctrl+O per als detalls)',
+  '{{count}} tool calls hidden (Ctrl+O for details)':
+    '{{count}} crides d’eines amagades (Ctrl+O per als detalls)',
+  'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
+    'El mode focus es controla des de la configuració de l’espai de treball o del sistema. Canvieu la configuració que té prioritat per alternar el focus.',
+  'Memory: {{read}} read, {{written}} written':
+    'Memòria: {{read}} lectures, {{written}} escriptures',
   'Show model-specific usage statistics.':
     "Mostra les estadístiques d'ús específiques del model.",
   'Show tool-specific usage statistics.':

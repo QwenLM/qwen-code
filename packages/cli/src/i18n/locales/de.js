@@ -458,6 +458,23 @@ export default {
   'Auto Edit': 'Automatisch bearbeiten',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim-Modus ein-/ausschalten',
+  'Focus mode is not supported by this renderer.':
+    'Der Fokusmodus wird von diesem Renderer nicht unterstützt.',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'Fokus-Modus ein-/ausschalten (Reasoning und Tool-Aufruf-Rauschen ausblenden)',
+  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.':
+    'Fokus-Modus aktiviert. Strg+O zeigt alle Details; schließen Sie diese Ansicht, um den Fokus anzuwenden. Führen Sie /focus erneut aus, um ihn zu deaktivieren.',
+  'Focus mode disabled.': 'Fokus-Modus deaktiviert.',
+  '1 tool call hidden (Ctrl+O for details)':
+    '1 Tool-Aufruf ausgeblendet (Strg+O für Details)',
+  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
+    'Tools: {{count}}, fehlgeschlagen: {{failed}} (Strg+O für Details)',
+  '{{count}} tool calls hidden (Ctrl+O for details)':
+    '{{count}} Tool-Aufrufe ausgeblendet (Strg+O für Details)',
+  'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
+    'Der Fokus-Modus wird durch Arbeitsbereichs- oder Systemeinstellungen gesteuert. Ändern Sie die vorrangige Einstellung, um den Fokus umzuschalten.',
+  'Memory: {{read}} read, {{written}} written':
+    'Speicher: {{read}} Lesezugriffe, {{written}} Schreibzugriffe',
   'Show model-specific usage statistics.':
     'Modellspezifische Nutzungsstatistiken anzeigen.',
   'Show tool-specific usage statistics.':

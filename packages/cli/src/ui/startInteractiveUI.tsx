@@ -38,6 +38,7 @@ import { KeypressProvider } from './contexts/KeypressContext.js';
 import { SessionStatsProvider } from './contexts/SessionContext.js';
 import { SettingsContext } from './contexts/SettingsContext.js';
 import { VimModeProvider } from './contexts/VimModeContext.js';
+import { FocusModeProvider } from './contexts/FocusModeContext.js';
 import { AgentViewProvider } from './contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
@@ -246,22 +247,24 @@ export async function startInteractiveUI(
                 >
                   <SessionStatsProvider sessionId={config.getSessionId()}>
                     <VimModeProvider settings={settings}>
-                      <AgentViewProvider config={config}>
-                        <BackgroundTaskViewProvider config={config}>
-                          <AppContainer
-                            config={config}
-                            settings={settings}
-                            startupWarnings={startupWarnings}
-                            version={version}
-                            initializationResult={initializationResult}
-                            initialUseVirtualViewport={useVP}
-                            extensionRefreshState={
-                              options.extensionRefreshState
-                            }
-                            repaintViewport={resizeReflow.repaint}
-                          />
-                        </BackgroundTaskViewProvider>
-                      </AgentViewProvider>
+                      <FocusModeProvider settings={settings}>
+                        <AgentViewProvider config={config}>
+                          <BackgroundTaskViewProvider config={config}>
+                            <AppContainer
+                              config={config}
+                              settings={settings}
+                              startupWarnings={startupWarnings}
+                              version={version}
+                              initializationResult={initializationResult}
+                              initialUseVirtualViewport={useVP}
+                              extensionRefreshState={
+                                options.extensionRefreshState
+                              }
+                              repaintViewport={resizeReflow.repaint}
+                            />
+                          </BackgroundTaskViewProvider>
+                        </AgentViewProvider>
+                      </FocusModeProvider>
                     </VimModeProvider>
                   </SessionStatsProvider>
                 </KeypressProvider>

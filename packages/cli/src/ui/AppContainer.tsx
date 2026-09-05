@@ -159,6 +159,10 @@ import {
   useVimModeState,
   useVimModeActions,
 } from './contexts/VimModeContext.js';
+import {
+  useFocusModeActions,
+  useFocusModeEnabled,
+} from './contexts/FocusModeContext.js';
 import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
@@ -1895,6 +1899,19 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { vimEnabled, vimMode } = useVimModeState();
   const { toggleVimEnabled } = useVimModeActions();
+  const { toggleFocusMode, syncFocusMode } = useFocusModeActions();
+  const focusModeEnabled = useFocusModeEnabled();
+  // /config mutates settings in place and rerenders this subtree, not the provider.
+  useEffect(() => {
+    syncFocusMode();
+  }, [settings.merged.ui?.focusMode, syncFocusMode]);
+  const previousFocusMode = useRef(focusModeEnabled);
+  useEffect(() => {
+    if (previousFocusMode.current !== focusModeEnabled) {
+      previousFocusMode.current = focusModeEnabled;
+      refreshStatic();
+    }
+  }, [focusModeEnabled, refreshStatic]);
 
   useLayoutEffect(() => {
     if (vimEnabled && buffer.text.length > 0) {
@@ -2158,6 +2175,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.updateItem,
     setSessionName,
     extensionRefreshState,
+    toggleFocusMode,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage

@@ -69,6 +69,7 @@ describe('buildSettingsListItems', () => {
     expect(items.length).toBeGreaterThan(0);
     const keys = items.map((item) => item.key);
     expect(keys).toContain('ui.theme');
+    expect(keys).not.toContain('ui.focusMode');
     // Labels are resolved from the schema definitions.
     const themeItem = items.find((item) => item.key === 'ui.theme');
     expect(themeItem?.label).toBeTruthy();

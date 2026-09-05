@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import type React from 'react';
 import { Text } from 'ink';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { type HistoryItem, ToolCallStatus } from '../types.js';
@@ -18,6 +19,7 @@ import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+import { FocusModeProvider } from '../contexts/FocusModeContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 import type { MouseEvent } from '../utils/mouse.js';
@@ -27,7 +29,8 @@ import {
 } from '../utils/measure-element-position.js';
 
 // Mock child components
-vi.mock('./messages/ToolGroupMessage.js', () => ({
+vi.mock('./messages/ToolGroupMessage.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./messages/ToolGroupMessage.js')>()),
   ToolGroupMessage: vi.fn(() => <div />),
 }));
 
@@ -580,6 +583,333 @@ describe('<HistoryItemDisplay />', () => {
 
     const passedProps = vi.mocked(ToolGroupMessage).mock.calls[0][0];
     expect(passedProps.fullDetail).toBe(true);
+  });
+
+  describe('focus mode', () => {
+    const makeFocusSettings = () =>
+      new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { ui: { focusMode: true } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+
+    const renderInFocusMode = (
+      element: React.ReactElement,
+      settings = makeFocusSettings(),
+    ) =>
+      renderWithProviders(
+        <FocusModeProvider settings={settings}>{element}</FocusModeProvider>,
+        { settings },
+      );
+
+    const successTool = (callId: string) => ({
+      callId,
+      name: 'run_shell_command',
+      description: 'Run a shell command',
+      resultDisplay: 'done',
+      status: ToolCallStatus.Success,
+      confirmationDetails: undefined,
+    });
+
+    it('collapses a committed all-success tool_group to a dim summary line', () => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const item: HistoryItem = {
+        id: 1,
+        type: 'tool_group',
+        tools: [
+          successTool('c1'),
+          successTool('c2'),
+          successTool('c3'),
+          successTool('c4'),
+          successTool('c5'),
+        ],
+      };
+
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
+      );
+
+      expect(lastFrame()).toContain('5 tool calls hidden (Ctrl+O for details)');
+      expect(vi.mocked(ToolGroupMessage)).not.toHaveBeenCalled();
+    });
+
+    it('collapses a single successful tool call to the singular summary line', () => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const item: HistoryItem = {
+        id: 1,
+        type: 'tool_group',
+        tools: [successTool('c1')],
+      };
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
+      );
+
+      expect(lastFrame()).toContain('1 tool call hidden (Ctrl+O for details)');
+      expect(ToolGroupMessage).not.toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      'summarizes errors with successful tools: %s',
+      (mixed) => {
+        vi.mocked(ToolGroupMessage).mockClear();
+        const item: HistoryItem = {
+          id: 1,
+          type: 'tool_group',
+          tools: [
+            ...(mixed ? [successTool('c1')] : []),
+            { ...successTool('c2'), status: ToolCallStatus.Error },
+          ],
+        };
+
+        const { lastFrame } = renderInFocusMode(
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={80}
+            isPending={false}
+          />,
+        );
+
+        expect(lastFrame()).toContain(
+          `Tools: ${mixed ? 2 : 1}, failed: 1 (Ctrl+O for details)`,
+        );
+        expect(vi.mocked(ToolGroupMessage)).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ToolCallStatus.Pending,
+      ToolCallStatus.Executing,
+      ToolCallStatus.Confirming,
+      ToolCallStatus.Canceled,
+    ])('keeps a committed group with status %s visible', (status) => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const item: HistoryItem = {
+        id: 1,
+        type: 'tool_group',
+        tools: [successTool('c1'), { ...successTool('c2'), status }],
+      };
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
+      );
+      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
+      expect(ToolGroupMessage).toHaveBeenCalled();
+    });
+
+    it('keeps successful subagent executions visible', () => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const item: HistoryItem = {
+        id: 1,
+        type: 'tool_group',
+        tools: [
+          {
+            ...successTool('agent'),
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'reviewer',
+              taskDescription: 'Review changes',
+              taskPrompt: 'Review changes',
+              status: 'completed',
+              toolCalls: [],
+            },
+          },
+        ],
+      };
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
+      );
+      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
+      expect(ToolGroupMessage).toHaveBeenCalled();
+    });
+
+    it.each([
+      { images: [{ data: 'aW1hZ2U=', mimeType: 'image/png' }] },
+      { omittedImageCount: 1 },
+    ])('preserves image-bearing tool groups: %j', (imageOutput) => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      renderInFocusMode(
+        <HistoryItemDisplay
+          item={{
+            id: 1,
+            type: 'tool_group',
+            tools: [{ ...successTool('image'), ...imageOutput }],
+          }}
+          terminalWidth={100}
+          isPending={false}
+        />,
+      );
+      expect(ToolGroupMessage).toHaveBeenCalled();
+    });
+
+    it.each([false, true])(
+      'preserves memory counts in a mixed group: %s',
+      (mixed) => {
+        vi.mocked(ToolGroupMessage).mockClear();
+        const { lastFrame } = renderInFocusMode(
+          <HistoryItemDisplay
+            item={{
+              id: 1,
+              type: 'tool_group',
+              tools: [
+                { ...successTool('memory'), name: 'memory_write' },
+                ...(mixed ? [successTool('shell')] : []),
+              ],
+              memoryReadCount: 2,
+              memoryWriteCount: 1,
+            }}
+            terminalWidth={120}
+            isPending={false}
+          />,
+        );
+        expect(lastFrame()).toContain('Memory: 2 read, 1 written');
+        expect(ToolGroupMessage).not.toHaveBeenCalled();
+      },
+    );
+
+    it('does NOT collapse a pending (still running) tool_group', () => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const item: HistoryItem = {
+        id: 1,
+        type: 'tool_group',
+        tools: [successTool('c1')],
+      };
+
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay item={item} terminalWidth={80} isPending={true} />,
+      );
+
+      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
+      expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
+    });
+
+    it('does NOT collapse a user-initiated tool_group', () => {
+      vi.mocked(ToolGroupMessage).mockClear();
+      const item: HistoryItem = {
+        id: 1,
+        type: 'tool_group',
+        tools: [successTool('c1')],
+        isUserInitiated: true,
+      };
+
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
+      );
+
+      expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
+      expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
+    });
+
+    it.each([ToolCallStatus.Success, ToolCallStatus.Error])(
+      'fullDetail restores tool details with status %s',
+      (status) => {
+        vi.mocked(ToolGroupMessage).mockClear();
+        const item: HistoryItem = {
+          id: 1,
+          type: 'tool_group',
+          tools: [{ ...successTool('c1'), status }],
+        };
+
+        const { lastFrame } = renderInFocusMode(
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={80}
+            isPending={false}
+            fullDetail
+          />,
+        );
+
+        expect(lastFrame()).not.toContain('hidden (Ctrl+O for details)');
+        expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalled();
+        expect(vi.mocked(ToolGroupMessage).mock.calls[0][0]).toMatchObject({
+          fullDetail: true,
+          toolCalls: item.tools,
+        });
+      },
+    );
+
+    it('hides gemini_thought completely', () => {
+      const item: HistoryItem = {
+        id: 1,
+        type: 'gemini_thought',
+        text: 'Inspecting the repository',
+        durationMs: 1200,
+      };
+
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay
+          item={item}
+          terminalWidth={100}
+          isPending={false}
+        />,
+      );
+
+      const output = lastFrame() ?? '';
+      expect(output).not.toContain('Thought for');
+      expect(output).not.toContain('Inspecting the repository');
+    });
+
+    it('hides an individually expanded thought continuation', () => {
+      const item: HistoryItem = {
+        id: 1,
+        type: 'gemini_thought_content',
+        text: 'Continuing the reasoning',
+      };
+
+      const element = (
+        <HistoryItemDisplay
+          item={item}
+          terminalWidth={100}
+          isPending={false}
+          thoughtExpanded
+        />
+      );
+      const normal = renderWithProviders(element);
+      expect(normal.lastFrame()).toContain('Continuing the reasoning');
+      normal.unmount();
+
+      const focused = renderInFocusMode(element);
+      expect(focused.lastFrame()).not.toContain('Continuing the reasoning');
+    });
+
+    it('fullDetail (Ctrl+O transcript) shows thoughts despite focus mode', () => {
+      const item: HistoryItem = {
+        id: 1,
+        type: 'gemini_thought',
+        text: 'Inspecting the repository',
+        durationMs: 1200,
+      };
+
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay
+          item={item}
+          terminalWidth={100}
+          isPending={false}
+          fullDetail
+        />,
+      );
+
+      expect(lastFrame() ?? '').toContain('Inspecting the repository');
+    });
+
+    it('leaves user messages untouched', () => {
+      const item: HistoryItem = {
+        ...baseItem,
+        type: MessageType.USER,
+        text: 'Hello',
+      };
+
+      const { lastFrame } = renderInFocusMode(
+        <HistoryItemDisplay {...baseItem} item={item} />,
+      );
+
+      expect(lastFrame()).toContain('Hello');
+    });
   });
 
   describe('showTimestamps', () => {

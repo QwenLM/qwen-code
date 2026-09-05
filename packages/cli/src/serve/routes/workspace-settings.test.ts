@@ -606,7 +606,12 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).not.toHaveBeenCalled();
   });
 
-  it.each(['ui.mouseTracking', 'ui.showScrollbar', 'ui.showToolCallArgs'])(
+  it.each([
+    'ui.mouseTracking',
+    'ui.showScrollbar',
+    'ui.showToolCallArgs',
+    'ui.focusMode',
+  ])(
     'rejects a TUI-only key (%s) that has no effect in the web shell',
     async (key) => {
       // These keys are read only inside the ink TUI (mouseTracking also

@@ -365,6 +365,23 @@ export default {
   'Auto Edit': '自動編集',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'Vim モードのオン/オフを切り替え',
+  'Focus mode is not supported by this renderer.':
+    'このレンダラーはフォーカスモードに対応していません。',
+  'toggle focus mode (hide reasoning and tool call noise)':
+    'フォーカスモードの切り替え（推論とツール呼び出しのノイズを非表示）',
+  'Focus mode enabled. Ctrl+O shows full details; close that view to apply focus. Run /focus again to disable.':
+    'フォーカスモードが有効になりました。Ctrl+O で全詳細を表示します。フォーカスを適用するには詳細表示を閉じてください。/focus を再実行すると無効になります。',
+  'Focus mode disabled.': 'フォーカスモードが無効になりました。',
+  '1 tool call hidden (Ctrl+O for details)':
+    '1 件のツール呼び出しを非表示（Ctrl+O で詳細）',
+  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
+    'ツール: {{count}}、失敗: {{failed}}（Ctrl+O で詳細）',
+  '{{count}} tool calls hidden (Ctrl+O for details)':
+    '{{count}} 件のツール呼び出しを非表示（Ctrl+O で詳細）',
+  'Focus mode is controlled by workspace or system settings. Change the overriding setting to toggle focus.':
+    'フォーカスモードはワークスペースまたはシステムの設定で制御されています。切り替えるには、優先されている設定を変更してください。',
+  'Memory: {{read}} read, {{written}} written':
+    'メモリ: 読み取り {{read}} 件、書き込み {{written}} 件',
   'exit the cli': 'CLIを終了',
   Timeout: 'タイムアウト',
   'Max Retries': '最大リトライ回数',

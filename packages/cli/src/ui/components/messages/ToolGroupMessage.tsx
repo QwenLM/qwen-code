@@ -46,7 +46,7 @@ function isRunningAgent(
   );
 }
 
-function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
+export function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
   return Boolean(tool.images?.length || tool.omittedImageCount);
 }
 
@@ -54,7 +54,7 @@ function hasInlineImageOutput(tool: IndividualToolCallDisplay): boolean {
  * Predicate: tool entry whose `resultDisplay` is an `AgentResultDisplay`
  * (i.e. a `task_execution` subagent invocation), regardless of status.
  */
-function isSubagentToolEntry(tool: IndividualToolCallDisplay): boolean {
+export function isSubagentToolEntry(tool: IndividualToolCallDisplay): boolean {
   const rd = tool.resultDisplay;
   return (
     typeof rd === 'object' &&

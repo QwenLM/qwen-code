@@ -1,5 +1,7 @@
 # Tool-Use Summaries
 
+The default display behavior below applies when [focus mode](#focus-mode) is off.
+
 Qwen Code can generate a short, git-commit-subject-style label after each tool batch completes, summarizing what the batch accomplished. The label appears inline: for a completed tool group in the main view it replaces the generic `Tool × N` header; when the group is force-expanded (in `Ctrl+O` expanded detail mode, or for error / user-initiated batches) it appears as a dim `● <label>` line below the group.
 
 This is a UX aid for parallel tool calls: when the model fans out into several `Read` + `Grep` + `Bash` calls at once, the summary tells you the intent at a glance instead of forcing you to scan the tool list.
@@ -34,6 +36,24 @@ When a group is force-expanded — in `Ctrl+O` expanded detail mode, or for erro
 
  ● Read 4 text files
 ```
+
+## Focus mode
+
+In the Ink terminal UI, `/focus` hides reasoning rows and replaces completed tool groups with short counts, including failures:
+
+```text
+Tools: 1, failed: 1 (Ctrl+O for details)
+```
+
+Unlike the default view, focus hides completed error arguments and output. Press `Ctrl+O` to inspect details, or run `/focus` again to restore the ordinary view. Existing history updates in both Ink history modes. Full detail takes precedence: if you enable focus while that view is open, close it to see the filtered history. Session previews also show full detail.
+
+For summarized groups, focus takes precedence over `ui.showToolCallArgs`.
+
+Running tools, approval prompts, cancelled groups, user-initiated groups and groups containing subagent results or image output (including omitted-image notices) stay visible. Memory read/write counts remain on the summary line.
+
+Focus is off by default. `/focus` saves `ui.focusMode` at User scope for future sessions. If an active workspace or system setting overrides it, the command warns and does not change your saved preference. Edit the overriding setting to change focus. Untrusted workspace settings do not override your preference. You can also manage the preference through `/settings` or `/config`.
+
+These count summaries need no fast model. Focus does not change label generation, tool execution or stored history. OpenTUI and Web Shell do not support this view.
 
 ## How It Works
 
