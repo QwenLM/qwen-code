@@ -26,8 +26,15 @@ const SUITE_SETTINGS = {
 // /compress is a live model call whose cost depends on which path the
 // compression service takes: measured at 9.8s for the cold side-query (611
 // output tokens) and 63.6s for the cache-sharing request (4138 output tokens)
-// on an otherwise quiet machine. The old 90s left a 1.4x margin over the slow
-// path, which is what reddened the shard in #11088.
+// on an otherwise quiet machine. With the extractor off, 90s already sufficed
+// (measured), so the old ceiling per se was not what reddened the shard in
+// #11088 — the extractor competed with the measurement, and the previously
+// unasserted 25s seed wait could expire, leaving /compress held mid-turn and
+// drained at the idle edge (contract pinned by mid-turn-submit-interactive).
+// The seed wait is now asserted; 150s is margin over the slow path under
+// runner load. It cannot rise to the CLI's 240s stream-idle bound: vitest's
+// testTimeout is 300s, the readiness waits already spend part of it, and the
+// side-query runs stream:true, maxAttempts:1, so a slow stream gets no retry.
 const COMPRESSION_EVENT_TIMEOUT_MS = 150_000;
 
 describe('Interactive Mode', () => {
@@ -66,7 +73,11 @@ describe('Interactive Mode', () => {
       await type(ptyProcess, longPrompt);
       await type(ptyProcess, '\r');
 
-      await rig.waitForText('einstein', 25000);
+      const seeded = await rig.waitForText('einstein', 60_000);
+      expect(
+        seeded,
+        'seed turn did not finish before /compress was submitted',
+      ).toBe(true);
 
       await type(ptyProcess, '/compress');
       // A small delay to allow React to re-render the command list.
@@ -80,6 +91,17 @@ describe('Interactive Mode', () => {
       expect(foundEvent, 'chat_compression telemetry event was not found').toBe(
         true,
       );
+
+      // The event is also emitted on the compression service's failure paths
+      // and carries no status field, so confirm the success-path UI text too.
+      const compressed = await rig.waitForText(
+        'Chat history compressed',
+        15_000,
+      );
+      expect(
+        compressed,
+        'chat_compression event landed but the UI did not report success',
+      ).toBe(true);
     },
   );
 
@@ -142,7 +164,11 @@ describe('Interactive Mode', () => {
       await type(ptyProcess, seedPrompt);
       await type(ptyProcess, '\r');
 
-      await rig.waitForText('einstein', 25000);
+      const seeded = await rig.waitForText('einstein', 60_000);
+      expect(
+        seeded,
+        'seed turn did not finish before /compress was submitted',
+      ).toBe(true);
 
       // Fire /compress with a trailing instruction. We are not asserting on
       // summary CONTENT (model behaviour) — only that the wiring runs
@@ -160,6 +186,17 @@ describe('Interactive Mode', () => {
       expect(foundEvent, 'chat_compression telemetry event was not found').toBe(
         true,
       );
+
+      // The event is also emitted on the compression service's failure paths
+      // and carries no status field, so confirm the success-path UI text too.
+      const compressed = await rig.waitForText(
+        'Chat history compressed',
+        15_000,
+      );
+      expect(
+        compressed,
+        'chat_compression event landed but the UI did not report success',
+      ).toBe(true);
     },
   );
 });
