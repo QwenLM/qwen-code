@@ -12,7 +12,11 @@ import {
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
 import { multiSessionCompatibilityError } from '../commands/channel/config-utils.js';
-import { loadSettings, saveSettings } from '../config/settings.js';
+import {
+  loadSettings,
+  saveSettings,
+  type SettingsFile,
+} from '../config/settings.js';
 
 export type ChannelSecretUpdate =
   | { operation: 'preserve' }
@@ -465,18 +469,25 @@ export function assertValidChannelSecretUpdates(
   }
 }
 
+/**
+ * Resolve the settings scope that owns channel configs for a workspace.
+ *
+ * When the workspace directory is the user's home directory, the settings
+ * loader disables the workspace scope and attributes the shared settings file
+ * to the user scope. Reads and writes must resolve the same scope: otherwise a
+ * redirected `QWEN_HOME` makes reads come from the user file while writes land
+ * in `<workspace>/.qwen/settings.json`, a file no scope reads.
+ */
+function channelSettingsScope(workspaceCwd: string): SettingsFile {
+  const loaded = loadSettings(workspaceCwd, { skipLoadEnvironment: true });
+  return loaded.workspaceSettingsActive ? loaded.workspace : loaded.user;
+}
+
 function workspaceValues(workspaceCwd: string): {
   channels: Record<string, Record<string, unknown>>;
   startupNames: string[];
 } {
-  const loaded = loadSettings(workspaceCwd, { skipLoadEnvironment: true });
-  // When the workspace directory is the user's home directory, the settings
-  // loader disables the workspace scope and attributes the shared settings
-  // file to the user scope. Fall back to that scope so channel configs
-  // written here remain readable in home-directory deployments.
-  const settings = loaded.workspaceSettingsActive
-    ? loaded.workspace.settings
-    : loaded.user.settings;
+  const settings = channelSettingsScope(workspaceCwd).settings;
   const rawChannels = isRecord(settings.channels) ? settings.channels : {};
   const channels: Record<string, Record<string, unknown>> = {};
   for (const [name, config] of Object.entries(rawChannels)) {
@@ -587,12 +598,12 @@ export class WorkspaceChannelSettingsStore {
     }
 
     const channels = { ...current.channels, [name]: nextConfig };
-    const workspaceFile = loadSettings(this.workspaceCwd, {
-      skipLoadEnvironment: true,
-    }).workspace;
-    saveSettings(workspaceFile, { channels }, ['channels'], {
-      throwOnWriteFailure: true,
-    });
+    saveSettings(
+      channelSettingsScope(this.workspaceCwd),
+      { channels },
+      ['channels'],
+      { throwOnWriteFailure: true },
+    );
     return this.snapshot();
   }
 
@@ -612,11 +623,8 @@ export class WorkspaceChannelSettingsStore {
         ? ['all']
         : []
       : current.startupNames.filter((startupName) => startupName !== name);
-    const workspaceFile = loadSettings(this.workspaceCwd, {
-      skipLoadEnvironment: true,
-    }).workspace;
     saveSettings(
-      workspaceFile,
+      channelSettingsScope(this.workspaceCwd),
       { channels, serve: { channels: startupNames } },
       ['channels'],
       { throwOnWriteFailure: true },
@@ -632,11 +640,8 @@ export class WorkspaceChannelSettingsStore {
       assertSafeChannelName(name);
     }
     this.assertRevision(options.expectedRevision);
-    const workspaceFile = loadSettings(this.workspaceCwd, {
-      skipLoadEnvironment: true,
-    }).workspace;
     saveSettings(
-      workspaceFile,
+      channelSettingsScope(this.workspaceCwd),
       { serve: { channels: [...names] } },
       ['serve', 'channels'],
       { throwOnWriteFailure: true },
