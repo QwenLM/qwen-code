@@ -711,10 +711,10 @@ These commands are run from the shell as `qwen <subcommand>` before starting an 
 
 ### Session Management
 
-| Command              | Description                                 | Usage Examples                                               |
-| -------------------- | ------------------------------------------- | ------------------------------------------------------------ |
-| `qwen sessions list` | List recent conversation sessions           | `qwen sessions list`, `qwen sessions list --json --limit 50` |
-| `qwen sessions ps`   | List interactive sessions running right now | `qwen sessions ps`, `qwen sessions ps --json`                |
+| Command              | Description                         | Usage Examples                                               |
+| -------------------- | ----------------------------------- | ------------------------------------------------------------ |
+| `qwen sessions list` | List recent conversation sessions   | `qwen sessions list`, `qwen sessions list --json --limit 50` |
+| `qwen sessions ps`   | List the sessions running right now | `qwen sessions ps`, `qwen sessions ps --json`                |
 
 #### `qwen sessions list`
 
@@ -756,12 +756,20 @@ qwen sessions list --json | jq .
 
 #### `qwen sessions ps`
 
-Lists the interactive Qwen Code sessions running on this machine right
-now. `sessions list` walks saved transcripts ("what have I worked on");
-this walks the live-process registry ("what is running at this moment").
-Records left behind by a killed session are swept as they are found.
-Headless sessions (`qwen -p`) do not register with the live-process
-registry, so they are not shown.
+Lists the Qwen Code sessions running on this machine right now.
+`sessions list` walks saved transcripts ("what have I worked on"); this
+answers "what is running at this moment".
+
+Two kinds of session are listed. An **interactive** session is one you
+started in a terminal; it registers in the live-process registry, and
+records left behind by a killed session are swept as they are found. A
+**managed** session is an Agent View session owned by a supervisor: it
+stores richer lifecycle state in the supervisor store, which the registry
+alone cannot provide. A session present in both sources is listed once, as
+managed. Managed sessions are listed first, because one of them may be
+waiting for an answer.
+
+Headless sessions (`qwen -p`) register nowhere and are not shown.
 
 **Flags:**
 
@@ -771,20 +779,44 @@ registry, so they are not shown.
 
 **Human-readable output (default):**
 
-A table with columns: NAME, PID, AGE, DIRECTORY.
+A table with columns: NAME, PID, AGE, STATE, DIRECTORY.
+
+STATE is `interactive` for a session you started yourself. For a managed
+session it is what that session is actually doing — `needs input`,
+`working`, `ready`, `stopped` or `failed`. Those are display labels; the
+`--json` output carries stable tokens instead (see below). PID and AGE print `-` for a
+managed session only when their own source value is unavailable: PID when
+there is no live worker process, and AGE when the creation stamp is unusable.
 
 **JSON output (`--json`):**
 
-Outputs JSON Lines on stdout, newest session first. Each line is a JSON
-object with fields:
+Outputs JSON Lines on stdout, managed sessions first. Every line carries
+a `managed` field saying which kind it is.
+
+An interactive session is emitted as its whole registry record, plus
+`managed: false`:
 
 ```
 schemaVersion, pid, procStart, pidNs, sessionId, cwd, name, startedAt,
-qwenVersion
+qwenVersion, managed
 ```
 
+A managed session is emitted in the managed row shape, even when the same
+session also has a registry record:
+
+```
+name, pid, startedAt, cwd, taskState, sessionId, managed
+```
+
+`taskState` is the machine-readable form of the STATE column, and is the
+field to script against: `running`, `waiting`, `ready`, `stopped` or
+`failed`. The column's wording can change; these tokens will not.
+
 Nothing else is written to stdout — an empty listing prints nothing at
-all — so `qwen sessions ps --json | jq .` is safe to script against.
+all — so `qwen sessions ps --json | jq .` is safe to script against. If
+the supervisor's own bookkeeping cannot be read, the interactive half is
+still listed and the reason is reported on stderr, which leaves stdout
+parseable.
 
 JSON output is raw data: field values are emitted exactly as recorded,
 with no terminal sanitization. Treat them as data, and sanitize before
@@ -800,6 +832,12 @@ qwen sessions ps
 # Note: `jq -r` renders the raw recorded value in your terminal (see the
 # raw-data note above); pipe through a sanitizer if the path is untrusted.
 qwen sessions ps --json | jq -r .cwd
+
+# Which background sessions are waiting on me?
+# Note: `jq -r` renders the raw recorded value in your terminal (see the
+# raw-data note above); a session name is session-generated text, so pipe
+# through a sanitizer if it is untrusted.
+qwen sessions ps --json | jq -r 'select(.taskState == "waiting") | .name'
 ```
 
 ## 6. Messaging Another Running Session

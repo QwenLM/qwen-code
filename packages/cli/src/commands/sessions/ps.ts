@@ -5,34 +5,43 @@
  */
 
 /**
- * `qwen sessions ps` — list the interactive Qwen Code sessions running
- * right now.
+ * `qwen sessions ps` — list the Qwen Code sessions running right now.
  *
  * The sibling `qwen sessions list` walks saved transcripts; this walks the
  * live-process registry, so the two answer different questions: "what have
  * I worked on" versus "what is running on this machine at this moment".
  *
+ * Two things can be running: an interactive session, which writes the
+ * live-process registry, and a managed Agent View session, which is owned
+ * by a supervisor and has richer lifecycle state in the supervisor store.
+ * Both are listed, managed ones first — see `managed-rows.ts` for the merge.
+ *
  * "Interactive" is a registration fact, not a filter: only the
  * interactive UI registers sessions, so headless runs (`qwen -p`) never
- * appear here.
+ * appear here. A managed session appears whether or not it registers.
  */
 
 import type { CommandModule, Argv } from 'yargs';
-import {
-  listLiveSessions,
-  type SessionRegistryRecord,
-} from '@qwen-code/qwen-code-core';
+import { listLiveSessions } from '@qwen-code/qwen-code-core';
 import stringWidth from 'string-width';
 import {
   sanitizeTerminalText,
   truncateToWidth,
 } from '../../ui/utils/textUtils.js';
-import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { listAgentViewSessionSnapshots } from '../../agent-view/supervisor-store.js';
+import {
+  managedSessionRows,
+  mergeSessionRows,
+  type SessionRow,
+} from './managed-rows.js';
+import type { AgentViewTaskState } from '../../agent-view/presentation.js';
 
 /** Fixed column widths for the human-readable table (exported for tests). */
 export const NAME_COL = 22;
 export const PID_COL = 9;
 export const AGE_COL = 10;
+export const STATE_COL = 13;
 
 interface PsArgs {
   json?: boolean;
@@ -75,58 +84,137 @@ export function formatAge(ms: number): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-function outputHuman(records: SessionRegistryRecord[], now: number): void {
+/**
+ * What the `STATE` column prints for a managed row.
+ *
+ * The mapping lives here rather than on the row because the row reaches
+ * `--json`: a machine contract pinned to display wording breaks every
+ * script the day someone rewords a column, with no type error to warn
+ * them. `taskState` is the stable token; this is the only place it turns
+ * into English.
+ *
+ * Labelled by task state rather than by the roster's display group,
+ * which folds `ready`, `stopped` and `failed` into one `completed`
+ * bucket. The roster UI can afford that because it also paints an icon
+ * tone; a one-line table has no second channel, and printing
+ * "completed" beside a session that failed is a lie the user has no way
+ * to see through.
+ */
+const TASK_STATE_LABEL: Record<AgentViewTaskState, string> = {
+  running: 'working',
+  waiting: 'needs input',
+  ready: 'ready',
+  stopped: 'stopped',
+  failed: 'failed',
+};
+
+/** A registry row knows only that a process is alive. */
+function stateLabel(row: SessionRow): string {
+  return row.taskState === undefined
+    ? 'interactive'
+    : TASK_STATE_LABEL[row.taskState];
+}
+
+function outputHuman(rows: SessionRow[], now: number): void {
   writeStdoutLine(
     padDisplay('NAME', NAME_COL) +
       padDisplay('PID', PID_COL) +
       padDisplay('AGE', AGE_COL) +
+      padDisplay('STATE', STATE_COL) +
       'DIRECTORY',
   );
-  for (const record of records) {
+  for (const row of rows) {
     writeStdoutLine(
-      padDisplay(
-        truncateToWidth(sanitize(record.name), NAME_COL - 2),
-        NAME_COL,
-      ) +
-        padDisplay(String(record.pid), PID_COL) +
-        padDisplay(formatAge(now - record.startedAt), AGE_COL) +
-        sanitize(record.cwd),
+      padDisplay(truncateToWidth(sanitize(row.name), NAME_COL - 2), NAME_COL) +
+        padDisplay(row.pid === undefined ? '-' : String(row.pid), PID_COL) +
+        padDisplay(
+          row.startedAt === undefined ? '-' : formatAge(now - row.startedAt),
+          AGE_COL,
+        ) +
+        padDisplay(stateLabel(row), STATE_COL) +
+        sanitize(row.cwd),
     );
   }
 }
 
+/**
+ * Managed sessions plus whether the store was read successfully.
+ *
+ * A supervisor store that cannot be read must not take the command down —
+ * the registry half still answers the question. But it must not vanish
+ * either: a listing that silently omits a session waiting for input is
+ * the failure this command exists to prevent. stderr keeps `--json`
+ * stdout parseable.
+ */
+async function readManagedRows(
+  now: number,
+): Promise<{ rows: SessionRow[]; complete: boolean }> {
+  try {
+    return {
+      rows: managedSessionRows(await listAgentViewSessionSnapshots(), now),
+      complete: true,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    writeStderrLine(
+      `Managed sessions could not be listed: ${sanitize(reason)}`,
+    );
+    return { rows: [], complete: false };
+  }
+}
+
 async function handlePs(argv: PsArgs): Promise<void> {
+  const now = Date.now();
   // listLiveSessions reports "cannot look" as "no peers" rather than
   // throwing, so there is no failure path to surface here.
-  const records = await listLiveSessions();
-  const now = Date.now();
+  const [records, managedResult] = await Promise.all([
+    listLiveSessions(),
+    readManagedRows(now),
+  ]);
+  const rows = mergeSessionRows(records, managedResult.rows);
 
   if (argv.json) {
-    for (const record of records) {
+    for (const row of rows) {
       // Deliberately raw: field values are emitted exactly as recorded,
       // with none of the table path's terminal sanitization. That keeps
       // the output honest data for tooling (and matches the sibling
       // `sessions list --json`); consumers that RENDER these values in a
-      // terminal own the sanitization. The inbox token is the one
-      // exception — a credential, not data: tooling that really needs it
-      // can read the record file, but it must not spill into logs and
-      // pipelines by default.
-      writeStdoutLine(JSON.stringify({ ...record, ipcToken: undefined }));
+      // terminal own the sanitization.
+      //
+      // Registry rows keep the whole record so existing consumers see
+      // every field they always saw, minus the inbox token — a
+      // credential, not data: tooling that really needs it can read the
+      // record file, but it must not spill into logs and pipelines by
+      // default. Managed rows have no record behind them and are emitted
+      // as the row itself.
+      writeStdoutLine(
+        row.record
+          ? JSON.stringify({
+              ...row.record,
+              ipcToken: undefined,
+              managed: false,
+            })
+          : JSON.stringify(row),
+      );
     }
     return;
   }
 
-  if (records.length === 0) {
-    writeStdoutLine('No other interactive Qwen Code sessions are running.');
+  if (rows.length === 0) {
+    writeStdoutLine(
+      managedResult.complete
+        ? 'No other Qwen Code sessions are running.'
+        : 'No interactive Qwen Code sessions are running; managed sessions could not be listed.',
+    );
     return;
   }
 
-  outputHuman(records, now);
+  outputHuman(rows, now);
 }
 
 export const psCommand: CommandModule<unknown, PsArgs> = {
   command: 'ps',
-  describe: 'List interactive Qwen Code sessions running right now',
+  describe: 'List the Qwen Code sessions running right now',
   builder: (yargs: Argv) =>
     yargs.option('json', {
       type: 'boolean',
