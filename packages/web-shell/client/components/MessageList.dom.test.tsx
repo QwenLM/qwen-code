@@ -513,6 +513,22 @@ const nextFrame = () =>
     () =>
       new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
   );
+// A fixed frame budget expires early on a loaded CI host: the frames still
+// tick, but the effect they were meant to flush is queued behind everything
+// else on the box. Poll frames against a wall-clock deadline instead, so the
+// wait stretches with the machine rather than with a frame count. The bound
+// stays well inside the lane's per-test budget (60s on shared ECS runners,
+// vitest's 5s default elsewhere), so a wait that never resolves still fails
+// as an assertion.
+const FLUSH_DEADLINE_MS = process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+  ? 10_000
+  : 4_000;
+const waitForFrames = async (predicate: () => boolean) => {
+  const deadline = Date.now() + FLUSH_DEADLINE_MS;
+  while (!predicate() && Date.now() < deadline) {
+    await nextFrame();
+  }
+};
 const mockMessageListWidth = (width: number) =>
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
     width,
@@ -1401,6 +1417,8 @@ describe('MessageList — turn collapse (DOM)', () => {
       hasOlderHistory: true,
       onLoadOlderHistory,
     });
+    const waitForLoadCount = (count: number) =>
+      waitForFrames(() => onLoadOlderHistory.mock.calls.length >= count);
     const list = c.querySelector(
       '[data-web-shell-message-list]',
     ) as HTMLElement;
@@ -1433,6 +1451,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         list.dispatchEvent(new Event('scroll'));
         await Promise.resolve();
       });
+      await waitForLoadCount(2);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
 
       // The user collapses the turn before the page commits.
@@ -1454,6 +1473,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         list.dispatchEvent(new Event('scroll'));
         await Promise.resolve();
       });
+      await waitForLoadCount(3);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(3);
 
       // The superseded load's snapshot must not wedge later detection: page 3
@@ -1477,6 +1497,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         list.dispatchEvent(new Event('scroll'));
         await Promise.resolve();
       });
+      await waitForLoadCount(4);
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(4);
       rerenderMessages(
         c,
@@ -2524,7 +2545,7 @@ describe('MessageList — turn collapse (DOM)', () => {
         resolveLoad();
         await Promise.resolve();
       });
-      await nextFrame();
+      await waitForFrames(() => list.scrollTop === 600);
       // The keep-open re-expanded the turn, and the anchor restore followed
       // the re-keyed run to a visible row instead of dropping: the scroll
       // position moved with the prepended history.

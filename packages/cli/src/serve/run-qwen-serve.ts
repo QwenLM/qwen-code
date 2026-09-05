@@ -45,7 +45,10 @@ import {
   type BridgeEvent,
 } from '@qwen-code/acp-bridge/eventBus';
 import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
-import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
+import type {
+  NdJsonMessageObservation,
+  NdJsonQueueSaturationInfo,
+} from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
   consumeServeFastPathRejectedLoaderKeys,
@@ -77,6 +80,10 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import {
+  PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+  PRIVATE_CONVERSATIONS_RUNTIME_ENV,
+} from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
 import { MEMORY_PROJECT_SCOPES } from '@qwen-code/qwen-code-core/memoryScopes';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
@@ -120,6 +127,10 @@ import {
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import {
+  isLocalPathOpenAvailable,
+  isLocalTerminalAvailable,
+} from './local-path-open.js';
 import {
   EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
@@ -2325,6 +2336,8 @@ function currentServeFeaturesForRunQwenServe(
   currentSessionSchedulingAvailable: boolean,
   env: Readonly<Record<string, string | undefined>>,
   nativeDirectoryPickerAvailable: boolean,
+  localPathOpenAvailable: boolean,
+  localTerminalOpenAvailable: boolean,
 ): string[] {
   return getAdvertisedServeFeatures(undefined, {
     requireAuth: opts.requireAuth === true,
@@ -2356,6 +2369,16 @@ function currentServeFeaturesForRunQwenServe(
     // briefly under-report them.
     nativeDirectoryPickerAvailable,
     workspaceRuntimeAvailable,
+    localPathOpenAvailable,
+    localTerminalOpenAvailable,
+    // The production wiring below always registers these, so the bootstrap
+    // envelope must not under-report them either — the runtime envelope
+    // serves all five once the app is up.
+    dynamicWorkspaceRegistrationAvailable: true,
+    scratchWorkspaceRegistrationAvailable: true,
+    standaloneSessionsAvailable: true,
+    workspaceTrustHotReloadAvailable: true,
+    acpHttpEnabled: resolveAcpHttpEnabled(env as NodeJS.ProcessEnv),
     clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
     cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
     browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(opts, env),
@@ -2373,6 +2396,8 @@ function createBootstrapCapabilities(input: {
   permissionPolicy: PermissionPolicy | undefined;
   env: Readonly<Record<string, string | undefined>>;
   nativeDirectoryPickerAvailable: boolean;
+  localPathOpenAvailable: boolean;
+  localTerminalOpenAvailable: boolean;
 }): CapabilitiesEnvelope {
   return {
     v: CAPABILITIES_SCHEMA_VERSION,
@@ -2389,6 +2414,8 @@ function createBootstrapCapabilities(input: {
       input.currentSessionSchedulingAvailable,
       input.env,
       input.nativeDirectoryPickerAvailable,
+      input.localPathOpenAvailable,
+      input.localTerminalOpenAvailable,
     ),
     modelServices: [],
     workspaceCwd: input.boundWorkspace,
@@ -2566,6 +2593,8 @@ function createBootstrapServeApp(input: {
   // request, so evaluate it once here — the runtime path likewise probes once,
   // at `createApp` time (server.ts).
   const nativeDirectoryPickerAvailable = isNativeDirectoryPickerAvailable();
+  const localPathOpenAvailable = isLocalPathOpenAvailable();
+  const localTerminalOpenAvailable = isLocalTerminalAvailable();
 
   installSelfOriginStripMiddleware(app, getPort, opts.hostname);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
@@ -2628,6 +2657,8 @@ function createBootstrapServeApp(input: {
         permissionPolicy,
         env: process.env,
         nativeDirectoryPickerAvailable,
+        localPathOpenAvailable,
+        localTerminalOpenAvailable,
       }),
     );
   });
@@ -2772,6 +2803,8 @@ function createBootstrapServeApp(input: {
           currentSessionSchedulingAvailable,
           process.env,
           nativeDirectoryPickerAvailable,
+          localPathOpenAvailable,
+          localTerminalOpenAvailable,
         ),
       },
       runtime: {
@@ -4178,6 +4211,10 @@ async function runQwenServeImpl(
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
+    // The Conversations marker is enable-only and scoped to the
+    // live-conversation bridge below; every other runtime's child must not
+    // inherit it from the daemon's own environment.
+    [PRIVATE_CONVERSATIONS_RUNTIME_ENV]: undefined,
     [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
     [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]: externalToolGuardHandler
       ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
@@ -4900,6 +4937,21 @@ async function runQwenServeImpl(
       daemonLog,
       emitTelemetryLog: core.emitDaemonLog,
     });
+    // Saturation now backpressures the agent pipe for a bounded grace
+    // window instead of tearing the channel down immediately (#10162).
+    // Warn at episode start so field diagnosis doesn't begin at the
+    // `channel exited` breadcrumb.
+    // `callHook` in ndJsonStream already isolates hook throws from the
+    // transport, so this needs no guard of its own.
+    const warnAcpQueueSaturated = (info: NdJsonQueueSaturationInfo): void => {
+      daemonLog.warn('ACP NDJSON decoded queue saturated', {
+        requiredBytes: info.requiredBytes,
+        availableBytes: info.availableBytes,
+        maxQueuedMessages: info.maxQueuedMessages,
+        maxQueuedBytes: info.maxQueuedBytes,
+        queueSaturationGraceMs: info.graceMs,
+      });
+    };
     const recordPromptQueueWait = (durationMs: number): void => {
       promptQueueWaitStats.count += 1;
       promptQueueWaitStats.totalMs += durationMs;
@@ -5071,6 +5123,7 @@ async function runQwenServeImpl(
             bytes,
             message,
           }),
+        onQueueSaturated: warnAcpQueueSaturated,
       },
       ...(acpChildExtraArgs(opts)
         ? { extraArgs: acpChildExtraArgs(opts) }
@@ -5114,6 +5167,17 @@ async function runQwenServeImpl(
         runtimeEpochSources.set(workspaceCwd, source);
       }
       return source;
+    };
+    let mcpAuthenticationActive = false;
+    const acquireMcpAuthentication = () => {
+      if (mcpAuthenticationActive) return undefined;
+      mcpAuthenticationActive = true;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        mcpAuthenticationActive = false;
+      };
     };
     const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
       {
@@ -5508,6 +5572,7 @@ async function runQwenServeImpl(
           : {}),
         boundWorkspace,
         runtimeEpochSource: runtimeEpochSourceFor(boundWorkspace),
+        acquireMcpAuthentication,
         // Prompt terminal ledger: persisted beside the transcript so a
         // restarted daemon can reconcile dangling prompts on cold load.
         promptLedger: runtime.createPromptLedgerSink(
@@ -5977,6 +6042,7 @@ async function runQwenServeImpl(
               bytes,
               message,
             }),
+          onQueueSaturated: warnAcpQueueSaturated,
         },
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
@@ -6077,6 +6143,7 @@ async function runQwenServeImpl(
           : {}),
         boundWorkspace: workspaceInput.cwd,
         runtimeEpochSource: runtimeEpochSourceFor(workspaceInput.cwd),
+        acquireMcpAuthentication,
         promptLedger: runtime.createPromptLedgerSink(
           workspaceInput.cwd,
           secondaryEnv.sessionRuntimeBaseDir,
@@ -6635,6 +6702,7 @@ async function runQwenServeImpl(
               bytes,
               message,
             }),
+          onQueueSaturated: warnAcpQueueSaturated,
         },
         ...(acpChildExtraArgs(opts)
           ? { extraArgs: acpChildExtraArgs(opts) }
@@ -6751,6 +6819,7 @@ async function runQwenServeImpl(
             : {}),
           boundWorkspace: cwd,
           runtimeEpochSource: runtimeEpochSourceFor(cwd),
+          acquireMcpAuthentication,
           // Live-conversation workspaces keep transcripts outside the
           // runtime storage layout, so no ledger sink is wired there.
           ...(provenance === 'live-conversation'
@@ -6762,7 +6831,17 @@ async function runQwenServeImpl(
                 ),
               }),
           sessionShellCommandEnabled,
-          childEnvOverrides,
+          // Only the Conversations runtime's children carry the private
+          // provenance marker; every other workspace keeps the shared
+          // overrides' explicit removal.
+          childEnvOverrides:
+            provenance === 'live-conversation'
+              ? {
+                  ...childEnvOverrides,
+                  [PRIVATE_CONVERSATIONS_RUNTIME_ENV]:
+                    PRIVATE_CONVERSATIONS_RUNTIME_ENABLE,
+                }
+              : childEnvOverrides,
           channelFactory: wsChannelFactory,
           externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
@@ -7218,7 +7297,9 @@ async function runQwenServeImpl(
             runtimeToDrain.provenance !== 'live-conversation'
           ) {
             await channelWorkerManager
-              .removeWorkspace(runtimeToDrain.workspaceCwd)
+              .removeWorkspace(runtimeToDrain.workspaceCwd, {
+                permanent: reason === 'workspace_removed',
+              })
               .catch((err) => {
                 daemonLog.error(
                   'workspace channel worker cleanup error',

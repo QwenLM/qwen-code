@@ -90,6 +90,31 @@ function getValidator(schema: AnySchema): Ajv {
  */
 export class SchemaValidator {
   /**
+   * Validates trusted application data without coercion or fail-open schema
+   * handling. Unlike {@link validate}, this method never mutates `data` and
+   * reports schema compilation failures to the caller.
+   */
+  static validateStrict(schema: unknown, data: unknown): string | null {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+      return 'schema must be a JSON object';
+    }
+    const strictAjv: Ajv = isDraft2020Uri(
+      (schema as { $schema?: unknown }).$schema,
+    )
+      ? new Ajv2020Class({ allErrors: true, strictSchema: true })
+      : new AjvClass({ allErrors: true, strictSchema: true });
+    addFormatsFunc(strictAjv);
+    try {
+      const validate = strictAjv.compile(schema as AnySchema);
+      return validate(data)
+        ? null
+        : strictAjv.errorsText(validate.errors, { dataVar: 'value' });
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /**
    * Strictly compiles a schema. Returns an error message if the schema is
    * malformed or uses unsupported draft/features for our Ajv configuration
    * (see {@link getValidator} — `$schema` selects between draft-07 and

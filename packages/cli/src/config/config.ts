@@ -5,6 +5,7 @@
  */
 
 import {
+  type ModelProposedGoalsMode,
   ApprovalMode,
   APPROVAL_MODES,
   type AuthType,
@@ -46,7 +47,8 @@ import {
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
   BUILT_IN_OUTPUT_STYLES,
-  getBuiltInOutputStyle,
+  findOutputStyle,
+  loadOutputStyleCatalog,
   stripAnsiAndControl,
   type OutputStyleDefinition,
 } from '@qwen-code/qwen-code-core';
@@ -134,7 +136,14 @@ function formatApprovalModeError(value: string): Error {
   );
 }
 
-function parseApprovalModeValue(value: string): ApprovalMode {
+/**
+ * Normalizes an approval-mode spelling exactly the way boot accepts it:
+ * trimmed, lowercased, with the legacy `auto_edit`/`autoedit` aliases mapped
+ * to AUTO_EDIT. Throws for values boot would reject. Shared with the ACP
+ * daemon's reload convergence so a settings file reload agrees with boot for
+ * every accepted spelling.
+ */
+export function parseApprovalModeValue(value: string): ApprovalMode {
   const normalized = value.trim().toLowerCase();
   const canonical =
     normalized === 'auto_edit' || normalized === 'autoedit'
@@ -1287,6 +1296,17 @@ export class SessionIdConflictError extends Error {
 }
 
 /**
+ * `goals.modelProposed` reaches core as a closed enum. Anything else in the
+ * settings file (a typo, an older value) falls back to the default rather
+ * than smuggling an unknown mode through.
+ */
+export function normalizeModelProposedGoals(
+  value: unknown,
+): ModelProposedGoalsMode | undefined {
+  return value === 'alwaysAsk' || value === 'disabled' ? value : undefined;
+}
+
+/**
  * Resolves the output style for this session. `--output-style` wins over
  * `general.outputStyle`; an unset, empty, or `default` value means no style.
  * An unknown name is reported and the session falls back to the default
@@ -1302,6 +1322,8 @@ export class SessionIdConflictError extends Error {
 export function resolveOutputStyle(
   argvStyle: unknown,
   settingsStyle: unknown,
+  /** The selectable styles; built-ins only unless a catalog was loaded. */
+  available: readonly OutputStyleDefinition[] = BUILT_IN_OUTPUT_STYLES,
 ): OutputStyleDefinition | undefined {
   // yargs collects a repeated string flag into an array; the last value wins,
   // as it does for every other repeated flag, and the user is told so.
@@ -1345,11 +1367,11 @@ export function resolveOutputStyle(
   if (!name || name.toLowerCase() === 'default') {
     return undefined;
   }
-  const style = getBuiltInOutputStyle(name);
+  const style = findOutputStyle(available, name);
   if (style) {
     return style;
   }
-  const known = BUILT_IN_OUTPUT_STYLES.map((s) => s.name).join(', ');
+  const known = available.map((s) => s.name).join(', ');
   warnAboutOutputStyle(
     `Unknown output style "${truncateForDisplay(name)}" (from ${source}); using the default style. Available styles: ${known}.`,
   );
@@ -1514,6 +1536,15 @@ export async function loadCliConfig(
 
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
   const trustedFolder = isWorkspaceTrusted(settings)?.isTrusted ?? true;
+
+  // Custom style files are prompts: a project's are read only from a trusted
+  // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
+  const outputStyleCatalog =
+    bareMode || safeMode
+      ? BUILT_IN_OUTPUT_STYLES
+      : await loadOutputStyleCatalog({
+          projectRoot: trustedFolder ? cwd : undefined,
+        });
 
   // Set the context filename in the server's memoryTool module BEFORE loading memory
   // TODO(b/343434939): This is a bit of a hack. The contextFileName should ideally be passed
@@ -2112,6 +2143,7 @@ export async function loadCliConfig(
     outputStyle: resolveOutputStyle(
       argv.outputStyle,
       bareMode || safeMode ? undefined : settings.general?.outputStyle,
+      outputStyleCatalog,
     ),
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
     coreTools:
@@ -2254,6 +2286,7 @@ export async function loadCliConfig(
       settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
+    sessionWorkflowEnabled: settings.experimental?.sessionWorkflow ?? false,
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
@@ -2310,6 +2343,9 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
+    modelProposedGoals: normalizeModelProposedGoals(
+      settings.goals?.modelProposed,
+    ),
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,

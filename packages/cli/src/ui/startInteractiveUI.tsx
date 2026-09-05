@@ -10,14 +10,21 @@ import { render } from 'ink';
 import React from 'react';
 import {
   createDebugLogger,
+  getLastPeerInboxFailure,
   type InboundPolicy,
+  parseHeldExpiry,
+  type PeerInboxStartFailure,
   isDebugLogFileEnabled,
   registerSession,
   type Config,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import { PeerMessaging } from '../peerMessaging/peer-messaging.js';
-import { PeerMessagingContext } from '../peerMessaging/PeerMessagingContext.js';
+import {
+  PeerInboxFailureContext,
+  PeerMessagingContext,
+} from '../peerMessaging/PeerMessagingContext.js';
+import { inboundPolicyScope } from '../peerMessaging/inbound-policy-scope.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { isValidSessionId } from '../config/config.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -199,10 +206,21 @@ export async function startInteractiveUI(
     // listening where no peer can reach it.
     const [peerMessaging, setPeerMessaging] =
       React.useState<PeerMessaging | null>(null);
+    const [peerInboxFailure, setPeerInboxFailure] =
+      React.useState<PeerInboxStartFailure | null>(null);
     React.useEffect(() => {
       let alive = true;
       void peerMessagingReady.then((messaging) => {
-        if (alive) setPeerMessaging(messaging);
+        if (!alive) return;
+        setPeerMessaging(messaging);
+        // A null inbox with the feature on is a bind that failed; the
+        // cause is what the user needs, not the null.
+        if (
+          messaging === null &&
+          settings.merged.agents?.crossSessionMessaging === true
+        ) {
+          setPeerInboxFailure(getLastPeerInboxFailure());
+        }
       });
       return () => {
         alive = false;
@@ -210,44 +228,48 @@ export async function startInteractiveUI(
     }, []);
 
     return (
-      <PeerMessagingContext.Provider value={peerMessaging}>
-        <RemoteInputContext.Provider value={remoteInputWatcher}>
-          <DualOutputContext.Provider value={dualOutputBridge}>
-            <SettingsContext.Provider value={settings}>
-              <KeypressProvider
-                kittyProtocolEnabled={kittyProtocolStatus.enabled}
-                config={config}
-                debugKeystrokeLogging={
-                  settings.merged.general?.debugKeystrokeLogging
-                }
-                pasteWorkaround={
-                  process.platform === 'win32' || nodeMajorVersion < 20
-                }
-                initialCapturedInput={initialCapturedInput}
-              >
-                <SessionStatsProvider sessionId={config.getSessionId()}>
-                  <VimModeProvider settings={settings}>
-                    <AgentViewProvider config={config}>
-                      <BackgroundTaskViewProvider config={config}>
-                        <AppContainer
-                          config={config}
-                          settings={settings}
-                          startupWarnings={startupWarnings}
-                          version={version}
-                          initializationResult={initializationResult}
-                          initialUseVirtualViewport={useVP}
-                          extensionRefreshState={options.extensionRefreshState}
-                          repaintViewport={resizeReflow.repaint}
-                        />
-                      </BackgroundTaskViewProvider>
-                    </AgentViewProvider>
-                  </VimModeProvider>
-                </SessionStatsProvider>
-              </KeypressProvider>
-            </SettingsContext.Provider>
-          </DualOutputContext.Provider>
-        </RemoteInputContext.Provider>
-      </PeerMessagingContext.Provider>
+      <PeerInboxFailureContext.Provider value={peerInboxFailure}>
+        <PeerMessagingContext.Provider value={peerMessaging}>
+          <RemoteInputContext.Provider value={remoteInputWatcher}>
+            <DualOutputContext.Provider value={dualOutputBridge}>
+              <SettingsContext.Provider value={settings}>
+                <KeypressProvider
+                  kittyProtocolEnabled={kittyProtocolStatus.enabled}
+                  config={config}
+                  debugKeystrokeLogging={
+                    settings.merged.general?.debugKeystrokeLogging
+                  }
+                  pasteWorkaround={
+                    process.platform === 'win32' || nodeMajorVersion < 20
+                  }
+                  initialCapturedInput={initialCapturedInput}
+                >
+                  <SessionStatsProvider sessionId={config.getSessionId()}>
+                    <VimModeProvider settings={settings}>
+                      <AgentViewProvider config={config}>
+                        <BackgroundTaskViewProvider config={config}>
+                          <AppContainer
+                            config={config}
+                            settings={settings}
+                            startupWarnings={startupWarnings}
+                            version={version}
+                            initializationResult={initializationResult}
+                            initialUseVirtualViewport={useVP}
+                            extensionRefreshState={
+                              options.extensionRefreshState
+                            }
+                            repaintViewport={resizeReflow.repaint}
+                          />
+                        </BackgroundTaskViewProvider>
+                      </AgentViewProvider>
+                    </VimModeProvider>
+                  </SessionStatsProvider>
+                </KeypressProvider>
+              </SettingsContext.Provider>
+            </DualOutputContext.Provider>
+          </RemoteInputContext.Provider>
+        </PeerMessagingContext.Provider>
+      </PeerInboxFailureContext.Provider>
     );
   };
 
@@ -451,8 +473,11 @@ export async function startInteractiveUI(
             settings.merged.agents?.crossSessionInbound as
               | InboundPolicy
               | undefined,
-          updateSessionRegistryIpcPath: (ipcPath) =>
-            config.updateSessionRegistryIpcPath(ipcPath),
+          getHeldExpiryMs: () =>
+            parseHeldExpiry(settings.merged.agents?.crossSessionHeldExpiry),
+          getPolicyScope: () => inboundPolicyScope(settings),
+          updateSessionRegistryIpcPath: (ipcPath, ipcToken) =>
+            config.updateSessionRegistryIpcPath(ipcPath, ipcToken),
           getSessionId: () => config.getSessionId(),
           reassertSessionRecord: () => config.reassertSessionRegistryRecord(),
         });

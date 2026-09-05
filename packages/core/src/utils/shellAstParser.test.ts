@@ -510,7 +510,21 @@ describe('isShellCommandReadOnlyAST', () => {
 // =========================================================================
 
 describe('classifyShellCommandSafety', () => {
-  const maxClassificationCpuMs = 1000;
+  // Budget for `process.cpuUsage()`, which is process-wide: it sums user +
+  // system across every thread for the window, so V8's background GC and JIT
+  // threads and the parser runtime's own threads are charged to it alongside
+  // the work under test. Measured against the built package on an idle
+  // machine, that reports 2.1-3.1x the wall time of the same commands -- 2.1x
+  // even when they run sequentially, so the inflation is the accounting, not
+  // the `Promise.all` fan-out below. The 1000 this replaces was a wall-clock
+  // number carried over unchanged when the metric changed, which put it below
+  // the floor of what a healthy run reports: ~270 ms here, 1232-1361 ms on
+  // GitHub-hosted runners.
+  //
+  // These tests guard against catastrophic backtracking on 10k-repetition
+  // adversarial inputs, which costs orders of magnitude rather than a small
+  // multiple, so the headroom below does not blunt them.
+  const maxClassificationCpuMs = 4000;
 
   it.each([
     'ls -la',

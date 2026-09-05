@@ -79,6 +79,8 @@ export type BackendEvent =
   | { type: 'speak'; text: string }
   | {
       type: 'permission_request';
+      /** Backend turn that is blocked on this vote, when known. */
+      jobRef?: string;
       requestId: string;
       title: string;
       options: readonly PermissionOption[];

@@ -271,6 +271,22 @@ describe('handleResumeSession', () => {
       expect.any(Number),
     );
   });
+
+  it('settles the unarmed swap transaction when the session is not found (R4-4)', async () => {
+    vi.spyOn(SessionService.prototype, 'loadSession').mockResolvedValue(
+      null as never,
+    );
+    const { config, calls } = createFakeConfig();
+    const host = createFakeHost(config);
+    await handleResumeSession(host, 'missing-session');
+    // The transaction opened but nothing was replayed: it must be closed
+    // with a commit (not an abort), or the single swap slot stays latched
+    // and every later /resume or /branch is rejected until restart.
+    expect(calls.swapBegin).toBe(1);
+    expect(calls.swapCommit).toBe(1);
+    expect(calls.swapAbort).toBe(0);
+    expect(calls.startNewSession).toHaveLength(0);
+  });
 });
 
 describe('handleBranchSession', () => {

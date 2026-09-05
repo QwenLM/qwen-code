@@ -88,7 +88,7 @@ describeE2E('qwen-live M1 — end-to-end voice call', () => {
     expect(record['url']).toBe(stack.live.url);
     expect(typeof record['token']).toBe('string');
     expect(String(record['token']).length).toBeGreaterThan(0);
-    expect(record['protocolVersion']).toBe(6);
+    expect(record['protocolVersion']).toBe(7);
     expect(record['pid']).toBe(stack.live.proc.pid);
     expect(String(record['instanceNonce'])).toMatch(/^[A-Za-z0-9_-]{16,256}$/);
   });
@@ -228,7 +228,10 @@ describeE2E('qwen-live M1 — end-to-end voice call', () => {
         description: 'the [SPEAK_TO_USER] speech request item',
       },
     );
-    expect(contextTextOf(speakMessage)).toContain('job_1');
+    expect(contextTextOf(speakMessage)).toContain(
+      'task to fix the failing test finished',
+    );
+    expect(contextTextOf(speakMessage)).not.toContain('job_1');
     const speakIndex = stack.fakeDash.inbox.indexOf(speakMessage);
     await stack.fakeDash.waitForMessage(
       (message) => message['type'] === 'response.create',
