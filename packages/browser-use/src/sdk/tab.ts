@@ -313,6 +313,7 @@ class DomCUAProxy implements BrowserDomCUA {
   }
   click(options: Parameters<BrowserDomCUA['click']>[0]): Promise<void> {
     return this.context.call<void>('dom_cua.click', {
+      ...options,
       tabId: this.tabId,
       node_id: snapshotRef(options.node_id),
     });
@@ -321,30 +322,30 @@ class DomCUAProxy implements BrowserDomCUA {
     options: Parameters<BrowserDomCUA['double_click']>[0],
   ): Promise<void> {
     return this.context.call<void>('dom_cua.double_click', {
+      ...options,
       tabId: this.tabId,
       node_id: snapshotRef(options.node_id),
     });
   }
   type(options: Parameters<BrowserDomCUA['type']>[0]): Promise<void> {
     return this.context.call<void>('dom_cua.type', {
+      ...options,
       tabId: this.tabId,
-      text: options.text,
     });
   }
   keypress(options: Parameters<BrowserDomCUA['keypress']>[0]): Promise<void> {
     return this.context.call<void>('dom_cua.keypress', {
+      ...options,
       tabId: this.tabId,
-      keys: options.keys,
     });
   }
   scroll(options: Parameters<BrowserDomCUA['scroll']>[0]): Promise<void> {
     return this.context.call<void>('dom_cua.scroll', {
+      ...options,
       tabId: this.tabId,
       ...(options.node_id === undefined
         ? {}
         : { node_id: snapshotRef(options.node_id) }),
-      x: options.x,
-      y: options.y,
     });
   }
 }

@@ -13,15 +13,27 @@ export function invalidArguments(
   method: string,
   error: ZodError,
 ): BrowserRuntimeError {
+  const issues = error.issues.map((issue) => ({
+    code: issue.code,
+    path: issue.path.join('.'),
+    message: issue.message,
+  }));
+  const summary = issues
+    .slice(0, 3)
+    .map(({ path, message }) =>
+      `${path || 'options'}: ${message}`.slice(0, 200),
+    )
+    .join('; ');
+  const hint =
+    method === 'cua.keypress' || method === 'dom_cua.keypress'
+      ? ` Use ${method}({ keys: ["Enter"] }); a chord uses an array such as ["Control", "a"].`
+      : method === 'dom_cua.type'
+        ? ' Use dom_cua.click({ node_id }) followed by dom_cua.type({ text }) to type at the current focus.'
+        : '';
   return new BrowserRuntimeError(
     'INVALID_ARGUMENT',
-    `Invalid arguments for ${method}`,
-    {
-      issues: error.issues.map((issue) => ({
-        code: issue.code,
-        path: issue.path.join('.'),
-      })),
-    },
+    `Invalid arguments for ${method}: ${summary}.${hint}`,
+    { issues },
   );
 }
 

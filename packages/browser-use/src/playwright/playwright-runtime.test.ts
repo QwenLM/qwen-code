@@ -17,6 +17,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChromeBridge } from '../bridge/index.js';
 import type { ScreenshotEnvelope, TabInfo } from '../core/primitives.js';
+import { BrowserSdkContext } from '../sdk/context.js';
+import { TabProxy } from '../sdk/tab.js';
 import { PlaywrightRuntime } from './playwright-runtime.js';
 
 const playwrightMocks = vi.hoisted(() => ({
@@ -310,6 +312,86 @@ describe('PlaywrightRuntime command contracts', () => {
     expect(fixture.page.mouse.wheel).toHaveBeenCalledWith(0, 200);
     expect(fixture.locator.pressSequentially).not.toHaveBeenCalled();
     expect(fixture.locator.press).not.toHaveBeenCalled();
+    expect(fixture.page.bringToFront).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsupported DOM CUA options through the public SDK before input', async () => {
+    const fixture = await runtimeFixture();
+    const info = await createTab(fixture.runtime);
+    const tab = new TabProxy(
+      new BrowserSdkContext(fixture.runtime),
+      'chrome',
+      info,
+    );
+
+    const targetedText = { node_id: 'e1', text: 'hello' };
+    await expect(tab.dom_cua.type(targetedText)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message: expect.stringContaining('dom_cua.click({ node_id })'),
+    });
+    for (const operation of [
+      () => tab.dom_cua.click({ node_id: 'e1', force: true } as never),
+      () => tab.dom_cua.double_click({ node_id: 'e1', force: true } as never),
+      () => tab.dom_cua.keypress({ node_id: 'e1', keys: ['Enter'] } as never),
+      () => tab.dom_cua.scroll({ x: 0, y: 100, unsupported: true } as never),
+    ]) {
+      await expect(operation()).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+      });
+    }
+    expect(fixture.page.keyboard.insertText).not.toHaveBeenCalled();
+    expect(fixture.page.keyboard.press).not.toHaveBeenCalled();
+    expect(fixture.locator.click).not.toHaveBeenCalled();
+    expect(fixture.locator.dblclick).not.toHaveBeenCalled();
+    expect(fixture.page.mouse.wheel).not.toHaveBeenCalled();
+  });
+
+  it('explains invalid keypress shapes in the error message without sending keys', async () => {
+    const fixture = await runtimeFixture();
+    const info = await createTab(fixture.runtime);
+    const tab = new TabProxy(
+      new BrowserSdkContext(fixture.runtime),
+      'chrome',
+      info,
+    );
+
+    for (const api of [tab.cua, tab.dom_cua]) {
+      for (const options of ['Enter', { keys: 'Enter' }]) {
+        await expect(api.keypress(options as never)).rejects.toMatchObject({
+          code: 'INVALID_ARGUMENT',
+          message: expect.stringContaining('keypress({ keys: ["Enter"] })'),
+        });
+      }
+    }
+    expect(fixture.page.keyboard.press).not.toHaveBeenCalled();
+  });
+
+  it('preserves focused input and snapshot ref normalization through the SDK', async () => {
+    const fixture = await runtimeFixture();
+    fixture.locator.count.mockResolvedValue(1);
+    const info = await createTab(fixture.runtime);
+    const tab = new TabProxy(
+      new BrowserSdkContext(fixture.runtime),
+      'chrome',
+      info,
+    );
+
+    await tab.dom_cua.click({ node_id: ' f1e2 ' });
+    await tab.dom_cua.type({ text: 'hello' });
+    await tab.dom_cua.keypress({ keys: ['Control', 'a'] });
+    await tab.cua.keypress({ keys: ['Enter'] });
+    await tab.dom_cua.scroll({ node_id: ' f1e2 ', x: 0, y: 200 });
+
+    expect(fixture.page.locator).toHaveBeenCalledWith('aria-ref=f1e2');
+    expect(fixture.locator.click).toHaveBeenCalledOnce();
+    expect(fixture.page.keyboard.insertText).toHaveBeenCalledExactlyOnceWith(
+      'hello',
+    );
+    expect(fixture.page.keyboard.press.mock.calls).toEqual([
+      ['Control+a'],
+      ['Enter'],
+    ]);
+    expect(fixture.page.mouse.wheel).toHaveBeenCalledWith(0, 200);
     expect(fixture.page.bringToFront).not.toHaveBeenCalled();
   });
 
@@ -889,6 +971,7 @@ function fakeLocator(): {
     first: ReturnType<typeof vi.fn>;
     count: ReturnType<typeof vi.fn>;
     click: ReturnType<typeof vi.fn>;
+    dblclick: ReturnType<typeof vi.fn>;
     hover: ReturnType<typeof vi.fn>;
     press: ReturnType<typeof vi.fn>;
     pressSequentially: ReturnType<typeof vi.fn>;
