@@ -18449,6 +18449,34 @@ describe('DaemonSessionProvider', () => {
       expect(result).toEqual({ ok: true, targetRecordId: 'record-0' });
       expect(userBlocks()).toHaveLength(1);
     });
+
+    it('reports a page that projects nothing as unavailable, not as a focus', async () => {
+      // Zero projected events is not the "already displayed" case — record-id
+      // dedup runs later, inside the admission, so a page whose records are all
+      // on screen still projects events and is filtered there. Nothing renderable
+      // came back, so claiming success would focus a record the window does not
+      // hold.
+      const session = pushSession('session-turn-index-empty-page');
+      sdkMocks.getSessionTurnIndexPage.mockResolvedValue(
+        turnIndexPage({ sessionId: session.sessionId }),
+      );
+      sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+        v: 1,
+        sessionId: session.sessionId,
+        events: [],
+        hasMore: false,
+        hasOlder: false,
+        targetRecordId: 'record-0',
+      });
+      const getIndex = await renderIndexHarness(['session_turn_navigation']);
+      let result: { ok: boolean; reason?: string } | undefined;
+      await act(async () => {
+        const opened = getIndex()?.openTurnAt('record-0');
+        await flushPromises();
+        result = await opened;
+      });
+      expect(result).toEqual({ ok: false, reason: 'unavailable' });
+    });
   });
 });
 

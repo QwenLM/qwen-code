@@ -774,3 +774,38 @@ describe('failure handling', () => {
     expect(state.liveEntries).toEqual([]);
   });
 });
+
+describe('terminal statuses', () => {
+  // `unsupported` is the ceiling latch and `disabled` is a capability the daemon
+  // does not advertise. Both are decided by something other than a page
+  // arriving, and both are terminal for the session, so no request result may
+  // move them. A fill takes no in-flight guard and a refresh can latch while one
+  // is pending, so a late page landing on a latched store is reachable.
+  const latched = latchTurnIndexUnsupported(seededState());
+  const disabled = createSessionTurnIndexState('s1', 'disabled');
+
+  it('never promotes a latched store back to ready', () => {
+    const older = indexPage({
+      snapshot: 'snap-1',
+      totalTurns: 10,
+      start: 0,
+      turns: turns([0, 1]),
+    });
+    expect(admitTurnIndexPage(latched, older, 'snap-1')?.status).toBe(
+      'unsupported',
+    );
+    expect(adoptRefreshedTail(latched, 'snap-2', 12).status).toBe(
+      'unsupported',
+    );
+    expect(admitSeedPage(latched, older).status).toBe('unsupported');
+    expect(resetToTailPage(latched, older).status).toBe('unsupported');
+    // The pages the latch was set over are not rewritten by a late arrival.
+    expect(adoptRefreshedTail(latched, 'snap-2', 12).totalTurns).toBe(10);
+  });
+
+  it('never demotes a terminal store to a re-seedable idle', () => {
+    expect(invalidateTurnIndexSnapshot(latched).status).toBe('unsupported');
+    expect(invalidateTurnIndexSnapshot(disabled).status).toBe('disabled');
+    expect(invalidateTurnIndexSnapshot(latched).pages.size).toBe(1);
+  });
+});

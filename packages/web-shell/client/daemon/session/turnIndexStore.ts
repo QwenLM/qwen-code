@@ -242,11 +242,28 @@ function evictCachedPages(
   return pages;
 }
 
+/**
+ * Statuses no request result may move.
+ *
+ * `disabled` means the daemon does not advertise the capability and
+ * `unsupported` means the transcript is above the indexing ceiling. Both are
+ * terminal for the session and both are decided by something other than a page
+ * arriving, so an in-flight result settling after either one has to leave the
+ * store alone: promoting it to `ready` un-latches a ceiling the daemon will hit
+ * again, and demoting it to `idle` arms a re-seed against a daemon that cannot
+ * answer it. Fills take no in-flight guard and a refresh can latch while one is
+ * pending, so this is reachable rather than theoretical.
+ */
+function isTerminalTurnIndexStatus(status: SessionTurnIndexStatus): boolean {
+  return status === 'disabled' || status === 'unsupported';
+}
+
 function withPage(
   state: SessionTurnIndexState,
   start: number,
   page: TurnIndexPageCacheEntry,
 ): SessionTurnIndexState {
+  if (isTerminalTurnIndexStatus(state.status)) return state;
   const pages = new Map(state.pages);
   pages.set(start, page);
   return { ...state, status: 'ready', pages: evictCachedPages(pages) };
@@ -277,6 +294,7 @@ export function admitSeedPage(
   state: SessionTurnIndexState,
   page: DaemonSessionTurnIndexPage,
 ): SessionTurnIndexState {
+  if (isTerminalTurnIndexStatus(state.status)) return state;
   const pages = new Map<number, TurnIndexPageCacheEntry>();
   if (page.turns.length > 0) {
     pages.set(page.start, { snapshot: page.snapshot, turns: page.turns });
@@ -406,6 +424,7 @@ export function adoptRefreshedTail(
   snapshot: string,
   totalTurns: number,
 ): SessionTurnIndexState {
+  if (isTerminalTurnIndexStatus(state.status)) return state;
   return { ...state, status: 'ready', snapshot, totalTurns };
 }
 
@@ -429,6 +448,7 @@ export function resetToTailPage(
 export function invalidateTurnIndexSnapshot(
   state: SessionTurnIndexState,
 ): SessionTurnIndexState {
+  if (isTerminalTurnIndexStatus(state.status)) return state;
   return {
     ...state,
     status: 'idle',

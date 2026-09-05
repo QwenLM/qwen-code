@@ -437,11 +437,11 @@ function materializeTranscriptHistory(
     return `${text} img:${images} file:${files}`;
   };
   const oldestRetainedBlock = current.blocks[0];
-  // The echo comparison is a boundary rule: it only holds when the page is
-  // about to be prepended, because it matches the window's oldest block against
-  // the page's newest user block. An anchored page lands mid-window, where those
-  // two blocks are unrelated, so a coincidental text match would silently excise
-  // a real turn head — callers that do not prepend must opt out.
+  // The echo comparison is a boundary rule: it only holds when the page is about
+  // to land at the head of the window, because it matches the window's oldest
+  // block against the page's newest user block. A page spliced mid-window has
+  // unrelated blocks on both sides, so a coincidental text match there would
+  // silently excise a real turn head — callers not landing at the head opt out.
   const boundaryEchoKey =
     options.boundaryEchoDedup === false ||
     (oldestRetainedBlock?.sourceRecordIds?.length ?? 0) !== 0
@@ -1391,6 +1391,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const failTurnIndex = useCallback(
     (error: unknown) => {
       const current = turnIndexRef.current;
+      // A terminal store stays terminal. A stale request failing after the
+      // ceiling latch must not demote it to `error` and arm a retry against a
+      // daemon that will hit the same ceiling again, and a capability-absent
+      // store has nothing to invalidate.
+      if (current.status === 'disabled' || current.status === 'unsupported') {
+        return;
+      }
       const reaction = classifyTurnIndexFailure(error);
       if (reaction === 'unsupported') {
         turnIndexAttemptRef.current = 0;
@@ -4890,9 +4897,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           session.clientId,
         );
         if (uiEvents.length === 0) {
-          // Every record in the page is already displayed, so the turn is
-          // already in the window and only needs focusing.
-          return { ok: true, targetRecordId: focusRecordId };
+          // The projection dropped every event in the page, so nothing
+          // renderable came back. This is not the "already displayed" case:
+          // record-id dedup runs later, inside the admission, so a page whose
+          // records are all on screen still projects events and is filtered
+          // there. Reporting success here would focus a record the window does
+          // not hold.
+          return { ok: false, reason: 'unavailable' };
         }
         // Placement comes from snapshot-local ordinals, never from record-id
         // ordering: ids are not ordered, and guessing a position could
@@ -4987,6 +4998,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             paginationGenerationRef.current += 1;
             history.beforeRecordId = entry.firstRecordId;
             history.cursor = undefined;
+            // The capacity latch's footprint was measured for a page fetched
+            // exclusive-before the anchor this jump just displaced, so it
+            // describes a page that will never be fetched. Dropping it makes the
+            // re-open gate fall back to real headroom at the new anchor instead
+            // of sizing a superseded request.
+            history.rejectedPage = undefined;
             history.hasMore =
               page.hasOlder === true &&
               store.getSnapshot().blocks.length < maxBlocks;

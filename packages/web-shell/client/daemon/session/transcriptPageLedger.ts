@@ -152,11 +152,12 @@ export function ledgerBlockOffset(
 }
 
 /**
- * Block id of the first live-tail block, i.e. the block right after the newest
- * page. Undefined when the ledger holds no page, in which case the whole store
- * is live tail.
+ * Block id of the newest page's last block — the boundary the live tail starts
+ * after. Undefined when the ledger holds no page, in which case the whole store
+ * is live tail. The ledger cannot name the first live-tail block itself: live
+ * blocks are not entries, so a caller derives it as the store's next block.
  */
-export function ledgerLiveTailFirstBlockId(
+export function ledgerNewestPageLastBlockId(
   ledger: TranscriptPageLedger,
 ): string | undefined {
   for (let index = ledger.spans.length - 1; index >= 0; index -= 1) {
@@ -183,7 +184,7 @@ export function ledgerCoversBlockPrefix(
   const covered = ledgerBlockCount(ledger);
   if (covered === 0) return true;
   if (covered > blocks.length) return false;
-  return blocks[covered - 1]?.id === ledgerLiveTailFirstBlockId(ledger);
+  return blocks[covered - 1]?.id === ledgerNewestPageLastBlockId(ledger);
 }
 
 interface LedgerEntryBlockBounds {

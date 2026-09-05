@@ -17,7 +17,7 @@ import {
   ledgerCoversBlockPrefix,
   ledgerForWindow,
   ledgerInsertIndexForOrdinal,
-  ledgerLiveTailFirstBlockId,
+  ledgerNewestPageLastBlockId,
   ledgerPageEntries,
   newerGapAt,
   olderGapAt,
@@ -185,15 +185,15 @@ describe('ledger span bookkeeping', () => {
 
   it('delimits the live tail at the newest page boundary', () => {
     const empty = createTranscriptPageLedger();
-    expect(ledgerLiveTailFirstBlockId(empty)).toBeUndefined();
+    expect(ledgerNewestPageLastBlockId(empty)).toBeUndefined();
     let ledger = recordLedgerLoadPage(
       empty,
       entry('load', blocks('b1', 'b2')),
       false,
     );
-    expect(ledgerLiveTailFirstBlockId(ledger)).toBe('b2');
+    expect(ledgerNewestPageLastBlockId(ledger)).toBe('b2');
     ledger = recordLedgerPrependPage(ledger, entry('pre', blocks('b0')), true);
-    expect(ledgerLiveTailFirstBlockId(ledger)).toBe('b2');
+    expect(ledgerNewestPageLastBlockId(ledger)).toBe('b2');
   });
 });
 
@@ -417,7 +417,7 @@ describe('clipLedgerToRetainedBlocks', () => {
     const clipped = evict(ledger, all, 1, true, 'r-tail');
     expect(pageIds(clipped)).toEqual([]);
     expect(spanSummary(clipped)).toEqual(['gap:r-tail']);
-    expect(ledgerLiveTailFirstBlockId(clipped)).toBeUndefined();
+    expect(ledgerNewestPageLastBlockId(clipped)).toBeUndefined();
   });
 
   it('leaves the ledger alone when a rewind only drops live-tail blocks', () => {
