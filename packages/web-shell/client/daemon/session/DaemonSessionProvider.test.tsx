@@ -756,6 +756,190 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('skips malformed persisted events while locating a healthy historical turn', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    const malformedEvent = {
+      v: 1,
+      id: { toString: null, valueOf: null },
+      type: 'session_update',
+      data: { update: { sessionUpdate: 'plan', entries: [] } },
+    } as unknown as DaemonEvent;
+    sdkMocks.sessions.push(
+      createMockSession({
+        getTurnIndexPage: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-1',
+          snapshot: 'snapshot-1',
+          totalTurns: 1,
+          start: 0,
+          turns: [
+            {
+              ordinal: 0,
+              turnId: 'turn-0',
+              kind: 'prompt' as const,
+              label: 'Healthy prompt',
+            },
+          ],
+        })),
+        getTranscriptPage: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'session-1',
+          hasMore: false,
+          targetRecordId: 'turn-0',
+          events: [
+            malformedEvent,
+            {
+              v: 1,
+              id: 2,
+              type: 'session_update',
+              data: {
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'Healthy prompt' },
+                  _meta: { qwenTranscript: { sourceRecordIds: ['turn-0'] } },
+                },
+              },
+            } as DaemonEvent,
+          ],
+        })),
+      }),
+    );
+    let navigationStore:
+      | ReturnType<typeof useDaemonTurnNavigationStore>
+      | undefined;
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+    let liveBlocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      navigationStore = useDaemonTurnNavigationStore();
+      navigation = useDaemonTurnNavigationState();
+      liveBlocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+      await expect(navigationStore!.locateOrdinal(0)).resolves.toMatchObject({
+        turnId: 'turn-0',
+        view: 'historical',
+      });
+    });
+    expect(navigation?.error).toBeUndefined();
+    expect(
+      [...navigation!.historicalPages.values()].flatMap((page) => page.blocks),
+    ).toContainEqual(
+      expect.objectContaining({ kind: 'user', text: 'Healthy prompt' }),
+    );
+    expect(liveBlocks).toEqual([]);
+  });
+
+  it('remembers a removed prompt broadcast that precedes its admission response', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    const accepted = createDeferred<NonBlockingPromptAccepted>();
+    const removal = createDeferred<void>();
+    const removalDelivered = createDeferred<void>();
+    const session = createMockSession({
+      submitPrompt: vi.fn(() => accepted.promise),
+      async *events(opts = {}) {
+        await removal.promise;
+        yield {
+          v: 1,
+          id: 1,
+          type: 'pending_prompt_completed',
+          originatorClientId: 'client-1',
+          data: {
+            sessionId: 'session-1',
+            promptId: 'removed-prompt',
+            state: 'removed',
+          },
+        } as DaemonEvent;
+        removalDelivered.resolve();
+        yield* createIdleEvents()(opts);
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+    let navigationStore:
+      | ReturnType<typeof useDaemonTurnNavigationStore>
+      | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      navigation = useDaemonTurnNavigationState();
+      navigationStore = useDaemonTurnNavigationStore();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    let submission: Promise<{ promptId: string }> | undefined;
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+      submission = requireActions(actions).submitPrompt('Never executed', {
+        optimisticUserMessage: false,
+      });
+      await vi.waitFor(() =>
+        expect(session.submitPrompt).toHaveBeenCalledOnce(),
+      );
+      removal.resolve();
+      await removalDelivered.promise;
+    });
+    await act(async () => {
+      accepted.resolve({ promptId: 'removed-prompt', lastEventId: 0 });
+      await submission;
+      await navigationStore!.refreshHead();
+    });
+    expect(navigation?.provisionalTurns).toEqual([]);
+    expect(navigation?.effectiveTurnCount).toBe(navigation?.totalTurns);
+  });
+
+  it('associates an admitted prompt with the exact optimistic user block', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 204 })),
+    );
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_turn_navigation'],
+    });
+    sdkMocks.sessions.push(createMockSession());
+    let actions: DaemonSessionActions | undefined;
+    let navigation: DaemonTurnNavigationSnapshot | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      actions = useDaemonActions();
+      navigation = useDaemonTurnNavigationState();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await vi.waitFor(() => expect(navigation?.mode).toBe('ready'));
+      await requireActions(actions).submitPrompt('Exact optimistic prompt', {
+        optimisticUserMessage: true,
+      });
+    });
+    const optimistic = blocks.find(
+      (block) =>
+        block.kind === 'user' && block.text === 'Exact optimistic prompt',
+    );
+    expect(optimistic).toBeDefined();
+    expect(navigation?.provisionalTurns).toMatchObject([
+      { promptId: 'prompt-1', blockId: optimistic!.id },
+    ]);
+  });
+
   it('materializes an anchored turn outside the live transcript', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',

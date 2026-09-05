@@ -83,7 +83,16 @@ describe('HistoricalTranscriptPageTable', () => {
       }),
     );
 
-    expect(target.blockId).toBe('user-1');
+    expect(target.blockId).toBe('history-page-1:user-1');
+    expect(
+      table.admitAnchor(
+        10,
+        'turn-10',
+        'snapshot-1',
+        response(['turn-10'], { targetRecordId: 'turn-10' }),
+      ),
+    ).toEqual(target);
+    expect(table.getSnapshot().pages.size).toBe(1);
     expect(table.getSnapshot().ranges[0]).toMatchObject({
       anchorOrdinal: 10,
       older: {
@@ -174,7 +183,7 @@ describe('HistoricalTranscriptPageTable', () => {
     expect(range.pageIds).toHaveLength(2);
     const continued = table.getSnapshot().pages.get(range.pageIds[1]!);
     expect([...continued!.recordIds]).toEqual(['turn-2']);
-    expect(continued!.blocks[0]?.id).toBe('user-2');
+    expect(continued!.blocks[0]?.id).toBe('history-page-2:user-2');
   });
 
   it('advances a newer cursor when a page contains only known overlap', () => {
@@ -606,7 +615,7 @@ describe('HistoricalTranscriptPageTable', () => {
     expect(table.findTurn('turn-2')).toEqual(selected);
   });
 
-  it('restores an explicit boundary when an outer active page is evicted', () => {
+  it('restores the older boundary when a head page is evicted', () => {
     const table = createTable({ maxPages: 2 });
     const target = table.admitAnchor(
       1,
@@ -625,6 +634,7 @@ describe('HistoricalTranscriptPageTable', () => {
       'snapshot-1',
       response(['turn-2'], { hasMore: true, nextCursor: 'next-2' }),
     );
+    table.findTurn('turn-2');
     table.beginBoundaryLoad(target.rangeId, 'newer');
     table.admitBoundary(
       target.rangeId,
@@ -634,11 +644,16 @@ describe('HistoricalTranscriptPageTable', () => {
     );
 
     expect(table.getSnapshot().ranges[0]).toMatchObject({
-      pageIds: ['history-page-1', 'history-page-2'],
-      newer: {
+      pageIds: ['history-page-2', 'history-page-3'],
+      older: {
         kind: 'loadable',
-        request: { kind: 'cursor', cursor: 'next-2' },
+        request: {
+          kind: 'older',
+          beforeRecordId: 'turn-2',
+          snapshot: 'snapshot-1',
+        },
       },
+      newer: { kind: 'end' },
     });
   });
 

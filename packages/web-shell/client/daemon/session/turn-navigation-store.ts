@@ -14,6 +14,7 @@ import type {
   DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import {
+  WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_HISTORICAL_MAX_BYTES,
   WEB_SHELL_HISTORICAL_MAX_PAGES,
   WEB_SHELL_TURN_INDEX_MAX_BYTES,
@@ -175,12 +176,14 @@ export function createDaemonTurnNavigationStore(
   let accessClock = 0;
   let pages = new Map<number, InternalIndexPage>();
   let provisionals: DaemonProvisionalTurn[] = [];
+  const removedPromptIds = new Set<string>();
   let liveLocations = new Map<string, DaemonTurnLocation>();
   let livePromptAliases = new Map<string, DaemonTurnLocation>();
   let liveRecordIds = new Set<string>();
   let lastLiveBlocks: readonly DaemonTranscriptBlock[] | undefined;
   let headRequest: Promise<void> | undefined;
   let headDirty = false;
+  let headRetryPending = false;
   let tooLarge = false;
   let pageTable = createPageTable();
 
@@ -207,6 +210,11 @@ export function createDaemonTurnNavigationStore(
 
   function publish(update: Partial<DaemonTurnNavigationSnapshot> = {}): void {
     const table = pageTable.getSnapshot();
+    const error = 'error' in update ? update.error : snapshot.error;
+    const removedErrorRange =
+      (error?.operation === 'older' || error?.operation === 'newer') &&
+      error.rangeId !== undefined &&
+      !table.ranges.some((range) => range.id === error.rangeId);
     const indexedTurnIds = new Set(
       [...indexedEntries(pages).values()].map((entry) => entry.turnId),
     );
@@ -239,6 +247,7 @@ export function createDaemonTurnNavigationStore(
     snapshot = Object.freeze({
       ...snapshot,
       ...update,
+      error: removedErrorRange ? undefined : error,
       sessionId,
       indexPages: new Map(
         [...pages.entries()].map(([start, page]) => [
@@ -266,12 +275,14 @@ export function createDaemonTurnNavigationStore(
     clientWasConnected = false;
     pages = new Map();
     provisionals = [];
+    removedPromptIds.clear();
     liveLocations = new Map();
     livePromptAliases = new Map();
     liveRecordIds = new Set();
     lastLiveBlocks = undefined;
     headRequest = undefined;
     headDirty = false;
+    headRetryPending = false;
     tooLarge = false;
     pageTable = createPageTable();
     snapshot = Object.freeze({
@@ -285,9 +296,11 @@ export function createDaemonTurnNavigationStore(
     selectionGeneration += 1;
     pages = new Map();
     provisionals = [];
+    removedPromptIds.clear();
     livePromptAliases = new Map();
+    headRetryPending = false;
     pageTable.reset();
-    pageTable.setLiveRecordIds(liveRecordIds);
+    syncLiveRecordIds();
     snapshot = Object.freeze({
       ...snapshot,
       totalTurns: 0,
@@ -321,6 +334,7 @@ export function createDaemonTurnNavigationStore(
       clientOwner = undefined;
       clientWasConnected = false;
       provisionals = [];
+      removedPromptIds.clear();
       livePromptAliases = new Map();
       if (
         snapshot.mode !== 'legacy' ||
@@ -427,7 +441,6 @@ export function createDaemonTurnNavigationStore(
       }
     }
     liveRecordIds = nextLiveRecordIds;
-    pageTable.setLiveRecordIds(liveRecordIds);
     const nextLivePromptAliases = new Map(
       [...livePromptAliases].filter(
         ([turnId, location]) =>
@@ -454,16 +467,19 @@ export function createDaemonTurnNavigationStore(
       locationsEqual(liveLocations, next) &&
       locationsEqual(livePromptAliases, nextLivePromptAliases)
     ) {
+      syncLiveRecordIds();
       return;
     }
     liveLocations = next;
     livePromptAliases = nextLivePromptAliases;
     provisionals = nextProvisionals;
     reconcileProvisionals();
+    syncLiveRecordIds();
     publish();
   }
 
   function recordPromptAdmitted(admission: DaemonPromptAdmission): void {
+    if (removedPromptIds.has(admission.promptId)) return;
     const entries = [...indexedEntries(pages).values()];
     const promptEntry = entries.find(
       (entry) => entry.promptId === admission.promptId,
@@ -479,6 +495,7 @@ export function createDaemonTurnNavigationStore(
           blockId: admission.blockId,
           view: 'live',
         });
+        syncLiveRecordIds();
         publish();
       }
       return;
@@ -511,6 +528,11 @@ export function createDaemonTurnNavigationStore(
   }
 
   function recordPromptRemoved(promptId: string): void {
+    if (snapshot.mode === 'legacy') return;
+    removedPromptIds.add(promptId);
+    while (removedPromptIds.size > WEB_SHELL_TURN_INDEX_PAGE_SIZE) {
+      removedPromptIds.delete(removedPromptIds.values().next().value!);
+    }
     const next = provisionals.filter((turn) => turn.promptId !== promptId);
     if (next.length === provisionals.length) return;
     provisionals = next;
@@ -589,7 +611,10 @@ export function createDaemonTurnNavigationStore(
     return headRequest;
   }
 
-  async function loadOrdinal(ordinal: number): Promise<void> {
+  async function loadOrdinal(
+    ordinal: number,
+    generation?: number,
+  ): Promise<void> {
     assertOrdinal(ordinal);
     if (findIndexEntry(ordinal)) return;
     const head = newestPage();
@@ -627,7 +652,10 @@ export function createDaemonTurnNavigationStore(
         ordinal,
       );
       publish(
-        snapshot.error?.operation === 'index' ? { error: undefined } : {},
+        snapshot.error?.operation === 'index' &&
+          snapshot.error.ordinal === ordinal
+          ? { error: undefined }
+          : {},
       );
     } catch (error) {
       if (
@@ -642,7 +670,10 @@ export function createDaemonTurnNavigationStore(
         error instanceof TurnIndexPageTooLargeError
       ) {
         enterTooLargeFallback();
-      } else {
+      } else if (
+        generation === undefined ||
+        generation === selectionGeneration
+      ) {
         publish({
           error: navigationError(
             'index',
@@ -661,9 +692,16 @@ export function createDaemonTurnNavigationStore(
   async function locateOrdinal(ordinal: number): Promise<DaemonTurnLocation> {
     assertOrdinal(ordinal);
     const generation = ++selectionGeneration;
-    publish({ selected: { ordinal, status: 'loading' }, error: undefined });
+    publish({
+      selected: { ordinal, status: 'loading' },
+      ...(snapshot.error?.operation === 'locate' ||
+      (snapshot.error?.operation === 'index' &&
+        snapshot.error.ordinal !== undefined)
+        ? { error: undefined }
+        : {}),
+    });
     try {
-      await loadOrdinal(ordinal);
+      await loadOrdinal(ordinal, generation);
       if (generation !== selectionGeneration)
         throw new Error('Selection changed');
       const entryWithSnapshot = findIndexEntry(ordinal);
@@ -694,7 +732,7 @@ export function createDaemonTurnNavigationStore(
       const response = await activeClient.getTranscriptPage({
         atRecordId: entryWithSnapshot.entry.turnId,
         snapshot: entryWithSnapshot.page.snapshot,
-        limit: indexPageSize,
+        limit: WEB_SHELL_HISTORY_PAGE_SIZE,
       });
       if (
         generation !== selectionGeneration ||
@@ -719,7 +757,9 @@ export function createDaemonTurnNavigationStore(
             status: 'ready',
             location: live,
           },
-          error: undefined,
+          ...(snapshot.error?.operation === 'locate'
+            ? { error: undefined }
+            : {}),
         });
         return live;
       }
@@ -743,7 +783,7 @@ export function createDaemonTurnNavigationStore(
           status: 'ready',
           location,
         },
-        error: undefined,
+        ...(snapshot.error?.operation === 'locate' ? { error: undefined } : {}),
       });
       return location;
     } catch (error) {
@@ -775,7 +815,12 @@ export function createDaemonTurnNavigationStore(
     if (!activeClient) return;
     const request = pageTable.beginBoundaryLoad(rangeId, direction);
     if (!request) return;
-    publish({ error: undefined });
+    const clearBoundaryError = () =>
+      snapshot.error?.operation === direction &&
+      snapshot.error.rangeId === rangeId
+        ? { error: undefined }
+        : {};
+    publish(clearBoundaryError());
     const capturedSession = sessionEpoch;
     const capturedChain = chainEpoch;
     try {
@@ -784,9 +829,9 @@ export function createDaemonTurnNavigationStore(
           ? {
               beforeRecordId: request.beforeRecordId,
               snapshot: request.snapshot,
-              limit: indexPageSize,
+              limit: WEB_SHELL_HISTORY_PAGE_SIZE,
             }
-          : { cursor: request.cursor, limit: indexPageSize },
+          : { cursor: request.cursor, limit: WEB_SHELL_HISTORY_PAGE_SIZE },
       );
       if (
         capturedSession !== sessionEpoch ||
@@ -815,7 +860,7 @@ export function createDaemonTurnNavigationStore(
         request.kind === 'older' ? request.snapshot : rangeSnapshot,
         response,
       );
-      publish({ error: undefined });
+      publish(clearBoundaryError());
     } catch (error) {
       if (
         capturedSession !== sessionEpoch ||
@@ -843,11 +888,15 @@ export function createDaemonTurnNavigationStore(
   }
 
   async function retry(): Promise<void> {
+    const retriedHead = headRetryPending;
+    if (retriedHead) await refreshHead();
     if (snapshot.error && !snapshot.error.retryable) return;
     const operation = snapshot.error?.operation;
     if (operation === 'index') {
       const ordinal = snapshot.error?.ordinal;
-      return ordinal === undefined ? refreshHead() : loadOrdinal(ordinal);
+      if (ordinal !== undefined) return loadOrdinal(ordinal);
+      if (!retriedHead) return refreshHead();
+      return;
     }
     if (operation === 'locate' || snapshot.selected?.status === 'unavailable') {
       if (!snapshot.selected) return;
@@ -911,6 +960,7 @@ export function createDaemonTurnNavigationStore(
     pages = retained;
     reconcileProvisionals(response.turns);
     evictIndexPages(nextHead.start);
+    headRetryPending = false;
     publish({
       mode: 'ready',
       fallbackReason: undefined,
@@ -995,6 +1045,11 @@ export function createDaemonTurnNavigationStore(
         return !blockId || blockId !== provisional.blockId;
       });
     });
+    syncLiveRecordIds();
+  }
+
+  function syncLiveRecordIds(): void {
+    pageTable.setLiveRecordIds([...liveRecordIds, ...livePromptAliases.keys()]);
   }
 
   function evictIndexPages(pinnedHeadStart?: number): void {
@@ -1030,6 +1085,7 @@ export function createDaemonTurnNavigationStore(
       enterTooLargeFallback();
       return;
     }
+    headRetryPending = isRetryable(error);
     publish({
       mode: pages.size > 0 ? 'ready' : 'degraded',
       ...(pages.size === 0 ? { fallbackReason: 'initial_error' as const } : {}),
@@ -1041,10 +1097,12 @@ export function createDaemonTurnNavigationStore(
 
   function enterTooLargeFallback(): void {
     tooLarge = true;
+    headRetryPending = false;
     chainEpoch += 1;
     selectionGeneration += 1;
     pages = new Map();
     provisionals = [];
+    removedPromptIds.clear();
     livePromptAliases = new Map();
     pageTable.reset();
     publish({

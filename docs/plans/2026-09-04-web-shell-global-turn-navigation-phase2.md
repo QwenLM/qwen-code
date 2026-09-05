@@ -100,10 +100,41 @@ interface DaemonTurnNavigationSnapshot {
   provisionalTurns: readonly ProvisionalTurn[];
   historicalPages: ReadonlyMap<string, HistoricalTranscriptPage>;
   historicalRanges: readonly HistoricalTranscriptRange[];
-  selected?: SelectedTurnState;
-  error?: TurnNavigationError;
+  locations: ReadonlyMap<string, DaemonTurnLocation>;
+  selected?: DaemonSelectedTurnState;
+  error?: DaemonTurnNavigationError;
+}
+
+interface DaemonSelectedTurnState {
+  ordinal: number;
+  turnId?: string;
+  status: 'loading' | 'ready' | 'unavailable';
+  location?: DaemonTurnLocation;
+}
+
+interface DaemonTurnNavigationError {
+  operation: 'index' | 'locate' | 'older' | 'newer';
+  message: string;
+  retryable: boolean;
+  rangeId?: string;
+  ordinal?: number;
 }
 ```
+
+The hook's commands above are only the consumer-facing subset. The provider
+also calls `configure({ sessionId, supported, client })`,
+`observeLiveBlocks(blocks)`, `recordPromptAdmitted({ promptId, label, blockId? })`,
+`recordPromptRemoved(promptId)`, and `handleSessionEvent(type)`. The exported
+`DaemonTurnNavigationSession`, `DaemonTurnNavigationClient`, and
+`DaemonPromptAdmission` types define this ingestion contract; the client owner
+must be the active `DaemonSessionClient` object, not a shared workspace client.
+Queued admissions may have no `blockId`: the queue appends its display block
+separately without durable prompt identity. Phase 2A still counts/reconciles
+these entries by `promptId`; consumers must treat the optional locator as
+unavailable and use durable ordinal lookup once indexed. Wiring queue-display
+identity across the SDK boundary belongs to the Phase 2B/3 integration, not a
+text-based heuristic. Recent server-side removals are remembered (bounded to
+200 prompt IDs) so an in-flight admission cannot resurrect a removed prompt.
 
 `getSnapshot()` returns the same immutable object until a meaningful state
 change occurs. Mutable LRU timestamps, in-flight promises, dirty refresh flags,
@@ -261,13 +292,21 @@ interface HistoricalTranscriptRange {
   newer: TranscriptBoundary;
 }
 
+type FrozenTranscriptBoundaryRequest =
+  | { kind: 'older'; beforeRecordId: string; snapshot: string }
+  | { kind: 'cursor'; cursor: string };
+
 type TranscriptBoundary =
   | { kind: 'end' }
   | { kind: 'live' }
   | { kind: 'cached'; rangeId: string }
-  | { kind: 'loadable'; request: FrozenBoundaryRequest }
-  | { kind: 'loading'; request: FrozenBoundaryRequest }
-  | { kind: 'error'; request: FrozenBoundaryRequest; retryable: boolean };
+  | { kind: 'loadable'; request: FrozenTranscriptBoundaryRequest }
+  | { kind: 'loading'; request: FrozenTranscriptBoundaryRequest }
+  | {
+      kind: 'error';
+      request: FrozenTranscriptBoundaryRequest;
+      retryable: boolean;
+    };
 ```
 
 A range contains only pages whose adjacency is proven by a continuation
@@ -275,14 +314,18 @@ request or exact overlap. A loadable boundary is an explicit unloaded gap.
 Separate random-anchor results remain separate ranges until continuity is
 proven; they are never flattened merely because both belong to one session.
 An exact overlap with another retained range may use a `cached` boundary rather
-than duplicating its normalized blocks.
+than duplicating its normalized blocks. A new anchor instead replaces
+overlapping cached ranges atomically: its continuation cursor follows the
+whole response and cannot recover records removed by cross-range deduplication.
 
 Each isolated transcript store normally allocates block IDs from the same
 small ordinal seed. To prevent collisions when Phase 3 renders several cached
 pages as one range, the page table owns a private session-local
 `nextBlockOrdinal`. It seeds every page normalization from that value and
 advances it synchronously from the resulting state before another response is
-materialized. IDs remain reducer-local implementation details; they are only
+materialized. Each historical block ID and tool `parentBlockId` is also
+namespaced by its page ID so it cannot collide with the independent live
+allocator. IDs remain reducer-local implementation details; they are only
 unique within the current provider epoch and are never used as protocol
 locators.
 
@@ -419,6 +462,15 @@ The selected target page, active range, newest metadata page, and metadata page
 containing the selected ordinal are pinned. A page that alone exceeds its
 entire cache budget fails atomically. Eviction converts the removed direction
 back into an explicit loadable boundary and never joins its neighbors.
+If the pinned selection prevents retaining the newly requested page, admission
+rolls back and the boundary becomes a non-retryable error instead of reporting
+a successful load with an unchanged request. This local page-budget error is
+not the session-wide `transcript_too_large` fallback; cached content stays usable.
+
+Head-refresh retry state is tracked independently of the visible operation
+error. A successful locate or boundary load clears only its own error, and
+`retry()` also retries a failed head refresh even when another operation had
+priority in the error slot.
 
 The existing live store retains its current block/byte caps. Phase 2 therefore
 adds bounded caches without making total retained data depend on session

@@ -584,15 +584,20 @@ provisional reconciliation, and canonical locator map — belong to this phase,
 leaving Phase 3 as the rail UI. The detailed design lives in
 `web-shell-global-turn-navigation-phase2.md`.)
 
+Phase 2A (implemented in [#11054](https://github.com/QwenLM/qwen-code/pull/11054),
+under review) delivers steps 1–3. Phase 2B delivers step 4. The
+[implementation plan](../../plans/2026-09-04-web-shell-global-turn-navigation-phase2.md)
+defines the current client contract and delivery slices.
+
 1. Add the bounded turn-index store, tail refresh, provisional reconciliation,
    and canonical locator map without coupling metadata residency to transcript
    residency.
 2. Land the immutable historical page table beside the existing connected live
    window, with bidirectional boundaries, deduplication by record ID, page
    admission, eviction, detached-live behavior, and random anchored reads.
-3. Migrate existing sequential prepend pagination behind the page-table
+3. Expose the complete headless state and locator contract needed by the rail.
+4. Migrate existing sequential prepend pagination behind the page-table
    boundary while preserving its current public behavior.
-4. Expose the complete headless state and locator contract needed by the rail.
 
 ### Phase 3: global rail
 

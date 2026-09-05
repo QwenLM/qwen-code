@@ -1248,31 +1248,38 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         }
       };
       for (const event of events) {
-        const normalized = filterDaemonUiEventsForTranscript(
-          event,
-          normalizeAndFilterEvent(
+        try {
+          const normalized = filterDaemonUiEventsForTranscript(
             event,
-            activeSession.clientId,
-            replayOpts,
-            setConnection,
-            { updateConnection: false, suppressLog: true },
-          ),
-          addNotice,
-          dismissNotice,
-          { hideHistoryTruncation: true, suppressSideEffects: true },
-        );
-        const projected =
-          subagentTranscriptModeRef.current === 'summary'
-            ? projectMainTranscriptEvents(normalized)
-            : normalized;
-        for (const uiEvent of projected) appendFreshEvent(uiEvent);
-        if (event.type === 'turn_complete') {
-          const stopReason =
-            (event.data as DaemonTurnCompleteData | undefined)?.stopReason ??
-            'end_turn';
-          appendFreshEvent(assistantDoneFromTurnEvent(event, stopReason));
-        } else if (event.type === 'turn_error') {
-          appendFreshEvent(assistantDoneFromTurnEvent(event, 'error'));
+            normalizeAndFilterEvent(
+              event,
+              activeSession.clientId,
+              replayOpts,
+              setConnection,
+              { updateConnection: false, suppressLog: true },
+            ),
+            addNotice,
+            dismissNotice,
+            { hideHistoryTruncation: true, suppressSideEffects: true },
+          );
+          const projected =
+            subagentTranscriptModeRef.current === 'summary'
+              ? projectMainTranscriptEvents(normalized)
+              : normalized;
+          for (const uiEvent of projected) appendFreshEvent(uiEvent);
+          if (event.type === 'turn_complete') {
+            const stopReason =
+              (event.data as DaemonTurnCompleteData | undefined)?.stopReason ??
+              'end_turn';
+            appendFreshEvent(assistantDoneFromTurnEvent(event, stopReason));
+          } else if (event.type === 'turn_error') {
+            appendFreshEvent(assistantDoneFromTurnEvent(event, 'error'));
+          }
+        } catch (error) {
+          console.warn(
+            '[DaemonSessionProvider] Skipped malformed navigation history event',
+            error,
+          );
         }
       }
       isolatedStore.dispatch(uiEvents);
@@ -3108,6 +3115,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 if (sessionRef.current !== activeSession) break;
               }
               if (isPendingPromptEvent(event)) {
+                if (
+                  event.type === 'pending_prompt_completed' &&
+                  isRecord(event.data) &&
+                  event.data['state'] === 'removed' &&
+                  typeof event.data['promptId'] === 'string'
+                ) {
+                  turnNavigationStore.recordPromptRemoved(
+                    event.data['promptId'],
+                  );
+                }
                 publishPendingPromptEvent(event);
                 if (sessionRef.current !== activeSession) break;
                 if (event.type === 'pending_prompt_started') {

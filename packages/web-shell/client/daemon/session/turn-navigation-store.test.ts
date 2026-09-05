@@ -105,8 +105,10 @@ function createClient() {
   return { client, getTurnIndexPage, getTranscriptPage };
 }
 
-async function flushInitialHead() {
-  await vi.waitFor(() => undefined);
+async function flushInitialHead(
+  store: ReturnType<typeof createDaemonTurnNavigationStore>,
+) {
+  await vi.waitFor(() => expect(store.getSnapshot().mode).not.toBe('loading'));
 }
 
 describe('createDaemonTurnNavigationStore', () => {
@@ -128,7 +130,7 @@ describe('createDaemonTurnNavigationStore', () => {
     );
 
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     expect(getTurnIndexPage).toHaveBeenCalledWith({ limit: 200 });
     expect(store.getSnapshot()).toMatchObject({
@@ -147,7 +149,7 @@ describe('createDaemonTurnNavigationStore', () => {
     );
 
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     expect(store.getSnapshot()).toMatchObject({
       mode: 'degraded',
@@ -174,7 +176,7 @@ describe('createDaemonTurnNavigationStore', () => {
       client: { ...client },
     });
     resolveHead(turnPage(0, ['turn-0'], { totalTurns: 1 }));
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     expect(store.getSnapshot()).toMatchObject({ mode: 'ready', totalTurns: 1 });
     expect(getTurnIndexPage).toHaveBeenCalledTimes(1);
@@ -187,7 +189,7 @@ describe('createDaemonTurnNavigationStore', () => {
       .mockResolvedValueOnce(turnPage(800, ['turn-800'], { totalTurns: 801 }))
       .mockResolvedValueOnce(turnPage(200, ['turn-200'], { totalTurns: 801 }));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     await store.loadOrdinal(200);
 
@@ -210,7 +212,7 @@ describe('createDaemonTurnNavigationStore', () => {
         turnPage(0, ['turn-0', 'wrong-turn-1'], { totalTurns: 3 }),
       );
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     await expect(store.loadOrdinal(0)).rejects.toThrow(
       'Frozen turn-index page changed',
@@ -231,7 +233,7 @@ describe('createDaemonTurnNavigationStore', () => {
       .mockResolvedValueOnce(turnPage(0, ['turn-0'], { totalTurns: 801 }))
       .mockResolvedValueOnce(turnPage(200, ['turn-200'], { totalTurns: 801 }));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     await store.loadOrdinal(0);
 
     await store.loadOrdinal(200);
@@ -247,7 +249,7 @@ describe('createDaemonTurnNavigationStore', () => {
       .mockResolvedValueOnce(turnPage(2, ['turn-2'], { totalTurns: 3 }))
       .mockResolvedValueOnce(turnPage(0, ['turn-0'], { totalTurns: 3 }));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     await expect(store.locateOrdinal(0)).rejects.toThrow(
       'Turn-index page exceeds the cache budget',
@@ -268,7 +270,7 @@ describe('createDaemonTurnNavigationStore', () => {
       .mockRejectedValueOnce(new Error('temporary metadata failure'))
       .mockResolvedValueOnce(turnPage(0, ['turn-0'], { totalTurns: 801 }));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     await expect(store.loadOrdinal(0)).rejects.toThrow(
       'temporary metadata failure',
@@ -309,7 +311,7 @@ describe('createDaemonTurnNavigationStore', () => {
       );
     getTranscriptPage.mockResolvedValueOnce(transcriptPage('turn-0'));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     await store.loadOrdinal(0);
 
     await store.refreshHead();
@@ -346,7 +348,7 @@ describe('createDaemonTurnNavigationStore', () => {
         }),
       );
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     const loading = store.loadOrdinal(0);
     await vi.waitFor(() => expect(getTurnIndexPage).toHaveBeenCalledTimes(2));
@@ -372,11 +374,12 @@ describe('createDaemonTurnNavigationStore', () => {
         turnPage(0, ['turn-0', 'turn-1'], { totalTurns: 2 }),
       );
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     store.configure({ sessionId: 'session-1', supported: true });
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await vi.waitFor(() => expect(getTurnIndexPage).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(store.getSnapshot().totalTurns).toBe(2));
+    expect(getTurnIndexPage).toHaveBeenCalledTimes(2);
 
     expect(store.getSnapshot().totalTurns).toBe(2);
   });
@@ -389,7 +392,7 @@ describe('createDaemonTurnNavigationStore', () => {
     );
     getTranscriptPage.mockResolvedValueOnce(transcriptPage('turn-0'));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     const location = await store.locateOrdinal(0);
 
@@ -400,7 +403,7 @@ describe('createDaemonTurnNavigationStore', () => {
     });
     expect(location).toMatchObject({
       turnId: 'turn-0',
-      blockId: 'history-user-1',
+      blockId: 'history-page-1:history-user-1',
       view: 'historical',
     });
   });
@@ -420,7 +423,7 @@ describe('createDaemonTurnNavigationStore', () => {
       )
       .mockResolvedValueOnce(transcriptPage('turn-1'));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     await store.locateOrdinal(0);
     const rangeId = store.getSnapshot().historicalRanges[0]!.id;
 
@@ -464,7 +467,7 @@ describe('createDaemonTurnNavigationStore', () => {
           }),
       );
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     await store.locateOrdinal(0);
     const rangeId = store.getSnapshot().historicalRanges[0]!.id;
     const loading = store.loadNewer(rangeId);
@@ -503,7 +506,7 @@ describe('createDaemonTurnNavigationStore', () => {
       )
       .mockResolvedValueOnce(transcriptPage('turn-1'));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     await store.locateOrdinal(0);
     const oldRangeId = store.getSnapshot().historicalRanges[0]!.id;
     const loading = store.loadNewer(oldRangeId);
@@ -530,7 +533,7 @@ describe('createDaemonTurnNavigationStore', () => {
       turnPage(0, ['turn-0'], { totalTurns: 1 }),
     );
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     store.observeLiveBlocks([userBlock('live-user-1', 'turn-0')]);
 
     await expect(store.locateOrdinal(0)).resolves.toMatchObject({
@@ -552,13 +555,13 @@ describe('createDaemonTurnNavigationStore', () => {
       )
       .mockResolvedValueOnce(transcriptPage('assistant-live'));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     store.observeLiveBlocks([
       assistantBlock('live-assistant-1', 'assistant-live'),
     ]);
     store.configure({ sessionId: 'session-1', supported: false });
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     await store.locateOrdinal(0);
     const rangeId = store.getSnapshot().historicalRanges[0]!.id;
 
@@ -600,7 +603,7 @@ describe('createDaemonTurnNavigationStore', () => {
     const page = turnPage(0, ['turn-0'], { totalTurns: 1 });
     page.turns[0] = { ...page.turns[0]!, promptId: 'prompt-exact' };
     resolveHead(page);
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     expect(store.getSnapshot().provisionalTurns).toMatchObject([
       { promptId: 'prompt-other', label: 'same label' },
@@ -630,7 +633,7 @@ describe('createDaemonTurnNavigationStore', () => {
     page.turns[0] = { ...page.turns[0]!, promptId: 'prompt-exact' };
     getTurnIndexPage.mockResolvedValueOnce(page);
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     store.observeLiveBlocks([
       { ...userBlock('live-user-1', 'local-only'), sourceRecordIds: [] },
     ]);
@@ -668,7 +671,7 @@ describe('createDaemonTurnNavigationStore', () => {
     store.observeLiveBlocks([userBlock('live-user-1', 'turn-0')]);
 
     resolveHead(turnPage(0, ['turn-0'], { totalTurns: 1 }));
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     expect(store.getSnapshot().provisionalTurns).toHaveLength(0);
     expect(store.getSnapshot().effectiveTurnCount).toBe(1);
@@ -679,7 +682,7 @@ describe('createDaemonTurnNavigationStore', () => {
     const { client, getTurnIndexPage } = createClient();
     getTurnIndexPage.mockResolvedValueOnce(turnPage(0, [], { totalTurns: 0 }));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     store.recordPromptAdmitted({
       promptId: 'prompt-live',
       label: 'prompt',
@@ -701,7 +704,7 @@ describe('createDaemonTurnNavigationStore', () => {
     const { client, getTurnIndexPage } = createClient();
     getTurnIndexPage.mockResolvedValueOnce(turnPage(0, [], { totalTurns: 0 }));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     store.recordPromptAdmitted({ promptId: 'prompt-1', label: 'one' });
 
     store.recordPromptAdmitted({ promptId: 'prompt-2', label: 'two' });
@@ -724,7 +727,7 @@ describe('createDaemonTurnNavigationStore', () => {
         turnPage(0, ['turn-new'], { totalTurns: 1, snapshot: 'snapshot-2' }),
       );
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     store.recordPromptAdmitted({
       promptId: 'stale-prompt',
       label: 'stale prompt',
@@ -756,7 +759,7 @@ describe('createDaemonTurnNavigationStore', () => {
         }),
       );
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     store.recordPromptAdmitted({
       promptId: 'stale-prompt',
       label: 'stale prompt',
@@ -789,7 +792,7 @@ describe('createDaemonTurnNavigationStore', () => {
       supported: true,
       client: first.client,
     });
-    await flushInitialHead();
+    await flushInitialHead(store);
     const locating = store.locateOrdinal(0);
     await vi.waitFor(() => expect(first.getTranscriptPage).toHaveBeenCalled());
 
@@ -818,7 +821,7 @@ describe('createDaemonTurnNavigationStore', () => {
         }),
     );
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     const locating = store.locateOrdinal(0);
     await vi.waitFor(() => expect(getTranscriptPage).toHaveBeenCalled());
 
@@ -851,7 +854,7 @@ describe('createDaemonTurnNavigationStore', () => {
       )
       .mockResolvedValueOnce(transcriptPage('turn-1'));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
     const first = store.locateOrdinal(0);
     await vi.waitFor(() => expect(getTranscriptPage).toHaveBeenCalledTimes(1));
 
@@ -878,7 +881,7 @@ describe('createDaemonTurnNavigationStore', () => {
     });
 
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     expect(store.getSnapshot()).toMatchObject({
       mode: 'legacy',
@@ -888,7 +891,7 @@ describe('createDaemonTurnNavigationStore', () => {
     store.configure({ sessionId: 'session-1', supported: false });
     store.configure({ sessionId: 'session-1', supported: true, client });
     store.handleSessionEvent('session_rewound');
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     expect(getTurnIndexPage).toHaveBeenCalledTimes(1);
     expect(store.getSnapshot().fallbackReason).toBe('too_large');
@@ -902,7 +905,7 @@ describe('createDaemonTurnNavigationStore', () => {
     );
 
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     expect(store.getSnapshot()).toMatchObject({
       mode: 'legacy',
@@ -918,7 +921,7 @@ describe('createDaemonTurnNavigationStore', () => {
       .mockResolvedValueOnce(turnPage(0, ['turn-0'], { totalTurns: 1 }));
     getTranscriptPage.mockResolvedValueOnce(transcriptPage('turn-0'));
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     await expect(store.locateOrdinal(0)).rejects.toThrow(
       'Historical transcript page exceeds the cache budget',
@@ -951,7 +954,7 @@ describe('createDaemonTurnNavigationStore', () => {
       body: { code: 'transcript_page_too_large' },
     });
     store.configure({ sessionId: 'session-1', supported: true, client });
-    await flushInitialHead();
+    await flushInitialHead(store);
 
     await expect(store.locateOrdinal(0)).rejects.toMatchObject({ status: 413 });
 

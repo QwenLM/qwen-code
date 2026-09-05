@@ -182,7 +182,7 @@ export class HistoricalTranscriptPageTable {
     const cached = this.findTurn(turnId);
     if (cached) return cached;
 
-    const knownRecordIds = this.allRecordIds();
+    const knownRecordIds = this.liveRecordIds;
     const materialized = this.materializePage(
       snapshot,
       response.events,
@@ -232,15 +232,41 @@ export class HistoricalTranscriptPageTable {
       older,
       newer,
     });
-    const pages = new Map(this.snapshot.pages);
-    pages.set(page.id, page);
-    const ranges = Object.freeze([...this.snapshot.ranges, range]);
     if (
       this.measureRetainedBytes(new Map([[page.id, page]]), [range]) >
       this.options.maxRetainedBytes
     ) {
       throw new HistoricalTranscriptPageTooLargeError();
     }
+    const pages = new Map(this.snapshot.pages);
+    let retainedRanges = [...this.snapshot.ranges];
+    for (const cachedRange of this.snapshot.ranges) {
+      if (
+        !cachedRange.pageIds.some((pageId) =>
+          [...(pages.get(pageId)?.recordIds ?? [])].some((recordId) =>
+            page.recordIds.has(recordId),
+          ),
+        )
+      ) {
+        continue;
+      }
+      // A cursor after this anchor cannot recover records deduplicated into
+      // another range. Replace overlapping ranges instead of creating a gap.
+      retainedRanges = this.restoreCachedBoundaries(
+        retainedRanges.filter((item) => item.id !== cachedRange.id),
+        cachedRange.id,
+      );
+      for (const pageId of cachedRange.pageIds) pages.delete(pageId);
+      this.rangeAccess.delete(cachedRange.id);
+      this.cachedBoundaryRequests.delete(
+        this.boundaryKey(cachedRange.id, 'older'),
+      );
+      this.cachedBoundaryRequests.delete(
+        this.boundaryKey(cachedRange.id, 'newer'),
+      );
+    }
+    pages.set(page.id, page);
+    const ranges = Object.freeze([...retainedRanges, range]);
     this.snapshot = Object.freeze({
       pages,
       ranges,
@@ -291,6 +317,31 @@ export class HistoricalTranscriptPageTable {
     snapshot: string,
     response: DaemonSessionTranscriptPage,
   ): void {
+    const previousSnapshot = this.snapshot;
+    const previousCachedBoundaryRequests = new Map(this.cachedBoundaryRequests);
+    const previousRangeAccess = new Map(this.rangeAccess);
+    try {
+      this.admitBoundaryPage(rangeId, direction, snapshot, response);
+    } catch (error) {
+      this.snapshot = previousSnapshot;
+      this.cachedBoundaryRequests.clear();
+      for (const [key, request] of previousCachedBoundaryRequests) {
+        this.cachedBoundaryRequests.set(key, request);
+      }
+      this.rangeAccess.clear();
+      for (const [key, access] of previousRangeAccess) {
+        this.rangeAccess.set(key, access);
+      }
+      throw error;
+    }
+  }
+
+  private admitBoundaryPage(
+    rangeId: string,
+    direction: BoundaryDirection,
+    snapshot: string,
+    response: DaemonSessionTranscriptPage,
+  ): void {
     assertContinuationCursor(response);
     const range = this.snapshot.ranges.find((item) => item.id === rangeId);
     if (!range || range[direction].kind !== 'loading') return;
@@ -318,11 +369,6 @@ export class HistoricalTranscriptPageTable {
         ? page
         : this.pageFromBlocks(page.id, snapshot, blocks);
     if (admittedPage.blocks.length === 0) {
-      const previousSnapshot = this.snapshot;
-      const previousCachedBoundaryRequests = new Map(
-        this.cachedBoundaryRequests,
-      );
-      const previousRangeAccess = new Map(this.rangeAccess);
       this.finishBoundaryWithoutPage(
         range,
         direction,
@@ -334,26 +380,13 @@ export class HistoricalTranscriptPageTable {
       const activeRange = this.snapshot.ranges.find(
         (item) => item.id === activeRangeId,
       );
-      try {
-        this.evict(
-          activeRangeId,
-          this.selectedPageId ?? activeRange?.pageIds[0] ?? range.pageIds[0]!,
-          activeRangeId === rangeId
-            ? { direction, request: admittedRequest }
-            : undefined,
-        );
-      } catch (error) {
-        this.snapshot = previousSnapshot;
-        this.cachedBoundaryRequests.clear();
-        for (const [key, request] of previousCachedBoundaryRequests) {
-          this.cachedBoundaryRequests.set(key, request);
-        }
-        this.rangeAccess.clear();
-        for (const [key, access] of previousRangeAccess) {
-          this.rangeAccess.set(key, access);
-        }
-        throw error;
-      }
+      this.evict(
+        activeRangeId,
+        this.selectedPageId ?? activeRange?.pageIds[0] ?? range.pageIds[0]!,
+        activeRangeId === rangeId
+          ? { direction, request: admittedRequest }
+          : undefined,
+      );
       return;
     }
     this.assertPageFits(admittedPage);
@@ -398,7 +431,7 @@ export class HistoricalTranscriptPageTable {
       activeRangeId,
       this.selectedPageId ?? activeRange?.pageIds[0] ?? range.pageIds[0]!,
       activeRangeId === rangeId
-        ? { direction, request: admittedRequest }
+        ? { direction, request: admittedRequest, pageId: admittedPage.id }
         : undefined,
     );
   }
@@ -420,10 +453,17 @@ export class HistoricalTranscriptPageTable {
       this.nextBlockOrdinal,
       result.nextBlockOrdinal,
     );
+    const pageId = `history-page-${this.nextPageId++}`;
     const page = this.pageFromBlocks(
-      `history-page-${this.nextPageId++}`,
+      pageId,
       snapshot,
-      result.blocks,
+      result.blocks.map((block) => ({
+        ...block,
+        id: `${pageId}:${block.id}`,
+        ...(block.kind === 'tool' && block.parentBlockId
+          ? { parentBlockId: `${pageId}:${block.parentBlockId}` }
+          : {}),
+      })),
     );
     return {
       page,
@@ -520,19 +560,12 @@ export class HistoricalTranscriptPageTable {
             cachedRangeId,
             current.request,
           )
-        : direction === 'newer' && response.hasMore && response.nextCursor
+        : response.hasMore
           ? {
               kind: 'loadable',
               request: { kind: 'cursor', cursor: response.nextCursor },
             }
-          : direction === 'older' && response.hasMore && response.nextCursor
-            ? {
-                kind: 'loadable',
-                request: { kind: 'cursor', cursor: response.nextCursor },
-              }
-            : response.hasMore
-              ? { kind: 'error', request: current.request, retryable: false }
-              : { kind: 'end' };
+          : { kind: 'end' };
     this.replaceRange(range.id, { ...range, [direction]: terminal });
   }
 
@@ -625,6 +658,7 @@ export class HistoricalTranscriptPageTable {
     admittedBoundary?: {
       direction: BoundaryDirection;
       request: FrozenTranscriptBoundaryRequest;
+      pageId?: string;
     },
   ): void {
     const pages = new Map(this.snapshot.pages);
@@ -688,7 +722,10 @@ export class HistoricalTranscriptPageTable {
           : active.pageIds[0];
       if (!removable || removable === targetPageId) break;
       const removedFirst = removable === active.pageIds[0];
-      if (!removedFirst && admittedBoundary?.direction === 'older') {
+      if (
+        removable === admittedBoundary?.pageId ||
+        (!removedFirst && admittedBoundary?.direction === 'older')
+      ) {
         throw new HistoricalTranscriptPageTooLargeError();
       }
       pages.delete(removable);
