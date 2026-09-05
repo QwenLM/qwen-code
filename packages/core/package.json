@@ -41,6 +41,10 @@
       "types": "./dist/src/hooks/user-prompt-submit-context.d.ts",
       "import": "./dist/src/hooks/user-prompt-submit-context.js"
     },
+    "./board": {
+      "types": "./dist/src/board.d.ts",
+      "import": "./dist/src/board.js"
+    },
     "./noFollowOpen": {
       "types": "./dist/src/utils/no-follow-open.d.ts",
       "import": "./dist/src/utils/no-follow-open.js"
