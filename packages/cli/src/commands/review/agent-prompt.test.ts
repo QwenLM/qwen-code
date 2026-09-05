@@ -4230,6 +4230,13 @@ describe('verify and reverse-audit briefs — the Step 4/5 methodology, in code'
     expect(p).toContain('go read the claimed source first');
   });
 
+  it('wires capture-tui into the verify brief — the producer its rendering claims cite', () => {
+    // The brief teaches terminal-rendering claims to run `review capture-tui`;
+    // if the block drops out of the prompt the command exists with no consumer.
+    const p = buildRoleBrief(PLAN, 'verify');
+    expect(p).toContain('"${QWEN_CODE_CLI:-qwen}" review capture-tui');
+  });
+
   it('the verify brief carries the #9789 do-not-refute list and the constructible rejection bar', () => {
     // The recall leak the finder-side RECALL rule closes has a verifier half:
     // "silence is better than noise" read as a confidence bar lets Step 4 drop

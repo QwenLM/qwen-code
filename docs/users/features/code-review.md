@@ -252,6 +252,8 @@ Confirmed findings are canonicalized into `.qwen/tmp/qwen-review-<target>-findin
 
 The command validates on write: a duplicate id, a finding with no failure scenario, an empty locations array, or an unknown severity is an error rather than a silently mangled entry.
 
+Where do the images come from? For terminal-rendering claims, `qwen review capture-tui` drives the code under review in a **private tmux server** (it cannot touch your own tmux sessions), captures the pane bytes as `.ans`, and renders a `.png` via `freeze` when installed — degrading explicitly (`png` → `ans-only` → refused) and recording which rung it reached, because a verifier must say whether its verdict stands on pixels, bytes, or prose.
+
 ## Evidence Images in PR Comments
 
 GitHub's API cannot attach images to review comments, so `/review` can host evidence images (TUI screenshots, rendered-output comparisons) in a repository you designate and embed them by URL:
