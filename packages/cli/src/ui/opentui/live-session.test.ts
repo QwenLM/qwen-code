@@ -393,6 +393,78 @@ describe('livePromptEvents', () => {
     expect(sendMessageStream).toHaveBeenCalledTimes(1);
   });
 
+  it('settles an Esc pressed during the startup wait without sending', async () => {
+    // Releasing the wait is not enough: a text-only prompt has no abort gate
+    // between the loop and `sendMessageStream`, so falling through would fire
+    // the UserPromptSubmit hooks and push history for a cancelled prompt.
+    const controller = new AbortController();
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    // A startup flight that never creates the chat, so the wait is still
+    // running when the abort lands.
+    const config = createFakeConfig(sendMessageStream, undefined, () => false);
+
+    vi.useFakeTimers();
+    try {
+      const pending = drain(
+        livePromptEvents(config, 'hello', controller.signal),
+      );
+      let settled = false;
+      const markSettled = () => {
+        settled = true;
+      };
+      void pending.then(markSettled, markSettled);
+      await vi.advanceTimersByTimeAsync(500);
+      controller.abort();
+      // Poll ticks, not the budget: the abort must release the wait at once.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(settled).toBe(true);
+      await expect(pending).rejects.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('fails the turn when the startup wait expires on a chat with no tools', async () => {
+    // `startChat()` assigns the chat before the SessionStart hook and
+    // `setTools()`, so a flight still inside that gap — or one that died in
+    // it — leaves a chat that is not ready: a send against it declares zero
+    // tools, silently.
+    const sendMessageStream = vi.fn(function* () {
+      yield { type: 'finished', value: {} };
+    });
+    const config = {
+      ...createFakeConfig(sendMessageStream),
+      initialize: vi.fn(async () => {
+        throw new Error('Config was already initialized');
+      }),
+      getGeminiClient: () => ({
+        sendMessageStream,
+        isInitialized: () => true,
+        getChat: () => ({ getGenerationConfig: () => ({ tools: undefined }) }),
+      }),
+    } as unknown as Config;
+
+    vi.useFakeTimers();
+    try {
+      const pending = drain(livePromptEvents(config, 'hello'));
+      // The wait expires deep inside the virtual-time run, so keep the
+      // rejection handled until the assertion below can claim it.
+      void pending.catch(() => {});
+      await vi.advanceTimersByTimeAsync(STARTUP_CHAT_WAIT_MS + 1_000);
+      await expect(pending).rejects.toThrow(
+        `Timed out after ${STARTUP_CHAT_WAIT_MS}ms`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(sendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('uses the ink promptId format and increments promptCount per turn', async () => {
     const sendMessageStream = vi.fn(function* () {});
     const config = createFakeConfig(sendMessageStream);
@@ -633,14 +705,19 @@ describe('livePromptEvents', () => {
 
   it('skips steering when the turn is aborted', async () => {
     const drainSteering = vi.fn(() => ['never']);
-    const sendMessageStream = oneToolBatchStream({
+    const controller = new AbortController();
+    const batch = oneToolBatchStream({
       callId: 't1',
       name: 'test_tool',
       args: {},
     });
+    // Esc reaches the generator mid-turn, not before it: the abort lands on
+    // the tool-response boundary, which is where a real cancel arrives.
+    const sendMessageStream = vi.fn(() => {
+      controller.abort();
+      return batch();
+    });
     const config = createFakeConfig(sendMessageStream);
-    const controller = new AbortController();
-    controller.abort();
 
     await drain(
       livePromptEvents(config, 'start', controller.signal, { drainSteering }),

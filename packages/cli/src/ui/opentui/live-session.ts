@@ -546,8 +546,7 @@ async function resolveSteeredPromptParts(
 
 // How long a turn waits for a startup initialization that is already in
 // flight to create the chat. Bounded so a config that never finishes
-// initializing still reports its own error instead of hanging the prompt —
-// the same budget commands-dispatch gives its registry self-heal.
+// initializing still reports its own error instead of hanging the prompt.
 export const STARTUP_CHAT_WAIT_MS = 15_000;
 const STARTUP_CHAT_POLL_MS = 100;
 
@@ -588,8 +587,22 @@ export async function* livePromptEvents(
   const chatReady = () =>
     client.isInitialized() &&
     client.getChat().getGenerationConfig().tools !== undefined;
-  while (!chatReady() && Date.now() < chatDeadline) {
+  while (!chatReady() && Date.now() < chatDeadline && !signal?.aborted) {
     await new Promise((resolve) => setTimeout(resolve, STARTUP_CHAT_POLL_MS));
+  }
+  // An abort before the send must reach runTurn's catch, not the send path:
+  // nothing between here and `sendMessageStream` re-checks the signal for
+  // text-only input, so a cancelled prompt would still fire its
+  // UserPromptSubmit hooks and leave an entry in the session history.
+  signal?.throwIfAborted();
+  // Expiry with a chat assigned but not ready — the flight is still inside,
+  // or died inside, the hook or `setTools()` stage — must not fall through:
+  // the send would answer the whole turn with zero tool declarations and no
+  // error. Gated so the no-chat branch still surfaces the client's own error.
+  if (client.isInitialized() && !chatReady()) {
+    throw new Error(
+      `Timed out after ${STARTUP_CHAT_WAIT_MS}ms waiting for the startup chat to become ready`,
+    );
   }
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
