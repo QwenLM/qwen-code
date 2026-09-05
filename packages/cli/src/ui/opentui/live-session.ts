@@ -544,6 +544,12 @@ async function resolveSteeredPromptParts(
   return { parts, events, restore: [] };
 }
 
+// How long a turn waits for a startup initialization that is already in
+// flight to create the chat. Bounded so a config that never finishes
+// initializing still reports its own error instead of hanging the prompt.
+export const STARTUP_CHAT_WAIT_MS = 15_000;
+const STARTUP_CHAT_POLL_MS = 100;
+
 /**
  * Sends one user prompt through the real client and yields neutral events.
  * The caller (backend) drains this into the streaming model.
@@ -565,6 +571,39 @@ export async function* livePromptEvents(
     /* already initialized by command loading / startup */
   }
   const client = config.getGeminiClient();
+  // `Config.initialize()` flips its own guard before the work runs, so the
+  // boot-time command-registry load owning that flight makes the call above
+  // throw while `startChat()` has not run yet. Sending then dies in
+  // `getChat()` and the prompt is dropped as "Chat not initialized". The
+  // registry self-heal in commands-dispatch bounds the same window; this
+  // waits it out so the turn starts against a real chat.
+  //
+  // Chat existence alone is not readiness: `startChat()` assigns the chat and
+  // only then awaits the SessionStart hook, its context and `setTools()`, so
+  // releasing on existence sends the session's first prompt with no tool
+  // declarations. `setTools()` is the flight's last stage and always writes
+  // `tools`, which makes its presence the marker that the chat is complete.
+  const chatDeadline = Date.now() + STARTUP_CHAT_WAIT_MS;
+  const chatReady = () =>
+    client.isInitialized() &&
+    client.getChat().getGenerationConfig().tools !== undefined;
+  while (!chatReady() && Date.now() < chatDeadline && !signal?.aborted) {
+    await new Promise((resolve) => setTimeout(resolve, STARTUP_CHAT_POLL_MS));
+  }
+  // An abort before the send must reach runTurn's catch, not the send path:
+  // nothing between here and `sendMessageStream` re-checks the signal for
+  // text-only input, so a cancelled prompt would still fire its
+  // UserPromptSubmit hooks and leave an entry in the session history.
+  signal?.throwIfAborted();
+  // Expiry with a chat assigned but not ready — the flight is still inside,
+  // or died inside, the hook or `setTools()` stage — must not fall through:
+  // the send would answer the whole turn with zero tool declarations and no
+  // error. Gated so the no-chat branch still surfaces the client's own error.
+  if (client.isInitialized() && !chatReady()) {
+    throw new Error(
+      `Timed out after ${STARTUP_CHAT_WAIT_MS}ms waiting for the startup chat to become ready`,
+    );
+  }
   const promptId = options?.promptId ?? nextLivePromptId(config);
   const abort = signal ?? new AbortController().signal;
   // Read per boundary rather than once: the vision bridge can pick a full-turn
