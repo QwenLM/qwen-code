@@ -61,6 +61,7 @@ import {
   buildRoleLaunchPrompt,
   findingsSection,
   agentPromptCommand,
+  renderFixAuditInput,
 } from './agent-prompt.js';
 import {
   BRIEFS,
@@ -6580,7 +6581,7 @@ describe('the tool budget in the briefs', () => {
       ),
     );
     const exempt = roles.filter((r) => BRIEFS[r].budgetExempt).sort();
-    expect(exempt).toEqual(['0', '7', 'verify']);
+    expect(exempt).toEqual(['0', '7', 'fix-audit', 'verify']);
   });
 
   it.each([
@@ -7225,4 +7226,544 @@ describe('incremental-scope briefs', () => {
     );
     expect(p).toContain('src/caller.ts (imports src/changed.ts)');
   });
+});
+
+describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => {
+  // The audit's whole design is what it is NOT handed: not the reviewed diff
+  // (it could rediscover the review's own findings), not the finding format
+  // or the severity ladder (it files nothing), not the project review rules
+  // (they tell a reviewer what to check). Each absence is pinned here,
+  // because each is a line a later "make it consistent with the other roles"
+  // edit would add back.
+  const artifact = (
+    outcomes: Record<string, 'fixed' | 'skipped' | 'no_change_needed' | null>,
+  ) =>
+    Object.entries(outcomes).map(([id, outcome]) => ({
+      id,
+      severity: 'Critical',
+      summary: `${id}: the retry counter is never reset`,
+      failureScenario: `${id}: a request that fails twice leaves attempts at 2`,
+      file: `src/${id}.ts`,
+      line: 42,
+      ...(outcome ? { outcome } : {}),
+      ...(outcome === 'skipped' ? { outcomeNote: 'out of scope' } : {}),
+    }));
+  const HUNKS =
+    'diff --git a/src/f1.ts b/src/f1.ts\n' +
+    '--- a/src/f1.ts\n+++ b/src/f1.ts\n@@ -40,3 +40,3 @@\n' +
+    '-  if (hops < 16) {\n+  if (hops < MAX_SUBAGENT_DEPTH_LIMIT) {\n';
+
+  function setup(opts: {
+    outcomes?: Record<string, 'fixed' | 'skipped' | 'no_change_needed' | null>;
+    hunks?: string;
+    rawFindings?: string;
+  }): { plan: string; findings: string; hunks: string; dir: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-fixaudit-'));
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.json');
+    writeFileSync(
+      findings,
+      opts.rawFindings ??
+        JSON.stringify({
+          findings: artifact(
+            opts.outcomes ?? { f1: 'fixed', f2: 'skipped', f3: 'fixed' },
+          ),
+        }),
+    );
+    const hunks = join(dir, 'hunks.diff');
+    writeFileSync(hunks, opts.hunks ?? HUNKS);
+    return { plan, findings, hunks, dir };
+  }
+  const handler = agentPromptCommand.handler as (a: unknown) => void;
+
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+  });
+
+  it('the brief carries the audit method and none of the finder machinery', () => {
+    const rules = 'Never merge without a changeset entry.';
+    const brief = buildRoleBrief(PLAN, 'fix-audit', { rules });
+    // The method: name the assumption, quote the pin, report only the unpinned.
+    expect(brief).toContain(
+      'what does this edit assume that nothing in the tree pins?',
+    );
+    expect(brief).toContain('**Quote the pin**');
+    expect(brief).toContain('**Report only what is unpinned.**');
+    // The two return shapes, and the read-only rule for the user's tree.
+    expect(brief).toContain('pin with:');
+    expect(brief).toContain('No unpinned assumptions — audited');
+    expect(brief).toContain('**You write nothing.**');
+    // The measured class it exists for (PR #9793).
+    expect(brief).toContain('hops < 16');
+    expect(brief).toContain('callId');
+    // NOT handed: the diff (readsDiff false), the finding format, the
+    // severity ladder, the Exclusion Criteria, the recall rule, the tool
+    // budget, and the project rules — even when rules were passed.
+    expect(BRIEFS['fix-audit'].readsDiff).toBe(false);
+    expect(brief).not.toContain(PLAN.diffPathAbsolute);
+    expect(brief).not.toContain('**Anchor:**');
+    expect(brief).not.toContain('What is NOT a finding');
+    expect(brief).not.toContain('Tool budget');
+    expect(brief).not.toContain('## Project rules');
+    expect(brief).not.toContain(rules);
+    // The verifier's tail, by contrast, does carry the Exclusion Criteria —
+    // so the absence above is the assumptions branch, not a broken tail().
+    expect(buildRoleBrief(PLAN, 'verify')).toContain('What is NOT a finding');
+  });
+
+  it('the launch prompt hands it no diff range', () => {
+    const p = buildRoleLaunchPrompt(PLAN, 'fix-audit', '/b/fix-audit.brief.md');
+    expect(p).toContain('You are review agent `fix-audit` — Fix audit agent.');
+    expect(p).toContain('read_file(file_path="/b/fix-audit.brief.md")');
+    expect(p).not.toContain('The code is a file too — the diff');
+    expect(p).not.toContain(PLAN.diffPathAbsolute);
+  });
+
+  it('renders only the fixed findings above the hunks, into one digest-keyed list file, and records the printed block', () => {
+    const { plan, findings, hunks, dir } = setup({});
+    try {
+      handler({ plan, role: 'fix-audit', findings, hunks });
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed.startsWith('You are review agent `fix-audit`')).toBe(true);
+      expect(printed).toContain('## What you are auditing');
+      expect(printed).toContain('the reviewed diff is not');
+      expect(printed).toContain('does not replace the brief; read it first');
+      // Nothing of the list rides in the block itself.
+      expect(printed).not.toContain('hops < 16');
+      expect(printed).not.toContain('f1: the retry counter');
+      const m = /^read_file\(file_path="([^"]*\.findings\.md)"\)$/m.exec(
+        printed,
+      );
+      expect(m).not.toBeNull();
+      const list = readFileSync(m![1], 'utf8');
+      // The `fixed` subset — and ONLY it: a skipped finding has no edit.
+      expect(list).toContain('2 with outcome `fixed`');
+      expect(list).toContain('### f1 — [Critical] src/f1.ts:42');
+      expect(list).toContain('### f3 — [Critical] src/f3.ts:42');
+      expect(list).not.toContain('f2');
+      expect(list).toContain(
+        'Failure scenario: f1: a request that fails twice',
+      );
+      // The hunks, verbatim, fenced by the markers the brief reads for.
+      expect(list).toContain('----- applied hunks begin -----');
+      expect(list).toContain('+  if (hops < MAX_SUBAGENT_DEPTH_LIMIT) {');
+      expect(list).toContain('----- applied hunks end -----');
+      // The record: keyed like every findings role, and exactly the block.
+      const recorded = readRecordedPrompts(plan);
+      const keys = [...recorded.keys()];
+      expect(keys).toHaveLength(1);
+      expect(keys[0]).toMatch(/^fix-audit--[0-9a-f]{12}$/);
+      expect(recorded.get(keys[0])).toBe(printed);
+      expect(wasDeliveredVerbatim(printed, recorded.get(keys[0])!)).toBe(true);
+      expect(readFileSync(briefPath(plan, keys[0]), 'utf8')).toContain(
+        '**You write nothing.**',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('marks a fixed finding no hunk corroborates, and leaves the matched one alone', () => {
+    // `fixed` says an edit landed; the hunks are the edits that landed. The
+    // default artifact marks f1 AND f3 fixed while HUNKS touches only
+    // src/f1.ts — f3's edit never landed, went to another file, or the
+    // snapshot was taken after it. The brief works per hunk and neither of
+    // its return shapes can say "a listed finding is closed by no hunk", so
+    // without the marker the claim rides through unexamined and is
+    // re-reported to the client as closed.
+    const { plan, findings, hunks, dir } = setup({});
+    try {
+      handler({ plan, role: 'fix-audit', findings, hunks });
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      const m = /^read_file\(file_path="([^"]*\.findings\.md)"\)$/m.exec(
+        printed,
+      );
+      const list = readFileSync(m![1], 'utf8');
+      const f3 = list.slice(list.indexOf('### f3'));
+      expect(f3).toContain("No hunk below touches this finding's location(s)");
+      // …and the corroborated one carries no such line.
+      const f1 = list.slice(list.indexOf('### f1'), list.indexOf('### f3'));
+      expect(f1).not.toContain('No hunk below touches');
+      // The brief tells the agent what to do with the marker.
+      expect(buildRoleBrief(PLAN, 'fix-audit')).toContain(
+        "No hunk below touches this finding's location(s)",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('matches a finding whose location is rooted differently from the hunk header', () => {
+    // A finding's location is repo-relative while a hunk header is relative
+    // to the repository the diff was taken in; a review of a subdirectory
+    // target can leave the two rooted differently. An equality-only
+    // comparison would mark every such finding unattested and bury the real
+    // mismatches in noise.
+    const rendered = (renderFixAuditInput as (a: unknown, h: string) => string)(
+      [
+        {
+          id: 'c1',
+          severity: 'Critical',
+          summary: 'bound picked by hand',
+          failureScenario: 'the bound disagrees with the configured limit',
+          locations: [{ file: 'src/f1.ts', line: 40 }],
+          outcome: 'fixed',
+        },
+      ],
+      HUNKS.replace(/src\/f1\.ts/g, 'packages/cli/src/f1.ts'),
+    );
+    expect(rendered).not.toContain('No hunk below touches');
+  });
+
+  it('corroborates a finding whose file name git C-quotes in the headers', () => {
+    // Git quotes a header name holding a TAB, a quote, a backslash or a
+    // control byte even under the `core.quotePath=false` fix-delta renders
+    // with — that setting only stops the quoting of non-ASCII bytes. The
+    // unquoted-only header read contributed no path for such a file: its
+    // finding was annotated as uncorroborated beside a hunk that was in
+    // the input, and when every `fixed` finding sat in such a name a
+    // consistent build was refused wholesale.
+    const render = renderFixAuditInput as (a: unknown, h: string) => string;
+    const finding = (id: string, file: string) => ({
+      id,
+      severity: 'Critical',
+      summary: 'bound picked by hand',
+      failureScenario: 'the bound disagrees with the configured limit',
+      locations: [{ file, line: 1 }],
+      outcome: 'fixed',
+    });
+    const tab =
+      'diff --git "a/src/a\\tb.ts" "b/src/a\\tb.ts"\n' +
+      '--- "a/src/a\\tb.ts"\n+++ "b/src/a\\tb.ts"\n@@ -1 +1 @@\n' +
+      '-const a = 1;\n+const a = 2;\n';
+    // Beside a corroborated sibling: no annotation over the quoted one.
+    expect(
+      render(
+        [finding('c1', 'src/a\tb.ts'), finding('c2', 'src/f1.ts')],
+        tab + HUNKS,
+      ),
+    ).not.toContain('No hunk below touches');
+    // Alone: not refused.
+    expect(() => render([finding('c1', 'src/a\tb.ts')], tab)).not.toThrow();
+    // Octal bytes decode to the name the finding carries…
+    const octal =
+      'diff --git "a/src/\\303\\251.ts" "b/src/\\303\\251.ts"\n' +
+      '--- "a/src/\\303\\251.ts"\n+++ "b/src/\\303\\251.ts"\n@@ -1 +1 @@\n' +
+      '-1\n+2\n';
+    expect(() => render([finding('c1', 'src/é.ts')], octal)).not.toThrow();
+    // Astral: git keeps the emoji's bytes RAW inside the quoted token
+    // (only the TAB forces the quotes), so a decode that iterates UTF-16
+    // code units feeds each lone surrogate half to `Buffer.from`, encodes
+    // both as U+FFFD, and the name matches nothing — falsely annotating
+    // the finding beside its own hunks.
+    const astral =
+      'diff --git "a/src/a\\tb🙂.ts" "b/src/a\\tb🙂.ts"\n' +
+      '--- "a/src/a\\tb🙂.ts"\n+++ "b/src/a\\tb🙂.ts"\n@@ -1 +1 @@\n' +
+      '-1\n+2\n';
+    const astralRendered = render([finding('c1', 'src/a\tb🙂.ts')], astral);
+    expect(astralRendered).not.toContain('No hunk below touches');
+    // …an escaped quote too, through the mixed quoted/bare rename header.
+    const rename =
+      'diff --git "a/src/q\\"x.ts" b/src/qx.ts\n' +
+      'similarity index 100%\nrename from "src/q\\"x.ts"\nrename to src/qx.ts\n';
+    expect(() => render([finding('c1', 'src/q"x.ts')], rename)).not.toThrow();
+    expect(() => render([finding('c1', 'src/qx.ts')], rename)).not.toThrow();
+    // A decode the decoder cannot complete contributes NOTHING: the list
+    // may over-match, never invent, so an unknown escape leaves the claim
+    // uncorroborated — annotated as unattested — rather than corroborated
+    // by a garbled name.
+    const garbled =
+      '--- "a/src/bad\\qx.ts"\n+++ "b/src/bad\\qx.ts"\n@@ -1 +1 @@\n-1\n+2\n';
+    expect(render([finding('c1', 'src/bad\\qx.ts')], garbled)).toContain(
+      "No hunk below touches this finding's location(s)",
+    );
+  });
+
+  it('never reads a hunk-body line as a header', () => {
+    // A deleted content line `-- a/src/f3.ts` renders as `--- a/src/f3.ts`
+    // at column 0 — byte-identical to a header — and an added `++ b/…` as
+    // `+++ b/…`. Read as headers they INVENT a touched path, corroborating
+    // a `fixed` finding whose edit never landed and silencing the
+    // per-finding annotation. Ordinary content:
+    // a `.patch` fixture, an SQL/Lua/Haskell comment quoting an old path,
+    // docs quoting a diff.
+    const render = renderFixAuditInput as (a: unknown, h: string) => string;
+    const finding = (id: string, file: string) => ({
+      id,
+      severity: 'Critical',
+      summary: 'bound picked by hand',
+      failureScenario: 'the bound disagrees with the configured limit',
+      locations: [{ file, line: 1 }],
+      outcome: 'fixed',
+    });
+    const forged =
+      'diff --git a/src/f1.ts b/src/f1.ts\n' +
+      '--- a/src/f1.ts\n+++ b/src/f1.ts\n@@ -1,3 +1,3 @@\n' +
+      ' const keep = 1;\n' +
+      '--- a/src/f3.ts\n' + // the deleted content line `-- a/src/f3.ts`
+      '+++ b/src/f3.ts\n' + // the added content line `++ b/src/f3.ts`
+      '\\ No newline at end of file\n';
+    // f1 is really touched; f3's only "hunk" is the forged body line.
+    const rendered = render(
+      [finding('f1', 'src/f1.ts'), finding('f3', 'src/f3.ts')],
+      forged,
+    );
+    const f3 = rendered.slice(rendered.indexOf('### f3'));
+    expect(f3).toContain("No hunk below touches this finding's location(s)");
+    expect(
+      rendered.slice(rendered.indexOf('### f1'), rendered.indexOf('### f3')),
+    ).not.toContain('No hunk below touches');
+    // …and f3 alone is annotated, not hidden: the all-unmatched case is
+    // built, and every entry carries the unattested line.
+    const alone = render([finding('f3', 'src/f3.ts')], forged);
+    expect(alone).toContain("No hunk below touches this finding's location(s)");
+    // Header scanning resumes after the counted body: a second file's
+    // genuine headers still corroborate.
+    const two =
+      forged +
+      'diff --git a/src/f2.ts b/src/f2.ts\n' +
+      '--- a/src/f2.ts\n+++ b/src/f2.ts\n@@ -1 +1 @@\n-1\n+2\n';
+    expect(render([finding('f2', 'src/f2.ts')], two)).not.toContain(
+      'No hunk below touches',
+    );
+  });
+
+  it('a different set of hunks is a different launch — the key follows the content', () => {
+    const a = setup({});
+    const b = setup({ hunks: HUNKS.replace('hops', 'depth') });
+    try {
+      handler({
+        plan: a.plan,
+        role: 'fix-audit',
+        findings: a.findings,
+        hunks: a.hunks,
+      });
+      handler({
+        plan: a.plan,
+        role: 'fix-audit',
+        findings: b.findings,
+        hunks: b.hunks,
+      });
+      expect([...readRecordedPrompts(a.plan).keys()]).toHaveLength(2);
+    } finally {
+      rmSync(a.dir, { recursive: true, force: true });
+      rmSync(b.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('carries the fix witness and the fixer note when the artifact has them, and the extra locations count', () => {
+    const rendered = (renderFixAuditInput as (a: unknown, h: string) => string)(
+      [
+        {
+          id: 'c1',
+          severity: 'Critical',
+          summary: 'dedup keyed by callId only',
+          failureScenario: 'two runtimes on one entry answer the wrong agent',
+          locations: [
+            { file: 'src/registry.ts', line: 10 },
+            { file: 'src/registry.ts', line: 30 },
+            { file: 'src/route.ts' },
+          ],
+          fixWitness: 'registry.test.ts › two runtimes, one callId',
+          outcome: 'fixed',
+          outcomeNote: 'keyed by (callId, runtimeId)',
+        },
+      ],
+      // Hunks that touch this finding's OWN file: the claim-versus-edit
+      // reconciliation below refuses an input where no `fixed` finding is
+      // corroborated by any hunk, and this case is about the rendering.
+      'diff --git a/src/registry.ts b/src/registry.ts\n' +
+        '--- a/src/registry.ts\n+++ b/src/registry.ts\n@@ -8,3 +8,3 @@\n' +
+        '-  byCallId.set(callId, runtime);\n' +
+        '+  byCallId.set(`${callId}:${runtimeId}`, runtime);\n',
+    );
+    expect(rendered).toContain(
+      '### c1 — [Critical] src/registry.ts:10 (+2 more location(s))',
+    );
+    expect(rendered).toContain(
+      'Fix witness: registry.test.ts › two runtimes, one callId',
+    );
+    expect(rendered).toContain("Fixer's note: keyed by (callId, runtimeId)");
+  });
+
+  it('builds — annotated, not refused — when no fixed finding appears in the hunks at all', () => {
+    // A fix can legitimately land in files no finding names: the finding
+    // is "no test pins this guard" at `src/f1.ts` and the fixer created
+    // `src/f1.test.ts`; or the finding names a declaration and the fix
+    // sets it at the caller. With ONE `fixed` finding the all-unmatched
+    // list is automatic in exactly those shapes, and the legitimate and
+    // never-landed states are indistinguishable to the command — so it
+    // annotates every entry and the auditor reports each as unattested.
+    const elsewhere =
+      'diff --git a/src/elsewhere.ts b/src/elsewhere.ts\n' +
+      '--- a/src/elsewhere.ts\n+++ b/src/elsewhere.ts\n@@ -1 +1 @@\n' +
+      '-const a = 1;\n+const a = 2;\n';
+    const readList = () => {
+      const printed = (writeStdoutLine as unknown as Mock).mock.calls.at(
+        -1,
+      )![0] as string;
+      const m = /^read_file\(file_path="([^"]*\.findings\.md)"\)$/m.exec(
+        printed,
+      );
+      expect(m).not.toBeNull();
+      return readFileSync(m![1], 'utf8');
+    };
+    // Two `fixed` findings, neither corroborated: both annotated.
+    const both = setup({ hunks: elsewhere });
+    try {
+      handler({
+        plan: both.plan,
+        role: 'fix-audit',
+        findings: both.findings,
+        hunks: both.hunks,
+      });
+      const list = readList();
+      expect(
+        list.match(/No hunk below touches this finding's location\(s\)/g),
+      ).toHaveLength(2);
+    } finally {
+      rmSync(both.dir, { recursive: true, force: true });
+    }
+    // The single-`fixed`-finding variant: one finding, one hunk in its
+    // new test file. With the refusal in place this build threw.
+    const one = setup({
+      outcomes: { f1: 'fixed', f2: 'skipped', f3: 'skipped' },
+      hunks:
+        'diff --git a/src/f1.test.ts b/src/f1.test.ts\n' +
+        'new file mode 100644\n' +
+        '--- /dev/null\n+++ b/src/f1.test.ts\n@@ -0,0 +1 @@\n' +
+        '+it("reddens without the guard", () => {});\n',
+    });
+    try {
+      handler({
+        plan: one.plan,
+        role: 'fix-audit',
+        findings: one.findings,
+        hunks: one.hunks,
+      });
+      const list = readList();
+      expect(list).toContain('### f1 —');
+      expect(list).toContain(
+        "No hunk below touches this finding's location(s)",
+      );
+    } finally {
+      rmSync(one.dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    [
+      'an artifact whose outcomes were never recorded',
+      { outcomes: { f1: 'fixed', f2: null } as const },
+      /carry no outcome[\s\S]*f2[\s\S]*review findings --outcomes/,
+    ],
+    [
+      // Zero `fixed` AND an empty tree: the two agree, nothing was applied.
+      // The hunks are part of the state this message asserts, so the case
+      // that pins it has to hold them empty — the divergent state is the
+      // row below.
+      'an artifact with no fixed finding beside an empty hunks file',
+      {
+        outcomes: { f1: 'skipped', f2: 'no_change_needed' } as const,
+        hunks: '\n',
+      },
+      /no finding has outcome `fixed`[\s\S]*Skip the audit/,
+    ],
+    [
+      // The mirror of the empty-hunks lie: the ledger owns no edit, the
+      // tree holds some. Asserting "nothing was applied" over it skips the
+      // audit of exactly the class this step exists to catch — a fixer that
+      // edited while recording `skipped`, or a write between the snapshot
+      // and the `--since`.
+      'an artifact with no fixed finding beside hunks that landed',
+      { outcomes: { f1: 'skipped', f2: 'no_change_needed' } as const },
+      /records no `fixed` outcome, but --hunks carries edits \(1 path\(s\): src\/f1\.ts\)[\s\S]*ledger\/tree mismatch[\s\S]*Correct the ledger/,
+    ],
+    [
+      'an empty hunks file beside a ledger that says something was fixed',
+      { hunks: '\n' },
+      /--hunks is empty, but the ledger marks 2 finding\(s\) fixed \(f1, f3\)[\s\S]*a claim, not an edit[\s\S]*the pre-edit state is gone and the audit cannot[\s\S]*the ledger, not the audit/,
+    ],
+    [
+      'a findings file that is not the artifact',
+      { rawFindings: '- **[Critical]** x.ts:1 — a prose list' },
+      /must be the findings artifact/,
+    ],
+  ])('refuses %s', (_name, opts, message) => {
+    const { plan, findings, hunks, dir } = setup(opts);
+    try {
+      expect(() =>
+        handler({ plan, role: 'fix-audit', findings, hunks }),
+      ).toThrow(message);
+      expect(readRecordedPrompts(plan).size).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts the bare findings array as well as the wrapper', () => {
+    const { plan, findings, hunks, dir } = setup({
+      rawFindings: JSON.stringify(artifact({ f1: 'fixed' })),
+    });
+    try {
+      expect(() =>
+        handler({ plan, role: 'fix-audit', findings, hunks }),
+      ).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    [
+      '--role fix-audit without --hunks',
+      { role: 'fix-audit', findings: '/f' },
+      /--role fix-audit needs --hunks <file>/,
+    ],
+    [
+      '--hunks on a role that does not take it',
+      { role: 'verify', findings: '/f', hunks: '/h' },
+      /--hunks hands the applied hunks to a --role fix-audit block; role "verify"/,
+    ],
+    [
+      '--hunks with no role',
+      { hunks: '/h' },
+      /--hunks hands the applied hunks to a --role fix-audit block; it needs that role/,
+    ],
+    [
+      '--hunks with --roster',
+      { roster: true, hunks: '/h' },
+      /--roster builds every prompt[\s\S]*--hunks/,
+    ],
+    [
+      '--hunks with --whole-diff',
+      { 'whole-diff': true, hunks: '/h' },
+      /--whole-diff builds the diff-reading block alone[\s\S]*--hunks/,
+    ],
+    [
+      '--chunk on the fix auditor',
+      { role: 'fix-audit', findings: '/f', hunks: '/h', chunk: 13 },
+      /does not take --chunk/,
+    ],
+    [
+      '--round on the fix auditor',
+      { role: 'fix-audit', findings: '/f', hunks: '/h', round: 2 },
+      /runs once and does not take/,
+    ],
+  ])(
+    'rules on the flag combination at the boundary: %s',
+    (_name, args, message) => {
+      const dir = mkdtempSync(join(tmpdir(), 'ap-fixaudit-guard-'));
+      try {
+        const plan = join(dir, 'plan.json');
+        writeFileSync(plan, JSON.stringify(PLAN));
+        expect(() => handler({ plan, ...args })).toThrow(message);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

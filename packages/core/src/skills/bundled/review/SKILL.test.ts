@@ -970,6 +970,232 @@ describe('bundled review skill', () => {
     expect(body).toContain('Never assemble an Aone link yourself');
   });
 
+  it('pins the Step 6B fix audit as a scoped disclosure, not a re-review', () => {
+    const body = coreBody();
+    const step = body.slice(
+      body.indexOf('### Step 6B: Apply the findings (`--fix`)'),
+      body.indexOf('## Step 7: Submit PR review'),
+    );
+    expect(step.length).toBeGreaterThan(0);
+    // The ordering the audit's correctness turns on: the snapshot is taken
+    // BEFORE the first edit, the outcomes are recorded BEFORE the audit (it
+    // reads them off the rebuilt artifact), and the audit runs BEFORE the
+    // report_findings re-issue (its notes ride that call).
+    const at = (needle: string) => {
+      const i = step.indexOf(needle);
+      expect(i, `Step 6B lost: ${needle}`).toBeGreaterThanOrEqual(0);
+      return i;
+    };
+    expect(at('review fix-delta --snapshot')).toBeLessThan(
+      at('Apply each finding to the working tree'),
+    );
+    expect(
+      at('--outcomes .qwen/tmp/qwen-review-{target}-outcomes.json'),
+    ).toBeLessThan(at('review fix-delta \\\n  --since'));
+    // The hunks producer runs before the consumer that reads them: swapped,
+    // the audit dies on a missing hunks file on a target's first fix run —
+    // and on a second review of the same target it reads the PREVIOUS run's
+    // leftover hunks and appends those stale assumptions to this run's
+    // ledger as `outcomeNote`s.
+    expect(at('review fix-delta \\\n  --since')).toBeLessThan(
+      at('--role fix-audit'),
+    );
+    expect(at('--role fix-audit')).toBeLessThan(
+      at('**Then re-issue the `report_findings` call, outcomes on it.**'),
+    );
+    // The audit's inputs are the rebuilt artifact and the applied hunks —
+    // never the reviewed diff, never findings-in.json. Producer and consumer
+    // sides derive from the SAME strings: a rename of any producer `--out`
+    // path must touch the same constant the consumer needle reads, or writer
+    // and reader silently disagree — an audit that dies `Fix audit: not
+    // run`, or worse, one that diffs against a stale leftover an interrupted
+    // earlier run left at the old consumer path.
+    const snapshotPath = '.qwen/tmp/qwen-review-{target}-fix-snapshot.json';
+    const hunksPath = '.qwen/tmp/qwen-review-{target}-fix-hunks.diff';
+    const artifactPath = '.qwen/tmp/qwen-review-{target}-findings.json';
+    expect(step).toContain(`--out ${snapshotPath}`);
+    expect(step).toContain(`--since ${snapshotPath}`);
+    expect(step).toContain(`--out ${hunksPath}`);
+    expect(step).toContain(`--hunks ${hunksPath}`);
+    expect(step).toContain(`--out ${artifactPath}`);
+    expect(step).toContain(`--findings ${artifactPath}`);
+    // The producer and the consumer are failure-coupled: `fix-delta
+    // --since` writes its hunks only as its final act, so a failed
+    // producer leaves whatever an interrupted earlier run wrote at the
+    // same deterministic path — without the `&&` (and the prose branch
+    // for its failure) the auditor runs over that stale file and appends
+    // the previous run's assumptions to this run's ledger.
+    expect(step).toContain('--out ' + hunksPath + ' && \\');
+    // The baseline record is anchored OUTSIDE the tree's write surface: the
+    // snapshot prints a fingerprint of the record, the orchestrator keeps
+    // it, and `--since` refuses the file without it or when it no longer
+    // matches — the one channel a planted process cannot rewrite is the
+    // orchestrator's own argument construction. Both halves have to be in
+    // the step: the instruction to keep the hex, and the flag that hands
+    // it back on the same `--since` invocation the ordering pins read.
+    expect(step).toContain(
+      'fix-delta: snapshot <tree> of <root> — fingerprint <hex>; pass it back as --fingerprint on --since',
+    );
+    expect(step).toContain('that fingerprint is yours to keep');
+    expect(step).toContain(
+      '--since ' +
+        snapshotPath +
+        ' \\\n  --fingerprint <the fingerprint the snapshot printed> \\\n  --out ' +
+        hunksPath,
+    );
+    expect(step).toContain(
+      'never worked around by re-taking the snapshot, which by then would record the edits',
+    );
+    // …and the hex comes from the printed line only: an orchestrator that
+    // re-derived it from the file at `--since` time would hand the check
+    // the forgery's own hash.
+    expect(step).toContain('**Never recompute it from the file**');
+    // Review worktrees are classified by the orchestrator's own naming,
+    // never by anything in the tree — and a `--fix` run names none.
+    expect(step).toContain(
+      'only a worktree this run created and names with `--review-worktree <path>`',
+    );
+    expect(step).toContain('a `--fix` run creates none, so pass nothing');
+    expect(step).toContain(
+      'the only valid source is the line the snapshot command printed',
+    );
+    expect(step).toContain(
+      'do not launch the auditor over the hunks file an interrupted earlier run can have left',
+    );
+    // `--plan` is `demandOption: true` on the builder: dropping the flag
+    // kills every later fix audit in a yargs refusal, disclosed as a
+    // routine `Fix audit: not run — <error>`.
+    expect(step).toContain(
+      'review agent-prompt --plan <the plan report from Step 1> --role fix-audit',
+    );
+    expect(step).toContain('never the reviewed diff');
+    // The four constraints that keep it from being the forbidden re-review,
+    // and the disclosure-not-finding rule that closes the back door.
+    expect(step).toContain('one agent, and not a re-review');
+    expect(step).toContain('It produces no verdict and files no finding.');
+    expect(step).toContain(
+      '**An unpinned assumption is a disclosure, not a finding.**',
+    );
+    expect(step).toContain('It never enters `findings-in.json`');
+    expect(step).toContain('never counts toward `fresh` or `induced`');
+    expect(step).toContain('Fix audit: not run — <why>');
+    // The rule it sits beside survives, and says why the audit is not it.
+    expect(step).toContain('**Do not re-run Steps 1–6**');
+    expect(step).toContain('precisely so that it is not one');
+    // Scope: fixed outcomes only. The interactive path gets the same
+    // outcomes discipline but NOT the audit — it runs after Step 9 cleanup
+    // swept the plan report `agent-prompt --plan` requires, and the
+    // paragraph must say so (with the disclosure line) rather than promise
+    // an audit that dies on the missing plan.
+    expect(step).toContain('only when the ledger holds no `fixed` outcome');
+    // …AND an empty hunks file. Zero `fixed` beside hunks that landed is
+    // the mirror of the empty-hunks lie — edits on disk that no outcome
+    // owns — and the command refuses it rather than letting the skip
+    // clause certify "nothing was applied" over them.
+    expect(step).toContain(
+      '**and `fix-delta --since` wrote an empty hunks file**',
+    );
+    expect(step).toContain('is not that state and is not skippable');
+    expect(step).toContain(
+      'Fix audit: not run — plan report swept by Step 9 cleanup',
+    );
+    expect(step).not.toContain('it gets the same audit');
+    // …and that reason is scoped to the target whose plan the sweep
+    // actually reaches. `cleanup` never globs the `file-review-…` family —
+    // this document's own Step 1/Step 9 contract, and what keeps a
+    // concurrent target's cleanup from killing a live file review's plan —
+    // so a blanket "nothing persists the plan" was a false statement of
+    // system state that dropped the audit on a live fix path where every
+    // input survives.
+    expect(step).toContain('**On a `local` target the plan is gone**');
+    expect(step).toContain(
+      '**On a FILE target no sweep ever reaches the plan**',
+    );
+    expect(step).toContain(
+      '**run the audit on this path exactly as Step 6B does**',
+    );
+    expect(step).toContain(
+      'Fix audit: not run — file-review plan removed at Step 9',
+    );
+    expect(step).not.toContain('nothing persists the plan');
+    // The note-propagation mechanism: the ledger re-run that carries an
+    // unpinned assumption into the artifact as `outcomeNote`, and the
+    // re-issue clause that carries it to the client. Without both halves
+    // the assumption reaches only the terminal summary, and the `fixed`
+    // findings close with the disclosure silently gone.
+    expect(step).toContain(
+      'run the `review findings --outcomes` command above again',
+    );
+    expect(step).toContain('for every `fixed` the fix audit annotated');
+    // The subagent type mandate reaches this launch too.
+    expect(step).toContain('`subagent_type: "review-agent"`');
+    // The refusal rule's carve-outs: the TWO ledger/tree-mismatch
+    // refusals are diagnoses to follow, not audit failures to disclose and
+    // move past. Folding either of them back into the blanket rule
+    // re-issues `report_findings` with outcomes the tree contradicts —
+    // the artifact lies and the correction the refusal directs never
+    // runs. The all-unmatched case is NOT one: a fix can legitimately
+    // land in files no finding names (a new test file, a caller), so the
+    // wholesale refusal fired on correct ledger states and instructed
+    // the orchestrator to falsify them — it is annotated and built, and
+    // the step must say so.
+    expect(step).toContain(
+      'The refusals that are NOT in this class are the two ledger/tree-mismatch refusals',
+    );
+    expect(step).toContain(
+      'the empty-hunks refusal (`--hunks is empty, but the ledger marks … fixed`)',
+    );
+    expect(step).toContain(
+      'the no-`fixed`-beside-landed-hunks refusal (`the ledger records no `fixed` outcome, but --hunks carries edits`)',
+    );
+    expect(step).toContain('Both take the same two-way ruling.');
+    expect(step).toContain(
+      'A `fixed` finding no hunk corroborates is NOT a mismatch',
+    );
+    expect(step).not.toContain('The one refusal that is NOT in this class');
+    expect(step).not.toContain('wholesale-mismatch refusal');
+    // The reach claim: the audit covers the `local`/`file` `--fix` path
+    // where `fix.effective` is true and Step 6B runs. The #9793 incident
+    // the class is measured on happened on a PR target with a fixer
+    // reading posted comments — #10153's half — so the step names the
+    // boundary rather than implying the audit would have reached it.
+    expect(step).toContain(
+      '**The reach is the `local` and `file` `--fix` path, where `fix.effective` is true and this step runs.**',
+    );
+    // The stderr relay: `fix-delta` prints its steering and blind-spot
+    // qualifications on stderr and exits 0, and the terminal summary's
+    // closed lists carried none of them — the orchestrator reported an
+    // unqualified all-clear over a possibly-partial hunks file, the exact
+    // "certifying past it" DESIGN.md says the lines exist to prevent.
+    expect(step).toContain(
+      'repeat every qualification `fix-delta` printed on stderr on the way',
+    );
+    expect(step).toContain('`committed, stashed, or newly ignored inside`');
+    expect(step).toContain(
+      'never into `findings-in.json`, the census, or the verdict',
+    );
+    expect(step).toContain(
+      'the pre-edit state is gone — there is no re-taking it at refusal time',
+    );
+    expect(step).toContain(
+      'say `Fix audit: not run — snapshot taken after the edits` under the **Fix audit** heading and leave the outcomes untouched',
+    );
+    // …and the impossible remedy the round-8 carve-out prescribed is gone:
+    // at refusal time the edits are already in the tree, so a redo cannot
+    // precede them.
+    expect(step).not.toContain(
+      're-take it before the first edit and re-run the audit',
+    );
+    expect(step).toContain(
+      'correct the ledger, re-run `review findings --outcomes`, and re-issue `report_findings` with the corrected outcomes',
+    );
+    // …and the blanket rule it carves out of still stands for every other
+    // refusal.
+    expect(step).toContain(
+      'disclosed and moved past, never a reason to touch the outcomes or the artifact',
+    );
+  });
+
   it('pins the fix-witness mandate in all three of its halves', () => {
     // The reviewer-side half of #9578. Three clauses have to survive together or
     // the rule goes inert in a way the suite would not notice:
