@@ -6320,7 +6320,15 @@ jobs:
                             ' 2> /dev/null || echo '')"
                           fi
                         fi
-                        if [[ "${REVIEW_LIVE_R}" == 'true' ]]; then
+                        # The deferral promises that the NEXT scan's round
+                        # performs the refresh, so it is honest only while a
+                        # next round exists: at the cap (MARK_ROUND ==
+                        # MAX_ROUNDS) the scan's round gate parks the PR
+                        # before any report step could run, so the hold
+                        # yields to the refresh there and the human inherits
+                        # a PR current with main — the pre-#10110 shape
+                        # (R32-1).
+                        if [[ "${REVIEW_LIVE_R}" == 'true' && "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
                           STALE_BASE_DEFERRED=true
                         elif gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
                           STALE_BASE_RETRY=true

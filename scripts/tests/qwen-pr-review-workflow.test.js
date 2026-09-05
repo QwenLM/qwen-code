@@ -6680,6 +6680,92 @@ describe('review supersede salvage (#10110)', () => {
       "steps.review.outputs.docs_only_medium != 'true'",
     );
     expect(note.run).toContain('<!-- qwen-review-salvaged');
+    // R32-2: the note claims the historical anchor only after reading back
+    // the posted review's commit_id — a restart that completed at the NEW
+    // head must not be announced as a post against the old one.
+    const readBack = note.run.indexOf('.commit_id');
+    const gate = note.run.indexOf('"$posted_sha" != "$EXPECTED_HEAD_SHA"');
+    const post = note.run.indexOf('gh pr comment');
+    expect(readBack).toBeGreaterThan(-1);
+    expect(gate).toBeGreaterThan(readBack);
+    expect(post).toBeGreaterThan(gate);
+  });
+
+  it('posts the historical-head note only when the review landed on the reviewed head (replayed note step)', () => {
+    const note = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report salvaged historical-head review',
+    );
+    const replay = (postedShas) => {
+      const dir = mkdtempSync(join(tmpdir(), 'review-note-'));
+      try {
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        const ghLog = join(dir, 'gh.log');
+        writeFileSync(
+          join(bin, 'gh'),
+          [
+            '#!/bin/bash',
+            `echo "$*" >> "${ghLog}"`,
+            'case "$*" in',
+            '  "api user --jq .login") echo bot ;;',
+            // The --jq projection is gh-side; the stub answers with the
+            // projected commit_id lines, chronological like the API.
+            '  *"/pulls/1/reviews"*) printf "%s\\n" "$POSTED_SHAS" ;;',
+            '  "pr comment"*) exit 0 ;;',
+            '  *) exit 1 ;;',
+            'esac',
+          ].join('\n') + '\n',
+        );
+        chmodSync(join(bin, 'gh'), 0o755);
+        const r = spawnSync('bash', ['-c', note.run], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            GITHUB_REPOSITORY: 'o/r',
+            PR_NUMBER: '1',
+            EXPECTED_HEAD_SHA: 'head-a',
+            MOVED_TO: 'head-b',
+            RUN_URL: 'https://example.test/run',
+            POSTED_SHAS: postedShas.join('\n'),
+          },
+        });
+        return {
+          status: r.status,
+          stdout: r.stdout,
+          posted: readFileSync(ghLog, 'utf8').includes('pr comment'),
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // The latest bot review is anchored at the reviewed head: note posted.
+    const landed = replay(['head-old', 'head-a']);
+    expect(landed.status).toBe(0);
+    expect(landed.posted).toBe(true);
+    // The latest bot review sits on the NEW head (a restart completed
+    // there): no historical-head claim, a warning, still exit 0.
+    const restarted = replay(['head-a', 'head-b']);
+    expect(restarted.status).toBe(0);
+    expect(restarted.posted).toBe(false);
+    expect(restarted.stdout).toContain('::warning::salvage note skipped');
+  });
+
+  it('exports the salvage-post contract to the agent only where the watcher arms (shape)', () => {
+    // R32-2: the skill's anchorsAtRisk=true rule restarts unless the
+    // environment carries the CI salvage contract; the export sits inside
+    // the AUTO_REVIEW-gated arming block, so an explicit run (no watcher,
+    // any marker forged) never carries it. Cross-pinned with
+    // packages/core/src/skills/bundled/review/SKILL.test.ts, which pins the
+    // rule's exception by the same name.
+    const armAt = run.indexOf('if [ "${AUTO_REVIEW:-false}" = "true" ]; then');
+    const exportAt = run.indexOf('export QWEN_REVIEW_SALVAGE_POST=1');
+    const launchAt = run.indexOf('supersede_watcher &');
+    expect(armAt).toBeGreaterThan(-1);
+    expect(exportAt).toBeGreaterThan(armAt);
+    expect(launchAt).toBeGreaterThan(exportAt);
+    // Exactly one export site (the guard's comment names the variable too).
+    expect(run.split('export QWEN_REVIEW_SALVAGE_POST').length).toBe(2);
   });
 
   // The marker -> outputs block sits OUTSIDE the retry-loop extraction

@@ -1195,8 +1195,11 @@ jobs:
               # must equal that pin so a stale marker from another run never
               # matches. The review then posts against the historical head —
               # the CLI's own presubmit head-drift gate (classifyHeadDrift)
-              # annotates the body and caps the verdict — instead of
-              # discarding hours of finished work. This escape is a
+              # annotates the body, caps the verdict and computes
+              # anchorsAtRisk, and the skill is told through
+              # QWEN_REVIEW_SALVAGE_POST (exported beside the watcher) to
+              # submit at the reviewed SHA instead of restarting — instead
+              # of discarding hours of finished work. This escape is a
               # correctness gate, not a security boundary: the agent can read
               # the marker path from its own environment, but forging it only
               # lets it post to an old head — nothing it could not already
@@ -2087,6 +2090,18 @@ jobs:
             # SALVAGE_DIR signal — only the watcher can record its kill
             # there. mktemp failure degrades to the timeline witness alone.
             SUPERSEDE_KILL_DIR="$("${QWEN_CI_REAL_MKTEMP:-mktemp}" -d "${RUNNER_TEMP:-/tmp}/qwen-review-supersede-kill.XXXXXX" 2>/dev/null || true)"
+            # Hand the reviewed agent the contract the watcher may arm: the
+            # skill's presubmit drift rule (references/posting.md,
+            # anchorsAtRisk=true) otherwise commands abandon-and-restart in
+            # exactly the drifted state a salvage creates — a restart that
+            # re-reviews the superseded head while the queued replacement
+            # waits behind it, or one that completes at the NEW head under
+            # an old-head note. With this signal AND a marker pinning the
+            # reviewed head, the skill submits at the reviewed SHA with the
+            # drift named instead. AUTO_REVIEW-gated like the arming: an
+            # explicit run arms no watcher, so the signal is absent there
+            # and the restart rule stands (R32-2).
+            export QWEN_REVIEW_SALVAGE_POST=1
             supersede_watcher &
             WATCHER_PID=$!
           fi
@@ -2422,6 +2437,20 @@ jobs:
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
+          # Claim the historical anchor only when the review really landed
+          # there: a restart that completed at the NEW head would leave this
+          # note naming a commit the posted review is not anchored to
+          # (R32-2). Read back the latest review by this credential — the
+          # list is chronological, so the last one is this run's post.
+          bot_login="$(gh api user --jq '.login' 2>/dev/null || true)"
+          posted_sha=""
+          if [ -n "$bot_login" ]; then
+            posted_sha="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --jq ".[] | select((.user.login // \"\") == \"${bot_login}\") | .commit_id" 2>/dev/null | tail -n1 || true)"
+          fi
+          if [ -z "$bot_login" ] || [ "$posted_sha" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "::warning::salvage note skipped: the latest review by ${bot_login:-this credential} is anchored at ${posted_sha:-unknown}, not the reviewed head ${EXPECTED_HEAD_SHA}."
+            exit 0
+          fi
           BODY="$(printf '%s\n' \
             "<!-- qwen-review-salvaged ${EXPECTED_HEAD_SHA} -->" \
             '' \

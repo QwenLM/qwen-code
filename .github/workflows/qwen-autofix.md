@@ -4247,7 +4247,11 @@ sentinel MARK_TS the retry branch uses keeps the feedback live, the
 next scan re-runs the round (itself held while the review is still in
 flight), and that round's report step performs the refresh once the
 review has landed. One extra round of latency, bounded by MAX_ROUNDS,
-against hours of discarded review work.
+against hours of discarded review work. At the cap itself (MARK_ROUND ==
+MAX_ROUNDS) the hold yields to the refresh: no later round exists to
+inherit it, and a deferral there would promise a retry the scan's round
+gate forbids — so the last permitted round refreshes the base exactly as
+it did before #10110 (R32-1).
 
 Fail-open on probe errors, deliberately: the probe is an optimization,
 and failing closed would wedge stale-base recovery — the path that

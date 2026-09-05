@@ -24970,8 +24970,104 @@ describe('report-step stale-base hold while review-pr is in flight (#10110)', ()
     );
     // The update runs only on a falsy probe — fail-open: a probe error must
     // not wedge stale-base recovery, so errors read as "no review live".
+    // R32-1: the deferral is only honest while a next round exists — at
+    // the cap the scan's round gate parks the PR before any report step,
+    // so the hold yields to the refresh there.
     expect(reviewAddressReportStep).toContain(
-      'if [[ "${REVIEW_LIVE_R}" == \'true\' ]]; then\n                          STALE_BASE_DEFERRED=true\n                        elif gh api -X PUT',
+      'if [[ "${REVIEW_LIVE_R}" == \'true\' && "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then\n                          STALE_BASE_DEFERRED=true\n                        elif gh api -X PUT',
+    );
+    expect(designDoc).toContain('At the cap itself (MARK_ROUND ==');
+  });
+
+  it('refreshes instead of deferring on the capped round (replayed decision)', () => {
+    // The hold's branch choice, executed: the block from the rollup probe
+    // through the update-branch PUT runs verbatim with a stub gh (live
+    // rollup, PUT logged) and the real jq. Below the cap a live review
+    // defers; AT the cap (MARK_ROUND == MAX_ROUNDS) the same live review
+    // must yield to the refresh, because the next scan the deferred
+    // headline promises is the one the round gate skips (R32-1).
+    const start = reviewAddressReportStep.indexOf(
+      'ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup',
+    );
+    const putAt = reviewAddressReportStep.indexOf(
+      'elif gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch"',
+      start,
+    );
+    const end =
+      reviewAddressReportStep.indexOf('\n                        fi', putAt) +
+      '\n                        fi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(putAt).toBeGreaterThan(start);
+    expect(end).toBeGreaterThan(putAt);
+    const block = reviewAddressReportStep.slice(start, end);
+    const decide = ({ markRound, maxRounds, live }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-hold-'));
+      try {
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        const ghLog = join(dir, 'gh.log');
+        writeFileSync(
+          join(bin, 'gh'),
+          [
+            '#!/bin/bash',
+            `echo "$*" >> "${ghLog}"`,
+            'case "$*" in',
+            '  *"--json statusCheckRollup"*) printf "%s\\n" "$ROLLUP_JSON" ;;',
+            '  *"update-branch"*) exit 0 ;;',
+            '  *) exit 1 ;;',
+            'esac',
+          ].join('\n') + '\n',
+        );
+        chmodSync(join(bin, 'gh'), 0o755);
+        const rollup = live
+          ? [
+              {
+                name: 'review-pr',
+                workflowName: '🧐 Qwen Pull Request Review',
+                status: 'IN_PROGRESS',
+              },
+            ]
+          : [];
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            [
+              'set -euo pipefail',
+              'PR=1; REPO=o/r; REPORT_HEAD=sha-head',
+              `MARK_ROUND=${markRound}; MAX_ROUNDS=${maxRounds}`,
+              'STALE_BASE_DEFERRED=false; STALE_BASE_RETRY=false',
+              block,
+              'printf "deferred=%s retry=%s\\n" "$STALE_BASE_DEFERRED" "$STALE_BASE_RETRY"',
+            ].join('\n'),
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              ROLLUP_JSON: JSON.stringify(rollup),
+            },
+          },
+        ).trim();
+        const put = readFileSync(ghLog, 'utf8').includes('update-branch');
+        return `${out} put=${put}`;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    // Below the cap, a live review defers and the PUT is withheld.
+    expect(decide({ markRound: 5, maxRounds: 10, live: true })).toBe(
+      'deferred=true retry=false put=false',
+    );
+    // At the cap the same live review yields: the PUT is issued and the
+    // deferred headline (with its "next scan" promise) is never taken.
+    expect(decide({ markRound: 10, maxRounds: 10, live: true })).toBe(
+      'deferred=false retry=true put=true',
+    );
+    // No live review: the refresh runs whatever the round.
+    expect(decide({ markRound: 10, maxRounds: 10, live: false })).toBe(
+      'deferred=false retry=true put=true',
     );
   });
 
