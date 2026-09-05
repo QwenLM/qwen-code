@@ -1433,8 +1433,8 @@ describe('release workflow', () => {
       ),
     ).toEqual({
       prepare: 30,
-      quality_static: 90,
-      quality_build: 90,
+      quality_static: 30,
+      quality_build: 45,
       quality_typecheck: 30,
       // The one bound an operator can retune without a PR; its default is
       // pinned by its own test above.
