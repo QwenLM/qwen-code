@@ -2374,21 +2374,29 @@ function unquoteGitPath(token: string): string | null {
     '\\': 92,
   };
   const bytes: number[] = [];
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
+  // By CODE POINT, never by UTF-16 code unit: git keeps non-ASCII bytes
+  // raw inside a quoted token, and an astral character iterated by code
+  // unit reaches `Buffer.from` as two lone surrogate halves — each
+  // encoded U+FFFD — so a name that is quoted (a TAB, a quote) AND holds
+  // an emoji decoded to a path that matched nothing. `Array.from` splits
+  // on code points; every escape git emits is single ASCII characters,
+  // so the escape branches index exactly as before.
+  const chars = Array.from(body);
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
     if (ch === '"') return null;
     if (ch !== '\\') {
       bytes.push(...Buffer.from(ch, 'utf8'));
       continue;
     }
-    const next = body[i + 1];
+    const next = chars[i + 1];
     if (next === undefined) return null;
     if (next in simple) {
       bytes.push(simple[next]);
       i += 1;
       continue;
     }
-    const octal = body.slice(i + 1, i + 4);
+    const octal = chars.slice(i + 1, i + 4).join('');
     if (!/^[0-7]{3}$/.test(octal)) return null;
     bytes.push(parseInt(octal, 8));
     i += 3;
@@ -2555,7 +2563,7 @@ function findingTouchesHunks(
  * `--fix` applied — rendered by the CLI from the outcome-bearing artifact and
  * the `fix-delta` diff, never assembled by the orchestrator.
  *
- * Five refusals, each a state where the audit could only return the
+ * Four refusals, each a state where the audit could only return the
  * all-clear and the all-clear would be a lie: an artifact whose outcomes were
  * never recorded (the audit cannot tell a fixed finding from a skipped one),
  * an artifact with no `fixed` finding AND no hunks (nothing was applied — the
@@ -2563,18 +2571,20 @@ function findingTouchesHunks(
  * artifact with no `fixed` finding BESIDE hunks that landed (the ledger and
  * the tree disagree: edits are on disk that no outcome owns, and asserting
  * "nothing was applied" over them would skip the audit of exactly the
- * assumption-introducing class this step exists to catch), a hunks file with
- * nothing in it beside a ledger that says something was fixed (a fix that
- * left no hunk in the tree is a claim, not an edit — the snapshot was taken
- * after the edits, or the edits never landed), and hunks in which NO `fixed`
- * finding's locations appear at all (the same claim-versus-edit lie, one
- * step short of the degenerate case).
+ * assumption-introducing class this step exists to catch), and a hunks file
+ * with nothing in it beside a ledger that says something was fixed (a fix
+ * that left no hunk in the tree is a claim, not an edit — the snapshot was
+ * taken after the edits, or the edits never landed).
  *
- * Between the last two lies the per-finding case, which is annotated rather
- * than refused: a fix can legitimately land in a file other than the one the
- * finding names — the brief's own `none` return shape is for a hunk that
- * closes no listed finding — so a single unmatched claim marks its entry and
- * the audit proceeds, and only a wholesale mismatch refuses.
+ * The per-finding case is annotated, never refused — the wholesale case
+ * included: a fix can legitimately land in a file no finding names (the
+ * finding is a missing test and the fixer created the test file; the
+ * finding names a declaration and the fix sets it at the caller), so with
+ * one `fixed` finding an all-unmatched list is automatic in exactly the
+ * legitimate shapes, and the legitimate and never-landed states are
+ * indistinguishable to this command. Every unmatched entry carries the
+ * annotation, the audit proceeds, and the brief's `none` return shape is
+ * for a hunk that closes no listed finding.
  */
 export function renderFixAuditInput(artifact: unknown, hunks: string): string {
   const findings = validateFindings(artifact);
@@ -2644,22 +2654,15 @@ export function renderFixAuditInput(artifact: unknown, hunks: string): string {
   // Claim versus edit, per finding. `fixed` says an edit landed; the hunks
   // are the edits that landed. A `fixed` finding no hunk corroborates is
   // either an edit that never landed (the tool failed, a later edit reverted
-  // it, it went to the wrong file) or one taken before the snapshot — and
-  // neither the brief's per-hunk method nor either of its return shapes can
-  // express "a listed finding is closed by no hunk", so without this the
-  // claim rides through unexamined and is re-reported to the client as
-  // closed.
+  // it, it went to the wrong file), one taken before the snapshot, or one
+  // that legitimately landed in a file the finding does not name — and
+  // without the annotation the claim rides through unexamined and is
+  // re-reported to the client as closed.
   const unmatched = fixed.filter((f) => !findingTouchesHunks(f, hunkPaths));
-  if (unmatched.length === fixed.length) {
-    throw new Error(
-      `agent-prompt: --hunks carries no edit for any of the ${fixed.length} ` +
-        `finding(s) the ledger marks fixed (${ids(fixed)}): no hunk touches ` +
-        'any location they name. A fix that left no hunk where its finding ' +
-        'sits is a claim, not an edit — either the snapshot was taken after ' +
-        'the edits, or those outcomes are wrong and the ledger, not the ' +
-        'audit, is what to correct.',
-    );
-  }
+  // Annotated, never refused — even when every entry is unmatched: see the
+  // docstring. The annotation itself instructs the auditor to report the
+  // finding as unattested, which is exactly what an all-unmatched input
+  // needs said about each of its entries.
   const unmatchedIds = new Set(unmatched.map((f) => f.id));
   const entries = fixed.map((f) =>
     [

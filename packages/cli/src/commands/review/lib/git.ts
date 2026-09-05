@@ -35,6 +35,14 @@ export const GIT_TIMEOUT_MS = 120_000;
 function gitOpts() {
   return {
     timeout: GIT_TIMEOUT_MS,
+    // The house ceiling, taken at the shared point so EVERY wrapper has it:
+    // the ones below re-state it per caller, but `gitProbe` (the steering
+    // enumeration's `config --get-regexp`, the nested-repository probes)
+    // rode Node's 1 MiB default, and a `.git/config` whose
+    // `filter.*.clean|process` enumeration passes it overflows the
+    // channel — the probe catches, answers null, and the disclosure that
+    // exists to name the planted filter never prints.
+    maxBuffer: 512 * 1024 * 1024,
     // `sanitizedGitEnv`, not `process.env`: an exported `GIT_DIR` redirects
     // discovery for every command here at once — `releaseWorktree`'s
     // `worktree remove --force` included, which is a delete — and the

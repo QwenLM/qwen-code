@@ -1129,16 +1129,18 @@ describe('bundled review skill', () => {
     expect(step).toContain('for every `fixed` the fix audit annotated');
     // The subagent type mandate reaches this launch too.
     expect(step).toContain('`subagent_type: "review-agent"`');
-    // The refusal rule's carve-outs: the THREE ledger/tree-mismatch
+    // The refusal rule's carve-outs: the TWO ledger/tree-mismatch
     // refusals are diagnoses to follow, not audit failures to disclose and
-    // move past. Folding any of them back into the blanket rule re-issues
-    // `report_findings` with outcomes the tree contradicts — the artifact
-    // lies and the correction the refusal directs never runs. Each is
-    // pinned on its own: a singular carve-out named only the first, four
-    // lines below a paragraph that already instructed following the
-    // second, and never named the third at all.
+    // move past. Folding either of them back into the blanket rule
+    // re-issues `report_findings` with outcomes the tree contradicts —
+    // the artifact lies and the correction the refusal directs never
+    // runs. The all-unmatched case is NOT one: a fix can legitimately
+    // land in files no finding names (a new test file, a caller), so the
+    // wholesale refusal fired on correct ledger states and instructed
+    // the orchestrator to falsify them — it is annotated and built, and
+    // the step must say so.
     expect(step).toContain(
-      'The refusals that are NOT in this class are the three ledger/tree-mismatch refusals',
+      'The refusals that are NOT in this class are the two ledger/tree-mismatch refusals',
     );
     expect(step).toContain(
       'the empty-hunks refusal (`--hunks is empty, but the ledger marks … fixed`)',
@@ -1146,11 +1148,20 @@ describe('bundled review skill', () => {
     expect(step).toContain(
       'the no-`fixed`-beside-landed-hunks refusal (`the ledger records no `fixed` outcome, but --hunks carries edits`)',
     );
+    expect(step).toContain('Both take the same two-way ruling.');
     expect(step).toContain(
-      'the wholesale-mismatch refusal (`--hunks carries no edit for any of the … finding(s) the ledger marks fixed`)',
+      'A `fixed` finding no hunk corroborates is NOT a mismatch',
     );
-    expect(step).toContain('All three take the same two-way ruling.');
     expect(step).not.toContain('The one refusal that is NOT in this class');
+    expect(step).not.toContain('wholesale-mismatch refusal');
+    // The reach claim: the audit covers the `local`/`file` `--fix` path
+    // where `fix.effective` is true and Step 6B runs. The #9793 incident
+    // the class is measured on happened on a PR target with a fixer
+    // reading posted comments — #10153's half — so the step names the
+    // boundary rather than implying the audit would have reached it.
+    expect(step).toContain(
+      '**The reach is the `local` and `file` `--fix` path, where `fix.effective` is true and this step runs.**',
+    );
     // The stderr relay: `fix-delta` prints its steering and blind-spot
     // qualifications on stderr and exits 0, and the terminal summary's
     // closed lists carried none of them — the orchestrator reported an
@@ -1159,7 +1170,7 @@ describe('bundled review skill', () => {
     expect(step).toContain(
       'repeat every qualification `fix-delta` printed on stderr on the way',
     );
-    expect(step).toContain('`committed or stashed inside`');
+    expect(step).toContain('`committed, stashed, or newly ignored inside`');
     expect(step).toContain(
       'never into `findings-in.json`, the census, or the verdict',
     );

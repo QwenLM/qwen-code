@@ -48,7 +48,22 @@ vi.mock('node:child_process', async (importOriginal) => {
     });
     return actual.spawnSync(...call);
   }) as typeof actual.spawnSync;
-  return { ...actual, default: { ...actual, spawnSync }, spawnSync };
+  // `execFileSync` rides the same record: the probe spawns (`status`,
+  // `ls-files`) go through it, and a link cycle is only provably dead
+  // when each physical repository's probe ran exactly ONCE.
+  const execFileSync = ((...call: Parameters<typeof actual.execFileSync>) => {
+    spawnRecord.calls.push({
+      args: (call[1] as readonly string[] | undefined) ?? [],
+      env: (call[2] as { env?: Record<string, string> } | undefined)?.env,
+    });
+    return (actual.execFileSync as (...c: typeof call) => unknown)(...call);
+  }) as typeof actual.execFileSync;
+  return {
+    ...actual,
+    default: { ...actual, spawnSync, execFileSync },
+    spawnSync,
+    execFileSync,
+  };
 });
 // The DT_UNKNOWN witness needs a dirent stream every predicate refuses —
 // no filesystem constructible on the CI hosts reports unknown types (NFS
@@ -75,6 +90,10 @@ vi.mock('node:fs', async (importOriginal) => {
       isDirectory: () => false,
       isFile: () => false,
       isSymbolicLink: () => false,
+      isFIFO: () => false,
+      isSocket: () => false,
+      isBlockDevice: () => false,
+      isCharacterDevice: () => false,
     }));
   }) as typeof actual.readdirSync;
   return { ...actual, default: { ...actual, readdirSync }, readdirSync };
@@ -82,6 +101,7 @@ vi.mock('node:fs', async (importOriginal) => {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -1502,10 +1522,12 @@ describe('fix-delta', () => {
     ).toBe(false);
   });
 
-  it('names a nested repo whose only uncommitted content is self-ignored', () => {
+  it('names a nested repo whose ignored set moved between the moments', () => {
     // The inner probe runs `--ignored=matching`: a repository whose only
-    // uncommitted content matches its OWN ignore rules emits nothing to a
-    // plain status, and an edit inside would classify clean in both states.
+    // beyond-tracked content matches its OWN ignore rules is CLEAN — the
+    // `!` entries are not uncommitted edits — but they ride the digest,
+    // so content newly ignored between the moments moves it and the
+    // move is disclosed.
     const emb = join(repo, 'emb');
     mkdirSync(emb);
     gitAt(emb, 'init', '-q', '-b', 'main');
@@ -1522,7 +1544,9 @@ describe('fix-delta', () => {
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
     expect(
-      lines.some((l) => /\bemb\b/.test(l) && l.includes('cannot see')),
+      lines.some(
+        (l) => /\bemb\b/.test(l) && l.includes('HEAD, stash, or ignored set'),
+      ),
     ).toBe(true);
     expect(
       lines.some((l) => l.includes('the tree is unchanged since the snapshot')),
@@ -2205,6 +2229,245 @@ describe('fix-delta', () => {
     ).toBe(false);
   });
 
+  it('walks and probes one physical directory once through a link cycle', () => {
+    // `ig/l1 -> .` and `ig/l2 -> .` re-enter the ignored directory on
+    // every lap, so the synthetic relative names never repeat — the
+    // name-keyed dedupe bounded nothing, and ONE physical repository was
+    // probed tens of thousands of times (a synchronous git spawn each),
+    // its fabricated identities persisted into the baseline and joined
+    // into one stderr line. The visited set is keyed on filesystem
+    // identity: every lap after the first is the same skip.
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+    git('add', '-A');
+    git('commit', '-qm', 'ignore ig');
+    const inner = join(repo, 'ig', 'inner');
+    mkdirSync(inner, { recursive: true });
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'f.txt'), 'inside\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+    symlinkSync('.', join(repo, 'ig', 'l1'));
+    symlinkSync('.', join(repo, 'ig', 'l2'));
+
+    runSnapshot();
+    writeFileSync(join(inner, 'f.txt'), 'the fix — uncommitted inside\n');
+    runSince();
+
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    const lines = stderr();
+    // Named exactly once, and no fabricated lap-names ride the line.
+    const naming = lines.filter((l) => l.includes('ig/inner'));
+    expect(naming.length).toBeGreaterThan(0);
+    for (const line of naming) {
+      expect(line).not.toContain('ig/l1/');
+      expect(line).not.toContain('ig/l2/');
+    }
+    // And the walk ended at the repository: without the identity visited
+    // set the lap names never repeat, the walk burns the whole entry
+    // budget, and an exhaustion stamp for `ig` itself joins the lines.
+    const cannotSee = lines.filter((l) => l.includes('cannot see'));
+    expect(cannotSee).toHaveLength(1);
+    expect(cannotSee[0]).toContain('ig/inner');
+    // One physical repository, one inner status probe — across BOTH runs.
+    const innerStatuses = spawnRecord.calls.filter((c) => {
+      const at = c.args.indexOf('-C');
+      return (
+        c.args.includes('status') &&
+        at !== -1 &&
+        String(c.args[at + 1]).endsWith(join('ig', 'inner'))
+      );
+    });
+    expect(innerStatuses).toHaveLength(2);
+  }, 60_000);
+
+  it('does not stamp a repository dirty for its own ignored content', () => {
+    // `--ignored=matching` prints `! <path>` for content the repository's
+    // OWN ignore rules collapse — not an uncommitted edit. Counted as
+    // dirt, a repository holding only its build output was stamped dirty
+    // at both moments, so every no-op run printed a false pre-existing
+    // note over a repository git itself reports clean.
+    const inner = join(repo, 'inner');
+    mkdirSync(inner);
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, '.gitignore'), 'node_modules/\n');
+    writeFileSync(join(inner, 'f.txt'), 'v1\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+    mkdirSync(join(inner, 'node_modules'));
+    writeFileSync(join(inner, 'node_modules', 'pkg.js'), 'ignored\n');
+
+    runSnapshot();
+    runSince();
+
+    const lines = stderr();
+    expect(lines.some((l) => l.includes('pre-existing'))).toBe(false);
+    expect(lines.at(-1)).toContain('the tree is unchanged since the snapshot');
+  });
+
+  // POSIX-only: a 41-entry symlink chain needs symlinks and the kernel's
+  // MAXSYMLINKS semantics.
+  it.skipIf(process.platform === 'win32')(
+    'discloses a link chain past the hop limit instead of skipping it silently',
+    () => {
+      // statSync resolves a 40-hop chain and throws ELOOP at 41 — the
+      // kernel's limit. The discovery catch skipped every stat failure
+      // alike, so the chain left no record in either state.
+      writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+      git('add', '-A');
+      git('commit', '-qm', 'ignore ig');
+      const looprepo = join(repo, 'ig', 'looprepo');
+      mkdirSync(looprepo, { recursive: true });
+      gitAt(looprepo, 'init', '-q', '-b', 'main');
+      gitAt(looprepo, 'config', 'user.email', 't@t.t');
+      gitAt(looprepo, 'config', 'user.name', 't');
+      writeFileSync(join(looprepo, 'f.txt'), 'v1\n');
+      gitAt(looprepo, 'add', '-A');
+      gitAt(looprepo, 'commit', '-qm', 'init');
+      for (let i = 0; i < 40; i++) {
+        symlinkSync(`c${i + 1}`, join(repo, 'ig', `c${i}`));
+      }
+      symlinkSync('looprepo', join(repo, 'ig', 'c40'));
+      writeFileSync(join(looprepo, 'f.txt'), 'dirty\n');
+
+      runSnapshot();
+      runSince();
+
+      const lines = stderr();
+      expect(
+        lines.some((l) => l.includes('ig/c0') && l.includes('cannot see')),
+      ).toBe(true);
+    },
+  );
+
+  // POSIX-only: chmod 000 is a no-op for the CI's Windows semantics.
+  it.skipIf(process.platform === 'win32')(
+    'discloses a snapshot-time unresolved path that is gone at --since',
+    () => {
+      // The baseline recorded only CONFIRMED states; an unresolved path
+      // that vanished between the moments was a transition no list
+      // carried, and the bare all-clear printed over it.
+      writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+      git('add', '-A');
+      git('commit', '-qm', 'ignore ig');
+      const blocked = join(repo, 'ig', 'blocked');
+      mkdirSync(blocked, { recursive: true });
+      chmodSync(blocked, 0o000);
+
+      runSnapshot();
+      chmodSync(blocked, 0o755);
+      rmSync(blocked, { recursive: true, force: true });
+      runSince();
+
+      const lines = stderr();
+      expect(
+        lines.some(
+          (l) => l.includes('ig/blocked') && l.includes('could not resolve'),
+        ),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    },
+  );
+
+  // POSIX-only: mkfifo has no Windows equivalent.
+  it.skipIf(process.platform === 'win32')(
+    'does not stamp a FIFO as unresolvable walk content',
+    () => {
+      // A FIFO, socket or device node reports a concrete dirent type —
+      // it fell through the directory/file/symlink predicates and was
+      // stamped `unresolved` on every run, a note nobody could clear.
+      writeFileSync(join(repo, '.gitignore'), 'node_modules\nig/\n');
+      git('add', '-A');
+      git('commit', '-qm', 'ignore ig');
+      mkdirSync(join(repo, 'ig'));
+      execFileSync('mkfifo', [join(repo, 'ig', 'pipe')]);
+
+      runSnapshot();
+      runSince();
+
+      const lines = stderr();
+      expect(lines.some((l) => l.includes('ig/pipe'))).toBe(false);
+      expect(lines.at(-1)).toContain(
+        'the tree is unchanged since the snapshot',
+      );
+    },
+  );
+
+  it('answers failed for a nested repo whose core.worktree steers its toplevel elsewhere', () => {
+    // The probe's inner status pins `--work-tree`, so it answers for the
+    // nested path either way — but a nested repository's own planted
+    // `core.worktree` steers DISCOVERY: asked for its toplevel, git names
+    // the planted directory. An answer that is not the repository's own
+    // is nobody's answer, and it must not ride the baseline under this
+    // path.
+    const inner = join(repo, 'inner');
+    mkdirSync(inner);
+    gitAt(inner, 'init', '-q', '-b', 'main');
+    gitAt(inner, 'config', 'user.email', 't@t.t');
+    gitAt(inner, 'config', 'user.name', 't');
+    writeFileSync(join(inner, 'f.txt'), 'v1\n');
+    gitAt(inner, 'add', '-A');
+    gitAt(inner, 'commit', '-qm', 'init');
+    gitAt(inner, 'config', 'core.worktree', repo);
+
+    runSnapshot();
+    runSince();
+
+    const lines = stderr();
+    expect(
+      lines.some((l) => l.includes('inner') && l.includes('cannot see')),
+    ).toBe(true);
+    expect(
+      lines.some((l) => l.includes('the tree is unchanged since the snapshot')),
+    ).toBe(false);
+  });
+
+  it('fails closed, never all-clears, for a .git git itself rejects', () => {
+    // An index gitlink whose checkout carries an EMPTY `.git` directory
+    // passes the `existsSync` test, but git rejects it. Where the run
+    // lands depends on the git version — a newer one refuses the outer
+    // status on the bogus entry outright, an older one lets discovery
+    // walk up and the inner probe answers for the SUPERPROJECT — so this
+    // pins the invariant both honest outcomes share: never a bare
+    // all-clear over the path.
+    const dead = join(repo, 'dead');
+    mkdirSync(dead);
+    mkdirSync(join(dead, '.git'));
+    git(
+      'update-index',
+      '--add',
+      '--cacheinfo',
+      `160000,${git('rev-parse', 'HEAD')},dead`,
+    );
+
+    let refused = false;
+    try {
+      runSnapshot();
+      runSince();
+    } catch (err) {
+      refused = true;
+      expect((err as Error).message).toMatch(/git repository/);
+    }
+    if (!refused) {
+      const lines = stderr();
+      expect(
+        lines.some((l) => l.includes('dead') && l.includes('cannot see')),
+      ).toBe(true);
+      expect(
+        lines.some((l) =>
+          l.includes('the tree is unchanged since the snapshot'),
+        ),
+      ).toBe(false);
+    }
+  });
+
   it('excludes a symlink reaching a review worktree, under an ignored directory', () => {
     // The exclusion keys on the discovered NAME; a link planted at any
     // other name under a collapsed ignored directory still reaches the
@@ -2763,6 +3026,40 @@ describe('fix-delta', () => {
     expect(stderr().some((l) => l.includes('filter.x.process'))).toBe(true);
   });
 
+  it('still rules the capture when the filter enumeration passes 1 MiB', () => {
+    // The enumeration rode Node's default 1 MiB `maxBuffer`: a config
+    // whose `filter.*` listing overflows it made the probe answer null,
+    // which read as "no surfaces" — the steering note never printed AND
+    // `hasFilter` flipped false, re-enabling the forgeable multi-line
+    // note reassembly the per-line ruling exists to defeat. The value
+    // lives in the config FILE, so argv's per-argument limit never
+    // applies to it.
+    const forge = join(out, 'forge-big.sh');
+    writeFileSync(forge, '#!/bin/sh\nprintf "error: \'\\n" >&2\ncat\n');
+    chmodSync(forge, 0o755);
+    git('config', 'filter.forge.clean', forge);
+    // The value rides the config FILE — as an argv item it would die on
+    // the per-argument limit long before the enumeration's 1 MiB. (No
+    // `#` in it: the config parser would strip it as a comment and the
+    // value would never grow.)
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `\n[filter "big"]\n\tclean = cat ${'x'.repeat(1_200_000)}\n`,
+    );
+    writeFileSync(join(repo, '.gitattributes'), 'secret.txt filter=forge\n');
+    writeFileSync(join(repo, 'secret.txt'), 'v1\n');
+    // A zero-commit nested repository: the genuine note the forged
+    // unterminated opener absorbs when the per-line ruling is off.
+    mkdirSync(join(repo, 'zzz'));
+    gitAt(join(repo, 'zzz'), 'init', '-q', '-b', 'main');
+
+    expect(() =>
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() }),
+    ).toThrow(/a clean\/process filter is configured/);
+    expect(stderr().some((l) => l.includes('filter.big.clean'))).toBe(true);
+    expect(stderr().some((l) => l.includes('filter.forge.clean'))).toBe(true);
+  });
+
   it('discloses a core.excludesFile whose rule drops a new file from the capture', () => {
     // A fourth steering surface of the `info/exclude` class, settable from
     // the repository's own config and pointing OUTSIDE the tree: the
@@ -2855,6 +3152,39 @@ describe('fix-delta', () => {
     expect(stderr().at(-1)).toContain(
       '1 file(s) changed since the snapshot — .qwen/tmp/qwen-review-notes.md',
     );
+  });
+
+  it('discloses a tracked family path the fix renamed away', () => {
+    // The tracked-half re-inclusion restores edits and deletions of
+    // family-named paths; a RENAME leaves the new, untracked,
+    // family-matching file excluded from `add -A` and invisible to
+    // `add -u`, so the hunks certify a bare deletion and the renamed
+    // content's addition is attested nowhere. The gap is disclosed, in
+    // the over-warn direction.
+    const before = join(repo, '.qwen', 'tmp', 'qwen-review-a.md');
+    writeFileSync(before, 'USER CONTENT line1\nline2\n');
+    git('add', '-A');
+    git('commit', '-qm', 'track a family-named file');
+
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    rmSync(before);
+    writeFileSync(
+      join(repo, '.qwen', 'tmp', 'qwen-review-b.md'),
+      'USER CONTENT line1\nline2\n',
+    );
+    runSince();
+
+    const hunks = readFileSync(hunksFile(), 'utf8');
+    expect(hunks).toContain('qwen-review-a.md');
+    expect(hunks).not.toContain('qwen-review-b.md');
+    const lines = stderr();
+    expect(
+      lines.some(
+        (l) =>
+          l.includes('qwen-review-a.md') &&
+          l.includes('additions under the family names'),
+      ),
+    ).toBe(true);
   });
 
   it('names a repository planted one level under a side-file family name', () => {
@@ -2950,7 +3280,8 @@ describe('fix-delta', () => {
     expect(
       lines.some(
         (l) =>
-          l.includes('committed or stashed inside') && l.includes('ig/inner'),
+          l.includes('committed, stashed, or newly ignored inside') &&
+          l.includes('ig/inner'),
       ),
     ).toBe(true);
     expect(lines.at(-1)).not.toContain('the tree is unchanged since');
@@ -3108,7 +3439,9 @@ describe('fix-delta', () => {
     // The symlink route: a top-level link at a non-family name resolves to
     // the review worktree. The link's target is excluded content, but the
     // exclusion is "walk, do not probe" — a repository inside the target
-    // is disclosed under the link's own name.
+    // is disclosed. The worktree's own `?` entry and the link reach the
+    // SAME physical repository, and the identity dedupe probes it once,
+    // under the first-discovered name.
     const wt = join(repo, '.qwen', 'tmp', 'review-pr-1');
     git('worktree', 'add', '-q', '--detach', wt);
     const inner = join(wt, 'inner');
@@ -3127,9 +3460,25 @@ describe('fix-delta', () => {
 
     expect(readFileSync(hunksFile(), 'utf8')).toBe('');
     const lines = stderr();
-    expect(
-      lines.some((l) => l.includes('cannot see') && l.includes('x/inner')),
-    ).toBe(true);
+    const blind = lines.filter(
+      (l) => l.includes('cannot see') && l.includes('inner'),
+    );
+    expect(blind).toHaveLength(1);
+    expect(blind[0]).toContain('review-pr-1/inner');
+    // …and the line is one NAME, not the same repository joined twice.
+    expect(blind[0]).not.toContain('x/inner');
+    // One physical repository, one probe per run: the link route's
+    // second discovery is the identity dedupe's skip, not a second
+    // status spawn.
+    const innerStatuses = spawnRecord.calls.filter((c) => {
+      const at = c.args.indexOf('-C');
+      return (
+        c.args.includes('status') &&
+        at !== -1 &&
+        String(c.args[at + 1]).endsWith('inner')
+      );
+    });
+    expect(innerStatuses).toHaveLength(2);
     expect(lines.at(-1)).not.toContain('the tree is unchanged since');
   });
 
@@ -3263,7 +3612,8 @@ describe('fix-delta', () => {
     expect(
       lines.some(
         (l) =>
-          l.includes('committed or stashed inside') && l.includes('__proto__'),
+          l.includes('committed, stashed, or newly ignored inside') &&
+          l.includes('__proto__'),
       ),
     ).toBe(true);
     expect(lines.at(-1)).not.toContain('the tree is unchanged since');
@@ -3488,6 +3838,64 @@ describe('fix-delta', () => {
           n.startsWith('qwen-fix-delta-'),
         ),
       ).toBe(false);
+    } finally {
+      process.chdir(cwdHere);
+      rmSync(outer, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a core.worktree that names a subtree holding the cwd', () => {
+    // Containment passes trivially from inside the steered subtree
+    // (`rel === ''`), and identity cannot see the narrowing: the
+    // snapshot records only the subtree, a fix applied beside it yields
+    // empty hunks, and the run all-clears over an applied edit. The
+    // config-blind walk from the cwd up to the first `.git` entry
+    // answers the honest tree, and the two answers must agree.
+    mkdirSync(join(repo, 'src'));
+    writeFileSync(join(repo, 'src', 'b.ts'), 'export const y = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'add src/b.ts');
+    git('config', 'core.worktree', join(repo, 'src'));
+    const cwdHere = process.cwd();
+    try {
+      process.chdir(join(repo, 'src'));
+      expect(() =>
+        runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() }),
+      ).toThrow(/core\.worktree/);
+      expect(existsSync(snapshotFile())).toBe(false);
+    } finally {
+      process.chdir(cwdHere);
+      git('config', '--unset', 'core.worktree');
+    }
+  });
+
+  it('refuses an ancestor whose planted .git gitfile points back at the honest repository', () => {
+    // Both `--absolute-git-dir` calls resolve through the planted
+    // gitfile to the same honest git dir, so the identity check passes
+    // and the whole measurement is re-rooted to the ancestor. The
+    // config-blind walk from the cwd finds the honest `.git` first, and
+    // the two answers must agree.
+    const outer = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-gitfile-')),
+    );
+    const cwdHere = process.cwd();
+    try {
+      const audited = join(outer, 'audited');
+      mkdirSync(audited);
+      gitAt(audited, 'init', '-q', '-b', 'main');
+      gitAt(audited, 'config', 'user.email', 't@t.t');
+      gitAt(audited, 'config', 'user.name', 't');
+      writeFileSync(join(audited, 'a.ts'), 'export const x = 1;\n');
+      gitAt(audited, 'add', '-A');
+      gitAt(audited, 'commit', '-qm', 'audited');
+      writeFileSync(join(outer, '.git'), `gitdir: ${join(audited, '.git')}\n`);
+      gitAt(audited, 'config', 'core.worktree', outer);
+      process.chdir(audited);
+
+      expect(() =>
+        runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() }),
+      ).toThrow(/core\.worktree/);
+      expect(existsSync(snapshotFile())).toBe(false);
     } finally {
       process.chdir(cwdHere);
       rmSync(outer, { recursive: true, force: true });
