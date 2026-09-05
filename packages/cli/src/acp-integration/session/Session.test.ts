@@ -929,6 +929,9 @@ describe('Session', () => {
         setSessionPrBoundCallback: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
+      getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
+      getPermissionManager: vi.fn().mockReturnValue(null),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getToolInvocationGuard: vi.fn().mockReturnValue(undefined),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
@@ -28179,6 +28182,203 @@ describe('Session', () => {
       );
     });
 
+    function configureAutoModeShellFallback(options: {
+      callId: string;
+      command: string;
+      denialState: core.AutoModeDenialState;
+      classifierResults?: Array<Record<string, unknown>>;
+    }) {
+      let denialState = options.denialState;
+      const generateJson = vi.fn();
+      for (const result of options.classifierResults ?? []) {
+        generateJson.mockResolvedValueOnce(result);
+      }
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      const invocation = {
+        params: { command: options.command },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Need permission',
+          command: options.command,
+          rootCommand: 'python',
+          onConfirm,
+        }),
+        getDescription: vi.fn().mockReturnValue('Run command'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute,
+      };
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.AUTO);
+      mockConfig.getCwd = vi.fn().mockReturnValue('/repo');
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+      mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+      mockConfig.getBaseLlmClient = vi.fn().mockReturnValue({ generateJson });
+      mockConfig.getAutoModeDenialState = vi
+        .fn()
+        .mockImplementation(() => denialState);
+      mockConfig.setAutoModeDenialState = vi
+        .fn()
+        .mockImplementation((next: core.AutoModeDenialState) => {
+          denialState = next;
+        });
+      (
+        mockLlmClient as unknown as {
+          getHistoryTail: ReturnType<typeof vi.fn>;
+        }
+      ).getHistoryTail = vi.fn().mockReturnValue([]);
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.ProceedOnce,
+        },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: options.callId,
+                  name: core.ToolNames.SHELL,
+                  args: { command: options.command },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      return {
+        execute,
+        generateJson,
+        getDenialState: () => denialState,
+        onConfirm,
+      };
+    }
+
+    it('routes an exact ACP retry to manual approval without reclassifying it', async () => {
+      const command = 'python -c "print(1)"';
+      const { execute, generateJson, getDenialState, onConfirm } =
+        configureAutoModeShellFallback({
+          callId: 'call-exact-auto-retry',
+          command,
+          denialState: {
+            consecutiveBlock: 1,
+            consecutiveUnavailable: 0,
+            totalBlock: 1,
+            totalUnavailable: 0,
+            pendingManualRetryFingerprint: core.getAutoModeActionFingerprint(
+              core.ToolNames.SHELL,
+              { command },
+              '/repo',
+            ),
+          },
+        });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'retry tool' }],
+      });
+
+      expect(generateJson).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                content: expect.objectContaining({
+                  text: expect.stringContaining('previously blocked'),
+                }),
+              }),
+            ]),
+          }),
+        }),
+      );
+      const permissionRequest = vi.mocked(mockClient.requestPermission).mock
+        .calls[0][0];
+      expect(permissionRequest.options).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            optionId:
+              core.ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+          }),
+        ]),
+      );
+      expect(onConfirm).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        { answers: undefined },
+      );
+      expect(execute).toHaveBeenCalledOnce();
+      expect(getDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 1,
+        totalUnavailable: 0,
+      });
+    });
+
+    it('routes the current ACP threshold block to manual approval', async () => {
+      const command = 'python -c "print(1)"';
+      const { execute, generateJson, getDenialState } =
+        configureAutoModeShellFallback({
+          callId: 'call-current-threshold',
+          command,
+          denialState: {
+            consecutiveBlock: 2,
+            consecutiveUnavailable: 0,
+            totalBlock: 2,
+            totalUnavailable: 0,
+          },
+          classifierResults: [
+            { shouldBlock: true },
+            {
+              thinking: 'confirmed',
+              shouldBlock: true,
+              reason: 'unsafe command',
+            },
+          ],
+        });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run tool' }],
+      });
+
+      expect(generateJson).toHaveBeenCalledTimes(2);
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                content: expect.objectContaining({
+                  text: expect.stringContaining('consecutive denial limit'),
+                }),
+              }),
+            ]),
+          }),
+        }),
+      );
+      expect(execute).toHaveBeenCalledOnce();
+      expect(getDenialState()).toEqual({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 3,
+        totalUnavailable: 0,
+      });
+    });
+
     describe('in-session cron MessageDisplay', () => {
       /** Mock scheduler that delivers exactly one in-session job through `start`. */
       function schedulerFiring(job: { prompt: string }) {
@@ -35765,11 +35965,17 @@ describe('Session', () => {
         bare?: boolean;
         plan?: boolean;
         disableHooks?: boolean;
+        todoWriteEnabled?: boolean;
       } = {},
     ) {
       session.dispose();
       (mockSettings as unknown as { merged: Record<string, unknown> }).merged =
-        { experimental: { todoStopGuard: true } };
+        {
+          experimental: { todoStopGuard: true },
+          ...(options.todoWriteEnabled === false
+            ? {}
+            : { tools: { todoWrite: { enabled: true } } }),
+        };
       mockConfig.getBareMode = vi.fn().mockReturnValue(options.bare ?? false);
       mockConfig.isSafeMode = vi.fn().mockReturnValue(options.safe ?? false);
       mockConfig.getApprovalMode = vi
@@ -35903,6 +36109,58 @@ describe('Session', () => {
         return typeof next === 'function' ? next() : next;
       });
     }
+
+    it('disables the guard and warns when todo_write is disabled', async () => {
+      debugLoggerWarnSpy.mockClear();
+      rebuildSessionWithGuard({ todoWriteEnabled: false });
+      installPendingTodoTool();
+      queuePendingTodoThenNaturalStops();
+
+      await runGuardPrompt();
+
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        'experimental.todoStopGuard requires tools.todoWrite.enabled; the Todo Stop Guard is disabled.',
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(
+            ([params]) =>
+              params.update.sessionUpdate === 'agent_message_chunk' &&
+              params.update._meta?.['source'] === 'todo_stop_guard',
+          ),
+      ).toBe(false);
+    });
+
+    it.each([
+      ['safe mode', { safe: true }],
+      ['bare mode', { bare: true }],
+    ] as const)('suppresses the missing Todo warning in %s', (_name, mode) => {
+      debugLoggerWarnSpy.mockClear();
+      rebuildSessionWithGuard({ ...mode, todoWriteEnabled: false });
+
+      expect(debugLoggerWarnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('tools.todoWrite.enabled'),
+      );
+    });
+
+    it('returns actionable Todo enablement guidance from daemon tool calls', async () => {
+      rebuildSessionWithGuard({ todoWriteEnabled: false });
+      mockToolRegistry.getTool.mockReturnValue(undefined);
+      queuePendingTodoThenNaturalStops();
+
+      await runGuardPrompt();
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      const followUp = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[1][1] as {
+        message: unknown;
+      };
+      expect(JSON.stringify(followUp.message)).toContain(
+        'tools.todoWrite.enabled',
+      );
+    });
 
     it('cleans up an admitted retry cancelled during previous-turn drain', async () => {
       rebuildSessionWithGuard();
