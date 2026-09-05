@@ -195,6 +195,15 @@ export class LocatorProxy implements BrowserLocator {
   private append(step: LocatorStep): LocatorProxy {
     return new LocatorProxy(this.context, this.tabId, [...this.steps, step]);
   }
+  private operandSteps(other: BrowserLocator, label: string): LocatorStep[] {
+    if (!(other instanceof LocatorProxy))
+      throw new TypeError(`${label} expects a Locator`);
+    if (other.context !== this.context || other.tabId !== this.tabId)
+      throw new TypeError(
+        `${label} expects a Locator from the same tab and browser session`,
+      );
+    return [...other.steps];
+  }
   locator(selector: string, options?: LocatorLocatorOptions): BrowserLocator {
     const next = this.append({ kind: 'locator', selector });
     return options === undefined ? next : next.filter(options);
@@ -242,26 +251,18 @@ export class LocatorProxy implements BrowserLocator {
       step.hasNotText = matcher(options.hasNotText);
     if (options.visible !== undefined) step.visible = options.visible;
     if (options.has !== undefined) {
-      if (!(options.has instanceof LocatorProxy))
-        throw new TypeError('filter has expects a Locator');
-      step.has = [...options.has.steps];
+      step.has = this.operandSteps(options.has, 'filter has');
     }
     if (options.hasNot !== undefined) {
-      if (!(options.hasNot instanceof LocatorProxy))
-        throw new TypeError('filter hasNot expects a Locator');
-      step.hasNot = [...options.hasNot.steps];
+      step.hasNot = this.operandSteps(options.hasNot, 'filter hasNot');
     }
     return this.append(step);
   }
   and(other: BrowserLocator): BrowserLocator {
-    if (!(other instanceof LocatorProxy))
-      throw new TypeError('and expects a Locator');
-    return this.append({ kind: 'and', steps: [...other.steps] });
+    return this.append({ kind: 'and', steps: this.operandSteps(other, 'and') });
   }
   or(other: BrowserLocator): BrowserLocator {
-    if (!(other instanceof LocatorProxy))
-      throw new TypeError('or expects a Locator');
-    return this.append({ kind: 'or', steps: [...other.steps] });
+    return this.append({ kind: 'or', steps: this.operandSteps(other, 'or') });
   }
   async all(): Promise<BrowserLocator[]> {
     const count = await this.count();

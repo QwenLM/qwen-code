@@ -116,6 +116,81 @@ describe('Browser SDK in the existing Node REPL', () => {
     });
   });
 
+  it.each(['and', 'or', 'has', 'hasNot'] as const)(
+    'rejects %s composition across tabs before dispatch',
+    async (method) => {
+      const agent = await setupBrowserRuntime();
+      const browser = await agent.browsers.get('chrome');
+      const tab = await browser.tabs.new();
+      backend.dispatch.mockResolvedValueOnce({ id: 'tab-2' });
+      const otherTab = await browser.tabs.new();
+      const locator = tab.playwright.locator('button');
+      const other = otherTab.playwright.getByText('Submit');
+      const dispatchCount = backend.dispatch.mock.calls.length;
+
+      expect(() =>
+        method === 'and' || method === 'or'
+          ? locator[method](other)
+          : locator.filter({ [method]: other }),
+      ).toThrow('expects a Locator from the same tab and browser session');
+      expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+    },
+  );
+
+  it.each(['and', 'or', 'has', 'hasNot'] as const)(
+    'rejects %s composition with an old session even when tab IDs match',
+    async (method) => {
+      const oldAgent = await setupBrowserRuntime();
+      const oldBrowser = await oldAgent.browsers.get('chrome');
+      const oldTab = await oldBrowser.tabs.new();
+      const oldLocator = oldTab.playwright.getByText('Submit');
+      await closeBrowserRuntime();
+
+      const agent = await setupBrowserRuntime();
+      const browser = await agent.browsers.get('chrome');
+      const tab = await browser.tabs.new();
+      expect(tab.id).toBe(oldTab.id);
+      const locator = tab.playwright.locator('button');
+      const dispatchCount = backend.dispatch.mock.calls.length;
+
+      expect(() =>
+        method === 'and' || method === 'or'
+          ? locator[method](oldLocator)
+          : locator.filter({ [method]: oldLocator }),
+      ).toThrow('expects a Locator from the same tab and browser session');
+      expect(backend.dispatch).toHaveBeenCalledTimes(dispatchCount);
+    },
+  );
+
+  it('preserves compound locator steps within the same tab and session', async () => {
+    const agent = await setupBrowserRuntime();
+    const browser = await agent.browsers.get('chrome');
+    const tab = await browser.tabs.new();
+    const locator = tab.playwright.locator('button');
+    const other = tab.playwright.getByText('Submit');
+    const otherSteps = [{ kind: 'getByText', text: 'Submit' }];
+
+    for (const method of ['and', 'or', 'has', 'hasNot'] as const) {
+      const combined =
+        method === 'and' || method === 'or'
+          ? locator[method](other)
+          : locator.filter({ [method]: other });
+      await combined.click();
+      expect(backend.calls.at(-1)).toEqual({
+        method: 'locator.click',
+        args: {
+          tabId: tab.id,
+          steps: [
+            { kind: 'locator', selector: 'button' },
+            method === 'and' || method === 'or'
+              ? { kind: method, steps: otherSteps }
+              : { kind: 'filter', [method]: otherSteps },
+          ],
+        },
+      });
+    }
+  });
+
   it('serializes History and locator requests without a Host Call bridge', async () => {
     const agent = await setupBrowserRuntime();
     const browser = await agent.browsers.get('extension');
