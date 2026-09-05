@@ -267,7 +267,7 @@ describe('Core System Prompt (prompts.ts)', () => {
   it('should append userMemory with separator when provided', () => {
     vi.stubEnv('SANDBOX', undefined);
     const memory = 'This is custom user memory.\nBe extra polite.';
-    const expectedSuffix = `\n\n---\n\n${memory}`;
+    const expectedSuffix = `\n\n---\n\n${CONTEXT_NOTICE}\n\n${memory}`;
     const prompt = getCoreSystemPrompt(memory);
 
     expect(prompt.endsWith(expectedSuffix)).toBe(true);
@@ -281,7 +281,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     const appendInstruction = 'Always answer in exactly one sentence.';
     const prompt = getCoreSystemPrompt(memory, undefined, appendInstruction);
 
-    expect(prompt).toContain(`\n\n---\n\n${memory}`);
+    expect(prompt).toContain(`\n\n---\n\n${CONTEXT_NOTICE}\n\n${memory}`);
     expect(prompt).toContain(`\n\n---\n\n${appendInstruction}`);
     expect(prompt.indexOf(memory)).toBeLessThan(
       prompt.indexOf(appendInstruction),
@@ -300,7 +300,11 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
 
     expect(result).toBe(
-      [customInstruction, userMemory, appendInstruction].join('\n\n---\n\n'),
+      [
+        customInstruction,
+        `${CONTEXT_NOTICE}\n\n${userMemory}`,
+        appendInstruction,
+      ].join('\n\n---\n\n'),
     );
   });
 
@@ -1217,7 +1221,7 @@ describe('getCustomSystemPrompt', () => {
     const result = getCustomSystemPrompt(customInstruction, userMemory);
 
     expect(result).toBe(
-      'You are a helpful assistant specialized in code review.\n\n---\n\nRemember to be extra thorough.\nFocus on security issues.',
+      `You are a helpful assistant specialized in code review.\n\n---\n\n${CONTEXT_NOTICE}\n\nRemember to be extra thorough.\nFocus on security issues.`,
     );
     expect(result).toContain('---');
   });
@@ -1233,7 +1237,7 @@ describe('getCustomSystemPrompt', () => {
     const result = getCustomSystemPrompt(customInstruction, userMemory);
 
     expect(result).toBe(
-      'You are a code assistant. Always provide examples.\n\n---\n\nUser prefers TypeScript examples.',
+      `You are a code assistant. Always provide examples.\n\n---\n\n${CONTEXT_NOTICE}\n\nUser prefers TypeScript examples.`,
     );
     expect(result).toContain('---');
   });
@@ -1578,6 +1582,13 @@ describe('resolveInteractionMode', () => {
   });
 });
 
+// Mirrors CONTEXT_FILES_PRECEDENCE_NOTICE in prompts.ts. Kept unexported there
+// so it does not become part of the package's public API via the index re-export.
+const CONTEXT_NOTICE =
+  "The following instructions come from the user's context files (QWEN.md / " +
+  'AGENTS.md). Where they conflict with the default guidance above, they take ' +
+  'precedence. Check them before choosing a tool or spawning a subagent.';
+
 describe('assembleSystemPrompt', () => {
   it('joins all layers in stable -> context -> volatile order', () => {
     const result = assembleSystemPrompt({
@@ -1589,8 +1600,46 @@ describe('assembleSystemPrompt', () => {
     });
 
     expect(result).toBe(
-      'BASE\n\n---\n\nCONTEXT_FILES\n\n---\n\nAPPEND\n\nGIT_STATUS\n\n---\n\nAUTO_MEMORY',
+      `BASE\n\n---\n\n${CONTEXT_NOTICE}\n\nCONTEXT_FILES\n\n---\n\nAPPEND\n\nGIT_STATUS\n\n---\n\nAUTO_MEMORY`,
     );
+  });
+
+  it('frames the context-files layer as taking precedence over the base prompt', () => {
+    const result = assembleSystemPrompt({
+      base: 'BASE',
+      contextFiles: 'Never spawn subagents.',
+    });
+
+    // The notice has to sit between the separator and the user's rules, so the
+    // model reads it as instruction rather than as more background text.
+    expect(result).toBe(
+      `BASE\n\n---\n\n${CONTEXT_NOTICE}\n\nNever spawn subagents.`,
+    );
+    expect(result.indexOf(CONTEXT_NOTICE)).toBeLessThan(
+      result.indexOf('Never spawn subagents.'),
+    );
+  });
+
+  it('only frames context files, not the append-prompt or auto-memory layers', () => {
+    const result = assembleSystemPrompt({
+      base: 'BASE',
+      appendPrompt: 'APPEND',
+      autoMemory: 'AUTO_MEMORY',
+    });
+
+    // --append-system-prompt and auto-memory are different slots with different
+    // semantics; neither should claim precedence over the base prompt.
+    expect(result).not.toContain(CONTEXT_NOTICE);
+    expect(result).toBe('BASE\n\n---\n\nAPPEND\n\n---\n\nAUTO_MEMORY');
+  });
+
+  it('omits the notice when the context-files layer is empty or whitespace', () => {
+    expect(assembleSystemPrompt({ base: 'BASE' })).not.toContain(
+      CONTEXT_NOTICE,
+    );
+    expect(
+      assembleSystemPrompt({ base: 'BASE', contextFiles: '   ' }),
+    ).not.toContain(CONTEXT_NOTICE);
   });
 
   it('returns only the base when every other layer is empty', () => {
