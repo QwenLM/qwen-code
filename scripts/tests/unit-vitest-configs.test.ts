@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -235,5 +236,27 @@ describe('scripts suite timeout', () => {
       expect(mod.default.test?.testTimeout, `stub=${stub}`).toBe(expected);
       vi.unstubAllEnvs();
     }
+  });
+
+  it('keeps the floor the config sets unlowered by any file in the suite', () => {
+    // Release run 33957952281 lost Quality Checks (Scripts) to two files that
+    // still carried quiet-host figures of their own: install-script.test.js
+    // capped itself at 30s with vi.setConfig, so a packaging case that costs
+    // 3s idle timed out at exactly 30000ms, and qwen-autofix-workflow.test.js
+    // bounded a subprocess at 30s, where the kill truncated the stub's
+    // recording and the timeout surfaced as a content mismatch. The config
+    // above owns testTimeout; a per-file override of it can only lower it.
+    const tests = fileURLToPath(new URL('.', import.meta.url));
+    for (const file of readdirSync(tests)) {
+      if (!/\.test\.[jt]s$/.test(file)) continue;
+      expect(
+        readFileSync(join(tests, file), 'utf8'),
+        `${file} overrides the suite testTimeout`,
+      ).not.toMatch(/vi\.setConfig\(\{[^}]*testTimeout/);
+    }
+    expect(
+      readFileSync(join(tests, 'qwen-autofix-workflow.test.js'), 'utf8'),
+      'the deferred-findings harness bounds its subprocess with its own figure',
+    ).toContain('QWEN_SCRIPTS_TEST_TIMEOUT_MS');
   });
 });

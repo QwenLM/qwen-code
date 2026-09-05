@@ -23,6 +23,15 @@ import { describe, expect, it } from 'vitest';
 
 import { getWorkflowJob } from './workflow-helpers.js';
 
+// A hung-runner bound, not a performance budget, so it rides the suite's own
+// knob (scripts/tests/vitest.config.ts) instead of a figure measured on a
+// quiet machine. Release run 33957952281: this harness's heaviest case costs
+// 0.9s idle, the pool ran it past a hardcoded 30s, and the kill truncated the
+// stub's recording — so a timeout surfaced as a content mismatch.
+const subprocessTimeoutMs = Number(
+  process.env.QWEN_SCRIPTS_TEST_TIMEOUT_MS ?? 90_000,
+);
+
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 // Long-form rationale moved out of the YAML when the file approached
 // GitHub's 500 KB start-runs limit; assertions that pin a REASON (rather
@@ -10021,7 +10030,7 @@ exit 1
         ],
         // spawnSync blocks the event loop, so vitest's async timeout can't
         // fire — bound each subprocess directly against a hung runner.
-        { encoding: 'utf8', timeout: 10_000 },
+        { encoding: 'utf8', timeout: subprocessTimeoutMs },
       );
     withRunnerDir((dir) => {
       // Mirror the workflow's staging: autofix-skill/{SKILL.md,scripts/run-agent.mjs}.
@@ -14174,7 +14183,7 @@ exit 1
           encoding: 'utf8',
           // spawnSync blocks the event loop, so vitest's async timeout cannot
           // fire — bound each subprocess directly against a hung runner.
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             PATH: `${bin}:${process.env.PATH}`,
@@ -24562,7 +24571,7 @@ describe('run-agent idle watchdog', () => {
         ],
         {
           encoding: 'utf8',
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             AGENT_WORKDIR: workdir,
@@ -24805,7 +24814,7 @@ describe('stale sandbox container cleanup', () => {
         ],
         {
           encoding: 'utf8',
-          timeout: 30_000,
+          timeout: subprocessTimeoutMs,
           env: {
             ...process.env,
             AGENT_WORKDIR: workdir,
