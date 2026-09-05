@@ -128,12 +128,22 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  * per-entry proof that a matched entry belongs to the rewind target —
  * conclusive only while no other turn sent the same text; callers must
  * establish that uniqueness before trusting the proof (see
- * `computeApiTruncationIndex`). System-reminder parts and cleared-media
- * placeholders never equal a genuine prompt, so a plain text part
- * comparison is sufficient.
+ * `computeApiTruncationIndex`). System-reminder parts never equal a
+ * genuine prompt, so for ordinary text a plain part comparison is
+ * sufficient.
+ *
+ * Round-30 exception: a placeholder-shaped target text proves nothing. A
+ * cleared media-only entry carries exactly that shape and keeps its mark
+ * through microcompaction, and the documented exact-match collision means
+ * a genuine prompt with the same full text is indistinguishable from the
+ * cleared entry once serialized. The proof refuses such text outright so
+ * the caller falls back to the positional walk (whose loud -1 is the
+ * fail-safe pinned for the collision class) instead of resolving onto the
+ * placeholder entry and silently truncating everything after it.
  */
 function isApiEntryOwnedByText(entry: Content, targetText: string): boolean {
   if (entry.role !== 'user' || !entry.parts) return false;
+  if (isClearedMediaPlaceholder(targetText)) return false;
   return entry.parts.some((part) => 'text' in part && part.text === targetText);
 }
 
@@ -285,6 +295,16 @@ export function computeApiTruncationIndex(
     // resolution into a loud -1 (the walk is desynced there), never a
     // silent wrong boundary. The durable close remains per-entry provenance
     // (non-re-mintable ids) at the mint sites.
+    //
+    // Round-30 residue: the proof still cannot distinguish the target from
+    // a same-text impostor when exactly one same-text entry is in play — a
+    // claimant-less re-send (no UI claimant to scan) or a placeholder
+    // collision re-mint (the cleared-media entry itself passes the text
+    // proof). Two demotions backstop it without a new gate condition: the
+    // proof refuses placeholder-shaped text outright (see
+    // `isApiEntryOwnedByText`), and an acceptance whose positional walk
+    // lands EARLIER than the match trusts the walk instead (see the
+    // acceptance branch below).
     const identifiedIndex = findApiHistoryPromptIndex(
       apiHistory,
       target.promptId,
@@ -317,6 +337,25 @@ export function computeApiTruncationIndex(
       isApiEntryOwnedByText(apiHistory[identifiedIndex]!, target.text) &&
       ownershipProofIsUnique()
     ) {
+      // Round-30 backstop: even a unique, ownership-proven match cannot be
+      // trusted when the positional walk lands EARLIER than it. An earlier
+      // landing means counted prompt entries precede the match that the UI
+      // turn count does not account for — entries of turns the UI deleted,
+      // or of a claimant-less re-send whose UI item never existed — while
+      // the target's own entry is absent. Accepting the match would then
+      // truncate at the impostor's boundary and silently keep the
+      // prompt+response of a turn the UI deleted. No compressed prefix can
+      // explain this desync (startIndex skips the prefix, and excluded
+      // placeholder/reminder entries desync the walk LATE, never early),
+      // so the walk's earlier answer is the exact pre-identity boundary —
+      // the safe baseline this gate exists to preserve. A walk that lands
+      // late or cannot land (-1) leaves the identity preferred: that is the
+      // absorbed-turn/placeholder-collision exactness pinned by the
+      // round-28 tests.
+      const positional = positionalTruncationIndex();
+      if (positional !== -1 && positional < identifiedIndex) {
+        return positional;
+      }
       return identifiedIndex;
     }
     return positionalTruncationIndex();

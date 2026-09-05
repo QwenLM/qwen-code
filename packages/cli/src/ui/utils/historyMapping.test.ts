@@ -1360,6 +1360,88 @@ describe('round-29: same-text twins defeat the text ownership proof', () => {
   });
 });
 
+describe('round-30: the proof cannot distinguish the target from a same-text impostor', () => {
+  // Round-29 demotes the text proof whenever the same text is in play
+  // twice, but the gate still accepts a same-text impostor whenever the
+  // proof cannot distinguish the target from it: a claimant-less re-send
+  // (the claimant scan only sees UI items) and a placeholder-collision
+  // re-mint (the text proof certifies the cleared-media entry itself) each
+  // pass both uniqueness conjuncts with exactly one same-text entry in
+  // play. The backstop is a demotion to the positional walk whenever the
+  // proof cannot establish ownership, never a seventh gate condition.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  const PLACEHOLDER = '[Old inline media cleared: image/png]';
+
+  it('demotes a claimant-less same-text impostor to the positional boundary', () => {
+    // Probe 1: the target's own entry never landed, and a re-send wearing
+    // the target's promptId+text landed later with NO UI entry. Both
+    // uniqueness conjuncts pass — the claimant scan only sees UI items and
+    // the same-text count sees exactly one entry, the impostor itself — so
+    // the gate resolves onto the impostor's boundary 4, silently keeping
+    // the prompt+response of the turn the UI deleted (entry at index 2).
+    // The positional walk is in sync and lands on the correct boundary 2.
+    const firstEntry = userContent('first prompt');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const impostor = userContent('run tests');
+    markApiHistoryPrompt(impostor, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'first prompt', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      firstEntry,
+      modelContent('r1'),
+      userContent('deleted turn prompt'), // UI deleted the turn; its entry survived
+      modelContent('r2'),
+      impostor, // claimant-less re-send wearing the target's id+text
+      modelContent('r3'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('refuses (-1) when a placeholder-shaped prompt re-mints a cleared-media mark', () => {
+    // Probe 2: a cleared-media placeholder entry keeps its mark through
+    // microcompaction, and a genuine prompt whose ENTIRE text equals the
+    // placeholder shape re-mints the same id with its own entry absent.
+    // The text proof passes (identical text — the documented exact-match
+    // collision) and both uniqueness conjuncts pass, so the gate resolves
+    // onto the placeholder entry at 0 and silently truncates everything
+    // after it, where the pre-identity positional walk refuses loudly
+    // (-1): the placeholder is excluded from the count and no later
+    // counted prompt exists.
+    const firstEntry = userContent('hello');
+    markApiHistoryPrompt(firstEntry, 'session########0');
+    const clearedMedia = userContent(PLACEHOLDER); // media-only entry, cleared; mark survived
+    markApiHistoryPrompt(clearedMedia, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'hello', 'session########0'),
+      llmItem(2),
+      userItemWithPromptId(3, PLACEHOLDER, 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      clearedMedia,
+      modelContent('r1'),
+      // the target's own entry never landed
+      userContent('later prompt'),
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+  });
+});
+
 describe('isRealUserTurn', () => {
   it('returns true for normal user prompts', () => {
     expect(isRealUserTurn(userItem(1, 'hello world'))).toBe(true);
