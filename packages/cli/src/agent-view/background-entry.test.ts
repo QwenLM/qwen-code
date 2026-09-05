@@ -77,6 +77,10 @@ function supervisorClosedError(): Error & { code: string } {
 
 // A store row shaped like the one dispatchAgentViewSession writes before
 // the ready wait; overrides let a test age it, move it or unmanage it.
+// The default createdAt sits INSIDE the dispatch window: the entry dates
+// the window when it starts, so a row stamped when the mock is built can
+// land a millisecond earlier and read as a session from a previous
+// launch.
 function recordedSession(
   overrides: Partial<{
     createdAt: string;
@@ -90,7 +94,7 @@ function recordedSession(
     ownership: 'managed',
     sessionState: 'starting',
     projectCwd: '/w/app',
-    createdAt: new Date().toISOString(),
+    createdAt: new Date(Date.now() + 1_000).toISOString(),
     ...overrides,
   };
 }
@@ -407,9 +411,7 @@ describe('runBackgroundDispatch', () => {
     // store and has a wrapper honoring this entry's contract retry, which
     // starts a SECOND agent on the same prompt.
     supervisorDispatch.mockRejectedValue(supervisorClosedError());
-    listAgentViewSessionStates.mockResolvedValue([
-      recordedSession({ createdAt: new Date().toISOString() }),
-    ]);
+    listAgentViewSessionStates.mockResolvedValue([recordedSession({})]);
 
     const code = await runBackgroundDispatch('audit', '/w/app');
 
