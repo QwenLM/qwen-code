@@ -108,13 +108,12 @@ hygiene findings.
   - Correct: multi-SDK behavior is consistent, protocol fields match the
     TS SDK, bridge error mapping preserves the original error class.
 
-- **ui-apps** — the three UI apps (`packages/desktop-shell/`,
-  `packages/web-shell/`, `packages/webui/`).
+- **ui-apps** — the two UI apps (`packages/desktop-shell/` and
+  `packages/web-shell/`).
   - `desktop-shell`: a thin Tauri shell around Web Shell (window
     management, process lifecycle, signing, updates).
   - `web-shell`: a client React app (`client/`), a Vite build, and a
     daemon proxy; ships as an embeddable component.
-  - `webui`: a lightweight web client consuming daemon REST endpoints.
   - Correct: IPC message shapes match both ends, routes resolve, state
     cleans up on unmount, portal roots are scoped.
 
