@@ -311,6 +311,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (segs) => ({ sessionId: segs[0] }),
     },
   },
+  // GET /session/:id/attachments → _qwen/session/attachments
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/attachments$/,
+    mapping: {
+      method: '_qwen/session/attachments',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
   // POST /session/:id/artifacts → _qwen/session/artifacts/add
   {
     httpMethod: 'POST',
@@ -469,6 +478,27 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
         ...bodyRecord(body),
         sessionId: segs[0],
         taskId: segs[1],
+      }),
+    },
+  },
+  // GET /session/:id/agents → _qwen/session/agents
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/agents$/,
+    mapping: {
+      method: '_qwen/session/agents',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  // GET /session/:id/agent-trace → _qwen/session/agent_trace
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/agent-trace$/,
+    mapping: {
+      method: '_qwen/session/agent_trace',
+      extractParams: (segs, _body, _method, query) => ({
+        sessionId: segs[0],
+        ...strParam(query, 'rootAgentId'),
       }),
     },
   },
