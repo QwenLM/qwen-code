@@ -2727,7 +2727,7 @@ export class DingtalkChannel extends ChannelBase {
       return {
         text: text || '(chat record)',
         downloadCodes: [],
-        syntheticText: Boolean(text),
+        syntheticText: !text,
       };
     }
 

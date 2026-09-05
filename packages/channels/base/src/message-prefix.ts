@@ -38,13 +38,11 @@ export function stripMessagePrefix(
  * Where to splice the stripped payload into an adapter-composed `text`.
  *
  * An adapter-supplied `displayTextOffset` is authoritative, and validated
- * before use so a stale one cannot corrupt the text. Otherwise the
- * segment is located by search, and a second occurrence makes the
- * location ambiguous: on QQ both the sender nick and the body are
- * attacker-controlled, so a nick equal to the body would put the first
- * occurrence inside the sender tag, leaving the prefix on the dispatched
- * message and corrupting the tag. Ambiguity fails closed rather than
- * picking one.
+ * before use so a stale one cannot corrupt the text. Without an offset, a
+ * trailing segment is preferred for adapters that append the user body after
+ * sender context. Other duplicate occurrences are ambiguous: on QQ both the
+ * sender nick and the body are attacker-controlled, so guessing could splice
+ * inside the sender tag. Ambiguity fails closed rather than picking one.
  */
 function locateDisplayText(
   envelope: Envelope,
@@ -53,6 +51,9 @@ function locateDisplayText(
   const offset = envelope.displayTextOffset;
   if (offset !== undefined && envelope.text.startsWith(displayText, offset)) {
     return offset;
+  }
+  if (offset === undefined && envelope.text.endsWith(displayText)) {
+    return envelope.text.length - displayText.length;
   }
   const first = envelope.text.indexOf(displayText);
   if (first === -1) return -1;
@@ -74,27 +75,21 @@ export function applyMessagePrefix(
   const sourceText = prefixText ?? displayText ?? envelope.text;
   const stripped = stripMessagePrefix(sourceText, prefix);
   if (stripped === undefined) return false;
-  if (prefixText !== undefined) envelope.messagePrefixText = stripped;
 
   if (displayText === undefined) {
+    if (prefixText !== undefined) envelope.messagePrefixText = stripped;
     envelope.text = stripped;
     return true;
   }
 
+  const at = locateDisplayText(envelope, displayText);
+  if (at === 'ambiguous' || at === -1) return false;
+
+  if (prefixText !== undefined) envelope.messagePrefixText = stripped;
   envelope.displayText = stripped;
-  if (envelope.text === displayText) {
-    envelope.text = stripped;
-  } else if (envelope.text.endsWith(displayText)) {
-    envelope.text = envelope.text.slice(0, -displayText.length) + stripped;
-  } else {
-    const at = locateDisplayText(envelope, displayText);
-    if (at === 'ambiguous') return false;
-    envelope.text =
-      at === -1
-        ? stripped
-        : envelope.text.slice(0, at) +
-          stripped +
-          envelope.text.slice(at + displayText.length);
-  }
+  envelope.text =
+    envelope.text.slice(0, at) +
+    stripped +
+    envelope.text.slice(at + displayText.length);
   return true;
 }

@@ -4453,6 +4453,30 @@ describe('DingtalkChannel quoted media', () => {
     expect(envelope.syntheticText).toBe(true);
   });
 
+  it('marks readable chat records as user text and exempts only the empty placeholder', async () => {
+    const readable = createChannel({ messagePrefix: '/review' });
+    sendDirectMedia(readable, 'chatRecord', {
+      chatRecord: [{ senderName: 'Alice', content: 'inspect production' }],
+    });
+
+    await vi.waitFor(() => {
+      expect(readable.handleInbound).toHaveBeenCalledOnce();
+    });
+    const readableEnvelope = vi.mocked(readable.handleInbound).mock
+      .calls[0]![0];
+    expect(readableEnvelope.syntheticText).toBeUndefined();
+
+    const empty = createChannel({ messagePrefix: '/review' });
+    sendDirectMedia(empty, 'chatRecord', {});
+
+    await vi.waitFor(() => {
+      expect(empty.handleInbound).toHaveBeenCalledOnce();
+    });
+    const emptyEnvelope = vi.mocked(empty.handleInbound).mock.calls[0]![0];
+    expect(emptyEnvelope.text).toBe('(chat record)');
+    expect(emptyEnvelope.syntheticText).toBe(true);
+  });
+
   it.each([
     ['an empty rich-text message', 'richText', { richText: [] }],
     ['a picture without a download code', 'picture', {}],

@@ -426,6 +426,64 @@ describe('group sender-name sanitization', () => {
     expect(env.alreadyPrefixed).toBeUndefined();
   });
 
+  it('keeps another member mention display-only for an unprefixed group slash command', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-slash-other-mention',
+      group_openid: 'grp-1',
+      content: '<@OPENID_OTHER> /clear',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toBe('/clear');
+    expect(env.displayText).toBe('<@OPENID_OTHER> /clear');
+  });
+
+  it('keeps a sanitizer-shaped group command as attributed prose', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-sanitized-command-group',
+      group_openid: 'grp-1',
+      content: '[/clear] now',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toMatch(/: \/clear now$/);
+    expect(env.alreadyPrefixed).toBe(true);
+  });
+
+  it('keeps a sanitizer-shaped C2C command as attributed prose', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+
+    (ch as unknown as { handleC2C: (event: unknown) => void }).handleC2C({
+      id: 'evt-sanitized-command-c2c',
+      content: '[/clear] now',
+      author: { username: 'Alice', id: 'uid', user_openid: 'user-openid' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toMatch(/: \/clear now$/);
+    expect(env.alreadyPrefixed).toBe(true);
+  });
+
   it('recognizes a slash command after the configured message prefix', () => {
     vi.useFakeTimers();
     const ch = makeChannel('review:');
@@ -447,6 +505,88 @@ describe('group sender-name sanitization', () => {
     };
     expect(env.text).toBe('review: /help');
     expect(env.alreadyPrefixed).toBeUndefined();
+  });
+
+  it('keeps a tag-shaped group prefix authoritative across prompt sanitization', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('[review]');
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-tag-prefix-group',
+      group_openid: 'grp-1',
+      content: '[review] hello',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.displayText).toBe('review hello');
+    expect(env.messagePrefixText).toBe('[review] hello');
+    expect(env.text).toMatch(/: review hello$/);
+  });
+
+  it('keeps a tag-shaped C2C prefix authoritative across prompt sanitization', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('[review]');
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+
+    (ch as unknown as { handleC2C: (event: unknown) => void }).handleC2C({
+      id: 'evt-tag-prefix-c2c',
+      content: '[review] hello',
+      author: { username: 'Alice', id: 'uid', user_openid: 'user-openid' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.displayText).toBe('review hello');
+    expect(env.messagePrefixText).toBe('[review] hello');
+    expect(env.text).toMatch(/: review hello$/);
+  });
+
+  it('does not accept a group prefix manufactured by prompt sanitization', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('review');
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-sanitized-prefix-group',
+      group_openid: 'grp-1',
+      content: '[r]eview hello',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.displayText).toBe('review hello');
+    expect(env.messagePrefixText).toBe('[r]eview hello');
+  });
+
+  it('does not restore another member mention in a prefixed group slash command', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel('!ai');
+    const inbound = vi.fn().mockResolvedValue(undefined);
+    (ch as unknown as { handleInbound: typeof inbound }).handleInbound =
+      inbound;
+    (ch as unknown as { saveQQState: () => void }).saveQQState = () => {};
+
+    (ch as unknown as { handleGroup: (event: unknown) => void }).handleGroup({
+      id: 'evt-prefixed-compact',
+      group_openid: 'grp-1',
+      content: '!ai /compact <@OPENID_OTHER>',
+      author: { username: 'Alice', id: 'uid', user_openid: 'uo' },
+    });
+
+    const env = inbound.mock.calls[0][0] as Envelope;
+    expect(env.text).toBe('!ai /compact');
+    expect(env.displayText).toBe('!ai /compact');
+    expect(env.messagePrefixText).toBe('!ai /compact');
+    expect(env.text).not.toContain('OPENID_OTHER');
   });
 
   it('audits the command that ran, not the configured prefix', () => {

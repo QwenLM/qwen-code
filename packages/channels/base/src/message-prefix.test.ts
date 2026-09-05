@@ -117,6 +117,17 @@ describe('applyMessagePrefix', () => {
     expect(applyMessagePrefix(input, 'review:')).toBe(false);
   });
 
+  it('uses the trailing display segment without an adapter offset', () => {
+    const input = envelope({
+      text: '[atMention=true] [review: inspect]: review: inspect',
+      displayText: 'review: inspect',
+      alreadyPrefixed: true,
+    });
+
+    expect(applyMessagePrefix(input, 'review:')).toBe(true);
+    expect(input.text).toBe('[atMention=true] [review: inspect]: inspect');
+  });
+
   it('uses the adapter-normalized prefix text without guessing mention boundaries', () => {
     const input = envelope({
       text: '@Alice Smith /review inspect this',
@@ -128,6 +139,45 @@ describe('applyMessagePrefix', () => {
     expect(input.text).toBe('inspect this');
     expect(input.displayText).toBe('inspect this');
     expect(input.messagePrefixText).toBe('inspect this');
+  });
+
+  it('matches an unsanitized prefix source while splicing sanitized display text', () => {
+    const input = envelope({
+      text: '[atMention=true] [Alice]: review hello',
+      displayText: 'review hello',
+      displayTextOffset: '[atMention=true] [Alice]: '.length,
+      messagePrefixText: '[review] hello',
+      alreadyPrefixed: true,
+    });
+
+    expect(applyMessagePrefix(input, '[review]')).toBe(true);
+    expect(input.text).toBe('[atMention=true] [Alice]: hello');
+    expect(input.displayText).toBe('hello');
+  });
+
+  it('rejects a prefix manufactured only by display sanitization', () => {
+    const input = envelope({
+      text: '[atMention=true] [Alice]: review hello',
+      displayText: 'review hello',
+      displayTextOffset: '[atMention=true] [Alice]: '.length,
+      messagePrefixText: '[r]eview hello',
+      alreadyPrefixed: true,
+    });
+
+    expect(applyMessagePrefix(input, 'review')).toBe(false);
+    expect(input.text).toBe('[atMention=true] [Alice]: review hello');
+  });
+
+  it('strips a reconciled slash envelope without restoring removed mentions', () => {
+    const input = envelope({
+      text: '!ai /compact',
+      displayText: '!ai /compact',
+      messagePrefixText: '!ai /compact',
+    });
+
+    expect(applyMessagePrefix(input, '!ai')).toBe(true);
+    expect(input.text).toBe('/compact');
+    expect(input.displayText).toBe('/compact');
   });
 
   it('falls back to the search when the adapter offset does not fit', () => {
@@ -144,6 +194,33 @@ describe('applyMessagePrefix', () => {
     expect(applyMessagePrefix(input, 'review:')).toBe(true);
     expect(input.text).toBe(
       '[atMention=false] [Alice]: inspect this\n机器人 OPENID: BOT',
+    );
+  });
+
+  it('refuses an absent display segment without mutating the envelope', () => {
+    const input = envelope({
+      text: '!ai /compact',
+      displayText: '!ai /compact <@other>',
+      messagePrefixText: '!ai /compact <@other>',
+    });
+
+    expect(applyMessagePrefix(input, '!ai')).toBe(false);
+    expect(input.text).toBe('!ai /compact');
+    expect(input.displayText).toBe('!ai /compact <@other>');
+    expect(input.messagePrefixText).toBe('!ai /compact <@other>');
+  });
+
+  it('uses an authoritative offset before a matching trailing segment', () => {
+    const input = envelope({
+      text: '[atMention=false] [Alice]: OPENID: BOT1D\n机器人 OPENID: BOT1D',
+      displayText: 'OPENID: BOT1D',
+      displayTextOffset: '[atMention=false] [Alice]: '.length,
+      alreadyPrefixed: true,
+    });
+
+    expect(applyMessagePrefix(input, 'OPENID:')).toBe(true);
+    expect(input.text).toBe(
+      '[atMention=false] [Alice]: BOT1D\n机器人 OPENID: BOT1D',
     );
   });
 

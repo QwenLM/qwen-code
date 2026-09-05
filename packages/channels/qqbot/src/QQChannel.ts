@@ -2452,6 +2452,7 @@ export class QQChannel extends ChannelBase {
     text: string;
     displayText: string;
     displayTextOffset?: number;
+    messagePrefixText?: string;
     senderName: string;
   } | null {
     // Keep identity values out of the display-name position. In particular,
@@ -2496,20 +2497,22 @@ export class QQChannel extends ChannelBase {
     const effectiveIsAtBot = forceAtMention ?? isAtBot;
 
     const configuredPrefix = this.configuredMessagePrefix();
-    // With no prefix configured, slash detection runs on the mention-free
-    // text as it always has: another member's `<@...>` ahead of the
-    // command must not make it read as prose. With a prefix, the display
-    // text is the right source -- `stripMessagePrefix` skips leading
-    // mentions itself, and what decides "command" is the payload after
-    // the prefix, not the raw text.
+    // Keep prefix matching on the pre-sanitized text: prompt sanitization can
+    // peel a leading bracket tag and must neither create nor destroy a match.
+    // Slash commands still discard mention tokens before dispatch.
+    const prefixSourceText =
+      this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText;
     const strippedCommandText = configuredPrefix
-      ? stripMessagePrefix(safeDisplayText, configuredPrefix)
+      ? stripMessagePrefix(prefixSourceText, configuredPrefix)
       : safeCleanText;
-    const commandText = strippedCommandText ?? safeCleanText;
+    const rawCommandText = (strippedCommandText ?? safeCleanText)
+      .replace(/<@[^>]{1,64}>/g, '')
+      .trim();
     const isSlash =
       effectiveIsAtBot &&
       strippedCommandText !== undefined &&
-      commandText.startsWith('/');
+      rawCommandText.startsWith('/');
+    const commandText = sanitizePromptText(rawCommandText);
 
     // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
     // self-echoes or other bot messages. Instead, tag with [bot] prefix so the
@@ -2584,15 +2587,22 @@ export class QQChannel extends ChannelBase {
     // whole `[atMention=…] [sender]:` wrapper and the OPENID suffix.
     // With `allowMention` off, every mention token is dropped from both
     // rather than leaving raw openids in the prompt.
-    // This is also what the base filter matches the prefix against, so a
-    // `<@...>` the user typed after the prefix survives into the prompt --
-    // `stripMessagePrefix` consumes the leading mention run and nothing
-    // else.
+    // Prefix matching uses `messagePrefixText` below while `displayText`
+    // remains the sanitized segment that is safe to splice into the prompt.
+    const payloadText = isSlash
+      ? commandText
+      : sanitizePromptText(strippedCommandText ?? prefixSourceText);
+    const messagePrefixText =
+      configuredPrefix && strippedCommandText !== undefined
+        ? `${configuredPrefix} ${payloadText}`
+        : configuredPrefix
+          ? prefixSourceText
+          : undefined;
     const displayText = sanitizePromptText(
-      this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText,
+      isSlash && messagePrefixText ? messagePrefixText : prefixSourceText,
     );
     const text = isSlash
-      ? sanitizePromptText(safeCleanText)
+      ? sanitizePromptText(messagePrefixText ?? safeCleanText)
       : `${head}${displayText}${suffixFromBotOpenId}`;
     // Where that segment sits, so the filter splices at an exact range
     // instead of searching: both the nick and the body are
@@ -2609,6 +2619,7 @@ export class QQChannel extends ChannelBase {
       text,
       displayText,
       ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
+      ...(messagePrefixText !== undefined ? { messagePrefixText } : {}),
       senderName,
     };
   }
@@ -2649,20 +2660,31 @@ export class QQChannel extends ChannelBase {
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
-    const commandText =
-      stripMessagePrefix(safeContent, this.configuredMessagePrefix()) ??
-      safeContent;
-    const isSlash = commandText.startsWith('/');
+    const configuredPrefix = this.configuredMessagePrefix();
+    const strippedCommandText = configuredPrefix
+      ? stripMessagePrefix(safeContent, configuredPrefix)
+      : safeContent;
+    const rawCommandText = strippedCommandText ?? safeContent;
+    const isSlash = rawCommandText.startsWith('/');
+    const commandText = sanitizePromptText(rawCommandText);
+    const displayText = sanitizePromptText(safeContent);
+    const messagePrefixText =
+      configuredPrefix && strippedCommandText !== undefined
+        ? `${configuredPrefix} ${commandText}`
+        : configuredPrefix
+          ? safeContent
+          : undefined;
     const text = isSlash
-      ? sanitizePromptText(safeContent)
-      : `[atMention=true] [${safeName}]: ${sanitizePromptText(safeContent)}`;
+      ? displayText
+      : `[atMention=true] [${safeName}]: ${displayText}`;
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
       senderName,
       chatId,
       text,
-      displayText: sanitizePromptText(safeContent),
+      displayText,
+      ...(messagePrefixText !== undefined ? { messagePrefixText } : {}),
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
@@ -2759,6 +2781,9 @@ export class QQChannel extends ChannelBase {
       text,
       displayText,
       ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
+      ...(result.messagePrefixText !== undefined
+        ? { messagePrefixText: result.messagePrefixText }
+        : {}),
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
@@ -2913,6 +2938,9 @@ export class QQChannel extends ChannelBase {
       text,
       displayText,
       ...(displayTextOffset !== undefined ? { displayTextOffset } : {}),
+      ...(result.messagePrefixText !== undefined
+        ? { messagePrefixText: result.messagePrefixText }
+        : {}),
       senderId,
       senderName,
       messageId: event.id,
