@@ -466,6 +466,22 @@ describe('ExportTranscriptDocument browser gate', () => {
     await expect
       .poll(() => page.locator('body').getAttribute('data-render-complete'))
       .toBe('true');
+    expect(await page.locator('[data-document-metadata]').isVisible()).toBe(
+      true,
+    );
+    const expandAll = page.locator('[data-document-expand-all]');
+    const collapseAll = page.locator('[data-document-collapse-all]');
+    const themeToggle = page.locator('[data-document-theme-toggle]');
+    expect(await expandAll.isDisabled()).toBe(true);
+    expect(await collapseAll.isEnabled()).toBe(true);
+    expect(await themeToggle.isVisible()).toBe(true);
+    await collapseAll.click();
+    expect(await expandAll.isEnabled()).toBe(true);
+    expect(await collapseAll.isDisabled()).toBe(true);
+    await expandAll.click();
+    expect(await expandAll.isDisabled()).toBe(true);
+    await themeToggle.click();
+    expect(await page.locator('html').getAttribute('class')).toContain('light');
     await expect
       .poll(() => page.locator('div[class*="mermaidInline"] svg').count())
       .toBeGreaterThan(0);
@@ -596,7 +612,7 @@ describe('ExportTranscriptDocument browser gate', () => {
     browser = await chromium.launch({ headless: true });
     for (const invalidDocument of invalidDocuments) {
       const page = await browser.newPage();
-      await installNetworkAndCspProbe(page);
+      const probe = await installNetworkAndCspProbe(page);
       await page.setContent(replaceDocumentEnvelope(html, invalidDocument), {
         waitUntil: 'load',
       });
@@ -606,11 +622,18 @@ describe('ExportTranscriptDocument browser gate', () => {
       expect(await page.getByRole('alert').textContent()).toContain(
         'Unable to open this chat export',
       );
+      expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
+      expect(probe.unexpectedRequests).toHaveLength(
+        expectedNetwork.unexpectedRequests,
+      );
+      expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
+        expectedNetwork.cspViolations,
+      );
       await page.close();
     }
   });
 
-  it('fails closed when the CDN renderer is unavailable', async () => {
+  it('fails closed when the CDN renderer is unavailable or fails to execute', async () => {
     const document = createExportTranscriptDocumentV1(
       [record('cdn-error', null, 'user', 'CDN error probe')],
       {
@@ -628,17 +651,29 @@ describe('ExportTranscriptDocument browser gate', () => {
     );
 
     browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
-    await page.route('**/*', (route) => route.abort('blockedbyclient'));
-    await page.setContent(renderExportTranscriptDocumentToHtml(document), {
-      waitUntil: 'load',
-    });
-    await expect
-      .poll(() => page.locator('body').getAttribute('data-render-complete'))
-      .toBe('error');
-    expect(await page.getByRole('alert').textContent()).toContain(
-      'Unable to load this chat export',
-    );
+    for (const rendererBody of [null, 'throw new Error("broken renderer");']) {
+      const page = await browser.newPage();
+      await page.route('**/*', async (route) => {
+        if (rendererBody && route.request().url() === RENDERER_URL) {
+          await route.fulfill({
+            body: rendererBody,
+            contentType: 'text/javascript',
+          });
+        } else {
+          await route.abort('blockedbyclient');
+        }
+      });
+      await page.setContent(renderExportTranscriptDocumentToHtml(document), {
+        waitUntil: 'load',
+      });
+      await expect
+        .poll(() => page.locator('body').getAttribute('data-render-complete'))
+        .toBe('error');
+      expect(await page.getByRole('alert').textContent()).toContain(
+        'Unable to load this chat export',
+      );
+      await page.close();
+    }
   });
 
   it('runs the real HTML export entry point with its pinned CDN runtime', async () => {

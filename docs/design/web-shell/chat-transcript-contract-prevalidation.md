@@ -578,6 +578,7 @@ document mode 必须：
 ### 10.9 CSP 与登记网络
 
 HTML 使用与 CLI build 精确绑定的 renderer。禁止 `latest`、版本范围和运行时远程解析。
+只有已将 renderer asset 发布到 npm 的 CLI 版本才能打开导出；两次发布之间的 source build 按设计 fail closed。
 
 最低安全要求：
 

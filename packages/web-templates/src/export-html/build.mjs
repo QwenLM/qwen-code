@@ -37,14 +37,13 @@ if (!reactVersion || !reactDomVersion) {
 const cdnBaseUrl = 'https://cdn.jsdelivr.net/npm';
 const documentRendererUrl = `${cdnBaseUrl}/@qwen-code/qwen-code@${exportTranscriptRendererPackageVersion}/export-transcript-document.js`;
 const rendererVersionPlaceholder = '__QWEN_RENDERER_BUILD_ID__';
-const documentImportMap = JSON.stringify({
-  imports: {
-    react: `${cdnBaseUrl}/react@${reactVersion}/+esm`,
-    'react/jsx-runtime': `${cdnBaseUrl}/react@${reactVersion}/jsx-runtime/+esm`,
-    'react-dom': `${cdnBaseUrl}/react-dom@${reactDomVersion}/+esm`,
-    'react-dom/client': `${cdnBaseUrl}/react-dom@${reactDomVersion}/client/+esm`,
-  },
-});
+const documentImports = {
+  react: `${cdnBaseUrl}/react@${reactVersion}/+esm`,
+  'react/jsx-runtime': `${cdnBaseUrl}/react@${reactVersion}/jsx-runtime/+esm`,
+  'react-dom': `${cdnBaseUrl}/react-dom@${reactDomVersion}/+esm`,
+  'react-dom/client': `${cdnBaseUrl}/react-dom@${reactDomVersion}/client/+esm`,
+};
+const documentImportMap = JSON.stringify({ imports: documentImports });
 
 const documentBuildResult = await build({
   entryPoints: [join(srcDir, 'document-main.tsx')],
@@ -57,7 +56,7 @@ const documentBuildResult = await build({
   target: ['chrome120'],
   legalComments: 'none',
   loader: { '.css': 'css' },
-  external: ['react', 'react/*', 'react-dom', 'react-dom/*'],
+  external: Object.keys(documentImports),
   define: {
     'process.env.NODE_ENV': '"production"',
     __EXPORT_TRANSCRIPT_RENDERER_VERSION__: JSON.stringify(
@@ -99,6 +98,8 @@ const documentTemplate = await readFile(
   'utf8',
 );
 
+// Function-form replacers preserve `$&`/`$'`/`` $` `` sequences in generated
+// CSS and JSON instead of interpreting them as replacement patterns.
 const documentHtmlOutput = documentTemplate
   .replace('__DOCUMENT_INLINE_CSS__', () => documentCssBundle.text.trim())
   .replace('__DOCUMENT_IMPORT_MAP__', () => documentImportMap)
