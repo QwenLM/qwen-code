@@ -533,6 +533,8 @@ export default {
   'Focus mode disabled.': 'Mode focus desactivat.',
   '1 tool call hidden (/focus to show)':
     '1 crida d’eina amagada (/focus per mostrar)',
+  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
+    'Eines: {{count}}, errors: {{failed}} (Ctrl+O per als detalls)',
   '{{count}} tool calls hidden (/focus to show)':
     '{{count}} crides d’eines amagades (/focus per mostrar)',
   'Show model-specific usage statistics.':

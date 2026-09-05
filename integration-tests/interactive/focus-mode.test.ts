@@ -41,6 +41,86 @@ describe.skipIf(pickE2eRenderer() !== 'ink')('Focus mode', () => {
   });
 
   it.each([true, false])(
+    'summarizes completed failed tools retroactively (terminal buffer: %s)',
+    async (useTerminalBuffer) => {
+      await rig.setup(`focus-mode-errors-${useTerminalBuffer}`, {
+        settings: {
+          general: { enableAutoUpdate: false },
+          memory: {
+            enableManagedAutoMemory: false,
+            enableManagedAutoDream: false,
+          },
+          ui: { enableFollowupSuggestions: false, useTerminalBuffer },
+          security: { auth: { selectedType: 'openai' } },
+        },
+      });
+      const qwenHome = join(rig.testDir!, 'isolated-home');
+      await mkdir(qwenHome);
+      server = await startFakeOpenAIServer(
+        ({ requestIndex }) =>
+          requestIndex === 0
+            ? {
+                toolCalls: [
+                  fakeToolCall('run_shell_command', {
+                    command: 'printf FOCUS_ERROR_DETAILS; exit 7',
+                  }),
+                ],
+              }
+            : { content: 'FOCUS_ERROR_HANDLED' },
+        fakeServerHostOptions(),
+      );
+      session = await InteractiveSession.start({
+        cwd: rig.testDir!,
+        cols: 140,
+        rows: 60,
+        env: {
+          QWEN_CODE_LANG: 'en',
+          QWEN_HOME: qwenHome,
+          QWEN_RUNTIME_DIR: join(rig.testDir!, 'runtime'),
+        },
+        args: [
+          '--approval-mode',
+          'yolo',
+          '--auth-type',
+          'openai',
+          '--openai-api-key',
+          'fake-key',
+          '--openai-base-url',
+          server.baseUrl,
+          '--model',
+          'fake-model',
+        ],
+      });
+      await session.idle();
+      await session.send('Run the deterministic failure fixture.');
+      await session.waitFor('FOCUS_ERROR_HANDLED');
+      await session.idle();
+      expect(await session.screen()).toContain('FOCUS_ERROR_DETAILS');
+      expect(JSON.stringify(server.requests[1]!.body)).toContain(
+        'FOCUS_ERROR_DETAILS',
+      );
+
+      await session.send('/focus');
+      await session.idle();
+      const focused = await session.screen();
+      expect(focused).not.toContain('FOCUS_ERROR_DETAILS');
+      expect(focused).toContain('Tools: 1, failed: 1 (Ctrl+O for details)');
+      expect(focused).toContain('FOCUS_ERROR_HANDLED');
+
+      session.sendKey('\u000f');
+      await session.idle();
+      expect(await session.screen()).toContain('FOCUS_ERROR_DETAILS');
+      session.sendKey('\u000f');
+      await session.idle();
+      expect(await session.screen()).not.toContain('FOCUS_ERROR_DETAILS');
+      await session.send('/focus');
+      await session.idle();
+      expect(await session.screen()).toContain('FOCUS_ERROR_DETAILS');
+      expect(server.requests).toHaveLength(2);
+    },
+  );
+
+  it.each([true, false])(
     'reprojects completed history and persists the preference (terminal buffer: %s)',
     async (useTerminalBuffer) => {
       await rig.setup(`focus-mode-${useTerminalBuffer}`, {

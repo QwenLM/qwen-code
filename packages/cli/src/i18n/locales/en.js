@@ -789,6 +789,8 @@ export default {
     'Focus mode enabled. Reasoning and completed tool calls are hidden. Run /focus again to disable, or press Ctrl+O for the full transcript.',
   'Focus mode disabled.': 'Focus mode disabled.',
   '1 tool call hidden (/focus to show)': '1 tool call hidden (/focus to show)',
+  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
+    'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)',
   '{{count}} tool calls hidden (/focus to show)':
     '{{count}} tool calls hidden (/focus to show)',
   'Show usage statistics dashboard.': 'Show usage statistics dashboard.',

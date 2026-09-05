@@ -746,6 +746,8 @@ export default {
     '專注模式已開啟。推理內容和已完成的工具呼叫將被隱藏。再次執行 /focus 可關閉，或按 Ctrl+O 檢視完整記錄。',
   'Focus mode disabled.': '專注模式已關閉。',
   '1 tool call hidden (/focus to show)': '已隱藏 1 個工具呼叫（/focus 顯示）',
+  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
+    '工具：{{count}}，失敗：{{failed}}（Ctrl+O 檢視詳情）',
   '{{count}} tool calls hidden (/focus to show)':
     '已隱藏 {{count}} 個工具呼叫（/focus 顯示）',
   'Show model-specific usage statistics.': '顯示模型相關的使用統計資訊',

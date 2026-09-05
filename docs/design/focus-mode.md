@@ -4,7 +4,7 @@
 
 Compact tool rendering still leaves tool groups and reasoning in the main
 transcript. Focus mode provides a persistent, optional reading view that hides
-reasoning and summarizes successful tool groups, while retaining the original
+reasoning and summarizes completed tool groups, while retaining the original
 history for the full transcript and exports.
 
 ## Design
@@ -21,8 +21,9 @@ synchronizes the provider when `/config` changes the effective setting.
 
 History rendering hides thought headers and thought continuation rows in focus
 mode. A committed, nonempty tool group becomes one translated summary line only
-when all tools succeeded, the group was not user initiated, and no tool contains
-a subagent execution result. Running, cancelled, failed, and confirmation-waiting
+when all tools succeeded or failed, the group was not user initiated, and no tool
+contains a subagent execution result. Failed groups show total and failure counts
+without commands, arguments or output. Running, cancelled and confirmation-waiting
 tools remain visible. User messages and assistant answers are unchanged.
 
 Ctrl+O uses `fullDetail` and displays the original thoughts and tool groups.

@@ -540,6 +540,8 @@ export default {
   'Focus mode disabled.': 'Mode focus désactivé.',
   '1 tool call hidden (/focus to show)':
     '1 appel d’outil masqué (/focus pour afficher)',
+  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
+    'Outils : {{count}}, échecs : {{failed}} (Ctrl+O pour les détails)',
   '{{count}} tool calls hidden (/focus to show)':
     '{{count}} appels d’outils masqués (/focus pour afficher)',
   'Show model-specific usage statistics.':

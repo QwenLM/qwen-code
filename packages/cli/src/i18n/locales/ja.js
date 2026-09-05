@@ -373,6 +373,8 @@ export default {
   'Focus mode disabled.': 'フォーカスモードが無効になりました。',
   '1 tool call hidden (/focus to show)':
     '1 件のツール呼び出しを非表示（/focus で表示）',
+  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
+    'ツール: {{count}}、失敗: {{failed}}（Ctrl+O で詳細）',
   '{{count}} tool calls hidden (/focus to show)':
     '{{count}} 件のツール呼び出しを非表示（/focus で表示）',
   'exit the cli': 'CLIを終了',

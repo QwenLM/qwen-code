@@ -1197,7 +1197,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: false,
         description:
-          'Hide reasoning output and collapse completed successful tool call groups into a single summary line to reduce transcript noise. Tool groups with errors or pending confirmations stay fully visible. Toggle at runtime with /focus; Ctrl+O still opens the full transcript.',
+          'Hide reasoning output and summarize completed tool call groups, including failures, in a short line. Pending confirmations stay fully visible. Toggle at runtime with /focus; Ctrl+O opens the full transcript.',
         showInDialog: true,
       },
       useTerminalBuffer: {

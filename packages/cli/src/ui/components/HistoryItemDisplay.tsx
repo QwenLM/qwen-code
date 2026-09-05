@@ -308,19 +308,23 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
     return null;
   }
 
-  // Collapse only finalized, fully-successful groups: errors, confirmations,
-  // cancellations, running tools (incl. focused embedded shells) and
-  // user-initiated batches all fail the every-Success / !isPending checks and
-  // stay expanded, matching ToolGroupMessage's forceExpandAll exceptions.
-  // Subagent groups stay visible so their scrollback summaries land.
+  // Keep active interactions and subagent summaries visible. Failed tools
+  // retain their status in the summary; Ctrl+O restores their full output.
   const collapseToolGroup =
     focusActive &&
     item.type === 'tool_group' &&
     !isPending &&
     !item.isUserInitiated &&
     item.tools.length > 0 &&
-    item.tools.every((tool) => tool.status === ToolCallStatus.Success) &&
+    item.tools.every(
+      (tool) =>
+        tool.status === ToolCallStatus.Success ||
+        tool.status === ToolCallStatus.Error,
+    ) &&
     !item.tools.some(isSubagentToolCall);
+  const failedToolCount = collapseToolGroup
+    ? item.tools.filter((tool) => tool.status === ToolCallStatus.Error).length
+    : 0;
 
   return (
     <Box
@@ -457,14 +461,24 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         (collapseToolGroup ? (
           <Box flexDirection="row">
             <Box width={2} flexShrink={0}>
-              <Text dimColor>{TOOL_STATUS.SUCCESS}</Text>
+              <Text dimColor>
+                {failedToolCount > 0 ? TOOL_STATUS.ERROR : TOOL_STATUS.SUCCESS}
+              </Text>
             </Box>
             <Text dimColor>
-              {itemForDisplay.tools.length === 1
-                ? t('1 tool call hidden (/focus to show)')
-                : t('{{count}} tool calls hidden (/focus to show)', {
-                    count: String(itemForDisplay.tools.length),
-                  })}
+              {failedToolCount > 0
+                ? t(
+                    'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)',
+                    {
+                      count: String(itemForDisplay.tools.length),
+                      failed: String(failedToolCount),
+                    },
+                  )
+                : itemForDisplay.tools.length === 1
+                  ? t('1 tool call hidden (/focus to show)')
+                  : t('{{count}} tool calls hidden (/focus to show)', {
+                      count: String(itemForDisplay.tools.length),
+                    })}
             </Text>
           </Box>
         ) : (

@@ -789,6 +789,8 @@ export default {
     '专注模式已开启。推理内容和已完成的工具调用将被隐藏。再次运行 /focus 可关闭，或按 Ctrl+O 查看完整记录。',
   'Focus mode disabled.': '专注模式已关闭。',
   '1 tool call hidden (/focus to show)': '已隐藏 1 个工具调用（/focus 显示）',
+  'Tools: {{count}}, failed: {{failed}} (Ctrl+O for details)':
+    '工具：{{count}}，失败：{{failed}}（Ctrl+O 查看详情）',
   '{{count}} tool calls hidden (/focus to show)':
     '已隐藏 {{count}} 个工具调用（/focus 显示）',
   'Show usage statistics dashboard.': '显示使用统计面板。',
