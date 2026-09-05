@@ -443,8 +443,8 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: undefined as string | undefined,
         description:
-          'Name of the output style that shapes how responses are written, for example "Concise" or "Explanatory". Leave unset for the default style. Change it with /output-style.',
-        // The style list will grow user/project-defined entries; the dedicated
+          'Name of the output style that shapes how responses are written: a built-in such as "Concise" or "Explanatory", or a custom style\'s name — its frontmatter `name`, defaulting to the file name without ".md" — from ~/.qwen/output-styles or .qwen/output-styles. Leave unset for the default style. Change it with /output-style. Only the built-ins are available in --bare and --safe-mode.',
+        // The style list includes user/project-defined entries; the dedicated
         // /output-style picker owns selection rather than a static enum here.
         showInDialog: false,
       },
@@ -1218,6 +1218,16 @@ const SETTINGS_SCHEMA = {
         default: true,
         description:
           'Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).',
+        showInDialog: true,
+      },
+      showToolCallArgs: {
+        type: 'boolean',
+        label: 'Show Tool Call Arguments',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Render tool calls on their own line with their raw arguments inline, instead of the type-based compact summary that folds read/search/list batches into "Read 3 files". Useful when debugging MCP integrations or tool schemas. Applies wherever the arguments are available: live, resumed, agent-view and speculated turns. The row is capped at 2 wrapped lines (and never more than 1000 characters) and truncated with a `+N chars` marker; press Ctrl+O for the complete payload. Groups of running parallel subagents keep their compact roster, and daemon-attached sessions carry no arguments, so both keep the compact view — press Ctrl+O there. Does not change result-output truncation.',
         showInDialog: true,
       },
       shellOutputMaxLines: {

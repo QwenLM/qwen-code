@@ -89,10 +89,18 @@ export async function gotoSession(
   scenario: WebShellDaemonScenario,
   daemon: MockDaemonController,
   theme: VisualTheme,
+  /**
+   * Extra query parameters for views the app addresses by URL rather than by
+   * click — `{ view: 'cockpit' }` opens the Session Workflow dependency
+   * canvas. Kept here so the URL shape, the theme priming and the theme
+   * assertion stay in one place instead of being re-implemented per spec.
+   */
+  search: Readonly<Record<string, string>> = {},
 ): Promise<void> {
   await primeTheme(page, theme);
+  const query = new URLSearchParams({ theme, ...search });
   await page.goto(
-    `/session/${encodeURIComponent(scenario.sessionId)}?theme=${theme}`,
+    `/session/${encodeURIComponent(scenario.sessionId)}?${query.toString()}`,
   );
   await expect(page.locator('[data-web-shell-root]')).toBeVisible();
   await expect(page.locator('html')).toHaveClass(new RegExp(`theme-${theme}`));
