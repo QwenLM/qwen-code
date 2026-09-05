@@ -12799,6 +12799,11 @@ describe('CoreToolScheduler telemetry spans', () => {
       (completedCalls[0] as CompletedToolCall).response.executionStatus,
     ).toBe('cancelled');
     expect(spanRecord.spanAttributes).toHaveProperty('success', false);
+    const responseText = JSON.stringify(
+      (completedCalls[0] as CompletedToolCall).response.responseParts,
+    );
+    expect(responseText).toContain('User cancelled tool execution.');
+    expect(responseText).not.toContain('had already completed');
   });
 
   it('classifies an agent-shaped cooperative cancellation as cancelled', async () => {
@@ -12819,6 +12824,32 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(
       (completedCalls[0] as CompletedToolCall).response.executionStatus,
     ).toBe('cancelled');
+  });
+
+  it('classifies an internal agent cancellation without aborting the parent', async () => {
+    const abortController = new AbortController();
+    const agentAbortController = new AbortController();
+    const partialResult =
+      'Agent was cancelled after completing the first step.';
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      execute: vi.fn().mockImplementation(async () => {
+        agentAbortController.abort();
+        return {
+          llmContent: [{ text: partialResult }],
+          returnDisplay: 'Agent cancelled',
+          aborted: agentAbortController.signal.aborted,
+        };
+      }),
+    });
+
+    const completedCall = completedCalls[0] as CompletedToolCall;
+    expect(abortController.signal.aborted).toBe(false);
+    expect(completedCall.status).toBe('success');
+    expect(completedCall.response.executionStatus).toBe('cancelled');
+    expect(JSON.stringify(completedCall.response.responseParts)).toContain(
+      partialResult,
+    );
   });
 
   // tool.execution sub-span lifecycle assertions —

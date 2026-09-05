@@ -5088,7 +5088,8 @@ export class CoreToolScheduler {
         : toolResult.aborted
           ? 'cancelled'
           : 'success';
-      executionStatus = aborted ? 'cancelled' : settledExecutionStatus;
+      executionStatus =
+        aborted || toolResult.aborted ? 'cancelled' : settledExecutionStatus;
       executionSettled = true;
       if (execSpan) {
         const completedExecSpan = execSpan;
@@ -5109,8 +5110,10 @@ export class CoreToolScheduler {
       }
       if (aborted) {
         // PostToolUseFailure Hook
-        // `execute()` returned a result here, so the tool's work did finish.
-        let cancelMessage = TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
+        // Cooperative interruptions can resolve without completing the work.
+        let cancelMessage = toolResult.aborted
+          ? TOOL_CANCELLED_BEFORE_COMPLETION_MESSAGE
+          : TOOL_CANCELLED_AFTER_COMPLETION_MESSAGE;
         let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(

@@ -1546,11 +1546,12 @@ export class ShellExecutionService {
         const sniffChunks: Buffer[] = [];
         const error: Error | null = null;
         let exited = false;
-        // Set the moment performCancelKill actually proceeds (a cancel reached
-        // us before the shell exited). The finalizer reads THIS, not a late
+        // Set only when performCancelKill actually dispatches a kill.
+        // The finalizer reads THIS, not a late
         // abortSignal.aborted check, to decide tree-kill vs shell-pid-only — an
         // abort that arrives after a normal exit must not retro-flag the reap.
         let cancelKillDispatched = false;
+        let cancelAfterLeaderExit = false;
 
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
@@ -1868,6 +1869,11 @@ export class ShellExecutionService {
 
         const exitDisposable = ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
+            // Normal exits may intentionally leave background children alive.
+            const pendingCancel =
+              cancelAfterLeaderExit && isSignalTermination(signal ?? null)
+                ? performCancelKill(true)
+                : undefined;
             exited = true;
             abortSignal.removeEventListener('abort', abortHandler);
 
@@ -1876,6 +1882,7 @@ export class ShellExecutionService {
               let fullOutput = '';
 
               try {
+                await pendingCancel;
                 try {
                   render(true);
                 } catch (e) {
@@ -2310,11 +2317,22 @@ export class ShellExecutionService {
           }
         };
 
-        const performCancelKill = async (): Promise<void> => {
+        const performCancelKill = async (
+          afterLeaderExit = false,
+        ): Promise<void> => {
           if (!ptyProcess.pid || exited) return;
+          if (
+            !ShellExecutionService.isPtyActive(
+              afterLeaderExit ? -ptyProcess.pid : ptyProcess.pid,
+            )
+          ) {
+            cancelAfterLeaderExit =
+              os.platform() !== 'win32' && !afterLeaderExit;
+            return;
+          }
           // Record that a cancel — not a natural exit — drove this teardown, so
-          // the finalizer reap tree-kills. Guarded by `exited` above, so a late
-          // abort after a normal exit returns early and never sets this.
+          // the finalizer reap tree-kills. The liveness check also covers an
+          // exit whose onExit callback has not been delivered yet.
           cancelKillDispatched = true;
           if (os.platform() === 'win32') {
             // Tree-kill SYNCHRONOUSLY (spawnSync, like windowsStrategy.killPty):
@@ -2353,7 +2371,11 @@ export class ShellExecutionService {
               // Send SIGTERM first to allow graceful shutdown
               process.kill(-ptyProcess.pid, 'SIGTERM');
               await new Promise((res) => setTimeout(res, SIGKILL_TIMEOUT_MS));
-              if (!exited) {
+              if (
+                !exited ||
+                (afterLeaderExit &&
+                  ShellExecutionService.isPtyActive(-ptyProcess.pid))
+              ) {
                 // Escalate to SIGKILL if still running
                 process.kill(-ptyProcess.pid, 'SIGKILL');
               }
