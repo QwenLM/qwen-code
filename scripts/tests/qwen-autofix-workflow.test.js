@@ -348,6 +348,15 @@ function qwenResultLine({ result, errorMessage, isError = false }) {
   })}\n`;
 }
 
+function qwenInitLine({ model, version }) {
+  return `${JSON.stringify({
+    type: 'system',
+    subtype: 'init',
+    ...(model === undefined ? {} : { model }),
+    ...(version === undefined ? {} : { qwen_code_version: version }),
+  })}\n`;
+}
+
 function runAutofixRunner(args) {
   return spawnSync(process.execPath, [autofixRunnerScriptPath, ...args], {
     encoding: 'utf8',
@@ -10065,9 +10074,12 @@ exit 1
     // secret, so it is safe to echo into a public comment. Each reporting
     // step must plumb it in and render a footer that names Qwen Code and the
     // model, with an empty-variable fallback so the footer never renders a
-    // bare backtick pair.
+    // bare backtick pair. The footer prefers the model the session ACTUALLY
+    // ran: run-agent.mjs writes the stream-json init event's resolved model
+    // + CLI version to agent-model, and every read site allowlists the
+    // values (WORKDIR is agent-writable) before interpolating them.
     const footer =
-      'echo "🧠 Handled by **Qwen Code** · model/模型 \\`${MODEL_DISPLAY}\\`"';
+      'echo "🧠 Handled by **Qwen Code** · model/模型 \\`${MODEL_DISPLAY}\\`${CLI_DISPLAY}"';
     for (const step of [
       pushAndReportStep,
       reviewAddressReportStep,
@@ -10077,6 +10089,19 @@ exit 1
         "MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'",
       );
       expect(step).toContain('MODEL_DISPLAY="${MODEL:-default}"');
+      expect(step).toContain('if [[ -s "${WORKDIR}/agent-model" ]]; then');
+      expect(step).toContain(
+        'AGENT_MODEL="$(sed -n \'1p\' "${WORKDIR}/agent-model" | tr -cd \'A-Za-z0-9._:/+-\' | cut -c1-100)"',
+      );
+      expect(step).toContain(
+        'AGENT_CLI_VERSION="$(sed -n \'2p\' "${WORKDIR}/agent-model" | tr -cd \'A-Za-z0-9._+-\' | cut -c1-40)"',
+      );
+      expect(step).toContain(
+        '[[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"',
+      );
+      expect(step).toContain(
+        'CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \\`${AGENT_CLI_VERSION}\\`}"',
+      );
       expect(step).toContain(footer);
     }
     // Push-and-report carries BOTH the fixed and no-action bodies, so the
@@ -21152,6 +21177,69 @@ exit 0
 
       expect(result.status).not.toBe(0);
       expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+  });
+
+  it('records the resolved model and CLI version for the report footers', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      // The init event carries what the session ACTUALLY ran — the resolved
+      // model and the CLI version — which the footers prefer over the
+      // configured OPENAI_MODEL.
+      const stub = writeWorkdirStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+        )});`,
+        "writeFileSync(`${workdir}/address-summary.md`, 'summary\\n');",
+        'process.exit(0);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(join(dir, 'agent-model'), 'utf8')).toBe(
+        'qwen3-coder-plus\n0.22.0\n',
+      );
+    });
+  });
+
+  it('records the model even when the run dies before a verdict', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        `process.stdout.write(${JSON.stringify(
+          qwenInitLine({ model: 'qwen3-coder-plus', version: '0.22.0' }),
+        )});`,
+        "process.stderr.write('boom\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'Qwen failed during address-review',
+      );
+      // A crashed round is exactly when the diagnosis footer needs to name
+      // the model that died.
+      expect(readFileSync(join(dir, 'agent-model'), 'utf8')).toBe(
+        'qwen3-coder-plus\n0.22.0\n',
+      );
+    });
+  });
+
+  it('writes no agent-model when the stream never reached an init event', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('died at startup\\n');",
+        'process.exit(1);',
+      ]);
+
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      // No file at all, rather than an empty one: the read sites' -s test
+      // falls back to the configured MODEL.
+      expect(existsSync(join(dir, 'agent-model'))).toBe(false);
     });
   });
 

@@ -221,6 +221,11 @@ function runQwen(options, prompt) {
   let stdoutCarry = '';
   let discardingOversizedStdoutLine = false;
   let terminalResult;
+  // The stream's init event carries the RESOLVED model and the CLI version —
+  // what actually ran, versus the configured OPENAI_MODEL the workflow knows.
+  // finish() writes them to agent-model for the report footers.
+  let initModel = '';
+  let initVersion = '';
   let settled = false;
   let timedOut = false;
   let idleTimedOut = false;
@@ -262,6 +267,20 @@ function runQwen(options, prompt) {
         const event = JSON.parse(line);
         lastOutputAt = Date.now();
         if (event?.type === 'result') terminalResult = event;
+        // First init event wins; newlines are flattened so the sentinel file
+        // stays two lines (the read sites allowlist further).
+        if (
+          !initModel &&
+          event?.type === 'system' &&
+          event?.subtype === 'init' &&
+          typeof event.model === 'string'
+        ) {
+          initModel = event.model.split('\n')[0].slice(0, 200);
+          initVersion =
+            typeof event.qwen_code_version === 'string'
+              ? event.qwen_code_version.split('\n')[0].slice(0, 80)
+              : '';
+        }
         if (event?.type !== 'stream_event') {
           process.stdout.write(`${line}${terminated ? '\n' : ''}`);
         }
@@ -329,6 +348,19 @@ function runQwen(options, prompt) {
         apiErrorKind: apiErrorInfo.kind,
         sandboxRemoval,
       };
+      // Written on EVERY settle path — a crashed or timed-out round is exactly
+      // when the diagnosis footer needs to name the model that died.
+      if (initModel || initVersion) {
+        try {
+          writeFileSync(
+            file(options.workdir, 'agent-model'),
+            `${initModel}\n${initVersion}\n`,
+          );
+        } catch {
+          // Best-effort: a write failure must not change the run outcome; the
+          // read sites fall back to the configured model.
+        }
+      }
       if (log.destroyed) {
         resolve(payload);
       } else {

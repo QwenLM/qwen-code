@@ -77,6 +77,21 @@ REPORT_HEAD="${CHECKED_OUT_HEAD}"
 # would double-write that round's marker.
 ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
 MODEL_DISPLAY="${MODEL:-default}"
+# agent-model: run-agent.mjs's copy of the session's RESOLVED model + CLI
+# version (from its stream-json init event). Preferred over MODEL, which names
+# only what was REQUESTED and reads 'default' when the repo variable is unset.
+# WORKDIR is agent-writable, so both values pass a character allowlist
+# (markup, backticks and comment tokens cannot survive) and a length cap
+# before a bot-authored comment renders them; the version allowlist is the
+# review footer's FOOTER_VERSION_RE shape.
+AGENT_MODEL=''
+AGENT_CLI_VERSION=''
+if [[ -s "${WORKDIR}/agent-model" ]]; then
+  AGENT_MODEL="$(sed -n '1p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100)"
+  AGENT_CLI_VERSION="$(sed -n '2p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._+-' | cut -c1-40)"
+fi
+[[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"
+CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \`${AGENT_CLI_VERSION}\`}"
 # Growth-audit trail (+ re-arm on sound): audit rounds record the
 # verdict under the key the baseline was READ under — same rule as
 # the growth markers, same dead-key hazard (a supersede-exempt
@@ -625,7 +640,7 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
     echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human. · 有空请复审；第 ${MAX_ROUNDS} 轮后本 bot 停止并将 PR 交给人工。"
     echo
     echo "---"
-    echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+    echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
     echo
     echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
@@ -668,7 +683,7 @@ else
     fi
     echo
     echo "---"
-    echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+    echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
     echo
     echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"

@@ -1489,6 +1489,16 @@ jobs:
           # unpredictable path a watcher cannot pre-seed.
           export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           MODEL_DISPLAY="${MODEL:-default}"
+          # Same agent-model preference + allowlist as 'Push and report'
+          # (each step is its own shell, so the block does not carry over).
+          AGENT_MODEL=''
+          AGENT_CLI_VERSION=''
+          if [[ -s "${WORKDIR}/agent-model" ]]; then
+            AGENT_MODEL="$(sed -n '1p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100)"
+            AGENT_CLI_VERSION="$(sed -n '2p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._+-' | cut -c1-40)"
+          fi
+          [[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"
+          CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \`${AGENT_CLI_VERSION}\`}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
             echo '::error::CI_DEV_BOT_PAT is required to publish the PR as the autofix bot.'
             exit 1
@@ -1549,7 +1559,7 @@ jobs:
           {
             echo
             echo "---"
-            echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+            echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
           } >> "${WORKDIR}/e2e-report.md"
           gh pr comment "${PR_URL}" --body-file "${WORKDIR}/e2e-report.md"
 
@@ -5567,6 +5577,7 @@ jobs:
             "${WORKDIR}/agent-api-error" \
             "${WORKDIR}/agent-api-error-kind" \
             "${WORKDIR}/agent-timeout" \
+            "${WORKDIR}/agent-model" \
             "${WORKDIR}/resolved-comments.txt" \
             "${WORKDIR}/comment-replies.json"
           # NOT deleted with its siblings: run 2 writes its own
@@ -5977,6 +5988,16 @@ jobs:
           REPORT_HEAD="${CHECKED_OUT_HEAD}"
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           MODEL_DISPLAY="${MODEL:-default}"
+          # Same agent-model preference + allowlist as 'Push and report'
+          # (each step is its own shell, so the block does not carry over).
+          AGENT_MODEL=''
+          AGENT_CLI_VERSION=''
+          if [[ -s "${WORKDIR}/agent-model" ]]; then
+            AGENT_MODEL="$(sed -n '1p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100)"
+            AGENT_CLI_VERSION="$(sed -n '2p' "${WORKDIR}/agent-model" | tr -cd 'A-Za-z0-9._+-' | cut -c1-40)"
+          fi
+          [[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"
+          CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \`${AGENT_CLI_VERSION}\`}"
           # Same helper as 'Push and report' (each step is its own shell, so
           # the definition does not carry over). The verdict is the one the
           # verification GATE validated (AUDIT_VERDICT step output), never a
@@ -6535,7 +6556,7 @@ jobs:
               echo "Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
               echo
               echo "---"
-              echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+              echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
               echo
               echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
               # Per-round growth history the census counts — same marker
