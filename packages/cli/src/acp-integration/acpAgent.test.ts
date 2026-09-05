@@ -15331,6 +15331,53 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('resolves sessionTurnIndex settings per request, not from the this.settings cache', async () => {
+    const readTurnIndexPage = vi.fn().mockResolvedValue({
+      sessionId: VALID_SESSION_ID,
+      records: [],
+      hasMore: false,
+      gaps: [],
+      startTime: 'start',
+      lastUpdated: 'end',
+    });
+    vi.mocked(SessionTranscriptReader).mockImplementation(
+      () =>
+        ({
+          readTurnIndexPage,
+        }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+    );
+    const { agent, agentPromise } =
+      await bootCoreSettingsAgent(makeCoreSettings());
+
+    // Multi-workspace daemon shape: the live session and `this.settings`
+    // belong to the boot workspace; the turn-index request names another cwd
+    // whose own settings must pin the transcript read. Routing through the
+    // stale cache would scan the wrong runtime root (#10095 bug class).
+    const perRequestSettings = makeCoreSettings();
+    vi.mocked(loadSettings).mockClear();
+    vi.mocked(loadSettings).mockReturnValue(perRequestSettings);
+    vi.mocked(runWithAcpRuntimeOutputDir).mockClear();
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTurnIndex, {
+        cwd: '/tmp/workspace-a',
+        sessionId: VALID_SESSION_ID,
+      }),
+    ).resolves.toBeDefined();
+
+    expect(loadSettings).toHaveBeenCalledWith('/tmp/workspace-a');
+    expect(runWithAcpRuntimeOutputDir).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![0]).toBe(
+      perRequestSettings,
+    );
+    expect(vi.mocked(runWithAcpRuntimeOutputDir).mock.calls[0]![1]).toBe(
+      '/tmp/workspace-a',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('still scans the transcript when the pre-read flush fails', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);

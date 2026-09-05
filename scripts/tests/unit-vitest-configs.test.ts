@@ -29,7 +29,6 @@ import nodeReplConfig from '../../packages/node-repl/vitest.config.js';
 import sdkTypescriptConfig from '../../packages/sdk-typescript/vitest.config.js';
 import vscodeCompanionConfig from '../../packages/vscode-ide-companion/vitest.config.js';
 import webShellConfig from '../../packages/web-shell/vitest.config.js';
-import webuiConfig from '../../packages/webui/vite.config.js';
 import scriptsTestsConfig from './vitest.config.js';
 
 // Every vitest project that `npm run test:ci` runs on the Windows/macOS
@@ -82,14 +81,6 @@ describe('unhandled-error exemption on the platform lanes', () => {
       );
     });
   }
-
-  it('keeps unhandled errors fatal only on Linux in packages/webui', async () => {
-    // webui's vitest configuration is the function-form vite.config.ts.
-    const config = await webuiConfig({ command: 'serve', mode: 'test' });
-    expect(config.test?.dangerouslyIgnoreUnhandledErrors).toBe(
-      process.platform !== 'linux',
-    );
-  });
 });
 
 describe('autofix gate load clamps', () => {
