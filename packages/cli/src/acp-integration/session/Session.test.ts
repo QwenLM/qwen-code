@@ -5767,6 +5767,51 @@ describe('Session', () => {
       );
     });
 
+    it('waits for approval-mode persistence before reporting success', async () => {
+      let release!: () => void;
+      mockConfig.waitForSessionApprovalModePersistence = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+
+      const pending = session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'auto-edit',
+      });
+      await Promise.resolve();
+
+      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.anything(),
+      );
+
+      release();
+      await pending;
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.objectContaining({ currentModeId: 'auto-edit' }),
+      );
+    });
+
+    it('does not report a mode switch when persistence fails', async () => {
+      mockConfig.waitForSessionApprovalModePersistence = vi
+        .fn()
+        .mockRejectedValue(new Error('approval persistence failed'));
+
+      await expect(
+        session.setMode({
+          sessionId: 'test-session-id',
+          modeId: 'auto-edit',
+        }),
+      ).rejects.toThrow('approval persistence failed');
+      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+        'qwen/notify/session/mode-update',
+        expect.anything(),
+      );
+    });
+
     it('rejects an unknown modeId and does NOT touch approval mode (A2)', async () => {
       await expect(
         session.setMode({

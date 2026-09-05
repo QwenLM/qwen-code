@@ -177,6 +177,7 @@ import {
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
+  SESSION_APPROVAL_MODE_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
@@ -5303,6 +5304,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
                     }
                   : {}),
+                ...(approvalMode
+                  ? { [SESSION_APPROVAL_MODE_META_KEY]: approvalMode }
+                  : {}),
                 [SESSION_INITIALIZATION_DEADLINE_META_KEY]:
                   Date.now() + initTimeoutMs,
               },
@@ -8281,6 +8285,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                         [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
                       }
                     : {}),
+                  ...(req.approvalMode
+                    ? {
+                        [SESSION_APPROVAL_MODE_META_KEY]: req.approvalMode,
+                      }
+                    : {}),
                 },
               });
               return await restoreChannel.connection.loadSession(request);
@@ -8306,6 +8315,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   ? {
                       [DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY]: true,
                     }
+                  : {}),
+                ...(req.approvalMode
+                  ? { [SESSION_APPROVAL_MODE_META_KEY]: req.approvalMode }
                   : {}),
               },
             });

@@ -4395,6 +4395,8 @@ export class CoreToolScheduler {
   ): Promise<void> {
     if (toolCall.status !== 'scheduled') return;
 
+    await this.config.waitForSessionApprovalModePersistence?.();
+
     if (goalTurnContext.getStore() !== toolCall.request.goalContext) {
       return runInRequestGoalContext(toolCall.request, () =>
         this.executeSingleToolCall(toolCall, signal),
@@ -4845,6 +4847,8 @@ export class CoreToolScheduler {
         return;
       }
     }
+
+    await this.config.waitForSessionApprovalModePersistence?.();
 
     if (signal.aborted) {
       const currentCall = this.toolCalls.find(

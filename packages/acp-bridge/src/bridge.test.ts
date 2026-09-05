@@ -139,6 +139,7 @@ import { SessionAttachmentStore } from './sessionAttachments.js';
 import { MultiClientPermissionMediator } from './permissionMediator.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
+  SESSION_APPROVAL_MODE_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
@@ -25538,6 +25539,107 @@ describe('createAcpSessionBridge', () => {
         },
       };
     }
+
+    it('passes an initial mode into newSession and confirms it afterward', async () => {
+      const handle = makeChannel({
+        newSessionImpl: async (params) => {
+          const mode = params._meta?.[
+            SESSION_APPROVAL_MODE_META_KEY
+          ] as ApprovalMode;
+          return {
+            sessionId: 'initial-mode',
+            modes: {
+              currentModeId: mode,
+              availableModes: [{ modeId: mode, id: mode, name: mode }],
+            },
+          };
+        },
+        extMethodImpl: async (method, params) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+            const mode = (params as { mode: ApprovalMode }).mode;
+            return { previous: mode, current: mode };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        approvalMode: ApprovalMode.YOLO,
+      });
+
+      expect(handle.agent.newSessionCalls[0]?._meta).toMatchObject({
+        [SESSION_APPROVAL_MODE_META_KEY]: ApprovalMode.YOLO,
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+        }),
+      );
+      await bridge.shutdown();
+    });
+
+    it.each(['load', 'resume'] as const)(
+      'passes an explicit mode into cold %s and confirms it afterward',
+      async (action) => {
+        const handle = makeChannel({
+          loadSessionImpl: async (params) => ({
+            modes: {
+              currentModeId: params._meta?.[
+                SESSION_APPROVAL_MODE_META_KEY
+              ] as ApprovalMode,
+              availableModes: [],
+            },
+          }),
+          extMethodImpl: async (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              const mode = (params as { mode: ApprovalMode }).mode;
+              return { previous: mode, current: mode };
+            }
+            return {};
+          },
+          resumeSessionImpl: async (params) => ({
+            modes: {
+              currentModeId: params._meta?.[
+                SESSION_APPROVAL_MODE_META_KEY
+              ] as ApprovalMode,
+              availableModes: [],
+            },
+          }),
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const request = {
+          sessionId: `initial-${action}-mode`,
+          workspaceCwd: WS_A,
+          approvalMode: ApprovalMode.YOLO,
+        };
+
+        if (action === 'load') {
+          await bridge.loadSession(request);
+        } else {
+          await bridge.resumeSession(request);
+        }
+
+        const call =
+          action === 'load'
+            ? handle.agent.loadSessionCalls[0]
+            : handle.agent.resumeSessionCalls[0];
+        expect(call?._meta).toMatchObject({
+          [SESSION_APPROVAL_MODE_META_KEY]: ApprovalMode.YOLO,
+        });
+        expect(handle.agent.extMethodCalls).toContainEqual(
+          expect.objectContaining({
+            method: SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+          }),
+        );
+        await bridge.shutdown();
+      },
+    );
 
     it('reaps a fresh session when approval-mode initialization fails', async () => {
       const bridge = makeBridge({

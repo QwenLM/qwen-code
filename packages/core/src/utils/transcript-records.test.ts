@@ -177,6 +177,26 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts session approval mode metadata as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('mode', null, {
+        type: 'system',
+        subtype: 'session_approval_mode',
+        message: undefined,
+        systemPayload: { mode: 'default' },
+      }),
+      record('root', 'mode'),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        recordId: 'mode',
+        path: 'subtype',
+      }),
+    );
+  });
+
   it('accepts the workflow agent retry marker as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
       record('root', null),
