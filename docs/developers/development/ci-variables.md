@@ -12,6 +12,11 @@ Repository maintainers set these under **Settings → Secrets and variables →
 Actions → Variables**. An unset (or empty) variable always falls back to the
 default listed below.
 
+The workflow files are the source of truth for these levers:
+`scripts/tests/release-workflow.test.js` pins the `release.yml` expressions
+byte-for-byte, and this page mirrors them. If the two ever disagree, trust the
+workflow and update this page in the same change.
+
 ## Variables
 
 | Variable                                 | Default | Used in                 | Controls                                              |
@@ -31,10 +36,13 @@ variables so they can be tuned independently.
 
 Every attempt of a contended shard is a fresh roll: the same commit can fail
 three disjoint test sets on a busy shared runner, while a real break fails all
-attempts. The retry lets a contention flake pass without hiding anything. Both
-variables also accept the literal value `off`, which omits the `--retry` flag
-entirely instead of passing `--retry=0` (a command-line `--retry=0` outranks a
-workspace's own Vitest config and would disable a deliberate retry policy).
+attempts. The tradeoff is that a failure which recovers within the retry
+budget greens the check and is not recorded as a failure by the flaky-rerun
+tracker, so keep the budget modest instead of using retries to paper over a
+flaky suite. Both variables also accept the literal value `off`, which omits
+the `--retry` flag entirely instead of passing `--retry=0` (a command-line
+`--retry=0` outranks a workspace's own Vitest config and would disable a
+deliberate retry policy).
 
 ### Workspace test timeout
 
@@ -49,5 +57,8 @@ test regression.
 `QWEN_CI_VITEST_MAX_WORKERS` caps each Vitest process
 (`VITEST_MAX_THREADS` / `VITEST_MAX_FORKS`, with the matching minimum forced to
 `1`) on the reserved self-hosted runners whose name starts with `ecs-qwen-`.
-It is only applied there; on GitHub-hosted runners the variable is ignored and
-Vitest uses its own defaults.
+The variable is exported only by the main CI workspace-test step and the
+release `workspace_tests` and `quality_scripts` steps; other Vitest
+invocations that land on the same reserved pool (the web-shell E2E smoke and
+the integration suites) do not consume it. On GitHub-hosted runners the
+variable is ignored and Vitest uses its own defaults.
