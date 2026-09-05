@@ -169,6 +169,7 @@ export default {
   // acronyms are kept in English (Agent, Grep, Glob, LSP), as is a product name
   // inside an otherwise-translated label (e.g. `Notebook`).
   // ============================================================================
+  'toolDisplayName.Exec': '执行代码',
   'toolDisplayName.Edit': '编辑',
   'toolDisplayName.WriteFile': '写入文件',
   'toolDisplayName.ReadFile': '读取文件',
@@ -723,6 +724,7 @@ export default {
   // ============================================================================
   // Settings Labels
   // ============================================================================
+  'Code Mode Only (Experimental)': '仅代码模式（实验性）',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '终端响铃通知',

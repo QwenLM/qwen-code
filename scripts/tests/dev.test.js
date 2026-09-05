@@ -74,6 +74,8 @@ describe('scripts/dev.js launcher', () => {
     expect(command).toBe('C:\\Program Files\\nodejs\\node.exe');
     expect(args.map(normalizePath)).toEqual([
       expect.stringContaining('node_modules/tsx/dist/cli.mjs'),
+      '--tsconfig',
+      expect.stringContaining('packages/cli/tsconfig.json'),
       expect.stringContaining('packages/cli/index.ts'),
       '--help',
     ]);
@@ -91,6 +93,8 @@ describe('scripts/dev.js launcher', () => {
     const [command, args, options] = spawnMock.mock.calls[0];
     expect(normalizePath(command)).toContain('tsx.cmd');
     expect(args.map(normalizePath)).toEqual([
+      '--tsconfig',
+      expect.stringContaining('packages/cli/tsconfig.json'),
       expect.stringContaining('packages/cli/index.ts'),
     ]);
     expect(options).toEqual(expect.objectContaining({ shell: true }));

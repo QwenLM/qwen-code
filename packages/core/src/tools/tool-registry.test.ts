@@ -735,6 +735,32 @@ describe('ToolRegistry', () => {
       ]);
     });
 
+    it('getDeferredToolSummary is empty in CodeModeOnly', () => {
+      // Both consumers of this summary — the startup deferred-tools reminder
+      // and the added-MCP-tools reminder — tell the model to reach the listed
+      // tools through ToolSearch, which CodeModeOnly hides. The MCP tool below
+      // is the one the previous test proves IS reported in Direct mode.
+      const codeModeConfig = new Config({
+        ...baseConfigParams,
+        codeModeOnly: true,
+      });
+      const registry = new ToolRegistry(codeModeConfig);
+      registry.registerTool(
+        new MockTool({ name: 'deferred', shouldDefer: true }),
+      );
+      registry.registerTool(
+        new DiscoveredMCPTool(
+          {} as CallableTool,
+          'schedule-server',
+          'cron_list',
+          'list scheduled jobs',
+          {},
+        ),
+      );
+
+      expect(registry.getDeferredToolSummary()).toEqual([]);
+    });
+
     it('removeMcpToolsByServer also drops revealedDeferred entries', async () => {
       // Pin the regression: a server-disconnect-then-reconnect cycle that
       // re-registers a tool of the same name must NOT inherit

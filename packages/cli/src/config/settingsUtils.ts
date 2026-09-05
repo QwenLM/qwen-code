@@ -164,6 +164,7 @@ export function getAllSettingKeys(): string[] {
 const SETTINGS_DIALOG_ORDER: readonly string[] = [
   // Workflow Control - most impactful setting
   'tools.approvalMode',
+  'tools.codeModeOnly',
 
   // Localization - users often set this first
   'general.language',
@@ -181,6 +182,7 @@ const SETTINGS_DIALOG_ORDER: readonly string[] = [
   'ide.enabled',
   'ui.showLineNumbers',
   'ui.hideTips',
+  'ui.showToolCallDetails',
   'general.terminalBell',
   'ui.enableWelcomeBack',
 

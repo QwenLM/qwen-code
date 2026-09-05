@@ -89,6 +89,11 @@ interface ShellToolParameterJsonSchema {
     command: {
       description: string;
     };
+    timeout: {
+      type: string;
+      minimum: number;
+      maximum: number;
+    };
   };
 }
 
@@ -243,6 +248,19 @@ describe('ShellTool', () => {
 
     // Ensure attribution singleton is clean between tests
     CommitAttributionService.resetInstance();
+  });
+
+  it('exposes the accepted timeout range in its schema', () => {
+    const schema = shellTool.schema
+      .parametersJsonSchema as ShellToolParameterJsonSchema;
+
+    expect(schema.properties.timeout).toEqual(
+      expect.objectContaining({
+        type: 'integer',
+        minimum: 1,
+        maximum: 600000,
+      }),
+    );
   });
 
   describe('gh pr create binding', () => {
@@ -8327,7 +8345,7 @@ describe('ShellTool', () => {
           is_background: false,
           timeout: 0,
         });
-      }).toThrow('Timeout must be a positive number.');
+      }).toThrow('params/timeout must be >= 1');
 
       // Negative timeout
       expect(() => {
@@ -8336,7 +8354,7 @@ describe('ShellTool', () => {
           is_background: false,
           timeout: -1000,
         });
-      }).toThrow('Timeout must be a positive number.');
+      }).toThrow('params/timeout must be >= 1');
 
       // Timeout too large
       expect(() => {
@@ -8345,7 +8363,7 @@ describe('ShellTool', () => {
           is_background: false,
           timeout: 700000,
         });
-      }).toThrow('Timeout cannot exceed 600000ms (10 minutes).');
+      }).toThrow('params/timeout must be <= 600000');
 
       // Non-integer timeout
       expect(() => {
@@ -8354,7 +8372,7 @@ describe('ShellTool', () => {
           is_background: false,
           timeout: 5000.5,
         });
-      }).toThrow('Timeout must be an integer number of milliseconds.');
+      }).toThrow('params/timeout must be integer');
 
       // Non-number timeout (schema validation catches this first)
       expect(() => {
@@ -8363,7 +8381,7 @@ describe('ShellTool', () => {
           is_background: false,
           timeout: 'invalid' as unknown as number,
         });
-      }).toThrow('params/timeout must be number');
+      }).toThrow('params/timeout must be integer');
     });
 
     it('should include timeout in description for foreground commands', async () => {

@@ -12,6 +12,7 @@ export { isActiveToolStatus } from '../../adapters/toolClassification';
  * write, …) are web-shell-only conveniences with no core equivalent.
  */
 export const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  exec: 'Exec',
   edit: 'Edit',
   write_file: 'WriteFile',
   read_file: 'ReadFile',

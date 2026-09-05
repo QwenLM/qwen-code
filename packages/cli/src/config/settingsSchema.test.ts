@@ -634,6 +634,16 @@ describe('SettingsSchema', () => {
       expect(mouseTracking.requiresRestart).toBe(true);
     });
 
+    it('should expose tool call details as a live UI setting', () => {
+      const showToolCallDetails =
+        getSettingsSchema().ui.properties.showToolCallDetails;
+      expect(showToolCallDetails).toBeDefined();
+      expect(showToolCallDetails.type).toBe('boolean');
+      expect(showToolCallDetails.default).toBe(true);
+      expect(showToolCallDetails.showInDialog).toBe(true);
+      expect(showToolCallDetails.requiresRestart).toBe(false);
+    });
+
     it('should have showToolCallArgs in ui settings', () => {
       const showToolCallArgs =
         getSettingsSchema().ui.properties.showToolCallArgs;
