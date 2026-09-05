@@ -103,38 +103,64 @@ describe('LocalFilesPanel degradation matrix', () => {
     expect(text()).toContain('当前环境不可用');
   });
 
-  // A missing zh key degrades silently to the raw key, and nothing in the type
-  // system enforces that EN and ZH stay in sync — so every state this panel can
-  // render is checked in Chinese.
-  it.each<[string, LocalFilesStatus]>([
-    ['idle', { phase: 'idle', blocker: null }],
-    ['needs-gesture', { phase: 'needs-gesture', blocker: null, rootName: 'd' }],
-    ['needs-session', { phase: 'needs-session', blocker: null, rootName: 'd' }],
-    ['held-elsewhere', { phase: 'held-elsewhere', blocker: null }],
-    ['connecting', { phase: 'connecting', blocker: null }],
-    ['registering', { phase: 'registering', blocker: null }],
-    ['reconnecting', { phase: 'reconnecting', blocker: null, message: 'x' }],
+  // A missing zh key degrades silently to the EN string (messages[key] ??
+  // EN[key] ?? key), and nothing in the type system enforces that EN and ZH
+  // stay in sync — so every state this panel can render is checked in
+  // Chinese against its actual zh string.
+  it.each<[string, LocalFilesStatus, string]>([
+    ['idle', { phase: 'idle', blocker: null }, '未连接'],
+    [
+      'needs-gesture',
+      { phase: 'needs-gesture', blocker: null, rootName: 'd' },
+      '需要重新连接',
+    ],
+    [
+      'needs-session',
+      { phase: 'needs-session', blocker: null, rootName: 'd' },
+      '等待会话',
+    ],
+    [
+      'held-elsewhere',
+      { phase: 'held-elsewhere', blocker: null },
+      '已在其他标签页连接',
+    ],
+    ['connecting', { phase: 'connecting', blocker: null }, '连接中'],
+    ['registering', { phase: 'registering', blocker: null }, '注册中'],
+    [
+      'reconnecting',
+      { phase: 'reconnecting', blocker: null, message: 'x' },
+      '重连中',
+    ],
     [
       'connected',
       { phase: 'connected', blocker: null, rootName: 'd', toolCount: 4 },
+      '已连接',
     ],
-    ['failed', { phase: 'failed', blocker: null, message: 'boom' }],
+    ['failed', { phase: 'failed', blocker: null, message: 'boom' }, '连接失败'],
     [
       'unavailable/insecure',
       { phase: 'unavailable', blocker: 'insecure-context' },
+      '安全上下文',
     ],
     [
       'unavailable/cross-origin',
       { phase: 'unavailable', blocker: 'cross-origin-frame' },
+      '跨源 iframe',
     ],
     [
       'unavailable/unsupported',
       { phase: 'unavailable', blocker: 'unsupported-browser' },
+      '当前浏览器没有',
     ],
-  ])('renders %s fully translated', (_label, status) => {
+    [
+      'unavailable/workspace-ineligible',
+      { phase: 'unavailable', blocker: 'workspace-ineligible' },
+      '该会话的工作区不能托管本地目录',
+    ],
+  ])('renders %s fully translated', (_label, status, zh) => {
     mount(status, 'zh-CN');
     expect(text()).not.toContain('localFiles.');
-    expect(text().length).toBeGreaterThan(0);
+    expect(text()).toContain(zh);
   });
 });
 

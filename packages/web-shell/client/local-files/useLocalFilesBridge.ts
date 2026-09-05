@@ -268,6 +268,16 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     ? `${options.workspaceSelector.kind}:${options.workspaceSelector.value}`
     : '';
   useEffect(() => {
+    // A blocker that activates late (capabilities resolving an ineligible
+    // workspace after the bridge started) must stop the running bridge and
+    // withhold, instead of letting a rebind dial the primary mount for a
+    // workspace the deployment declared ineligible. stopBridge() runs before
+    // setStatus because stop() emits 'stopped' (mapped to idle).
+    if (capability.blocker !== null) {
+      stopBridge();
+      setStatus({ phase: 'unavailable', blocker: capability.blocker });
+      return;
+    }
     const handle = handleRef.current;
     if (handle === undefined) return;
     // Rebind preconditions, in order: the store must still hold the grant (a
@@ -310,7 +320,14 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
     return () => {
       cancelled = true;
     };
-  }, [sessionId, selectorKey, startBridge, stopBridge, store]);
+  }, [
+    sessionId,
+    selectorKey,
+    startBridge,
+    stopBridge,
+    store,
+    capability.blocker,
+  ]);
 
   useEffect(
     () => () => {

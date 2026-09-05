@@ -569,6 +569,35 @@ describe('useLocalFilesBridge restore', () => {
     hB.unmount();
   });
 
+  it('stops the running bridge when a blocker activates late', async () => {
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const common = {
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store: fakeStore(handle),
+    };
+    const h = render({ ...common, sessionId: 'session-1' });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+
+    // Capabilities resolve the session's workspace as ineligible after the
+    // bridge started: the running bridge must stop and the panel withhold.
+    h.rerender({
+      ...common,
+      sessionId: 'session-1',
+      withheldBlocker: 'workspace-ineligible',
+    });
+    await h.flush();
+    await h.flush();
+    expect(h.sockets[0]!.closeCount).toBe(1);
+    expect(h.get().status).toEqual({
+      phase: 'unavailable',
+      blocker: 'workspace-ineligible',
+    });
+    h.unmount();
+  });
+
   it('does not start a bridge from an ungranted handle on session switch', async () => {
     const handle = fakeHandle('ai_coding', {
       query: 'prompt',

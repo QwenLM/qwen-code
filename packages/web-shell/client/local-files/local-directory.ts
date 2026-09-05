@@ -155,28 +155,28 @@ export function splitRelativePath(path: unknown): string[] {
   if (typeof path !== 'string') {
     throw new LocalDirectoryError('invalid_path', '`path` must be a string.');
   }
-  const trimmed = path;
-  if (trimmed === '' || trimmed === '.') return [];
-  if (trimmed.includes('\\')) {
+  const input = path;
+  if (input === '' || input === '.') return [];
+  if (input.includes('\\')) {
     throw new LocalDirectoryError(
       'invalid_path',
       'Backslashes are not allowed; use forward slashes.',
     );
   }
-  if (trimmed.startsWith('/')) {
+  if (input.startsWith('/')) {
     throw new LocalDirectoryError(
       'invalid_path',
       'Absolute paths are not allowed; paths are relative to the granted directory.',
     );
   }
-  if (/^[a-zA-Z]:/.test(trimmed)) {
+  if (/^[a-zA-Z]:/.test(input)) {
     throw new LocalDirectoryError(
       'invalid_path',
       'Windows drive paths are not allowed; paths are relative to the granted directory.',
     );
   }
   const segments: string[] = [];
-  for (const raw of trimmed.split('/')) {
+  for (const raw of input.split('/')) {
     if (raw === '' || raw === '.') continue;
     if (raw === '..') {
       throw new LocalDirectoryError(
