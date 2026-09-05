@@ -290,6 +290,32 @@ describe('runBackgroundDispatch', () => {
     expect(dispatchAgentViewSession).not.toHaveBeenCalled();
   });
 
+  it('reports a dispatch that timed out client-side as still starting, not failed', async () => {
+    // The dispatch RPC runs under a client cap
+    // (LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS); the server-side handler
+    // keeps launching after the client gives up — a store I/O stall can
+    // push it past the cap — so the session may still come up.
+    // Certifying a failure with exit 1 would have a wrapping script
+    // start a second agent on the same prompt. Report the in-flight
+    // launch and a distinct exit code a wrapper can treat as "do not
+    // retry".
+    const timeout = new Error(
+      'Timed out waiting for Agent View supervisor response.',
+    ) as Error & { code: string };
+    timeout.code = 'timeout';
+    supervisorDispatch.mockRejectedValue(timeout);
+
+    const code = await runBackgroundDispatch('audit', '/w/app');
+
+    expect(code).toBe(2);
+    expect(stderr.join('')).not.toContain(
+      'Could not start a background session',
+    );
+    expect(stderr.join('')).toContain('may still be starting');
+    expect(stderr.join('')).toContain('qwen sessions ps');
+    expect(dispatchAgentViewSession).not.toHaveBeenCalled();
+  });
+
   it('reports an error-like rejection reason instead of [object Object]', async () => {
     // A plain-object rejection with a message must surface the message:
     // the hand-rolled instanceof ternary stringified it to

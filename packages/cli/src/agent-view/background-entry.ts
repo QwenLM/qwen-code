@@ -123,7 +123,11 @@ export function readBackgroundPrompt(
  *
  * Returns a process exit code. A failure is reported as a sentence, not
  * a stack: the supervisor can be unstartable for ordinary reasons — a
- * stale socket, a read-only home — and the user needs the reason.
+ * stale socket, a read-only home — and the user needs the reason. A
+ * client-side dispatch timeout returns a distinct exit code (2) with an
+ * in-flight sentence instead of a failure: the supervisor may still
+ * bring the session up after the client cap, so a wrapper keyed on the
+ * exit code must not retry it.
  */
 export async function runBackgroundDispatch(
   prompt: string,
@@ -163,6 +167,20 @@ export async function runBackgroundDispatch(
     });
   } catch (error) {
     const reason = getErrorMessage(error);
+    // A client-side timeout is not a launch failure: the dispatch RPC
+    // runs under a client cap (LONG_AGENT_VIEW_OPERATION_TIMEOUT_MS),
+    // and the supervisor's handler keeps recording and launching the
+    // session after the client gives up — a store I/O stall can push it
+    // past the cap. Certifying failure here would have a wrapping
+    // script (the consumer this entry is built for) retry and start a
+    // second agent on the same prompt. Report the in-flight launch and
+    // a distinct exit code a wrapper can treat as "do not retry".
+    if ((error as { code?: string } | undefined)?.code === 'timeout') {
+      writeStderrLine(
+        `The background session may still be starting: ${reason}. Check: qwen sessions ps`,
+      );
+      return 2;
+    }
     writeStderrLine(`Could not start a background session: ${reason}`);
     return 1;
   }
