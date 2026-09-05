@@ -3445,6 +3445,25 @@ export abstract class ChannelBase {
     this.releaseQueuedTurn(binding.sessionId);
   }
 
+  /**
+   * Follow a task onto the session its reload healed to (a superseded
+   * redirect). The queue reservation and the staleness generation are keyed
+   * by session id, so both must move with the binding: leaving them behind
+   * keeps the stale id "busy" forever and drops the turn on a generation the
+   * replacement never had.
+   */
+  private moveNamedTurnBinding(
+    binding: NamedTurnBinding,
+    sessionId: string,
+  ): void {
+    if (binding.sessionId !== null) {
+      this.releaseQueuedTurn(binding.sessionId);
+    }
+    binding.sessionId = sessionId;
+    binding.generation = this.sessionGenerations.get(sessionId) ?? 0;
+    this.reserveQueuedTurn(sessionId);
+  }
+
   private finishNamedTurnBinding(envelope: Envelope): void {
     const binding = this.namedTurnBindings.get(envelope);
     if (!binding) return;
@@ -3510,6 +3529,24 @@ export abstract class ChannelBase {
     }
   }
 
+  /**
+   * The actionable recovery message for a worktree task whose ownership state
+   * the daemon refused to restore. Both codes come from the load/resume route
+   * — the reset route resumes an interrupted transfer itself and reports a
+   * broken marker as invalid state — so they surface on selection and on a
+   * message, wrapped in the manager's generic load failure.
+   */
+  private worktreeRecoveryMessage(error: unknown): string | undefined {
+    switch (readDaemonHttpErrorCode(error)) {
+      case 'worktree_reset_interrupted':
+        return 'The task was interrupted while being reset. Its files were not changed. Clear the task again to finish the reset.';
+      case 'worktree_marker_missing':
+        return 'The task cannot verify its worktree because its ownership marker is missing. Its files were not changed. Clear the task to restart it in the same worktree, or close it.';
+      default:
+        return undefined;
+    }
+  }
+
   private async sendNamedSessionError(
     envelope: Envelope,
     error: unknown,
@@ -3520,9 +3557,10 @@ export abstract class ChannelBase {
       );
     }
     const message =
-      error instanceof Error
+      this.worktreeRecoveryMessage(error) ??
+      (error instanceof Error
         ? sanitizeDisplayText(error.message, 500)
-        : 'Named-session operation failed.';
+        : 'Named-session operation failed.');
     await this.sendThreadMessage(
       envelope.chatId,
       envelope.threadId,
@@ -3721,8 +3759,8 @@ export abstract class ChannelBase {
           resetWorktreeKept = reset?.worktreeKept ?? false;
           removedIds = reset ? [reset.previousSessionId] : [];
         } catch (error) {
-          // Worktree resets carry typed daemon failures; translate them into
-          // the actionable message for that class before the generic one.
+          // The reset route's busy signal has its own wording; every other
+          // typed failure goes through the shared named-session surface.
           const code = readDaemonHttpErrorCode(error);
           if (code !== undefined) {
             process.stderr.write(
@@ -3734,22 +3772,6 @@ export abstract class ChannelBase {
               envelope.chatId,
               envelope.threadId,
               'Task is busy. Wait for the running prompt to finish (or cancel it), then try again.',
-            );
-            return;
-          }
-          if (code === 'worktree_reset_interrupted') {
-            await this.sendThreadMessage(
-              envelope.chatId,
-              envelope.threadId,
-              'A previous reset of this task was interrupted and the automatic retry did not complete it. The task was left on its original session; try again, or close the task if it keeps failing.',
-            );
-            return;
-          }
-          if (code === 'worktree_marker_missing') {
-            await this.sendThreadMessage(
-              envelope.chatId,
-              envelope.threadId,
-              "The task's worktree marker is missing, so its checkout cannot be verified (it may have been cleaned up). Try again; if it keeps failing, close the task and create a new one.",
             );
             return;
           }
@@ -6336,11 +6358,13 @@ export abstract class ChannelBase {
         return;
       }
       try {
-        const resumed = await this.namedSessions.resumeReserved(
+        sessionId = await this.namedSessions.resumeReserved(
           this.namedSessionOwner(envelope),
           namedTurn.sessionId,
         );
-        sessionId = resumed ? namedTurn.sessionId : undefined;
+        if (sessionId && sessionId !== namedTurn.sessionId) {
+          this.moveNamedTurnBinding(namedTurn, sessionId);
+        }
       } catch (error) {
         await this.sendNamedSessionError(envelope, error);
         return;

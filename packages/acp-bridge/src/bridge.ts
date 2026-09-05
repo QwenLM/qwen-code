@@ -420,8 +420,8 @@ function getChannelPromptDisplayText(
  * parked prompt owns no promptActive/goalTurnActive flag and no
  * pendingInteractions entry, so without this term a session with a deferred
  * restore question reads quiescent to `getSessionSummary` consumers
- * (quiescence preconditions, the Channel busy probe) and to the
- * coalesced-restore waiter response.
+ * (quiescence preconditions, the Channel busy probe), to the coalesced-restore
+ * waiter response, and to the daemon status snapshot's per-session table.
  *
  * Deliberately NOT used for the restore RESPONSE's `hasActivePrompt`
  * (computed as `restorePromptAdmitted || promptActive || goalTurnActive`):
@@ -9248,8 +9248,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             attachCount: entry.attachCount,
             pendingPromptCount: entry.pendingPromptCount,
             pendingPermissionCount: entry.pendingPermissionIds.size,
-            hasActivePrompt:
-              entry.promptActive || entry.goalTurnActive === true,
+            hasActivePrompt: hasInFlightPromptActivity(entry),
             lastEventId: entry.events.lastEventId,
             ...(entry.sessionLastSeenAt !== undefined
               ? { lastSeenAt: entry.sessionLastSeenAt }
@@ -11514,11 +11513,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // idle-close path (transcript and persisted record survive), which is
       // the desired end state for a superseded session: no client may keep
       // writing through it once its worktree moved to the replacement.
-      for (const clientId of [
-        ...(byId.get(sessionId)?.clientIds.keys() ?? []),
-      ]) {
-        await bridgeApi.detachClient(sessionId, clientId);
-        if (!byId.has(sessionId)) return;
+      //
+      // Registrations are refcounted and one `detachClient` drops exactly one,
+      // so a clientId registered twice (an SDK reconnect whose first detach
+      // never arrived) survives a single pass over the key snapshot at count 1
+      // — and a non-empty `clientIds` is precisely what holds the idle close
+      // off. Re-snapshot the keys each pass, once per remaining registration.
+      const entry = byId.get(sessionId);
+      if (!entry) return;
+      const registrations = (): number => {
+        let total = 0;
+        for (const count of entry.clientIds.values()) total += count;
+        return total;
+      };
+      let outstanding = registrations();
+      while (outstanding > 0 && byId.get(sessionId) === entry) {
+        for (const clientId of [...entry.clientIds.keys()]) {
+          await bridgeApi.detachClient(sessionId, clientId);
+        }
+        // Bail on a pass that made no net progress: a client reconnecting as
+        // fast as we detach would otherwise spin this request forever, and the
+        // reset route holds the worktree ownership lock while it runs.
+        const remaining = registrations();
+        if (remaining >= outstanding) break;
+        outstanding = remaining;
       }
     },
 

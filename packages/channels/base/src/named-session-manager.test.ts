@@ -459,7 +459,7 @@ describe('NamedSessionManager', () => {
     vi.mocked(bridge.loadSession).mockClear();
 
     await expect(named.resumeReserved(alice, feature.sessionId)).resolves.toBe(
-      true,
+      feature.sessionId,
     );
 
     await expect(named.current(alice)).resolves.toEqual(
@@ -480,11 +480,11 @@ describe('NamedSessionManager', () => {
 
     await expect(
       named.resumeReserved({ ...alice, senderId: 'bob' }, review.sessionId),
-    ).resolves.toBe(false);
+    ).resolves.toBeUndefined();
     await expect(named.close(alice, 'review')).resolves.toBeDefined();
-    await expect(named.resumeReserved(alice, review.sessionId)).resolves.toBe(
-      false,
-    );
+    await expect(
+      named.resumeReserved(alice, review.sessionId),
+    ).resolves.toBeUndefined();
     expect(bridge.loadSession).not.toHaveBeenCalled();
   });
 
@@ -902,33 +902,11 @@ describe('NamedSessionManager', () => {
     );
   });
 
-  it('retries an interrupted worktree reset exactly once', async () => {
-    const named = manager();
-    await named.create(alice, 'feature', 'worktree');
-    vi.mocked(bridge.resetWorktreeSession).mockRejectedValueOnce(
-      daemonError('worktree_reset_interrupted'),
-    );
-
-    const reset = await named.reset(alice);
-
-    expect(reset).toEqual(
-      expect.objectContaining({
-        name: 'feature',
-        sessionId: 'session-2',
-        worktreeKept: true,
-      }),
-    );
-    expect(bridge.resetWorktreeSession).toHaveBeenCalledTimes(2);
-    await expect(named.current(alice)).resolves.toEqual(
-      expect.objectContaining({ sessionId: 'session-2' }),
-    );
-  });
-
-  it('propagates a worktree reset that stays interrupted after one retry', async () => {
+  it('attempts a worktree reset once and keeps the daemon cause', async () => {
     const named = manager();
     const created = await named.create(alice, 'feature', 'worktree');
     vi.mocked(bridge.resetWorktreeSession).mockRejectedValue(
-      daemonError('worktree_reset_interrupted'),
+      daemonError('worktree_reset_invalid_state'),
     );
 
     const error: unknown = await named
@@ -937,28 +915,34 @@ describe('NamedSessionManager', () => {
 
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toBe('Could not reset task "feature".');
-    expect(readDaemonHttpErrorCode(error)).toBe('worktree_reset_interrupted');
-    expect(bridge.resetWorktreeSession).toHaveBeenCalledTimes(2);
+    expect(readDaemonHttpErrorCode(error)).toBe('worktree_reset_invalid_state');
+    // The daemon resumes an interrupted transfer itself, so the manager never
+    // retries a rejected reset.
+    expect(bridge.resetWorktreeSession).toHaveBeenCalledTimes(1);
     await expect(named.current(alice)).resolves.toEqual(
       expect.objectContaining({ sessionId: created.sessionId }),
     );
   });
 
-  it('does not retry a worktree reset rejected for another daemon reason', async () => {
+  it('keeps the typed daemon code on a load failure for the channel', async () => {
     const named = manager();
-    await named.create(alice, 'feature', 'worktree');
-    vi.mocked(bridge.resetWorktreeSession).mockRejectedValueOnce(
-      daemonError('worktree_marker_missing'),
+    const created = await named.create(alice, 'feature', 'worktree');
+    router.handleSessionDied(created.sessionId);
+    vi.mocked(bridge.loadSession).mockRejectedValue(
+      daemonError('worktree_reset_interrupted'),
     );
 
     const error: unknown = await named
-      .reset(alice)
+      .use(alice, 'feature')
       .catch((caught: unknown) => caught);
 
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toBe('Could not reset task "feature".');
-    expect(readDaemonHttpErrorCode(error)).toBe('worktree_marker_missing');
-    expect(bridge.resetWorktreeSession).toHaveBeenCalledTimes(1);
+    expect((error as Error).message).toBe(
+      'Could not load task "feature". The current task was not changed.',
+    );
+    expect(readDaemonHttpErrorCode(error)).toBe('worktree_reset_interrupted');
+    await expect(named.current(alice)).resolves.toEqual(
+      expect.objectContaining({ sessionId: created.sessionId }),
+    );
   });
 
   it('detaches the replacement when the registry commit fails after a worktree reset', async () => {
@@ -1039,6 +1023,22 @@ describe('NamedSessionManager', () => {
     expect(released).toEqual([created.sessionId]);
   });
 
+  it('reports the healed replacement session from a reserved reload', async () => {
+    const filePath = join(dir, 'named-sessions.json');
+    const firstManager = manager();
+    const created = await firstManager.create(alice, 'feature', 'worktree');
+    const restarted = supersededRestart(filePath, created.sessionId);
+
+    // A queued turn is bound to the superseded id; the reload must hand back
+    // the id the caller dispatches on, not just a success flag.
+    await expect(
+      restarted.manager.resumeReserved(alice, created.sessionId),
+    ).resolves.toBe('session-2');
+    await expect(restarted.manager.current(alice)).resolves.toEqual(
+      expect.objectContaining({ name: 'feature', sessionId: 'session-2' }),
+    );
+  });
+
   it('loads a legacy shared-only v1 registry and writes its workspace root next', async () => {
     const first = manager();
     await first.create(alice, 'review');
@@ -1077,6 +1077,83 @@ describe('NamedSessionManager', () => {
     );
     expect(named.presentation(review.sessionId)).toEqual(
       expect.objectContaining({ taskName: 'review', status: 'open' }),
+    );
+  });
+
+  it('keeps a fallback session healed mid-close when detachment rolls back', async () => {
+    const filePath = join(dir, 'named-sessions.json');
+    const named = manager();
+    const fallback = await named.create(alice, 'fallback', 'worktree');
+    const closing = await named.create(alice, 'feature', 'worktree');
+    const healedId = 'session-1b';
+    // The fallback's session was superseded out of band, so loading it during
+    // the close heals the registry onto the replacement before the detach of
+    // the closing task fails and the snapshot is restored.
+    router.handleSessionDied(fallback.sessionId);
+    vi.mocked(bridge.loadSession).mockImplementation(
+      async (sessionId: string) => {
+        if (sessionId === fallback.sessionId) {
+          throw daemonError('worktree_session_superseded', {
+            replacementSessionId: healedId,
+          });
+        }
+        return sessionId;
+      },
+    );
+    vi.mocked(bridge.listSessions).mockReturnValue([
+      {
+        sessionId: healedId,
+        workspaceCwd: '/workspace',
+        hasActivePrompt: false,
+        worktree: {
+          slug: 'fallback',
+          path: `/worktrees/${fallback.sessionId}`,
+          branch: 'fallback',
+        },
+        worktreeState: 'persisted-v1',
+      },
+      {
+        sessionId: closing.sessionId,
+        workspaceCwd: '/workspace',
+        hasActivePrompt: false,
+        worktree: {
+          slug: 'feature',
+          path: `/worktrees/${closing.sessionId}`,
+          branch: 'feature',
+        },
+        worktreeState: 'persisted-v1',
+      },
+    ]);
+    vi.mocked(bridge.discardSession).mockRejectedValueOnce(
+      new Error('detach failed'),
+    );
+
+    await expect(named.close(alice, 'feature')).rejects.toThrow(
+      'Failed to close',
+    );
+
+    const persisted = JSON.parse(readFileSync(filePath, 'utf8')) as {
+      owners: Array<{
+        activeTaskName: string | null;
+        tasks: Array<{ name: string; sessionId: string; status: string }>;
+      }>;
+    };
+    const tasks = persisted.owners[0]?.tasks ?? [];
+    // The committed heal survives the rollback ...
+    expect(tasks.find((task) => task.name === 'fallback')?.sessionId).toBe(
+      healedId,
+    );
+    // ... and the task that failed closed is restored under its original id.
+    expect(tasks.find((task) => task.name === 'feature')).toMatchObject({
+      sessionId: closing.sessionId,
+      status: 'open',
+    });
+    expect(persisted.owners[0]?.activeTaskName).toBe('feature');
+    expect(named.presentation(closing.sessionId)).toEqual(
+      expect.objectContaining({ taskName: 'feature', status: 'open' }),
+    );
+    expect(named.presentation(healedId)).toEqual(
+      expect.objectContaining({ taskName: 'fallback', status: 'open' }),
     );
   });
 

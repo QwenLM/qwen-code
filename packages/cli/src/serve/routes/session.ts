@@ -3915,33 +3915,38 @@ export function registerSessionRoutes(
               restoreRequestMetadata.sourceType === 'channel';
             let isPart4AWorktreeRestore = false;
             let part4AWorktreeKey: string | undefined;
-            if (
-              isChannelRestore &&
-              runtime.provenance !== 'live-conversation'
-            ) {
+            if (runtime.provenance !== 'live-conversation') {
               const sidecarBeforeRestore = await readWorktreeSessionStrict(
                 sessionService.getWorktreeSessionPath(restoredStorageSessionId),
               );
-              // A reset moved this session's worktree ownership to a
-              // replacement: never restore the superseded session — tell the
-              // caller where the ownership went so it can redirect (and
-              // self-heal its registry).
-              if (
-                sidecarBeforeRestore.state === 'valid' &&
-                sidecarBeforeRestore.session.supersededBy !== undefined
-              ) {
-                throw new WorktreeSessionSupersededError(
-                  restoredStorageSessionId,
-                  sidecarBeforeRestore.session.supersededBy,
+              if (isChannelRestore) {
+                // A reset moved this session's worktree ownership to a
+                // replacement: never restore the superseded session — tell the
+                // caller where the ownership went so it can redirect (and
+                // self-heal its registry).
+                if (
+                  sidecarBeforeRestore.state === 'valid' &&
+                  sidecarBeforeRestore.session.supersededBy !== undefined
+                ) {
+                  throw new WorktreeSessionSupersededError(
+                    restoredStorageSessionId,
+                    sidecarBeforeRestore.session.supersededBy,
+                  );
+                }
+                suppressWorktreeContextRestore = !(
+                  sidecarBeforeRestore.state === 'valid' &&
+                  sidecarBeforeRestore.session.workspaceCwd === undefined
                 );
               }
+              // The ownership validation below runs for every non-live
+              // restore, and the reset route is public, so the lock cannot be
+              // Channel-only: a source-less restore would otherwise attest
+              // exclusive ownership while a transfer moves it. Legacy
+              // sidecars (no recorded workspace) validate on the legacy path
+              // and stay lock-free.
               isPart4AWorktreeRestore =
                 sidecarBeforeRestore.state === 'valid' &&
                 sidecarBeforeRestore.session.workspaceCwd !== undefined;
-              suppressWorktreeContextRestore = !(
-                sidecarBeforeRestore.state === 'valid' &&
-                sidecarBeforeRestore.session.workspaceCwd === undefined
-              );
               if (
                 isPart4AWorktreeRestore &&
                 sidecarBeforeRestore.state === 'valid'
@@ -4353,9 +4358,20 @@ export function registerSessionRoutes(
                     oldSidecar.state === 'valid' &&
                     oldSidecar.session.supersededBy === restoredStorageSessionId
                   ) {
+                    // The other side of this handoff is the SUPERSEDED
+                    // session, so it must not ride the wire as
+                    // `replacementSessionId`: that key tells a caller to load
+                    // the id it carries, and the session being restored here
+                    // already is the replacement. The old id is diagnostic.
+                    daemonLog?.warn(
+                      'worktree restore found an interrupted reset',
+                      {
+                        sessionId: restoredStorageSessionId,
+                        supersedesSessionId: sidecar.supersedes,
+                      },
+                    );
                     throw new WorktreeResetInterruptedError(
                       restoredStorageSessionId,
-                      sidecar.supersedes,
                     );
                   }
                 }
@@ -4720,20 +4736,22 @@ export function registerSessionRoutes(
               if (oldSidecar.supersededBy !== undefined) {
                 // ── Resume path ──────────────────────────────────────
                 // A previous transfer for this session crashed mid-flight.
-                // Classify by the marker: naming the old session (or absent)
-                // means the flip never committed — roll the interrupted
-                // transfer back and proceed with a fresh replacement in the
-                // same request; naming the replacement means the flip
-                // committed — finish the severance and return it.
+                // Classify by the marker: naming the old session means the
+                // flip never committed — roll the interrupted transfer back
+                // and proceed with a fresh replacement in the same request;
+                // naming the replacement means the flip committed — finish
+                // the severance and return it. An absent marker only reads
+                // as pre-commit while the replacement is dormant (below).
                 const replacementId = oldSidecar.supersededBy;
                 const newSidecarPath =
                   sessionService.getWorktreeSessionPath(replacementId);
                 const newRead = await readWorktreeSessionStrict(newSidecarPath);
+                // Sidecar-link agreement only. The marker is the authority on
+                // what committed, so neither branch may consult the
+                // replacement's transcript record: a crash can leave the
+                // linked pair with no record yet, and a retry that refuses on
+                // it never converges.
                 const linksAgree =
-                  (await resolveSessionIdForRestore(
-                    sessionService,
-                    replacementId,
-                  )) !== undefined &&
                   newRead.state === 'valid' &&
                   newRead.session.supersedes === storageSessionId;
                 const marker =
@@ -4750,14 +4768,31 @@ export function registerSessionRoutes(
                   (marker.state === 'valid' &&
                     marker.sessionId === storageSessionId)
                 ) {
-                  // Pre-commit: S_new is provably non-authoritative, so the
-                  // destructive rollback is correct here. A missing marker
-                  // with a valid sidecar is the supervisor-cleaned shape and
-                  // rolls back the same way; the fresh transfer below then
-                  // recreates the marker through the hatch.
+                  // Pre-commit: a marker naming the old session proves S_new
+                  // non-authoritative, so the destructive rollback is correct
+                  // and the fresh transfer below recreates the marker through
+                  // the hatch.
                   if (!linksAgree) {
                     daemonLog?.warn(
                       'worktree reset resume found inconsistent links',
+                      { sessionId, replacementSessionId: replacementId },
+                    );
+                    throw new WorktreeResetInvalidStateError(sessionId);
+                  }
+                  // An absent marker proves nothing on its own: a committed
+                  // transfer whose git-excluded marker was later cleaned (a
+                  // task-local `git clean -xdf`) reads exactly like the
+                  // supervisor-cleaned pre-commit shape. A replacement still
+                  // live on this daemon is that committed owner, so refuse
+                  // before any destructive write instead of dismantling it
+                  // and spawning a second writer. A dormant replacement is
+                  // the genuine post-crash shape and still rolls back.
+                  if (
+                    marker.state === 'missing' &&
+                    readSummary(replacementId) !== undefined
+                  ) {
+                    daemonLog?.warn(
+                      'worktree reset resume found a live replacement with no marker',
                       { sessionId, replacementSessionId: replacementId },
                     );
                     throw new WorktreeResetInvalidStateError(sessionId);

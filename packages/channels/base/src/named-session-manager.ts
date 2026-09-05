@@ -13,7 +13,6 @@ import process from 'node:process';
 import { canonicalizeWorkspacePath } from './paths.js';
 import type { SessionTarget } from './types.js';
 import type { SessionRouter } from './SessionRouter.js';
-import { readDaemonHttpErrorCode } from './SessionRouter.js';
 
 const REGISTRY_VERSION = 1;
 const MAX_OPEN_TASKS = 8;
@@ -234,22 +233,27 @@ export class NamedSessionManager {
     });
   }
 
+  /**
+   * Reload a task a queued turn is already bound to. Resolves to the session
+   * id the caller must dispatch on — the healed replacement when a superseded
+   * redirect fired — or undefined when the task is no longer reservable.
+   */
   resumeReserved(
     input: NamedSessionOwnerInput,
     sessionId: string,
-  ): Promise<boolean> {
+  ): Promise<string | undefined> {
     return this.withOwnerLock(input, async () => {
       const owner = await this.ensureOwner(input, false);
       const task = owner?.tasks.find(
         (candidate) =>
           candidate.sessionId === sessionId && candidate.status === 'open',
       );
-      if (!task) return false;
-      await this.loadTask(
+      if (!task) return undefined;
+      const result = await this.loadTask(
         task,
         `Could not reload reserved task "${task.name}".`,
       );
-      return true;
+      return result.sessionId;
     });
   }
 
@@ -450,7 +454,19 @@ export class NamedSessionManager {
       try {
         await this.router.detachManagedSession(task.sessionId);
       } catch (error) {
-        this.commitOwner(owner);
+        // The fallback's load may have healed its own superseded redirect
+        // mid-close; restoring the raw snapshot would undo that heal.
+        const healedReplacement =
+          replacement !== undefined &&
+          replacementSessionId !== undefined &&
+          replacementSessionId !== replacement.sessionId
+            ? { ...replacement, sessionId: replacementSessionId }
+            : undefined;
+        this.commitOwner(
+          healedReplacement
+            ? this.replaceTask(owner, healedReplacement, owner.activeTaskName)
+            : owner,
+        );
         this.router.forgetManagedSession(task.sessionId);
         const restored = await this.loadTask(
           task,
@@ -496,8 +512,8 @@ export class NamedSessionManager {
       if (task.isolation === 'worktree') {
         // Worktree reset is an ownership transfer, not a new conversation:
         // the daemon moves the checkout to a fresh session and supersedes
-        // this one. Busy tasks fail before any daemon call; an interrupted
-        // transfer gets exactly one automatic retry.
+        // this one. Busy tasks fail before any daemon call, and the daemon
+        // resumes an interrupted transfer itself, so one attempt is enough.
         if (this.isBusy(task.sessionId)) {
           throw new Error(
             `Task "${task.name}" is busy. Wait for the running prompt to finish (or cancel it), then try again.`,
@@ -773,28 +789,17 @@ export class NamedSessionManager {
   }
 
   private async resetWorktreeSession(task: StoredTask): Promise<string> {
-    let retriedInterrupted = false;
-    for (;;) {
-      try {
-        return await this.router.replaceManagedWorktreeSession(
-          task.sessionId,
-          task.target,
-          this.cwd,
-          task.cwd,
-        );
-      } catch (error) {
-        const code = readDaemonHttpErrorCode(error);
-        if (code === 'worktree_reset_interrupted' && !retriedInterrupted) {
-          // The daemon classified a crashed transfer and rolled the
-          // pre-commit shapes back; exactly one automatic retry completes
-          // (or definitively reports) the reset.
-          retriedInterrupted = true;
-          continue;
-        }
-        throw new Error(`Could not reset task "${task.name}".`, {
-          cause: error,
-        });
-      }
+    try {
+      return await this.router.replaceManagedWorktreeSession(
+        task.sessionId,
+        task.target,
+        this.cwd,
+        task.cwd,
+      );
+    } catch (error) {
+      throw new Error(`Could not reset task "${task.name}".`, {
+        cause: error,
+      });
     }
   }
 

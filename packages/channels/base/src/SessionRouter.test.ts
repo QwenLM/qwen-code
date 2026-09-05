@@ -1174,6 +1174,17 @@ describe('SessionRouter', () => {
       };
     }
 
+    /** An attestation for a session owning the task's worktree checkout. */
+    function worktreeSessionInfo(sessionId: string) {
+      return {
+        sessionId,
+        workspaceCwd: '/tmp',
+        hasActivePrompt: false,
+        worktree: { slug: 'task', path: '/tmp/worktree-task', branch: 'task' },
+        worktreeState: 'persisted-v1' as const,
+      };
+    }
+
     it('fails closed when the bridge does not support worktree reset', async () => {
       const router = new SessionRouter(bridge, '/tmp', 'user', undefined, {
         recoveryMode: 'lazy',
@@ -1336,6 +1347,154 @@ describe('SessionRouter', () => {
         expect.anything(),
       );
       expect(router.getTarget('replacement-session')).toBeUndefined();
+    });
+
+    it('consults the daemon for the old session after a failed reset', async () => {
+      // The daemon commits the flip and the client side fails afterwards, so
+      // only the next load of the old id reports the superseded redirect.
+      let flipCommitted = false;
+      const loadSession = vi.fn(async (sessionId: string) => {
+        if (flipCommitted && sessionId === 'old-session') {
+          throw daemonHttpError('worktree_session_superseded', {
+            replacementSessionId: 'replacement-session',
+          });
+        }
+        return sessionId;
+      });
+      const managedBridge = worktreeResetBridge({
+        loadSession,
+        listSessions: vi
+          .fn()
+          .mockReturnValue([
+            worktreeSessionInfo('old-session'),
+            worktreeSessionInfo('replacement-session'),
+          ]),
+        resetWorktreeSession: vi.fn(async () => {
+          flipCommitted = true;
+          throw new Error('timed out');
+        }),
+      });
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession(
+        'old-session',
+        target,
+        '/tmp/worktree-task',
+      );
+      await router.loadManagedSession(
+        'old-session',
+        target,
+        '/tmp',
+        '/tmp/worktree-task',
+        'worktree',
+      );
+      expect(router.isSessionLive('old-session')).toBe(true);
+      vi.mocked(loadSession).mockClear();
+
+      await expect(
+        router.replaceManagedWorktreeSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+        ),
+      ).rejects.toThrow('timed out');
+
+      // The failed reset drops only the live flag: the route survives and the
+      // old id is no longer served from memory.
+      expect(router.isSessionLive('old-session')).toBe(false);
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe('old-session');
+
+      await expect(
+        router.loadManagedSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+          'worktree',
+        ),
+      ).resolves.toEqual({
+        loaded: true,
+        sessionId: 'replacement-session',
+        redirectedFrom: 'old-session',
+      });
+      expect(loadSession.mock.calls.map((call) => call[0])).toEqual([
+        'old-session',
+        'replacement-session',
+      ]);
+      expect(router.getSession('ch', 'alice', 'chat1')).toBe(
+        'replacement-session',
+      );
+    });
+
+    it('re-loads the same session when a failed reset never committed', async () => {
+      const discardSession = vi.fn().mockResolvedValue(undefined);
+      const loadSession = vi.fn(async (sessionId: string) => sessionId);
+      const managedBridge = worktreeResetBridge({
+        loadSession,
+        listSessions: vi
+          .fn()
+          .mockReturnValue([worktreeSessionInfo('old-session')]),
+        resetWorktreeSession: vi
+          .fn()
+          .mockRejectedValue(new Error('daemon unavailable')),
+        discardSession,
+      });
+      const router = new SessionRouter(
+        managedBridge,
+        '/tmp',
+        'user',
+        undefined,
+        { recoveryMode: 'lazy' },
+      );
+      router.activateManagedSession(
+        'old-session',
+        target,
+        '/tmp/worktree-task',
+      );
+      await router.loadManagedSession(
+        'old-session',
+        target,
+        '/tmp',
+        '/tmp/worktree-task',
+        'worktree',
+      );
+      vi.mocked(loadSession).mockClear();
+
+      await expect(
+        router.replaceManagedWorktreeSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+        ),
+      ).rejects.toThrow('daemon unavailable');
+
+      // A pre-flip failure keeps the same session as the worktree owner: the
+      // retry re-loads and re-attaches it instead of discarding it.
+      await expect(
+        router.loadManagedSession(
+          'old-session',
+          target,
+          '/tmp',
+          '/tmp/worktree-task',
+          'worktree',
+        ),
+      ).resolves.toEqual({ loaded: true, sessionId: 'old-session' });
+      expect(loadSession).toHaveBeenCalledWith(
+        'old-session',
+        '/tmp',
+        { sourceId: 'ch' },
+        expect.anything(),
+      );
+      expect(discardSession).not.toHaveBeenCalled();
+      expect(router.getSessionCwd('old-session')).toBe('/tmp/worktree-task');
+      expect(router.isSessionLive('old-session')).toBe(true);
     });
   });
 

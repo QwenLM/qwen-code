@@ -613,9 +613,6 @@ export function sendBridgeError(
       error: err.message,
       code: 'worktree_reset_interrupted',
       sessionId: err.sessionId,
-      ...(err.replacementSessionId !== undefined
-        ? { replacementSessionId: err.replacementSessionId }
-        : {}),
     });
     return;
   }

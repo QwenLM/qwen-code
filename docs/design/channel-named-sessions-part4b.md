@@ -205,9 +205,10 @@ the design (see the disposition table).
   misleading message — chiga0 F3. (The claimed silent shared-task creation
   does not occur; `TASK_NAME_PATTERN` rejects a leading hyphen. Only the
   message is wrong.)
-- `acquireWorktreeRestore` is keyed per bridge instance (a `WeakMap`) and per
-  session ID, and today covers only the deferred-prompt restore shape; the
-  ordinary Part 4A worktree restore takes no such lock.
+- `acquireWorktreeRestore` (renamed `acquireWorktreeOwnershipOp` by this part)
+  is keyed per bridge instance (a `WeakMap`) and per session ID, and today
+  covers only the deferred-prompt restore shape; the ordinary Part 4A worktree
+  restore takes no such lock.
 - `packages/core/src/utils/atomicFileWrite.ts` already provides
   `atomicWriteFile` with `noFollow: true` (an atomic replace that substitutes
   a regular file for whatever occupies the path, never following a swapped-in
@@ -349,15 +350,24 @@ the existing `lastSelectedAt` bump.
 
 ### New route: `POST /session/:id/worktree-reset`
 
-Request body: `{ workspaceCwd: string, sourceType?, sourceId? }`. The route
-resolves the registered root workspace runtime exactly like the create route;
-the worktree path itself is never accepted as a routing input. The session ID
-in the path is the worktree owner to replace (`S_old`).
+Request body (every field optional): `{ cwd?, modelServiceId?, approvalMode?,
+sourceType?, sourceId? }`. `cwd` is the wire field for the workspace root —
+the SDK maps its `workspaceCwd` option onto it — and the route resolves it
+through the same resolver as load/resume: an explicit `cwd` selects that
+registered workspace, omitting it falls back to the daemon's advertised
+primary workspace, and the worktree path itself is never accepted as a routing
+input. The session ID in the path is the worktree owner to replace (`S_old`).
 
 The response on success is the same session payload shape as create/load,
-carrying `S_new`, its client registration, the worktree metadata, and
-`worktreeState: "persisted-v1"`. SDK and bridge types reuse the existing
-`DaemonSession` surface; no new response type is introduced.
+carrying `S_new`, the worktree metadata, and `worktreeState: "persisted-v1"`.
+It carries no client registration for the caller: the route never reads
+`X-Qwen-Client-Id`, so `S_new` spawns unattached — the fresh-transfer body's
+`clientId` is a daemon-minted identity for that spawn, and the
+idempotent-resume body omits it. Callers treat the response as the
+replacement's identity and attach it through their normal flow; the Channel
+adopts the returned client and calls `activateManagedSession`. SDK and bridge
+types reuse the existing `DaemonSession` surface; no new response type is
+introduced.
 
 Typed failures (4xx, bounded, no paths or stack traces):
 
@@ -366,12 +376,20 @@ Typed failures (4xx, bounded, no paths or stack traces):
 - `worktree_reset_active` — the session has an active prompt, a pending
   interaction, or a parked deferred restore prompt.
 - `worktree_reset_invalid_state` — stale, foreign, tampered, containment
-  failure, or ambiguous ownership. Always non-destructive.
-- `worktree_session_superseded` — see the redirect below. Also used by
-  load/resume.
-- `worktree_reset_interrupted` — a previous reset crashed mid-transfer;
-  retrying resumes it. Also surfaced through load/resume, see the superseded
-  redirect section.
+  failure, or ambiguous ownership. Non-destructive for what this request
+  started: a partial transfer is rolled back before the caller sees it, while
+  a pre-existing interrupted state is left untouched for operator repair.
+
+Two further codes belong to the restore surface, not to this route, which
+resolves both shapes itself and never returns them:
+
+- `worktree_session_superseded` — load/resume of `S_old` after the flip; see
+  the redirect below.
+- `worktree_reset_interrupted` — load/resume of a replacement whose
+  `supersedes`/`supersededBy` links agree while the marker never moved. The
+  repair is retrying the reset against the superseded session, which rolls the
+  interrupted transfer back or finishes it; see the superseded redirect
+  section.
 
 ### Deferred-prompt visibility (R8-2)
 
@@ -400,14 +418,15 @@ computations.
 Serialization for this operation is keyed on the canonical worktree path, not
 the session ID — after any completed or crashed transfer, two sessions hold
 sidecars naming the same worktree, and per-session locks would not mutually
-exclude their resets. The existing `acquireWorktreeRestore` serialization
-(per bridge instance) is widened the same way: every route-owned Part 4A
-worktree restore takes the worktree-keyed lock after its sidecar pre-read,
-and this route holds it for the whole operation. A restore of `S_old` can
-therefore never pass marker validation concurrently with a transfer that is
-about to flip the marker, and two resets targeting the same worktree can
-never both reach the flip. The runtime generation is captured before the
-first side effect and re-asserted before the response, as in create/load.
+exclude their resets. The existing restore serialization (per bridge instance)
+is widened the same way and renamed `acquireWorktreeOwnershipOp`: every
+route-owned Part 4A worktree restore takes the worktree-keyed lock after its
+sidecar pre-read, and this route holds it for the whole operation. A restore
+of `S_old` can therefore never pass marker validation concurrently with a
+transfer that is about to flip the marker, and two resets targeting the same
+worktree can never both reach the flip. The runtime generation is captured
+before the first side effect and re-asserted before the response, as in
+create/load.
 
 Inside the lock, with the sidecar re-read and re-validated under the lock:
 
@@ -753,14 +772,25 @@ options, bindingToken)`;
 - on success records the new session's target and canonical cwd and returns
   the new session ID.
 
-The load path learns the superseded redirect: when the bridge surfaces the
-typed `worktree_session_superseded` error, `loadManagedSession` propagates it
-with the replacement ID; the manager catches it, exact-loads the replacement,
-and commits the registry update under the owner lock before continuing. The
-manager also maps the typed restore failures to the bounded messages shown
-above: `worktree_marker_missing` to the recovery message and
-`worktree_reset_interrupted` to the interrupted-transfer message; every other
-daemon failure keeps the existing generic named-session message.
+The load path learns the superseded redirect inside the router, not the
+manager: when the daemon surfaces the typed `worktree_session_superseded`
+error, `loadManagedSession` reads the replacement ID off it, exact-loads that
+ID once (a second superseded response is a genuine failure, not another
+hop), heals the route mappings that pointed at the superseded session, and
+returns the healed ID alongside `loaded`. The manager's `loadTask` consumes
+that ID for every registry write it makes — a heal that is folded into the
+stored owner rather than rebuilt from the pre-heal snapshot — so `use`,
+`close`, and lock resolution cannot clobber it.
+
+The typed restore failures map to the bounded messages shown above on the
+shared named-session error surface, which every selection, message, and
+`/clear` path already reports through: `worktree_marker_missing` to the
+recovery message and `worktree_reset_interrupted` to the interrupted-transfer
+message. Both codes are produced only by the load/resume route, so they reach
+that surface wrapped in the manager's generic load failure rather than the
+reset call — the reset route resumes an interrupted transfer itself. A reset
+refused because a session is busy keeps its own cancel-first wording, and
+every other daemon failure keeps the existing generic named-session message.
 
 ### Bridge, worker, SDK
 
@@ -805,9 +835,12 @@ daemon failure keeps the existing generic named-session message.
 - Downgrade between reset and restart: an older worker reads the same
   registry and restores `S_new` through the Part 4A path; `supersededBy` is
   ignored by readers that predate it.
-- `S_old` after reset: its transcript and catalog record persist; restore
-  fails closed as superseded (Channel) or invalid (other callers); it never
-  reclaims the worktree.
+- `S_old` after reset: its transcript and catalog record persist, and restore
+  fails closed for every caller — a Channel restore gets the typed
+  `worktree_session_superseded` redirect with the replacement ID, while any
+  other caller gets the ordinary non-typed Part 4A integrity `409` (the
+  checkout marker now names the replacement) and never a reset-taxonomy code,
+  because it takes no ownership lock. `S_old` never reclaims the worktree.
 
 ## User-facing error classes
 
@@ -839,8 +872,9 @@ Bounded messages, no paths, session IDs, or daemon bodies:
    compare-and-swap commit shapes, and strict-reader tests for every crash
    window.
 3. Daemon route `POST /session/:id/worktree-reset`: worktree-keyed
-   serialization (widening `acquireWorktreeRestore`), preconditions,
-   resumable transfer protocol, rollback, capability registration.
+   serialization (widening the restore lock into
+   `acquireWorktreeOwnershipOp`), preconditions, resumable transfer protocol,
+   rollback, capability registration.
 4. Restore changes: superseded redirect, interrupted-transfer signal,
    missing-marker typed failure, and removal of the under-attesting
    `hasUnlocatedRestoredPrompt` branch.

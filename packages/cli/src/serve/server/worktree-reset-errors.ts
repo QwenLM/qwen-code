@@ -28,14 +28,17 @@ export class WorktreeSessionSupersededError extends Error {
 
 /**
  * Channel restore reached the ownership check and the marker is absent.
- * Distinct from corruption: the checkout may have been cleaned, and the
- * caller can retry the restore or reset the task.
+ * Distinct from corruption: the checkout may have been cleaned. A restore
+ * retry cannot repair it — no restore path writes a marker — so the caller
+ * must reset the task, whose transfer recreates the marker. An absent marker
+ * whose `supersedes`/`supersededBy` links agree classifies as
+ * {@link WorktreeResetInterruptedError} instead, before this one.
  */
 export class WorktreeMarkerMissingError extends Error {
   readonly sessionId: string;
   constructor(sessionId: string) {
     super(
-      `Worktree ownership marker for session ${sessionId} is missing; retry the restore or reset the task`,
+      `Worktree ownership marker for session ${sessionId} is missing; reset the task to recreate it`,
     );
     this.name = 'WorktreeMarkerMissingError';
     this.sessionId = sessionId;
@@ -43,20 +46,24 @@ export class WorktreeMarkerMissingError extends Error {
 }
 
 /**
- * A worktree reset crashed mid-transfer; the sidecar pair and marker
- * describe an unfinished handoff. Retrying the reset is the repair for the
- * pre-commit shapes; the post-commit shape resumes as a no-op.
+ * A restore reached an unfinished handoff: the sidecar pair links the two
+ * sessions but the checkout marker never moved onto the replacement. The
+ * repair depends on which session the caller restored — retrying the reset
+ * against the *superseded* session rolls the pre-commit shape back or
+ * finishes it, while this shape, reported for the replacement, is not
+ * repairable that way (the reset route resumes a committed transfer as a
+ * no-op) and needs operator repair. Carries no replacement id: this is
+ * thrown for the replacement, so the id it would name is already the
+ * caller's own.
  */
 export class WorktreeResetInterruptedError extends Error {
   readonly sessionId: string;
-  readonly replacementSessionId?: string;
-  constructor(sessionId: string, replacementSessionId?: string) {
+  constructor(sessionId: string) {
     super(
-      'A previous worktree reset was interrupted; retry the reset to finish or roll it back',
+      'A previous worktree reset was interrupted; retry the reset against the superseded session to finish or roll it back',
     );
     this.name = 'WorktreeResetInterruptedError';
     this.sessionId = sessionId;
-    this.replacementSessionId = replacementSessionId;
   }
 }
 
@@ -84,10 +91,13 @@ export class WorktreeResetUnsupportedError extends Error {
 
 /**
  * Reset refused on stale, foreign, tampered, containment-failing, or
- * ambiguous ownership state. Always non-destructive: the route rolls any
- * partial transfer back before this reaches the caller. The message is
- * deliberately generic — the specific reason goes to the daemon log, never
- * to the wire (no paths, no underlying I/O error text).
+ * ambiguous ownership state. Non-destructive for what this request started:
+ * the route rolls a partial transfer this request began back before this
+ * reaches the caller, while the resume path's fail-closed branches — an
+ * invalid marker, an inconsistent supersede link pair, an ambiguous marker
+ * owner — leave the pre-existing interrupted state untouched for operator
+ * repair. The message is deliberately generic — the specific reason goes to
+ * the daemon log, never to the wire (no paths, no underlying I/O error text).
  */
 export class WorktreeResetInvalidStateError extends Error {
   readonly sessionId: string;

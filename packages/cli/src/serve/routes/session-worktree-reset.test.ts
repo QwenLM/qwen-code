@@ -5,6 +5,7 @@
  */
 
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   realpathSync,
@@ -27,6 +28,7 @@ import {
 } from 'vitest';
 import {
   SessionService,
+  WORKTREE_SESSION_FILE,
   createWorktreeSessionMarkerExclusive,
   readWorktreeSessionMarkerStrict,
   readWorktreeSessionStrict,
@@ -274,6 +276,11 @@ function makeFixture(options: { resetSupport?: boolean } = {}) {
     createMarker(sessionId: string) {
       return createWorktreeSessionMarkerExclusive(worktreeDir, sessionId);
     },
+    // The marker is git-excluded, so a task-local `git clean -xdf` removes it
+    // from a checkout whose transfer already committed.
+    removeMarker(): void {
+      rmSync(path.join(worktreeDir, WORKTREE_SESSION_FILE), { force: true });
+    },
   };
 }
 
@@ -509,6 +516,107 @@ describe('POST /session/:id/worktree-reset', () => {
     await expectMarkerOwner(fixture, replacementId);
   });
 
+  it('rolls back an interrupted pre-commit transfer whose replacement has no transcript record', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    const crashedId = randomUUID();
+    fixture.writeTranscript(oldId);
+    // The crash left the sidecar pair linked before the replacement ever
+    // persisted a record: the marker, not the record, decides the rollback.
+    await fixture.writeSidecar(oldId, { supersededBy: crashedId });
+    await fixture.writeSidecar(crashedId, { supersedes: oldId });
+    await fixture.createMarker(oldId);
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    const newId = res.body.sessionId;
+    expect(newId).not.toBe(crashedId);
+    expect(res.body.worktreeState).toBe('persisted-v1');
+
+    expect(archiveMocks.deleteDaemonSessionIfOrphan).toHaveBeenCalledTimes(1);
+    expect(archiveMocks.deleteDaemonSessionIfOrphan).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: crashedId }),
+    );
+    expect(await fixture.readSidecar(crashedId)).toEqual({ state: 'missing' });
+    await expectMarkerOwner(fixture, newId);
+  });
+
+  it('resumes a committed transfer idempotently when the replacement has no transcript record', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    const replacementId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId, { supersededBy: replacementId });
+    await fixture.writeSidecar(replacementId, { supersedes: oldId });
+    await fixture.createMarker(replacementId);
+
+    const res = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBe(replacementId);
+    expect(res.body.worktreeState).toBe('persisted-v1');
+    expect(fixture.fake.spawnOrAttach).not.toHaveBeenCalled();
+    expect(fixture.fake.clearSessionWorktree).toHaveBeenCalledWith(oldId);
+    expect(fixture.fake.severSessionClients).toHaveBeenCalledWith(oldId);
+    expect(archiveMocks.deleteDaemonSessionIfOrphan).not.toHaveBeenCalled();
+    await expectMarkerOwner(fixture, replacementId);
+  });
+
+  it('refuses a marker-cleaned committed transfer while the replacement is live', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId);
+    await fixture.createMarker(oldId);
+
+    const committed = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+    expect(committed.status).toBe(200);
+    const replacementId = committed.body.sessionId;
+    fixture.writeTranscript(replacementId);
+    // The committed transfer cleared and severed the old session itself;
+    // only the retry's bridge calls are under test from here on.
+    vi.clearAllMocks();
+    // A `git clean -xdf` in the checkout removes the excluded marker, and the
+    // committed replacement is still live on this daemon: the marker-missing
+    // shape now reads exactly like the pre-commit crash shape.
+    fixture.removeMarker();
+    expect((await fixture.readMarker()).state).toBe('missing');
+    fixture.fake.setSummary(replacementId, {
+      hasActivePrompt: false,
+      pendingInteractionCount: 0,
+    });
+
+    const retry = await request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({});
+
+    expect(retry.status).toBe(409);
+    expect(retry.body.code).toBe('worktree_reset_invalid_state');
+    // Nothing destructive ran and no second writer was spawned.
+    expect(archiveMocks.deleteDaemonSessionIfOrphan).not.toHaveBeenCalled();
+    expect(fixture.fake.clearSessionWorktree).not.toHaveBeenCalled();
+    expect(fixture.fake.severSessionClients).not.toHaveBeenCalled();
+    expect(fixture.fake.spawnOrAttach).not.toHaveBeenCalled();
+    const replacementSidecar = await expectSidecar(fixture, replacementId);
+    expect(replacementSidecar?.supersedes).toBe(oldId);
+    const oldSidecar = await expectSidecar(fixture, oldId);
+    expect(oldSidecar?.supersededBy).toBe(replacementId);
+    expect(
+      existsSync(
+        fixture.sessionService.getSessionTranscriptPath(replacementId),
+      ),
+    ).toBe(true);
+    expect((await fixture.readMarker()).state).toBe('missing');
+    expect(fixture.fake.clearSessionResetPending).toHaveBeenCalledWith(oldId);
+  });
+
   it('rolls back sidecars and the orphan replacement when the marker flip fails', async () => {
     const fixture = makeFixture();
     const oldId = randomUUID();
@@ -595,9 +703,155 @@ describe('POST /session/:id/load worktree classifications', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('worktree_reset_interrupted');
     expect(res.body.sessionId).toBe(replacementId);
+    // The interrupted handoff's other side is the SUPERSEDED session, so it
+    // must not ride the wire under the key that tells a caller which id to
+    // load instead: the restore target already is the replacement.
+    expect(res.body.replacementSessionId).toBeUndefined();
     expect(fixture.fake.killSession).toHaveBeenCalledWith(replacementId, {
       requireZeroAttaches: true,
     });
+  });
+
+  it('serializes a source-less restore behind an in-flight reset', async () => {
+    const fixture = makeFixture();
+    const oldId = randomUUID();
+    const replacementId = randomUUID();
+    fixture.writeTranscript(oldId);
+    await fixture.writeSidecar(oldId);
+    await fixture.createMarker(oldId);
+
+    // Hold the transfer mid-flight: the reset owns the worktree-keyed lock
+    // for its whole duration, including while the replacement spawns.
+    let releaseSpawn!: () => void;
+    const spawnGate = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    let resetHoldsLock!: () => void;
+    const resetAtSpawn = new Promise<void>((resolve) => {
+      resetHoldsLock = resolve;
+    });
+    fixture.fake.spawnOrAttach.mockImplementationOnce(async () => {
+      // Reached only after the ownership lock was acquired.
+      resetHoldsLock();
+      await spawnGate;
+      return { sessionId: replacementId, attached: false };
+    });
+    // The contending restore is source-less: no source in the request and no
+    // persisted source on the session, so it is not a Channel restore.
+    let metadataRead!: () => void;
+    const metadataGate = new Promise<void>((resolve) => {
+      metadataRead = resolve;
+    });
+    vi.spyOn(
+      SessionService.prototype,
+      'readCreationMetadata',
+    ).mockImplementation(async () => {
+      metadataRead();
+      return {};
+    });
+
+    // Supertest dispatches on the first `then`, so both requests are chained
+    // here: the reset must already be in flight before the restore starts.
+    const resetInFlight = request(fixture.app)
+      .post(`/session/${oldId}/worktree-reset`)
+      .send({})
+      .then((response) => response);
+    await resetAtSpawn;
+
+    let restoreSettled = false;
+    const restoreInFlight = request(fixture.app)
+      .post(`/session/${oldId}/load`)
+      .send({})
+      .then((response) => {
+        restoreSettled = true;
+        return response;
+      });
+    // The restore reaches the ownership gate right after its metadata read;
+    // from there it waits instead of attesting ownership mid-transfer. Poll
+    // so an ungated restore is caught however slowly the box runs.
+    await metadataGate;
+    const deadline = Date.now() + 500;
+    while (!restoreSettled && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(restoreSettled).toBe(false);
+    expect(fixture.fake.loadSession).not.toHaveBeenCalled();
+
+    releaseSpawn();
+    const [resetResponse, restoreResponse] = await Promise.all([
+      resetInFlight,
+      restoreInFlight,
+    ]);
+
+    expect(resetResponse.status).toBe(200);
+    expect(resetResponse.body.sessionId).toBe(replacementId);
+    // Released state: the restore observes the completed transfer and
+    // redirects to the replacement instead of attesting the superseded
+    // session it asked for.
+    expect(restoreResponse.status).toBe(409);
+    expect(restoreResponse.body.code).toBe('worktree_session_superseded');
+    expect(restoreResponse.body.sessionId).toBe(oldId);
+    expect(restoreResponse.body.replacementSessionId).toBe(replacementId);
+    expect(fixture.fake.setSessionWorktree).toHaveBeenCalledTimes(1);
+    expect(fixture.fake.setSessionWorktree).toHaveBeenCalledWith(
+      replacementId,
+      expect.objectContaining({ path: fixture.realTarget }),
+    );
+    expect(fixture.fake.changeSessionCwd).not.toHaveBeenCalledWith(
+      oldId,
+      expect.anything(),
+    );
+  });
+
+  it('keeps a legacy sidecar restore lock-free while a reset holds the worktree', async () => {
+    const fixture = makeFixture();
+    const ownerId = randomUUID();
+    const legacyId = randomUUID();
+    fixture.writeTranscript(ownerId);
+    fixture.writeTranscript(legacyId);
+    await fixture.writeSidecar(ownerId);
+    // A legacy sidecar records no workspace: its restore validates on the
+    // legacy path and must never contend on the worktree-keyed lock.
+    await fixture.writeSidecar(legacyId, { workspaceCwd: undefined });
+    await fixture.createMarker(ownerId);
+
+    let releaseSpawn!: () => void;
+    const spawnGate = new Promise<void>((resolve) => {
+      releaseSpawn = resolve;
+    });
+    let resetHoldsLock!: () => void;
+    const resetAtSpawn = new Promise<void>((resolve) => {
+      resetHoldsLock = resolve;
+    });
+    fixture.fake.spawnOrAttach.mockImplementationOnce(async () => {
+      resetHoldsLock();
+      await spawnGate;
+      return { sessionId: randomUUID(), attached: false };
+    });
+    vi.spyOn(
+      SessionService.prototype,
+      'readCreationMetadata',
+    ).mockResolvedValue({});
+
+    const resetInFlight = request(fixture.app)
+      .post(`/session/${ownerId}/worktree-reset`)
+      .send({})
+      .then((response) => response);
+    await resetAtSpawn;
+
+    // Awaited directly on purpose: a legacy restore that wrongly took the
+    // lock would hang here until the reset was released, failing the test.
+    const legacyResponse = await request(fixture.app)
+      .post(`/session/${legacyId}/load`)
+      .send({});
+
+    expect(legacyResponse.status).toBe(200);
+    expect(legacyResponse.body.worktree).toEqual(
+      expect.objectContaining({ path: fixture.realTarget }),
+    );
+
+    releaseSpawn();
+    expect((await resetInFlight).status).toBe(200);
   });
 
   it('attests persisted-v1 when the marker proves ownership', async () => {

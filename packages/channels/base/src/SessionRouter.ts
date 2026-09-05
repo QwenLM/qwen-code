@@ -694,7 +694,8 @@ export class SessionRouter {
    *
    * A failure past the daemon's marker flip rolls nothing back: the
    * registry keeps pointing at the old id, and the next selection's load
-   * heals it through the superseded redirect.
+   * heals it through the superseded redirect — the failed reset drops the
+   * old id from the live set so that load consults the daemon again.
    */
   async replaceManagedWorktreeSession(
     sessionId: string,
@@ -751,6 +752,12 @@ export class SessionRouter {
           .discardSession?.(replacementId, bindingToken)
           .catch(() => undefined);
       }
+      // A failure past the daemon's marker flip leaves this session superseded
+      // server-side with no eviction event to tell us. While the id stays live
+      // the next load short-circuits and never consults the daemon, so the
+      // superseded redirect can never heal it. Drop only the live flag: the
+      // route mappings stay, so a pre-flip failure simply re-loads this id.
+      this.liveSessionIds.delete(sessionId);
       throw error;
     } finally {
       this.endSessionLoad(loadWindow);
