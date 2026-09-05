@@ -6368,8 +6368,9 @@ describe('qwen-triage verify maintainer-review round', () => {
     // client's own timeout (curl 28).
     expect(out).toContain('stall_exit=18');
     // 20 chunks x 200 ms is 4 s before the stall arm even starts, so this
-    // cannot fit vitest's 5 s default. It was timing out on main.
-  }, 30000);
+    // cannot fit vitest's 5 s default (it was timing out on main) and runs
+    // on the suite ceiling in scripts/tests/vitest.config.ts.
+  });
 
   // GitHub cancels the OLDER pending run in a concurrency group, so the
   // requester's own /verify proceeds — the earlier "queued behind other
@@ -6647,9 +6648,9 @@ describe('qwen-triage tmux lane parity', () => {
     const out = runProxyWatchdogTest(proxy);
     expect(out).toContain('chunks=20');
     expect(out).toContain('stall_exit=18');
-    // Same reason as its verify-lane twin: the stream alone outlasts the
-    // 5 s default.
-  }, 30000);
+    // Same reason as its verify-lane twin: the stream alone outlasts the 5 s
+    // default, so this runs on the suite ceiling too.
+  });
 
   // PR lifecycle scripts run before the agent and can plant a
   // tmp/<name>-tmux-<ts>/ directory whose report.md and transcript the
@@ -7093,7 +7094,7 @@ describe('qwen-triage build-process guard', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  }, 30000);
+  });
 });
 
 describe('triage job budget', () => {
