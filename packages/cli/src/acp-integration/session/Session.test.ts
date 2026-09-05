@@ -34051,7 +34051,24 @@ describe('Session', () => {
             update.sessionUpdate === 'tool_call_update' &&
             update._meta?.provenance === 'subagent',
         );
-      expect(subagentUpdates).toEqual([]);
+      // Filter out the new subagentProgress frames, as they are intentionally
+      // emitted before the cancellation check to keep the parent card live.
+      // The new contract allows the pre cancellation approval progress update.
+
+      const progressUpdates = subagentUpdates.filter(
+        (update: { _meta?: { subagentProgress?: boolean } }) =>
+          update?._meta?.subagentProgress,
+      );
+      expect(progressUpdates).toHaveLength(1);
+      expect(progressUpdates[0].content?.[0]?.content?.text).toContain(
+        'Waiting for permission',
+      );
+
+      const nonProgressUpdates = subagentUpdates.filter(
+        (update: { _meta?: { subagentProgress?: boolean } }) =>
+          !update?._meta?.subagentProgress,
+      );
+      expect(nonProgressUpdates).toEqual([]);
     });
 
     it('aborts sibling Agent calls in the same batch after nested ask_user_question cancellation', async () => {

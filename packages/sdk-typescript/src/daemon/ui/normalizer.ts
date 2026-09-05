@@ -948,7 +948,8 @@ function normalizeSessionUpdate(
       if (
         getString(update, 'status') === 'in_progress' &&
         getString(update, 'kind') === undefined &&
-        meta?.['shellProgress'] !== undefined
+        (meta?.['shellProgress'] !== undefined ||
+          meta?.subagentProgress === true)
       ) {
         return [];
       }
