@@ -79,6 +79,14 @@ Command hooks execute commands via child processes. Input JSON is passed through
 }
 ```
 
+`$QWEN_PROJECT_DIR` (and the `$GEMINI_PROJECT_DIR` / `$CLAUDE_PROJECT_DIR`
+compatibility forms) is expanded before the command reaches the shell, not by
+the shell itself. Outside quotes the expanded path is auto-quoted for you
+(including any literal path suffix immediately after it, e.g. on Windows
+`cmd.exe`); inside `"..."` the raw path is spliced into your existing quotes.
+Inside bash `'...'`, nothing expands — that's standard bash single-quote
+semantics, so the placeholder is left exactly as written.
+
 ### HTTP Hooks
 
 HTTP hooks send hook input as POST requests to specified URLs. They support URL whitelists, DNS-level SSRF protection, environment variable interpolation, and other security features.
