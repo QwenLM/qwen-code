@@ -298,15 +298,7 @@ export function loadTypeScript(
   if (bases === undefined && loadedTypeScript !== undefined) {
     return loadedTypeScript;
   }
-  const from: string[] = bases ? [...bases] : [];
-  if (bases === undefined) {
-    try {
-      from.push(nodePath.join(process.cwd(), 'package.json'));
-    } catch {
-      /* a working directory that no longer exists: only the CLI's own tree */
-    }
-    from.push(import.meta.url);
-  }
+  const from = bases ? [...bases] : defaultTypeScriptBases();
   let found: TypeScriptModule | null = null;
   for (const base of from) {
     try {
@@ -321,6 +313,25 @@ export function loadTypeScript(
   }
   if (bases === undefined) loadedTypeScript = found;
   return found;
+}
+
+/**
+ * Where the default resolution looks, in order: the working directory —
+ * the repository the review runs in, whose own `typescript` is the one
+ * that reads its sources, and the only base a globally installed CLI has
+ * (nothing ships beside `dist/`) — then this module's own tree, which
+ * serves the source checkout and the test runner. A working directory
+ * that no longer exists contributes no base.
+ */
+export function defaultTypeScriptBases(): string[] {
+  const from: string[] = [];
+  try {
+    from.push(nodePath.join(process.cwd(), 'package.json'));
+  } catch {
+    /* a working directory that no longer exists: only the CLI's own tree */
+  }
+  from.push(import.meta.url);
+  return from;
 }
 
 /**

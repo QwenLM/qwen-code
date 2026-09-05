@@ -28,6 +28,7 @@ import {
   resolveSpecifier,
   dependentsOfChanged,
   discoverWorkspacePackages,
+  defaultTypeScriptBases,
   loadTypeScript,
   seamLines,
 } from './import-graph.js';
@@ -776,12 +777,15 @@ describe('seamLines', () => {
   });
 
   it('a parser build missing an entry point makes the read doubt, never throw (#10136)', () => {
+    // A `satisfies` on the receiver path: the full parser passes through
+    // it and binds `m`; a build without `isSatisfiesExpression` (TS 4.8
+    // and older) cannot follow the path and doubts — never throws.
     const source = [
-      "foo(require('./changed.js') satisfies X);", // 1
-      "const { moved } = require('./changed.js');", // 2
-      'moved();', // 3
+      "const m = require('./changed.js') satisfies X;", // 1
+      'm.run();', // 2
+      'let y = 1;', // 3
     ].join('\n');
-    // TypeScript 4.8 and older: no `isSatisfiesExpression`.
+    expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2]);
     const older = new Proxy(ts, {
       get: (target, prop) =>
         prop === 'isSatisfiesExpression'
@@ -1081,6 +1085,15 @@ describe('the seam oracle and its parser (#10136)', () => {
     const loaded = loadTypeScript();
     expect(loaded).not.toBeNull();
     expect(loaded?.version).toBe(ts.version);
+  });
+
+  it('looks in the working directory first, then in its own tree', () => {
+    // A globally installed CLI has no `typescript` beside `dist/`; the
+    // repository the review runs in is the one base that can serve it.
+    const bases = defaultTypeScriptBases();
+    expect(bases).toHaveLength(2);
+    expect(bases[0]).toBe(join(process.cwd(), 'package.json'));
+    expect(bases[1]).toMatch(/^file:.*import-graph\.(ts|js)$/);
   });
 
   it('refuses a resolvable but unusable parser and falls through to the next base', () => {
