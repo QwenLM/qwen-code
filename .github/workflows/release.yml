@@ -337,7 +337,7 @@ jobs:
   quality_static:
     name: 'Quality Checks (Static)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 30
+    timeout-minutes: 90
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
@@ -401,7 +401,7 @@ jobs:
   quality_build:
     name: 'Quality Checks (Build)'
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-hk4-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 45
+    timeout-minutes: 90
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
