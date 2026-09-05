@@ -1629,6 +1629,9 @@ export class DingtalkChannel extends ChannelBase {
       process.stderr.write(
         `[DingTalk:${this.name}] No webhook for chatId ${chatId}, cannot send.\n`,
       );
+      if (failOnHttpError) {
+        throw new Error('DingTalk session webhook unavailable');
+      }
       return;
     }
 
@@ -1681,7 +1684,12 @@ export class DingtalkChannel extends ChannelBase {
     failOnHttpError = false,
   ): Promise<void> {
     const webhook = this.webhooks.get(chatId);
-    if (!webhook) return;
+    if (!webhook) {
+      if (failOnHttpError) {
+        throw new Error('DingTalk session webhook unavailable');
+      }
+      return;
+    }
     while (plan.nextChunk < plan.chunks.length) {
       const index = plan.nextChunk;
       const chunk = plan.chunks[index]!;

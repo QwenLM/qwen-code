@@ -7263,6 +7263,59 @@ describe('DingtalkChannel outbound file delivery', () => {
     ).toBe(0);
   });
 
+  it('retries an aggregated DM response when its session webhook is unavailable', async () => {
+    vi.useFakeTimers();
+    try {
+      const channel = createChannel({
+        blockStreaming: 'on',
+        aggregateBackgroundAgentResponses: true,
+      });
+      seedSessionTarget(channel, 'session-1', {
+        channelName: 'test-dingtalk',
+        senderId: 'user-1',
+        chatId: 'dm-user-1',
+        isGroup: false,
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      await channel.dispatchBackgroundResponse('session-1', 'Lost result.', {
+        taskId: 'agent-1',
+        status: 'running',
+        kind: 'agent',
+        turnComplete: false,
+        label: 'Worker one',
+      });
+      await channel.dispatchBackgroundResponse('session-1', '', {
+        taskId: 'agent-1',
+        status: 'completed',
+        kind: 'agent',
+        turnComplete: true,
+        label: 'Worker one',
+      });
+
+      const aggregation = [
+        ...(
+          channel as unknown as {
+            backgroundResponseAggregations: Map<
+              string,
+              {
+                delivered?: boolean;
+                retryTimer?: ReturnType<typeof setTimeout>;
+                delivery?: { attempts: number };
+              }
+            >;
+          }
+        ).backgroundResponseAggregations.values(),
+      ][0];
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(aggregation?.delivered).not.toBe(true);
+      expect(aggregation?.delivery?.attempts).toBe(1);
+      expect(aggregation?.retryTimer).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('uses the terminal status of a turn whose earlier segments were running', async () => {
     const channel = createChannel({
       blockStreaming: 'on',
@@ -10567,6 +10620,27 @@ describe('DingtalkChannel reply delivery timeout', () => {
 
     controller.abort(new Error('reply fetch timed out'));
     await expect(send).rejects.toThrow('reply fetch timed out');
+  });
+
+  it('fails strict delivery when the session webhook disappears', async () => {
+    const channel = createChannel();
+    const deliver = (
+      channel as unknown as {
+        deliverReplyText(
+          chatId: string,
+          plan: { title: string; chunks: string[]; nextChunk: number },
+          failOnHttpError: boolean,
+        ): Promise<void>;
+      }
+    ).deliverReplyText.bind(channel);
+
+    await expect(
+      deliver(
+        'cid123',
+        { title: 'hello', chunks: ['hello'], nextChunk: 0 },
+        true,
+      ),
+    ).rejects.toThrow('DingTalk session webhook unavailable');
   });
 });
 
