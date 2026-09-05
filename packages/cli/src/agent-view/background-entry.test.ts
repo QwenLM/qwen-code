@@ -226,7 +226,16 @@ describe('runBackgroundDispatch', () => {
     // The dispatch RPC can block for seconds while the worker starts; a
     // reader that leaves during that window (`qwen --bg "..." | true`,
     // a CI step closing the pipe) sends EPIPE back once the success
-    // writes arrive — after the work is done.
+    // writes arrive — after the work is done. The protection must cover
+    // that whole window, so the ordering is witnessed INSIDE the
+    // dispatch call: a post-call count alone would still pass if
+    // ignoreBrokenPipe() moved below the dispatch, re-exposing the
+    // async-EPIPE crash for the multi-second RPC.
+    supervisorDispatch.mockImplementation(async () => {
+      expect(ignoreBrokenPipeCalls).toBe(1);
+      return { sessionId: 'sess-abc', state: 'created' };
+    });
+
     await runBackgroundDispatch('audit', '/w/app');
 
     expect(ignoreBrokenPipeCalls).toBe(1);
