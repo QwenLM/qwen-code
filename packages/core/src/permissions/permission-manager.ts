@@ -10,6 +10,7 @@ import {
   matchesRule,
   resolveToolName,
   splitCompoundCommand,
+  stripLeadingVariableAssignments,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
 } from './rule-parser.js';
@@ -67,6 +68,78 @@ const DECISION_PRIORITY: Readonly<Record<PermissionDecision, number>> = {
   default: 1,
   allow: 0,
 };
+
+/**
+ * Restrictive shell rules retain the legacy no-env identity as an additional
+ * match shape. Both the command and an env-prefixed rule specifier are stripped
+ * together so tightening allow-rule identity can never make deny/ask fail open.
+ * Assignment-only restrictive rules deliberately have no stripped fallback:
+ * stripping them to an empty specifier would broaden them to the whole tool.
+ */
+function matchesRestrictiveRule(
+  rule: PermissionRule,
+  ctx: PermissionCheckContext,
+  pathCtx: PathMatchContext | undefined,
+): boolean {
+  const {
+    toolName,
+    toolAliases,
+    command,
+    filePath,
+    domain,
+    specifier,
+    toolParams,
+  } = ctx;
+
+  const match = (
+    candidateRule: PermissionRule,
+    candidateCommand: string | undefined,
+  ): boolean =>
+    matchesRule(
+      candidateRule,
+      toolName,
+      candidateCommand,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+      toolParams,
+      toolAliases,
+      'canonical',
+    );
+
+  if (match(rule, command)) {
+    return true;
+  }
+
+  if (
+    command === undefined ||
+    !SHELL_TOOL_NAMES.has(resolveToolName(toolName))
+  ) {
+    return false;
+  }
+
+  const strippedCommand = stripLeadingVariableAssignments(command);
+  if (!strippedCommand || strippedCommand === command) {
+    return false;
+  }
+
+  let fallbackRule = rule;
+  if (
+    rule.specifier !== undefined &&
+    (rule.specifierKind === 'command' || SHELL_TOOL_NAMES.has(rule.toolName))
+  ) {
+    const strippedSpecifier = stripLeadingVariableAssignments(rule.specifier);
+    if (!strippedSpecifier) {
+      return false;
+    }
+    if (strippedSpecifier !== rule.specifier) {
+      fallbackRule = { ...rule, specifier: strippedSpecifier };
+    }
+  }
+
+  return match(fallbackRule, strippedCommand);
+}
 
 /**
  * Minimal interface for the parts of Config used by PermissionManager.
@@ -421,14 +494,14 @@ export class PermissionManager {
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';
+        if (matchesRestrictiveRule(rule, ctx, pathCtx)) return 'deny';
       }
       // Priority 2: ask rules
       for (const rule of [
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';
+        if (matchesRestrictiveRule(rule, ctx, pathCtx)) return 'ask';
       }
       // Priority 3: allow rules
       for (const rule of [
@@ -900,16 +973,7 @@ export class PermissionManager {
    */
   findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
     ctx = this.normalizePermissionContext(ctx);
-    const {
-      toolName,
-      toolAliases,
-      command,
-      cwd,
-      filePath,
-      domain,
-      specifier,
-      toolParams,
-    } = ctx;
+    const { cwd } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -919,22 +983,11 @@ export class PermissionManager {
           }
         : undefined;
 
-    const matchArgs = [
-      toolName,
-      command,
-      filePath,
-      domain,
-      pathCtx,
-      specifier,
-      toolParams,
-      toolAliases,
-    ] as const;
-
     for (const rule of [
       ...this.sessionRules.deny,
       ...this.persistentRules.deny,
     ]) {
-      if (matchesRule(rule, ...matchArgs, 'canonical')) {
+      if (matchesRestrictiveRule(rule, ctx, pathCtx)) {
         return rule.raw;
       }
     }
@@ -1087,7 +1140,7 @@ export class PermissionManager {
 
     return (
       restrictiveRules.some((rule) =>
-        matchesRule(rule, ...matchArgs, 'canonical'),
+        matchesRestrictiveRule(rule, ctx, pathCtx),
       ) || allowRules.some((rule) => matchesRule(rule, ...matchArgs))
     );
   }
@@ -1103,16 +1156,7 @@ export class PermissionManager {
    */
   hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
     ctx = this.normalizePermissionContext(ctx);
-    const {
-      toolName,
-      toolAliases,
-      command,
-      cwd,
-      filePath,
-      domain,
-      specifier,
-      toolParams,
-    } = ctx;
+    const { toolName, command, cwd } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -1172,20 +1216,7 @@ export class PermissionManager {
       }
     }
 
-    const matchArgs = [
-      toolName,
-      command,
-      filePath,
-      domain,
-      pathCtx,
-      specifier,
-      toolParams,
-      toolAliases,
-    ] as const;
-
-    return askRules.some((rule) =>
-      matchesRule(rule, ...matchArgs, 'canonical'),
-    );
+    return askRules.some((rule) => matchesRestrictiveRule(rule, ctx, pathCtx));
   }
 
   private hasAskRuleForTool(toolName: string): boolean {
