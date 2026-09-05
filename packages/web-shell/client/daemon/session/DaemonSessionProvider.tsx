@@ -4902,7 +4902,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         const ledger = ledgerForWindow(
           transcriptLedgerRef.current,
           session.sessionId,
-          preCommit.blocks,
+          preCommit,
         );
         const uiEvents = projectTranscriptPageEvents(
           page.events,
@@ -5249,7 +5249,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ledgerForWindow(
                 transcriptLedgerRef.current,
                 activeSession.sessionId,
-                preCommit.blocks,
+                preCommit,
               ),
               prependEntry,
               page.hasMore,

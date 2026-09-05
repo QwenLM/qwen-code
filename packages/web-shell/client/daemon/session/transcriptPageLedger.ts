@@ -70,6 +70,12 @@ export interface TranscriptGap {
  */
 export interface TranscriptPageLedger {
   sessionId?: string;
+  /**
+   * The store's ordinal counter when these spans were last validated against a
+   * window. Absent on a ledger that has never been validated, which makes the
+   * reset check below skip rather than guess.
+   */
+  nextOrdinal?: number;
   spans: readonly TranscriptPageSpan[];
 }
 
@@ -88,28 +94,53 @@ export function createTranscriptPageLedger(
   return { ...(sessionId !== undefined ? { sessionId } : {}), spans: [] };
 }
 
+/** The part of the transcript window a ledger validates itself against. */
+export interface LedgerWindow {
+  blocks: readonly DaemonTranscriptBlock[];
+  /**
+   * The store's block ordinal counter. It only advances while a window lives —
+   * history admission seeds its throwaway store from the current value — and a
+   * bare `store.reset()` restarts it at 1.
+   */
+  nextOrdinal: number;
+}
+
 /**
- * Returns the ledger to record a new page into: the one for `sessionId` when
- * it still describes `blocks`, an empty one otherwise.
+ * Returns the ledger to record a new page into: the one for `sessionId` when it
+ * still describes `window`, an empty one otherwise. The result carries the
+ * window's ordinal so the next call can tell a reset from growth.
  *
  * Pages are session-scoped, so a branch or a switch must never inherit the
  * previous chain's boundaries. The window check matters because the store is
  * also wiped from places that know nothing about the ledger (clear screen,
  * session clear): recording against a wiped window would carry boundaries for
  * blocks that no longer exist into the new page's ledger.
+ *
+ * Size and block ids alone cannot detect that wipe. A reset restarts the ordinal
+ * counter, so the regrown window recycles the same ids, and once it holds as many
+ * blocks as the spans claim, the prefix check compares equal against blocks that
+ * are not the pages'. An ordinal that went backwards is the only tell.
  */
 export function ledgerForWindow(
   ledger: TranscriptPageLedger,
   sessionId: string,
-  blocks: readonly DaemonTranscriptBlock[],
+  window: LedgerWindow,
 ): TranscriptPageLedger {
-  const scoped =
-    ledger.sessionId === sessionId
-      ? ledger
-      : createTranscriptPageLedger(sessionId);
-  return ledgerCoversBlockPrefix(scoped, blocks)
-    ? scoped
-    : createTranscriptPageLedger(sessionId);
+  const fresh = {
+    ...createTranscriptPageLedger(sessionId),
+    nextOrdinal: window.nextOrdinal,
+  };
+  if (ledger.sessionId !== sessionId) return fresh;
+  if (
+    ledger.nextOrdinal !== undefined &&
+    window.nextOrdinal < ledger.nextOrdinal
+  ) {
+    return fresh;
+  }
+  if (!ledgerCoversBlockPrefix(ledger, window.blocks)) return fresh;
+  return ledger.nextOrdinal === window.nextOrdinal
+    ? ledger
+    : { ...ledger, nextOrdinal: window.nextOrdinal };
 }
 
 export function ledgerPageEntries(

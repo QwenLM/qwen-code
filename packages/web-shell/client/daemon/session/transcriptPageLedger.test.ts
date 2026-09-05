@@ -518,21 +518,32 @@ describe('ledgerForWindow', () => {
   const page = blocks('b1', 'b2');
   const tail = blocks('t1');
 
-  function loadedLedger(sessionId = 's1') {
-    return recordLedgerLoadPage(
-      createTranscriptPageLedger(sessionId),
-      entry('load', page),
-      false,
-    );
+  function loadedLedger(sessionId = 's1', nextOrdinal = 4) {
+    return {
+      ...recordLedgerLoadPage(
+        createTranscriptPageLedger(sessionId),
+        entry('load', page),
+        false,
+      ),
+      nextOrdinal,
+    };
   }
 
   it('keeps a ledger that still describes the window', () => {
     const ledger = loadedLedger();
-    expect(ledgerForWindow(ledger, 's1', [...page, ...tail])).toBe(ledger);
+    expect(
+      ledgerForWindow(ledger, 's1', {
+        blocks: [...page, ...tail],
+        nextOrdinal: 4,
+      }),
+    ).toBe(ledger);
   });
 
   it('discards a ledger left over from another session', () => {
-    const fresh = ledgerForWindow(loadedLedger('s1'), 's2', page);
+    const fresh = ledgerForWindow(loadedLedger('s1'), 's2', {
+      blocks: page,
+      nextOrdinal: 4,
+    });
     expect(pageIds(fresh)).toEqual([]);
     expect(fresh.sessionId).toBe('s2');
   });
@@ -540,9 +551,34 @@ describe('ledgerForWindow', () => {
   it('discards a ledger the store was wiped behind', () => {
     // Clear screen and session clear reset the store without telling the
     // ledger; recording the next page must not inherit those boundaries.
-    const fresh = ledgerForWindow(loadedLedger(), 's1', []);
+    const fresh = ledgerForWindow(loadedLedger(), 's1', {
+      blocks: [],
+      nextOrdinal: 1,
+    });
     expect(pageIds(fresh)).toEqual([]);
     expect(fresh.sessionId).toBe('s1');
+  });
+
+  it('discards a ledger whose window was reset and regrew with recycled ids', () => {
+    // A bare reset restarts the ordinal counter, so the regrown window mints the
+    // same block ids again. Size and ids then line up with spans that describe
+    // blocks which are not the pages', and only the ordinal going backwards
+    // reveals the wipe — which is why the ledger records it.
+    const fresh = ledgerForWindow(loadedLedger('s1', 9), 's1', {
+      blocks: page,
+      nextOrdinal: 3,
+    });
+    expect(pageIds(fresh)).toEqual([]);
+    expect(fresh.nextOrdinal).toBe(3);
+  });
+
+  it('keeps a ledger whose window only grew, and re-stamps the ordinal', () => {
+    const grown = ledgerForWindow(loadedLedger('s1', 4), 's1', {
+      blocks: [...page, ...tail],
+      nextOrdinal: 7,
+    });
+    expect(pageIds(grown)).toEqual(['load']);
+    expect(grown.nextOrdinal).toBe(7);
   });
 });
 
