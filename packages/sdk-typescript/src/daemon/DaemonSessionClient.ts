@@ -54,6 +54,7 @@ import type {
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionTaskOutputStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
@@ -1051,6 +1052,18 @@ export class DaemonSessionClient {
       ...opts,
       clientId: this.clientId,
     });
+  }
+
+  taskOutput(
+    taskId: string,
+    kind: 'shell' | 'monitor',
+  ): Promise<DaemonSessionTaskOutputStatus> {
+    return this.client.sessionTaskOutput(
+      this.sessionId,
+      taskId,
+      kind,
+      this.clientId,
+    );
   }
 
   workflowTasks(): Promise<DaemonSessionWorkflowTasksStatus> {

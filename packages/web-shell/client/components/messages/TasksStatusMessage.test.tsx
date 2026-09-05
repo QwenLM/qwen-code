@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
+  DaemonSessionShellTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionWorkflowTaskStatus,
@@ -25,28 +26,57 @@ const {
   getWorkflowTasksMock,
   cancelTaskMock,
   controlWorkflowTaskMock,
-} = vi.hoisted(() => ({
-  getTasksMock: vi.fn(),
-  getWorkflowTasksMock: vi.fn(),
-  cancelTaskMock: vi.fn(),
-  controlWorkflowTaskMock: vi.fn(),
-}));
+  getTaskOutputMock,
+  writeClipboardTextMock,
+  warnClipboardWriteFailureMock,
+  actionsMock,
+  connectionMock,
+} = vi.hoisted(() => {
+  const getTasksMock = vi.fn();
+  const getWorkflowTasksMock = vi.fn();
+  const cancelTaskMock = vi.fn();
+  const controlWorkflowTaskMock = vi.fn();
+  const getTaskOutputMock = vi.fn();
+  return {
+    getTasksMock,
+    getWorkflowTasksMock,
+    cancelTaskMock,
+    controlWorkflowTaskMock,
+    getTaskOutputMock,
+    writeClipboardTextMock: vi.fn(),
+    warnClipboardWriteFailureMock: vi.fn(),
+    actionsMock: {
+      getTasks: getTasksMock,
+      getWorkflowTasks: getWorkflowTasksMock,
+      cancelTask: cancelTaskMock,
+      controlWorkflowTask: controlWorkflowTaskMock,
+      getTaskOutput: getTaskOutputMock,
+    },
+    connectionMock: { capabilities: { features: [] as string[] } },
+  };
+});
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useActions: () => ({
-    getTasks: getTasksMock,
-    getWorkflowTasks: getWorkflowTasksMock,
-    cancelTask: cancelTaskMock,
-    controlWorkflowTask: controlWorkflowTaskMock,
-  }),
+  useActions: () => actionsMock,
+  useConnection: () => connectionMock,
+}));
+vi.mock('../../utils/clipboard', () => ({
+  writeClipboardText: writeClipboardTextMock,
+  warnClipboardWriteFailure: warnClipboardWriteFailureMock,
 }));
 
-const { TasksStatusMessage } = await import('./TasksStatusMessage');
+const { MonitorTaskDetail, ShellTaskDetail, TasksStatusMessage } = await import(
+  './TasksStatusMessage'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+beforeEach(() => {
+  connectionMock.capabilities.features = [];
+});
 
 afterEach(() => {
   for (const { root, container } of mounted) {
@@ -58,6 +88,9 @@ afterEach(() => {
   getWorkflowTasksMock.mockReset();
   cancelTaskMock.mockReset();
   controlWorkflowTaskMock.mockReset();
+  getTaskOutputMock.mockReset();
+  writeClipboardTextMock.mockReset();
+  warnClipboardWriteFailureMock.mockReset();
   vi.useRealTimers();
 });
 
@@ -78,6 +111,240 @@ function agentTask(
     ...overrides,
   };
 }
+
+function shellTask(): DaemonSessionShellTaskStatus {
+  return {
+    kind: 'shell',
+    id: 'shell-1',
+    label: 'shell-label',
+    description: 'run build',
+    status: 'running',
+    startTime: 1_000,
+    runtimeMs: 5_000,
+    command: 'npm run build',
+    cwd: '/workspace',
+  };
+}
+
+function renderTaskDetail(
+  task: DaemonSessionMonitorTaskStatus | DaemonSessionShellTaskStatus,
+): HTMLElement {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  mounted.push({ root, container });
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        {task.kind === 'monitor' ? (
+          <MonitorTaskDetail task={task} />
+        ) : (
+          <ShellTaskDetail task={task} />
+        )}
+      </I18nProvider>,
+    );
+  });
+  return container;
+}
+
+describe('process task output', () => {
+  it.each([
+    ['monitor', monitorTask()],
+    ['shell', shellTask()],
+  ] as const)(
+    'shows %s output when the daemon supports it',
+    async (_, task) => {
+      connectionMock.capabilities.features = ['session_task_output'];
+      getTaskOutputMock.mockResolvedValue({
+        v: 1,
+        sessionId: 'session-1',
+        taskId: task.id,
+        kind: task.kind,
+        output: 'first line\nlatest line',
+        truncated: true,
+      });
+
+      const container = renderTaskDetail(task);
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(getTaskOutputMock).toHaveBeenCalledWith(task.id, task.kind);
+      expect(container.textContent).toContain('first line\nlatest line');
+      expect(container.textContent).toContain('Showing the latest 64 KiB');
+    },
+  );
+
+  it('refreshes output when the task snapshot advances', async () => {
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock
+      .mockResolvedValueOnce({
+        output: 'first snapshot',
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        output: 'second snapshot',
+        truncated: false,
+      });
+    const task = monitorTask();
+    const container = renderTaskDetail(task);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('first snapshot');
+
+    await act(async () => {
+      mounted.at(-1)!.root.render(
+        <I18nProvider language="en">
+          <MonitorTaskDetail task={{ ...task, runtimeMs: 8_000 }} />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).toContain('second snapshot');
+    expect(getTaskOutputMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('follows new output when the overflowing output box is at the bottom', async () => {
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock
+      .mockResolvedValueOnce({
+        output: 'first snapshot',
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        output: 'second snapshot',
+        truncated: false,
+      });
+    const task = monitorTask();
+    const container = renderTaskDetail(task);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const outputBox = container.querySelector<HTMLElement>(
+      '[data-testid="task-output"]',
+    )!;
+    Object.defineProperties(outputBox, {
+      clientHeight: { configurable: true, value: 100 },
+      scrollHeight: {
+        configurable: true,
+        get: () => (outputBox.textContent === 'first snapshot' ? 200 : 300),
+      },
+      scrollTop: { configurable: true, value: 100, writable: true },
+    });
+
+    await act(async () => {
+      mounted.at(-1)!.root.render(
+        <I18nProvider language="en">
+          <MonitorTaskDetail task={{ ...task, runtimeMs: 8_000 }} />
+        </I18nProvider>,
+      );
+      await Promise.resolve();
+    });
+
+    expect(outputBox.scrollTop).toBe(300);
+  });
+
+  it.each([
+    ['the user scrolls away from the bottom', 200, 40],
+    ['the output box is not overflowing', 100, 0],
+  ])(
+    'does not follow new output when %s',
+    async (_, scrollHeight, scrollTop) => {
+      connectionMock.capabilities.features = ['session_task_output'];
+      getTaskOutputMock
+        .mockResolvedValueOnce({
+          output: 'first snapshot',
+          truncated: false,
+        })
+        .mockResolvedValueOnce({
+          output: 'second snapshot',
+          truncated: false,
+        });
+      const task = monitorTask();
+      const container = renderTaskDetail(task);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      const outputBox = container.querySelector<HTMLElement>(
+        '[data-testid="task-output"]',
+      )!;
+      Object.defineProperties(outputBox, {
+        clientHeight: { configurable: true, value: 100 },
+        scrollHeight: { configurable: true, value: scrollHeight },
+        scrollTop: { configurable: true, value: scrollTop, writable: true },
+      });
+
+      await act(async () => {
+        mounted.at(-1)!.root.render(
+          <I18nProvider language="en">
+            <MonitorTaskDetail task={{ ...task, runtimeMs: 8_000 }} />
+          </I18nProvider>,
+        );
+        await Promise.resolve();
+      });
+
+      expect(outputBox.scrollTop).toBe(scrollTop);
+    },
+  );
+
+  it('copies the visible output snapshot', async () => {
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock.mockResolvedValue({
+      output: 'output to copy',
+      truncated: false,
+    });
+    writeClipboardTextMock.mockResolvedValue(undefined);
+    const container = renderTaskDetail(shellTask());
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const copyButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Copy"]',
+    )!;
+    await act(async () => {
+      copyButton.click();
+      await Promise.resolve();
+    });
+
+    expect(writeClipboardTextMock).toHaveBeenCalledWith('output to copy');
+    expect(copyButton.querySelector('.lucide-check')).not.toBeNull();
+  });
+
+  it('keeps an output read failure inside the task detail', async () => {
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock.mockRejectedValue(new Error('read failed'));
+
+    const container = renderTaskDetail(monitorTask());
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('Output is unavailable');
+    expect(container.textContent).toContain('watch server log');
+  });
+
+  it('shows a stable empty state before a task emits output', async () => {
+    connectionMock.capabilities.features = ['session_task_output'];
+    getTaskOutputMock.mockResolvedValue({ output: '', truncated: false });
+
+    const container = renderTaskDetail(shellTask());
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain('No output yet');
+  });
+
+  it('keeps the metadata-only view for older daemons', () => {
+    const container = renderTaskDetail(monitorTask());
+
+    expect(getTaskOutputMock).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('Output is unavailable');
+  });
+});
 
 function monitorTask(
   overrides: Partial<DaemonSessionMonitorTaskStatus> = {},

@@ -168,6 +168,7 @@ import type {
   ServeSessionResourcesStatus,
   ServeSessionStatsStatus,
   ServeSessionSupportedCommandsStatus,
+  ServeSessionTaskOutputStatus,
   ServeSessionTasksStatus,
   ServeWorkspaceEnvStatus,
   ServeWorkspaceExtensionsStatus,
@@ -640,6 +641,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_tasks',
   'session_agents',
   'session_agent_trace',
+  'session_task_output',
   'session_monitor_tool_correlation',
   'session_stats',
   'session_lsp',
@@ -1024,6 +1026,11 @@ interface FakeBridgeOpts {
     sessionId: string,
     rootAgentId?: string,
   ) => Promise<ServeSessionAgentTrace>;
+  sessionTaskOutputImpl?: (
+    sessionId: string,
+    taskId: string,
+    taskKind: 'shell' | 'monitor',
+  ) => Promise<ServeSessionTaskOutputStatus>;
   sessionLspImpl?: (sessionId: string) => Promise<ServeSessionLspStatus>;
   sessionResourcesImpl?: (
     sessionId: string,
@@ -1356,6 +1363,11 @@ interface FakeBridge extends AcpSessionBridge {
     rootAgentId?: string;
   }>;
   sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined>;
+  sessionTaskOutputCalls: Array<{
+    sessionId: string;
+    taskId: string;
+    taskKind: 'shell' | 'monitor';
+  }>;
   sessionLspCalls: string[];
   sessionResourcesCalls: string[];
   sessionSavedWorkflowCalls: Array<{ sessionId: string; name: string }>;
@@ -1590,6 +1602,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   }> = [];
   const sessionTasksOptions: Array<{ includeWorkflows?: boolean } | undefined> =
     [];
+  const sessionTaskOutputCalls: FakeBridge['sessionTaskOutputCalls'] = [];
   const sessionLspCalls: string[] = [];
   const sessionResourcesCalls: string[] = [];
   const sessionSavedWorkflowCalls: FakeBridge['sessionSavedWorkflowCalls'] = [];
@@ -1935,6 +1948,16 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       nodes: [],
       rootAgentIds: [],
       warnings: [],
+    }));
+  const sessionTaskOutputImpl =
+    opts.sessionTaskOutputImpl ??
+    (async (sessionId, taskId, taskKind) => ({
+      v: 1 as const,
+      sessionId,
+      taskId,
+      kind: taskKind,
+      output: '',
+      truncated: false,
     }));
   const sessionSavedWorkflowImpl: AcpSessionBridge['getSessionSavedWorkflow'] =
     opts.sessionSavedWorkflowImpl ??
@@ -2289,6 +2312,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionAgentsCalls,
     sessionAgentTraceCalls,
     sessionTasksOptions,
+    sessionTaskOutputCalls,
     sessionLspCalls,
     sessionResourcesCalls,
     sessionSavedWorkflowCalls,
@@ -2599,6 +2623,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(rootAgentId ? { rootAgentId } : {}),
       });
       return sessionAgentTraceImpl(sessionId, rootAgentId);
+    },
+    async getSessionTaskOutputStatus(sessionId, taskId, taskKind) {
+      sessionTaskOutputCalls.push({ sessionId, taskId, taskKind });
+      return sessionTaskOutputImpl(sessionId, taskId, taskKind);
     },
     async getSessionLspStatus(sessionId) {
       sessionLspCalls.push(sessionId);
@@ -10201,6 +10229,14 @@ describe('createServeApp', () => {
           workspaceCwd: WS_DIFFERENT,
           state: { owner: 'secondary' },
         }),
+        sessionTaskOutputImpl: async (sessionId, taskId, taskKind) => ({
+          v: 1,
+          sessionId,
+          taskId,
+          kind: taskKind,
+          output: 'secondary output',
+          truncated: false,
+        }),
         sessionResourcesImpl: async (sessionId) => ({
           v: 1,
           sessionId,
@@ -10242,6 +10278,9 @@ describe('createServeApp', () => {
       const res = await request(app)
         .get('/session/s-secondary/context')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const outputRes = await request(app)
+        .get('/session/s-secondary/tasks/shell-1/output?kind=shell')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
       const resourcesRes = await request(app)
         .get('/session/s-secondary/resources')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
@@ -10254,10 +10293,38 @@ describe('createServeApp', () => {
       });
       expect(primaryBridge.sessionContextCalls).toEqual([]);
       expect(secondaryBridge.sessionContextCalls).toEqual(['s-secondary']);
+      expect(outputRes.status).toBe(200);
+      expect(outputRes.headers['cache-control']).toBe('no-store');
+      expect(outputRes.body.output).toBe('secondary output');
+      expect(primaryBridge.sessionTaskOutputCalls).toEqual([]);
+      expect(secondaryBridge.sessionTaskOutputCalls).toEqual([
+        {
+          sessionId: 's-secondary',
+          taskId: 'shell-1',
+          taskKind: 'shell',
+        },
+      ]);
       expect(resourcesRes.status).toBe(200);
       expect(resourcesRes.body.workspaceCwd).toBe(WS_DIFFERENT);
       expect(primaryBridge.sessionResourcesCalls).toEqual([]);
       expect(secondaryBridge.sessionResourcesCalls).toEqual(['s-secondary']);
+    });
+
+    it('rejects task output requests with an invalid kind', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .get('/session/s-1/tasks/task-1/output?kind=agent')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.field).toBe('kind');
+      expect(bridge.sessionTaskOutputCalls).toEqual([]);
     });
 
     it('surfaces live owner scan failures as structured bridge errors on owner-routed reads', async () => {

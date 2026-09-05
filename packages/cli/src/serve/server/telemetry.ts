@@ -153,6 +153,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/tasks/:taskId/output',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/tasks/:taskId/output',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/subagents/:subagentRef',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/subagents/:subagentRef',

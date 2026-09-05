@@ -392,6 +392,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_tasks',
       'session_agents',
       'session_agent_trace',
+      'session_task_output',
       'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',

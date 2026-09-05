@@ -3402,6 +3402,16 @@ describe('createAcpSessionBridge', () => {
                 warnings: [],
               };
             }
+            if (method === 'qwen/status/session/task_output') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                taskId: params['taskId'],
+                kind: params['taskKind'],
+                output: 'latest output',
+                truncated: false,
+              };
+            }
             if (method === 'qwen/status/session/lsp') {
               return {
                 v: 1,
@@ -3492,6 +3502,14 @@ describe('createAcpSessionBridge', () => {
       nodes: [],
     });
     await expect(
+      bridge.getSessionTaskOutputStatus(session.sessionId, 'shell-1', 'shell'),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      taskId: 'shell-1',
+      kind: 'shell',
+      output: 'latest output',
+    });
+    await expect(
       bridge.getSessionLspStatus(session.sessionId),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
@@ -3518,12 +3536,18 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/tasks',
       'qwen/status/session/agents',
       'qwen/status/session/agent_trace',
+      'qwen/status/session/task_output',
       'qwen/status/session/lsp',
       'qwen/status/session/resources',
     ]);
     expect(handles[0]?.agent.extMethodCalls[2]?.params).toMatchObject({
       sessionId: session.sessionId,
       includeWorkflows: true,
+    });
+    expect(handles[0]?.agent.extMethodCalls[5]?.params).toMatchObject({
+      sessionId: session.sessionId,
+      taskId: 'shell-1',
+      taskKind: 'shell',
     });
 
     await bridge.shutdown();

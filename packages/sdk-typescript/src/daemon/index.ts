@@ -603,6 +603,7 @@ export type {
   DaemonSessionResourcesStatus,
   DaemonSessionAgentTaskStatus,
   DaemonSessionMonitorTaskStatus,
+  DaemonSessionTaskOutputStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonWorkflowApprovalStatusEntry,
   DaemonWorkflowDispatchStatus,

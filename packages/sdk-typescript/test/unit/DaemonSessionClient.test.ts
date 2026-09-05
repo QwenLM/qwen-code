@@ -1993,6 +1993,16 @@ describe('DaemonSessionClient', () => {
           tasks: [],
         });
       }
+      if (req.url.endsWith('/session/s-1/tasks/shell-1/output?kind=shell')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          taskId: 'shell-1',
+          kind: 'shell',
+          output: 'latest output',
+          truncated: false,
+        });
+      }
       if (req.url.endsWith('/session/s-1/lsp')) {
         return jsonResponse(200, {
           v: 1,
@@ -2100,6 +2110,14 @@ describe('DaemonSessionClient', () => {
       now: 1_700_000_000_000,
       tasks: [],
     });
+    await expect(session.taskOutput('shell-1', 'shell')).resolves.toEqual({
+      v: 1,
+      sessionId: 's-1',
+      taskId: 'shell-1',
+      kind: 'shell',
+      output: 'latest output',
+      truncated: false,
+    });
     await expect(session.lspStatus()).resolves.toEqual({
       v: 1,
       sessionId: 's-1',
@@ -2142,6 +2160,7 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1/supported-commands',
       'http://daemon/session/s-1/tasks',
       'http://daemon/session/s-1/tasks?includeWorkflows=true',
+      'http://daemon/session/s-1/tasks/shell-1/output?kind=shell',
       'http://daemon/session/s-1/lsp',
       'http://daemon/session/s-1/resources',
       'http://daemon/session/s-1/cancel',
@@ -2157,6 +2176,7 @@ describe('DaemonSessionClient', () => {
       persist: true,
     });
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
       'client-1',
       'client-1',
       'client-1',
