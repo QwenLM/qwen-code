@@ -75,6 +75,14 @@ const GIT_ENV_CONFIG = [
   'GIT_CONFIG_GLOBAL',
   'GIT_CONFIG_SYSTEM',
   'GIT_CONFIG_PARAMETERS',
+  // The one config key with an environment spelling of its own:
+  // `GIT_DEFAULT_HASH` is `init.defaultObjectFormat`, and it changes what a
+  // bare `git init` creates — a sha256 store beside a sha1 source cannot
+  // read the source's objects through an alternates pointer, so the
+  // standalone scratch tree would stand up unable to check out the reviewed
+  // head. The tree names the source's format explicitly as well; this
+  // closes the class the way the numbered keys above are closed.
+  'GIT_DEFAULT_HASH',
 ];
 
 /**
@@ -185,6 +193,98 @@ export function sanitizedGitEnv(): NodeJS.ProcessEnv {
   // reader the pipeline points at `git show HEAD:` does not either.
   env['GIT_NO_REPLACE_OBJECTS'] = '1';
   return env;
+}
+
+/**
+ * The repo-local `filter.<name>.smudge|clean|process` commands defined in the
+ * config files git reads for a tree whose common dir is `commonDir` and whose
+ * admin dir is `gitDir`, when any are.
+ *
+ * Two git invocations in this pipeline EXECUTE these — hooks and fsmonitor
+ * are blanked by key name, filters cannot be, because their key carries a
+ * name of the planter's choosing. The scratch-tree checkouts run the smudge
+ * side of an attributed file; the residue `status` runs the clean side (or
+ * the `process` filter that serves both) when a stat-stale attributed file
+ * refreshes the index — measured live through the exact residue invocation
+ * on git 2.43 and 2.47, and the tree still reported clean. The planting
+ * surface is two plain writes into the common dir the scratch-tree report
+ * calls shared: `git config filter.evil.clean CMD` and one line appended to
+ * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
+ * wipe the common dir, so a filter planted while reviewing one PR fires on
+ * every later matching checkout of the user's OWN repository — persistence
+ * planted by reviewing a malicious PR, measured live. The local config files
+ * are read with `--file` rather than merged config because filters in the
+ * user's global config (git-lfs is the common one) are the user's own
+ * contract, exactly like any git command they run — while a probe's planting
+ * surface is the repo-local files. The state cannot be told apart from a
+ * filter the user set deliberately, and cannot be safely wiped, so a hit is
+ * a refusal in the caller, not a cleanup here. And it is a one-shot read of
+ * same-user-writable state, like every gate in this file: cost, not closure.
+ *
+ * Every linked worktree's per-worktree config is a candidate too, not only
+ * the two files git reads for THIS tree: the scratch-tree screen runs
+ * against the review worktree while the checkout it authorises runs in the
+ * SCRATCH tree, whose own `<common>/worktrees/<label>/config.worktree` is
+ * honored once `extensions.worktreeConfig` is on — a filter planted there
+ * executed during the reset while a narrower screen reported the repository
+ * clean. The admin directory is one `readdir`, and a filter in any of these
+ * is a plant whichever tree carries it.
+ */
+export function filterCommandsIn(commonDir: string, gitDir: string): string[] {
+  const candidates = [
+    join(commonDir, 'config'),
+    join(gitDir, 'config.worktree'),
+  ];
+  try {
+    for (const entry of readdirSync(join(commonDir, 'worktrees'))) {
+      candidates.push(join(commonDir, 'worktrees', entry, 'config.worktree'));
+    }
+  } catch {
+    // No linked worktrees registered: the two candidates above are all of it.
+  }
+  const found: string[] = [];
+  for (const file of candidates) {
+    if (!existsSync(file)) continue;
+    const r = spawnSync(
+      'git',
+      [
+        'config',
+        '--file',
+        file,
+        '--get-regexp',
+        '^filter\\..*\\.(smudge|clean|process)$',
+      ],
+      { cwd: dirname(file), encoding: 'utf8', env: sanitizedGitEnv() },
+    );
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
+    for (const line of r.stdout.split('\n')) {
+      const key = line.split(/\s+/)[0];
+      if (key && !found.includes(key)) found.push(key);
+    }
+  }
+  return found;
+}
+
+/**
+ * `filterCommandsIn` for a tree path: resolves the common and admin dirs
+ * through git's own discovery. The scratch-tree command screens the review
+ * worktree this way before any checkout; `worktreeResidue` screens the
+ * identity it has already pinned and calls `filterCommandsIn` directly.
+ */
+export function localFilterCommands(worktree: string): string[] {
+  const files = spawnSync(
+    'git',
+    ['rev-parse', '--git-common-dir', '--git-dir'],
+    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
+  if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
+    return [];
+  }
+  const [commonDir, gitDir] = files.stdout.trim().split('\n');
+  return filterCommandsIn(
+    resolve(worktree, commonDir),
+    resolve(worktree, gitDir),
+  );
 }
 
 /**
@@ -899,6 +999,29 @@ export function worktreeResidue(
           };
         }
       }
+      // The `status` below REFRESHES the index, and a stat-stale tracked
+      // file whose attributes select a content filter runs that filter's
+      // `clean` (or `process`) command as part of the refresh — a repo-local
+      // `filter.evil.clean` executed under the exact invocation below and
+      // the tree still measured clean (git 2.43 and 2.47, live). The `-c`
+      // blanks on that invocation close the two channels a fixed key names;
+      // a filter's key carries an arbitrary name, so it cannot be blanked
+      // and is screened the way the scratch-tree checkouts screen it: read
+      // the repo-local config files of the identity pinned above, and when
+      // any defines one, refuse to measure — unmeasured, never clean.
+      const filters = filterCommandsIn(commonDir, realpathSync(gitDir));
+      if (filters.length > 0) {
+        return {
+          paths: [],
+          total: 0,
+          unmeasured:
+            'the residue measurement would execute the repo-local content ' +
+            `filter command(s) ${filters.join(', ')} — \`status\` refreshes ` +
+            'the index, and a stat-stale attributed file refreshes through ' +
+            'the filter; remove the filter config, or the attributes that ' +
+            'select it, if it is not yours',
+        };
+      }
     }
   } catch {
     // A cwd that no longer resolves is not a tree this probe can measure.
@@ -926,7 +1049,11 @@ export function worktreeResidue(
       // WRITES the index too — a stat-stale tracked file refreshes it — and
       // the write fires `post-index-change` from a repo-local `core.hooksPath`
       // (measured live on git 2.43), so the hook directory is blanked here the
-      // way the checkouts blank it.
+      // way the checkouts blank it. Those are the two channels a FIXED key
+      // names; the refresh's third channel, a content filter's `clean` or
+      // `process` command, lives under a key of the planter's naming and is
+      // closed by the `filterCommandsIn` screen above instead — a refusal,
+      // because there is no `-c` that blanks a name one does not know.
       '-c',
       'core.fsmonitor=',
       '-c',

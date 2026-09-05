@@ -44,7 +44,12 @@
 // fresh `git init` whose object store is the user's, reached through an
 // alternates pointer, checked out at the reviewed head. Whatever a recipe
 // step writes into that tree's config, hooks, refs or index lands there and
-// dies with the tree. And nothing that could execute the user's repo-local
+// dies with the tree — the STATE does. A command-valued key written there
+// (`core.hooksPath`, `core.fsmonitor`, a `filter.*`, an `alias.*`) is live
+// at the next git command run IN the tree, as the reviewer — `git config
+// core.hooksPath .githooks`, a committed hook, then `git commit` ran the
+// hook, measured — and that reach is the brief's to judge, step by step,
+// not this command's to screen. And nothing that could execute the user's repo-local
 // config is run in their repository to build it: no clone (a local `git
 // clone` spawns `upload-pack` in the SOURCE repository), no `worktree add`,
 // no checkout, no index refresh, no residue `status` — the standalone
@@ -79,7 +84,6 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
-  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -97,6 +101,7 @@ import {
   RESIDUE_PATH_CAP,
   discardWorktree,
   exposeDependencies,
+  localFilterCommands,
   redirectedAncestor,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
@@ -121,7 +126,10 @@ export interface ScratchTreeReport {
   /**
    * True when the tree is a standalone repository (`--standalone`) rather
    * than a linked worktree: its `.git` is its own, so config, hooks, refs
-   * and index written inside it stay inside it. That is the whole claim —
+   * and index written inside it stay inside it. That is the whole claim,
+   * and it is a claim about STATE: a command-valued key written into that
+   * config executes at the next git command run in the tree, and the
+   * brief's reach rule, not this command, judges the step that writes it —
    * the object store is the user's, reached through an alternates pointer,
    * and a git command aimed at another path or at the global config is
    * outside the tree and outside this contract (the dependency farm's links
@@ -205,7 +213,9 @@ export interface ScratchTreeArgs {
  * `filter.<name>.smudge|clean` commands are config-driven, and a checkout runs
  * whichever ones an attributes file selects. `runScratchTree` detects that
  * surface in the repository's own config and refuses rather than run it (see
- * `localFilterCommands`). What a probe does with its own shell is the probe's
+ * `localFilterCommands` in worktree.ts — the residue measurement screens the
+ * same surface before its `status`, whose index refresh runs the clean
+ * side). What a probe does with its own shell is the probe's
  * business, and the report says plainly that the common dir is shared rather
  * than isolated. `core.fsmonitor` is the other command-valued key the same
  * checkouts execute — a value in the user's config fires on `worktree add`
@@ -220,76 +230,6 @@ const NO_HOOKS = [
   '-c',
   'core.fsmonitor=',
 ];
-
-/**
- * The repo-local `filter.<name>.smudge|clean` commands, when any are defined.
- *
- * The reset's and rebuild's checkouts EXECUTE these — hooks are disabled above,
- * filters are not — and the planting surface is two plain writes a probe can
- * make into the COMMON dir this command's report calls shared:
- * `git config filter.evil.smudge CMD` and one line appended to
- * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
- * wipe the common dir, so a filter planted while reviewing one PR fires on
- * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The two local config
- * files are checked with `--file` rather than merged config because filters
- * in the user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run — while a probe's planting
- * surface is the repo-local files. The state cannot be told apart from a
- * filter the user set deliberately, and cannot be safely wiped, so a hit is a
- * refusal upstream, not a cleanup here.
- */
-function localFilterCommands(worktree: string): string[] {
-  const files = spawnSync(
-    'git',
-    ['rev-parse', '--git-common-dir', '--git-dir'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-  );
-  if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return [];
-  }
-  const [commonDir, gitDir] = files.stdout.trim().split('\n');
-  const common = resolve(worktree, commonDir);
-  const candidates = [
-    join(common, 'config'),
-    join(resolve(worktree, gitDir), 'config.worktree'),
-  ];
-  // Every OTHER worktree's per-worktree config too. This screen runs against
-  // the review worktree, but the checkout it authorises runs in the SCRATCH
-  // tree, whose own `<common>/worktrees/<label>/config.worktree` is honored
-  // once `extensions.worktreeConfig` is on and was never read here — a filter
-  // planted there executed during the reset while this function reported the
-  // repository clean. The admin directory is one `readdir`, and a filter in
-  // any of these is a plant whichever tree carries it.
-  try {
-    for (const entry of readdirSync(join(common, 'worktrees'))) {
-      candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
-    }
-  } catch {
-    // No linked worktrees registered: the two candidates above are all of it.
-  }
-  const found: string[] = [];
-  for (const file of candidates) {
-    if (!existsSync(file)) continue;
-    const r = spawnSync(
-      'git',
-      [
-        'config',
-        '--file',
-        file,
-        '--get-regexp',
-        '^filter\\..*\\.(smudge|clean)$',
-      ],
-      { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-    );
-    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
-    for (const line of r.stdout.split('\n')) {
-      const key = line.split(/\s+/)[0];
-      if (key && !found.includes(key)) found.push(key);
-    }
-  }
-  return found;
-}
 
 /**
  * Stand `tree` up as a standalone repository checked out at `headSha`, whose
@@ -335,13 +275,13 @@ function buildStandaloneTree(
   // that already exists — a symlink included — instead of following it, so
   // the discard's rmSync is the only thing that can clear the leaf.
   mkdirSync(tree);
-  git(
-    tree,
-    'init',
-    '--quiet',
-    '--template=',
-    ...(format === 'sha1' ? [] : [`--object-format=${format}`]),
-  );
+  // Named explicitly in BOTH directions: a bare `git init` follows
+  // `init.defaultObjectFormat` / `GIT_DEFAULT_HASH`, so a sha1 source under
+  // a sha256 default would get a store that cannot read the source's objects
+  // through the alternates pointer. `--show-object-format` and
+  // `--object-format` arrived together (git 2.29), so a source whose format
+  // could be read is a git that accepts the flag.
+  git(tree, 'init', '--quiet', '--template=', `--object-format=${format}`);
   writeFileSync(
     join(tree, '.git', 'objects', 'info', 'alternates'),
     `${objects}\n`,
@@ -698,7 +638,12 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       note:
         `your scratch tree is at ${shellQuotePath(tree)}, a STANDALONE repository checked out at ${headSha.slice(0, 9)}. ` +
         'Its `.git` is its own: config, hooks, refs and index written there ' +
-        "stay there and die with the tree. Its object store is the user's " +
+        'stay there and die with the tree — the STATE does; a command-valued ' +
+        'key written into that config (`core.hooksPath`, `core.fsmonitor`, ' +
+        '`filter.*`, `alias.*`, `core.pager`, `credential.helper`) executes ' +
+        'at your next git command in the tree, as you, so a git step there ' +
+        "is judged by what it reaches (your brief's `git config --local " +
+        "--list` rule), never by its text. Its object store is the user's " +
         "repository's, read through an alternates pointer — so this isolates " +
         'what you write INSIDE the tree, and nothing more: git aimed at ' +
         'another path (`git -C`, `git push <path>`) or at your global config ' +
@@ -957,7 +902,9 @@ export const scratchTreeCommand: CommandModule = {
           'Stand the tree up as a standalone repository (its own .git, with ' +
           'the object store reached through an alternates pointer) instead ' +
           'of a linked worktree, so a git config, hook or ref write inside ' +
-          'it stays inside it; rebuilt on every call, with no checkout or ' +
+          'it stays inside it (the state does — a command-valued key written ' +
+          'there still executes at the next git command run in the tree); ' +
+          'rebuilt on every call, with no checkout or ' +
           "index refresh run in the user's repository to build it. For an " +
           'agent that executes PR-authored instructions.',
       })

@@ -1116,7 +1116,9 @@ describe('runScratchTree --standalone', () => {
   // The prose-execution audit's tree. Its input is untrusted — a recipe the
   // PR author wrote — so the tree is a repository of its own, sharing only the
   // object store through an alternates pointer: what a recipe step writes into
-  // config, hooks or refs lands in the tree and dies with it. And the command
+  // config, hooks or refs lands in the tree and dies with it — the state does;
+  // a command-valued key written there is live at the tree's next git
+  // command, which is the brief's reach rule to judge. And the command
   // runs nothing that could execute the user's repo-local config in their
   // repository to build it — no clone, no `worktree add`, no checkout, no
   // residue `status` — which is what makes the repo-local config screen the
@@ -1194,6 +1196,19 @@ describe('runScratchTree --standalone', () => {
     expect(r.sharedTreeResidue).toEqual([]);
     expect(r.sharedTreeUnmeasured).toContain('not measured');
     expect(r.note).not.toContain('NOT clean');
+  });
+
+  it('says the containment is of STATE — a command-valued key written inside still executes there', () => {
+    // R14-1: "dies with the tree" read as a sandbox. `git config
+    // core.hooksPath .githooks`, a committed hook, then `git commit` ran the
+    // hook as the reviewer — each step innocuous by its text. The note keeps
+    // the containment sentence and, beside it, names the class and the read
+    // that establishes a git step's reach (the brief carries the full rule).
+    const r = run();
+    expect(r.note).toContain('die with the tree — the STATE does');
+    expect(r.note).toContain('core.hooksPath');
+    expect(r.note).toContain('executes at your next git command in the tree');
+    expect(r.note).toContain('git config --local --list');
   });
 
   it('keeps a config, hook or ref write inside the tree from reaching the user’s repository', () => {
@@ -1416,6 +1431,34 @@ describe('runScratchTree --standalone', () => {
       );
     } finally {
       rmSync(repo256, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a sha1 source sha1 when the environment asks for sha256 — the format is the source’s, not the knob’s', () => {
+    // The sibling test pins the sha256 direction; this pins sha1, against
+    // BOTH knobs that flip a bare `git init`: `init.defaultObjectFormat` in
+    // the (isolated) global config, and `GIT_DEFAULT_HASH`, its environment
+    // spelling. A sha256 store beside a sha1 source cannot read the source's
+    // objects through the alternates pointer, so the checkout of the
+    // reviewed head fails. The command names the source's format explicitly
+    // in both directions — the config knob is what a bare init would honor
+    // once the environment is sanitized — and drops the variable from its
+    // git environment (pinned on `sanitizedGitEnv` directly, since the
+    // explicit flag masks its absence here).
+    writeFileSync(
+      join(gitIsolation.home, '.gitconfig'),
+      '[init]\n\tdefaultObjectFormat = sha256\n',
+    );
+    const saved = process.env['GIT_DEFAULT_HASH'];
+    process.env['GIT_DEFAULT_HASH'] = 'sha256';
+    try {
+      const r = run(undefined, { fetchedSha: headSha });
+      expect(r.available).toBe(true);
+      expect(git(r.path!, 'rev-parse', '--show-object-format')).toBe('sha1');
+      expect(git(r.path!, 'rev-parse', 'HEAD')).toBe(headSha);
+    } finally {
+      if (saved === undefined) delete process.env['GIT_DEFAULT_HASH'];
+      else process.env['GIT_DEFAULT_HASH'] = saved;
     }
   });
 

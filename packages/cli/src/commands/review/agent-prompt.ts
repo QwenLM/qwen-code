@@ -1798,10 +1798,14 @@ export function buildRoleBrief(
   // over — and a hand-rolled copy without the farm fails builds for
   // environment reasons the agent would misfile as prose divergence.
   // `--standalone`, unlike the verifier's: this is the one role whose input
-  // is untrusted text, so its tree is a clone with a `.git` of its own —
-  // a `git config`, hook or ref write a recipe step makes lands in the
-  // tree and dies with it, instead of in the user's repository through the
-  // linked worktree's shared common dir.
+  // is untrusted text, so its tree is a repository of its own (init plus an
+  // alternates pointer — not a clone) — a `git config`, hook or ref write a
+  // recipe step makes lands in the tree and dies with it, instead of in the
+  // user's repository through the linked worktree's shared common dir. That
+  // is where the STATE lands; a command-valued key written there still
+  // executes at the next git command run in the tree, and the weld says so
+  // beside the containment sentence, so the agent's per-step reach rule is
+  // the one that judges it.
   if (role === 'prose-exec') {
     const wt = report.worktreePath;
     if (typeof wt === 'string' && wt) {
@@ -1815,6 +1819,12 @@ export function buildRoleBrief(
           'repository, not a linked worktree: its `.git` is its own, with the ' +
           'object store reached through an alternates pointer, so a `git config`, ' +
           'hook or ref written inside it stays inside it and dies with it. That ' +
+          'contains the state, not the execution: a command-valued key written ' +
+          "into the copy's config (`core.hooksPath`, `core.fsmonitor`, `filter.*`, " +
+          '`alias.*`, `core.pager`, `credential.helper`, …) runs whatever it names ' +
+          'at your next git command in the copy, as you — read `git config ' +
+          '--local --list` there before any git step and judge the step by that ' +
+          'reach, as your brief says. And it ' +
           'is isolation of what you write INSIDE the copy, not a sandbox: git ' +
           'aimed at any other path (`git -C`, `git push <path>`) or at your ' +
           'global config is outside it — and every such step is in a ' +
@@ -1964,18 +1974,29 @@ export function buildRoleBrief(
     // pr-context run ever writes, which masks a misconfigured plan as a
     // genuine pr-context failure. The plan is a file on disk, so it is
     // re-validated here exactly as role 0 re-validates it above.
-    if (
-      !isPositivePrNumber(pr) ||
-      !/^[1-9]\d*$/.test(String(pr)) ||
-      Number(pr) > Number.MAX_SAFE_INTEGER ||
-      typeof repo !== 'string' ||
-      !isOwnerRepo(repo)
-    ) {
+    // One throw per cause, like role 0: a malformed identity is a tampered
+    // or corrupted plan, and reporting it as a MISSING one sends whoever
+    // triages the failure to look for a local-review plan that is not there.
+    if (pr === undefined || typeof repo !== 'string') {
       throw new Error(
         'agent-prompt: --role 6d needs a plan with `prNumber` and `ownerRepo` ' +
           '(the roster only owes the counter-frame audit on PR reviews — ' +
           'without a PR description there is no frame to counter and no ' +
           'incident to replay).',
+      );
+    }
+    if (
+      !isPositivePrNumber(pr) ||
+      !/^[1-9]\d*$/.test(String(pr)) ||
+      Number(pr) > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new Error(
+        `agent-prompt: plan prNumber is not a safe positive integer: ${JSON.stringify(pr)}`,
+      );
+    }
+    if (!isOwnerRepo(repo)) {
+      throw new Error(
+        `agent-prompt: plan ownerRepo is not owner/repo: ${JSON.stringify(repo)}`,
       );
     }
     const dir = opts.planPath ? dirname(resolve(opts.planPath)) : null;

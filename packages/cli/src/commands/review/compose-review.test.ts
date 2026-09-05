@@ -6321,13 +6321,13 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
 
   it('translates the disclosures — role phrase and Not-reviewed frame', () => {
     // test-matrix required and never built → one role gap, both languages.
-    // (6d is recorded so the matrix stays the ONLY gap the test is about.)
+    // (The plan carries no PR identity, so 6d is not owed and the matrix is
+    // the ONLY gap the test is about — there is nothing to record for it.)
     const p = plan({ han: true });
     transcript('a1', goodPrompt(1), { toolCalls: 3 });
     transcript('a2', goodPrompt(2), { toolCalls: 2 });
     recordBuilt(p, 1);
     recordBuilt(p, 2);
-    recordStep45(p, ['6d']);
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
     expect(r.body).toContain(
       'Not reviewed: the whole-diff test-coverage check',

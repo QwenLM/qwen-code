@@ -26,6 +26,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -128,6 +129,54 @@ describe('worktreeResidue', () => {
     // (#9557) — so a caller without the fetched sha gets unmeasured, never
     // clean.
     expect(worktreeResidue(tree).unmeasured).toContain('brought no record');
+  });
+
+  it('refuses to measure when repo-local config defines a content filter — the status would execute it', () => {
+    // `status` REFRESHES the index, and a stat-stale tracked file whose
+    // attributes select a filter refreshes THROUGH that filter's `clean`
+    // command — measured live on git 2.43 and 2.47 through the exact residue
+    // invocation, which then reported the tree clean. The `-c` blanks close
+    // the two channels a fixed key names (`core.fsmonitor`, `core.hooksPath`);
+    // a filter's key is the planter's to name, so the measurement screens the
+    // repo-local config files the way the scratch-tree checkouts do and
+    // refuses — unmeasured, never clean — before anything spawns. The plant
+    // is two writes into the common dir: the config key and one attributes
+    // line in `info/attributes` (no residue in the tree itself).
+    const marker = join(repo, 'PWNED-clean');
+    gitRepo('config', 'filter.evil.clean', `touch ${marker} && cat`);
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    appendFileSync(
+      join(repo, '.git', 'info', 'attributes'),
+      'a.ts filter=evil\n',
+    );
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(tree, 'a.ts'), stale, stale);
+
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
+    expect(existsSync(marker)).toBe(false);
+    expect(got.paths).toEqual([]);
+    expect(got.unmeasured).toContain('filter.evil.clean');
+    expect(got.unmeasured).toContain('would execute');
+  });
+
+  it('screens the `process` filter too — the long-running protocol serves the same refresh', () => {
+    // `filter.<name>.process` is the third command a filter key can carry,
+    // and the one a screen written for `smudge|clean` alone misses: git
+    // spawns it for the refresh exactly as it spawns `clean` (the marker
+    // appears even when the protocol handshake then fails, measured live).
+    const marker = join(repo, 'PWNED-process');
+    gitRepo('config', 'filter.evil.process', `sh -c 'touch ${marker}; cat'`);
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    appendFileSync(
+      join(repo, '.git', 'info', 'attributes'),
+      'a.ts filter=evil\n',
+    );
+    const stale = new Date(Date.now() + 60_000);
+    utimesSync(join(tree, 'a.ts'), stale, stale);
+
+    const got = worktreeResidue(tree, 12, git('rev-parse', 'HEAD'));
+    expect(existsSync(marker)).toBe(false);
+    expect(got.unmeasured).toContain('filter.evil.process');
   });
 
   it('names a modified file and an untracked probe — the live #9207 shape', () => {
@@ -1764,6 +1813,11 @@ describe('sanitizedGitEnv', () => {
       process.env['GIT_CONFIG_VALUE_0'] = 'touch /tmp/pwned';
       process.env['GIT_CONFIG_GLOBAL'] = '/tmp/evil-global';
       process.env['GIT_CONFIG_PARAMETERS'] = "'core.pager=cat'";
+      // The one config key with an environment spelling of its own: it
+      // decides what a bare `git init` creates, and a sha256 store beside a
+      // sha1 source cannot read the source's objects through an alternates
+      // pointer.
+      process.env['GIT_DEFAULT_HASH'] = 'sha256';
       process.env['PATH'] = saved['PATH'];
 
       const env = sanitizedGitEnv();
@@ -1775,6 +1829,7 @@ describe('sanitizedGitEnv', () => {
         'GIT_CONFIG_VALUE_0',
         'GIT_CONFIG_GLOBAL',
         'GIT_CONFIG_PARAMETERS',
+        'GIT_DEFAULT_HASH',
       ]) {
         expect(env[key]).toBeUndefined();
       }

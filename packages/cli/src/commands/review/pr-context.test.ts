@@ -3616,13 +3616,15 @@ describe('runPrContext identity failure (handler level)', () => {
       (c) => String(c[0]).startsWith('/tmp/ctx.md'),
     )?.[1] as string) ?? '';
 
-  it('writes the context temp-then-rename — a mid-write failure leaves nothing at --out', async () => {
+  it('writes the context temp-then-rename — the rename is the commit point', async () => {
     // The up-front removal of a STALE file already ran by the time the final
     // write starts, so a direct writeFileSync that threw mid-write (ENOSPC
     // creates the file then throws) would leave a truncated-but-readable
     // context at --out — the one shape the missing-context branches the
-    // launch flow keys on cannot see. The rename is the commit point; a
-    // reverted direct write leaves no tmp path and never calls rename.
+    // launch flow keys on cannot see. This pins the SHAPE — a tmp write, a
+    // rename onto --out, never a direct write; a reverted direct write
+    // leaves no tmp path and never calls rename. The failure itself is the
+    // next test's.
     currentUserMock.mockReturnValue('someone');
     await run();
     const tmpWrite = writeFileSyncMock.mock.calls.find(
@@ -3635,6 +3637,42 @@ describe('runPrContext identity failure (handler level)', () => {
     expect(
       writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
     ).toBe(false);
+  });
+
+  it('a mid-write failure leaves nothing at --out, and takes its tmp debris with it', async () => {
+    // ENOSPC creates the file then throws. With the temp write inside the
+    // same try, the catch removes the tmp path and re-throws: nothing was
+    // ever written at --out and the rename never ran, so the launch flow's
+    // missing-context branches see exactly a missing context. Deleting the
+    // catch ships green without this test — the throw still propagates, but
+    // the `.tmp` stays beside the missing context.
+    currentUserMock.mockReturnValue('someone');
+    const enospc = Object.assign(new Error('ENOSPC: no space left on device'), {
+      code: 'ENOSPC',
+    });
+    writeFileSyncMock.mockImplementation((target: unknown) => {
+      const path = String(target);
+      if (path.startsWith('/tmp/ctx.md.') && path.endsWith('.tmp')) {
+        throw enospc;
+      }
+    });
+    try {
+      await expect(run()).rejects.toThrow('ENOSPC');
+      const tmp = writeFileSyncMock.mock.calls.find(
+        (c) =>
+          String(c[0]).startsWith('/tmp/ctx.md.') &&
+          String(c[0]).endsWith('.tmp'),
+      )?.[0];
+      expect(tmp).toBeDefined();
+      expect(rmSyncMock).toHaveBeenCalledWith(tmp, { force: true });
+      expect(renameSyncMock).not.toHaveBeenCalled();
+      expect(
+        writeFileSyncMock.mock.calls.some((c) => c[0] === '/tmp/ctx.md'),
+      ).toBe(false);
+    } finally {
+      // `beforeEach` clears calls, not implementations.
+      writeFileSyncMock.mockReset();
+    }
   });
 
   it('recovery SURVIVES the identity throw — isolation, not just non-deletion', async () => {

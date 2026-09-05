@@ -155,10 +155,13 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     // unconditional carve-out would tell every chunk agent to defer an
     // out-of-frame signal to an agent that never launched, and nothing in the
     // run would own the dimension. The sibling prose-exec clause has carried
-    // its qualifier since it was written; this one is pinned to keep it.
+    // its qualifier since it was written; this one is pinned to keep it —
+    // the qualifier AND its continuation, which names the whole-diff owner.
     const p = buildChunkAgentPrompt(PLAN, 13);
     expect(p).toContain('the counter-frame audit, where the run owes it');
-    expect(p).toContain('where the run owes it, a dedicated agent runs it');
+    expect(p).toContain(
+      "(the author's frame spans every territory — a dedicated whole-diff agent owns it)",
+    );
   });
 
   it('tells the agent to page a truncated read', () => {
@@ -3231,8 +3234,10 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain(`--worktree '${resolve(PR_PLAN.worktreePath)}'`);
     expect(p).toContain(`--label ${key}`);
     // And `--standalone`, which the verifier's weld does NOT carry: prose-exec
-    // executes PR-authored text, so its tree is a clone with a `.git` of its
-    // own — a config/hook/ref write a recipe makes dies with the tree instead
+    // executes PR-authored text, so its tree is a repository of its own (init
+    // plus an alternates pointer — not a clone, which would spawn
+    // `upload-pack` in the user's repository) with a `.git` of its own — a
+    // config/hook/ref write a recipe makes dies with the tree instead
     // of landing in the user's repository through a linked worktree's shared
     // common dir. The flag rides on the `--worktree` line so the label and
     // sha continuations below keep their pinned shape.
@@ -3247,6 +3252,13 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       'isolation of what you write INSIDE the copy, not a sandbox',
     );
     expect(p).toContain('`git push <path>`');
+    // And the weld carries the brief's qualification of that containment:
+    // what dies with the copy is the STATE, and a command-valued key written
+    // there runs at the copy's next git command (R14-1).
+    expect(p).toContain('contains the state, not the execution');
+    expect(p).toContain(
+      'read `git config --local --list` there before any git step',
+    );
     expect(p).not.toContain(
       "nothing you do through its git reaches the user's",
     );
@@ -3876,8 +3888,8 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // (R20-8 — an unqualified rule declared every JS build step never-executed).
     expect(pp).toContain("enumerate the copy's COMMITTED symlinks");
     expect(pp).toContain("the review environment's dependency farm");
-    // The copy is a standalone clone — a git write INSIDE it dies with it —
-    // while the review worktree's git is the user's repository, where a
+    // The copy is a standalone repository — a git write INSIDE it dies with
+    // it — while the review worktree's git is the user's repository, where a
     // command-valued key executes at their own next operation.
     expect(pp).toContain('The copy is a standalone repository');
     expect(pp).toContain('reached through an alternates pointer');
@@ -3886,6 +3898,19 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(pp).toContain('core.fsmonitor');
     expect(pp).toContain('credential.helper');
     expect(pp).toContain('Such a step is quoted, never run');
+    // State containment is not execution containment (R14-1): a
+    // command-valued key written into the copy's config is live at the next
+    // git step there — `core.hooksPath` + a committed hook + `git commit` ran
+    // the hook as the reviewer, each step innocuous by its text — so the
+    // brief keeps the containment sentence and adds the class, the read that
+    // establishes a git step's reach, and the rule that judges the writing
+    // AND the tripping step by it.
+    expect(pp).toContain('contains the STATE, not the execution');
+    expect(pp).toContain('core.hooksPath');
+    expect(pp).toContain('git config --local --list');
+    expect(pp).toContain(
+      'judge both the step that WRITES such a key and the step that TRIPS it',
+    );
     // And the install allowance stays bounded by the egress ban: installs go
     // through the environment's own dependency configuration, never through
     // a registry redirect the PR commits or a step adds to the copy.
@@ -3940,6 +3965,11 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // Shape, not just presence — the same tampered-plan family Agent 0's
     // guard refuses. Narrowing this guard to `pr === undefined` welds a
     // dangling `qwen-review-pr-null-context.md` pointer for every junk row.
+    // And one throw PER CAUSE, as role 0 throws: a malformed identity is a
+    // tampered or corrupted plan, and a collapsed "needs a plan with
+    // prNumber" sends the triage after a local-review plan that is not
+    // there. A present-but-junk number names the number; a junk repo names
+    // the repo; only an absent field is reported as missing.
     for (const prNumber of [
       null,
       '',
@@ -3954,14 +3984,21 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         buildRoleBrief({ ...PR_PLAN, prNumber: prNumber as never }, '6d', {
           planPath,
         }),
-      ).toThrow(/counter-frame/);
+      ).toThrow(/not a safe positive integer/);
     }
-    for (const ownerRepo of [undefined, null, '', 'no-slash', 'a/b/c']) {
+    for (const ownerRepo of [undefined, null]) {
       expect(() =>
         buildRoleBrief({ ...PR_PLAN, ownerRepo: ownerRepo as never }, '6d', {
           planPath,
         }),
       ).toThrow(/counter-frame/);
+    }
+    for (const ownerRepo of ['', 'no-slash', 'a/b/c']) {
+      expect(() =>
+        buildRoleBrief({ ...PR_PLAN, ownerRepo: ownerRepo as never }, '6d', {
+          planPath,
+        }),
+      ).toThrow(/not owner\/repo/);
     }
     // The cannot-read branch: the same-repo context-unavailable flow launches
     // 6d against a file that is not on disk, and the branch is what turns
