@@ -479,4 +479,94 @@ describe('transferWorktreeSessionMarkerOwner', () => {
     );
     expect(stdout).toBe('');
   });
+
+  it.skipIf(process.geteuid === undefined)(
+    'refuses a marker owned by a different uid without touching it',
+    async () => {
+      const dir = await tempDir();
+      await createWorktreeSessionMarkerExclusive(dir, 'session-old');
+      const markerPath = path.join(dir, WORKTREE_SESSION_FILE);
+      const before = await fs.lstat(markerPath);
+
+      // Stands in for a marker a different unix account owns — a daemon that
+      // ran as root wrote it, or the worktree was restored from a backup
+      // taken under another uid. The transfer must refuse it outright rather
+      // than ride `atomicWriteFile`'s ownership-preserving in-place write.
+      // A test cannot chown without privileges, so the foreign uid is
+      // injected where the transfer observes it: the fstat behind the strict
+      // reader's `handle.stat()`.
+      const foreignUid = (process.geteuid?.() ?? 0) + 1000;
+      const probe = await fs.open(markerPath, 'r');
+      const prototype = Object.getPrototypeOf(probe) as Pick<
+        typeof probe,
+        'stat'
+      >;
+      const originalStat = prototype.stat;
+      await probe.close();
+      const statSpy = vi
+        .spyOn(prototype, 'stat')
+        .mockImplementation(async function (this: typeof probe) {
+          const stats = await originalStat.call(this);
+          stats.uid = foreignUid;
+          return stats;
+        });
+
+      try {
+        await expect(
+          transferWorktreeSessionMarkerOwner(dir, 'session-old', 'session-new'),
+        ).rejects.toThrow('Worktree marker is owned by a different uid');
+        // The refusal precedes every write step: the marker keeps its bytes
+        // and its inode, and no transfer temp file is staged beside it.
+        await expect(fs.readFile(markerPath, 'utf8')).resolves.toBe(
+          'session-old',
+        );
+        expect((await fs.lstat(markerPath)).ino).toBe(before.ino);
+        const siblings = await fs.readdir(dir);
+        expect(siblings.filter((name) => name.endsWith('.tmp'))).toEqual([]);
+      } finally {
+        statSpy.mockRestore();
+      }
+    },
+  );
+
+  it('aborts the rename when the marker is swapped in the commit window', async () => {
+    const dir = await tempDir();
+    await createWorktreeSessionMarkerExclusive(dir, 'session-old');
+    const markerPath = path.join(dir, WORKTREE_SESSION_FILE);
+
+    // Stands in for a second writer that takes over the marker path after the
+    // opening strict read decided the transfer was allowed. `fs.writeFile`'s
+    // flush is the last step before `atomicWriteFile` commits the rename, so
+    // hooking it lands the swap inside the window where the staged temp file
+    // already exists and only the `assertCanCommit` re-check can stop it.
+    const probe = await fs.open(markerPath, 'r');
+    const prototype = Object.getPrototypeOf(probe) as Pick<
+      typeof probe,
+      'sync'
+    >;
+    const originalSync = prototype.sync;
+    await probe.close();
+    const syncSpy = vi
+      .spyOn(prototype, 'sync')
+      .mockImplementation(async function (this: typeof probe) {
+        await originalSync.call(this);
+        await fs.unlink(markerPath);
+        await fs.writeFile(markerPath, 'session-raced');
+      });
+
+    try {
+      await expect(
+        transferWorktreeSessionMarkerOwner(dir, 'session-old', 'session-new'),
+      ).rejects.toThrow('Worktree marker changed during ownership transfer');
+      // The aborted rename leaves the raced marker — never the stale owner
+      // this call was about to commit — and cleans up the staged temp file.
+      await expect(fs.readFile(markerPath, 'utf8')).resolves.toBe(
+        'session-raced',
+      );
+      const siblings = await fs.readdir(dir);
+      expect(siblings.filter((name) => name.endsWith('.tmp'))).toEqual([]);
+    } finally {
+      syncSpy.mockRestore();
+    }
+  });
 });
