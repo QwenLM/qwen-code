@@ -77,6 +77,28 @@ REPORT_HEAD="${CHECKED_OUT_HEAD}"
 # would double-write that round's marker.
 ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
 MODEL_DISPLAY="${MODEL:-default}"
+# agent-model: run-agent.mjs's copy of the session's RESOLVED model + CLI
+# version (from its stream-json init event). Preferred over MODEL, which names
+# only what was REQUESTED and reads 'default' when the repo variable is unset.
+# WORKDIR is agent-writable, so this read is defensive in BOTH directions.
+# Fails safe: a planted directory or FIFO fails the regular-file test, an
+# unreadable or malformed file yields empty values, and every fallback ends
+# at the configured MODEL — none of them may abort this PAT-bearing step
+# under -eo pipefail (which would lose the push and the round report).
+# Publishes nothing an agent chose: no symlink (head would follow one to an
+# arbitrary host file and print its head into a public comment), bounded
+# head -c prefixes (sed buffers a whole line before cut could bound it), and
+# a character allowlist + length cap per value — markup, backticks and
+# comment tokens cannot survive. The version allowlist is the review footer's
+# FOOTER_VERSION_RE shape.
+AGENT_MODEL=''
+AGENT_CLI_VERSION=''
+if [[ -f "${WORKDIR}/agent-model" && ! -L "${WORKDIR}/agent-model" ]]; then
+  AGENT_MODEL="$(head -c 400 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '1p' | tr -cd 'A-Za-z0-9._:/+-' | cut -c1-100 || true)"
+  AGENT_CLI_VERSION="$(head -c 1000 "${WORKDIR}/agent-model" 2>/dev/null | sed -n '2p' | tr -cd 'A-Za-z0-9._+-' | cut -c1-40 || true)"
+fi
+[[ -n "${AGENT_MODEL}" ]] && MODEL_DISPLAY="${AGENT_MODEL}"
+CLI_DISPLAY="${AGENT_CLI_VERSION:+ · CLI \`${AGENT_CLI_VERSION}\`}"
 # Growth-audit trail (+ re-arm on sound): audit rounds record the
 # verdict under the key the baseline was READ under — same rule as
 # the growth markers, same dead-key hazard (a supersede-exempt
@@ -625,7 +647,7 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
     echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human. · 有空请复审；第 ${MAX_ROUNDS} 轮后本 bot 停止并将 PR 交给人工。"
     echo
     echo "---"
-    echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+    echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
     echo
     echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
@@ -668,7 +690,7 @@ else
     fi
     echo
     echo "---"
-    echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+    echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
     echo
     echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
