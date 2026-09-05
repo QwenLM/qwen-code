@@ -123,12 +123,14 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  *
  * A `promptId` match alone never proves ownership (twins, cron/duplicate
  * re-sends and re-minted absorbed marks all wear the same id), but a turn's
- * own entry carries exactly that turn's prompt text, while any other turn's
- * entry carries a different prompt. Comparing the entry's user text parts
- * against the target's text is therefore the minimal per-entry proof that a
- * matched entry belongs to the rewind target. System-reminder parts and
- * cleared-media placeholders never equal a genuine prompt, so a plain text
- * part comparison is sufficient.
+ * own entry carries exactly that turn's prompt text. Comparing the entry's
+ * user text parts against the target's text is therefore the minimal
+ * per-entry proof that a matched entry belongs to the rewind target —
+ * conclusive only while no other turn sent the same text; callers must
+ * establish that uniqueness before trusting the proof (see
+ * `computeApiTruncationIndex`). System-reminder parts and cleared-media
+ * placeholders never equal a genuine prompt, so a plain text part
+ * comparison is sufficient.
  */
 function isApiEntryOwnedByText(entry: Content, targetText: string): boolean {
   if (entry.role !== 'user' || !entry.parts) return false;
@@ -243,41 +245,77 @@ export function computeApiTruncationIndex(
     !target.promptIdFileKeyOnly
   ) {
     // Ownership gate (round-28 structural close of the twin-trust class that
-    // R24-1 .. R27-1 each patched per-entrance). Identities are minted
-    // `sessionId########<n>` by entrances whose counters restart
-    // independently, so a `promptId` can be worn by API entries that do NOT
-    // belong to the rewind target: an earlier/later twin's entry, a
-    // cron/duplicate re-send with no UI claimant, or an absorbed turn's
-    // re-minted mark. A unique post-`startIndex` match is therefore never
-    // provably the target's own entry on the id alone — the round-27
-    // attempt to whitelist by scanning the UI history for twin claimants
-    // still resolved a target onto a twin's boundary whenever the positional
-    // walk could not land (or landed late) while an impostor wore the id.
+    // R24-1 .. R27-1 each patched per-entrance, refined by round-29).
+    // Identities are minted `sessionId########<n>` by entrances whose
+    // counters restart independently, so a `promptId` can be worn by API
+    // entries that do NOT belong to the rewind target: an earlier/later
+    // twin's entry, a cron/duplicate re-send with no UI claimant, or an
+    // absorbed turn's re-minted mark. A unique post-`startIndex` match is
+    // therefore never provably the target's own entry on the id alone — the
+    // round-27 attempt to whitelist by scanning the UI history for twin
+    // claimants still resolved a target onto a twin's boundary whenever the
+    // positional walk could not land (or landed late) while an impostor wore
+    // the id.
     //
-    // The target's OWN entry is the unique one whose user prompt text equals
-    // the target's text; every impostor carries a different prompt. Accept
-    // the identity match only under that ownership proof, and prefer it over
-    // the positional walk: it lands exactly even when the walk is
-    // desynchronized by an absorbed turn or a placeholder collision. Any
-    // other outcome — no match, an ambiguous (multi) match, or a match owned
-    // by a different turn — falls back to the positional walk, the exact
-    // pre-identity behavior, whose loud -1 is the safe refusal.
+    // The target's OWN entry is the one whose user prompt text equals the
+    // target's text. Accept the identity match only under that ownership
+    // proof, and prefer it over the positional walk: it lands exactly even
+    // when the walk is desynchronized by an absorbed turn or a placeholder
+    // collision. Any other outcome — no match, an ambiguous (multi) match, a
+    // match owned by a different turn, or a NON-UNIQUE ownership proof —
+    // falls back to the positional walk, the exact pre-identity behavior,
+    // whose loud -1 is the safe refusal.
     //
-    // This supersedes the claimant scan. file-key-only restored items and
-    // other same-id UI claimants can no longer demote an ownership-proven
-    // match onto a late positional walk, and an unowned match can no longer
-    // be returned at all — closing the companion shapes where a missing or
-    // desynchronized target resolved onto a twin's boundary. The pinned
-    // surviving-twin resolutions stay correct because the surviving twin IS
-    // the rewind target in those states, so its entry's text matches.
+    // Round-29 uniqueness: the text proof stops being a proof whenever the
+    // same text is in play twice. Cron/duplicate re-sends and re-minted
+    // twins re-send the SAME prompt text, so an impostor's entry passes the
+    // text gate and the resolution lands on a boundary that is not the
+    // target's own — silently dropping context the UI still shows, or
+    // keeping context the UI deleted (the same-text variants of R27-1 and
+    // R26-1). The proof is unique only when no other real non-file-key-only
+    // UI turn claims the same promptId with the same text (with two
+    // claimants the matched entry could belong to either), and at most one
+    // post-`startIndex` entry carries the target's text (a second copy is a
+    // re-send whose mark can sit at a different position than the target's
+    // own boundary). file-key-only restored items never own marked entries,
+    // so they still cannot demote a proof — the pinned surviving-twin
+    // resolutions stay correct because the surviving twin IS the rewind
+    // target in those states and no other turn claims its id with its text.
+    // Demoting a same-text state is conservative: it can turn an exact
+    // resolution into a loud -1 (the walk is desynced there), never a
+    // silent wrong boundary. The durable close remains per-entry provenance
+    // (non-re-mintable ids) at the mint sites.
     const identifiedIndex = findApiHistoryPromptIndex(
       apiHistory,
       target.promptId,
       startIndex,
     );
+    const ownershipProofIsUnique = (): boolean => {
+      if (
+        uiHistory.some(
+          (item, index) =>
+            index !== targetIndex &&
+            isRealUserTurn(item) &&
+            !item.promptIdFileKeyOnly &&
+            item.promptId === target.promptId &&
+            item.text === target.text,
+        )
+      ) {
+        return false;
+      }
+      let sameTextEntries = 0;
+      for (let i = startIndex; i < apiHistory.length; i++) {
+        if (isApiEntryOwnedByText(apiHistory[i]!, target.text)) {
+          sameTextEntries++;
+          if (sameTextEntries > 1) return false;
+        }
+      }
+      return true;
+    };
     if (
       identifiedIndex !== -1 &&
-      isApiEntryOwnedByText(apiHistory[identifiedIndex]!, target.text)
+      isApiEntryOwnedByText(apiHistory[identifiedIndex]!, target.text) &&
+      ownershipProofIsUnique()
     ) {
       return identifiedIndex;
     }

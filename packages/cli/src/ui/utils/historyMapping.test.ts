@@ -1276,6 +1276,90 @@ describe('round-28 ownership gate: companion shapes of the R27-1 whitelist', () 
   });
 });
 
+describe('round-29: same-text twins defeat the text ownership proof', () => {
+  // The round-28 ownership gate proves an identity match by comparing the
+  // matched entry's user text against the target's text, on the premise
+  // that every impostor carries a DIFFERENT prompt. Cron/duplicate
+  // re-sends and re-minted twins re-send the SAME prompt text, so an
+  // impostor's entry passes the text proof and the resolution lands on a
+  // boundary that is not the target's own. The gate must demote to the
+  // positional walk whenever the text proof is not unique to the target.
+
+  function userItemWithPromptId(
+    id: number,
+    text: string,
+    promptId: string,
+  ): HistoryItem {
+    const item = userItem(id, text) as HistoryItem & { promptId: string };
+    item.promptId = promptId;
+    return item;
+  }
+
+  it('maps a same-text twin positionally when its entry re-pushed unmarked (R27-1 same-text)', () => {
+    // Same shape as the R27-1 pin above, but P and Q share one prompt text
+    // in addition to the id. P's entry keeps the mark; the retry re-pushes
+    // Q's own entry unmarked. The text proof passes on P's entry (same
+    // text), so the shortcut resolves Q onto P's boundary 0 — silently
+    // dropping P's prompt+response from model context while the UI still
+    // shows P — where the positional walk lands correctly at 2.
+    const pEntry = userContent('run tests');
+    markApiHistoryPrompt(pEntry, 'session########1');
+    const ui: HistoryItem[] = [
+      userItemWithPromptId(1, 'run tests', 'session########1'),
+      llmItem(2),
+      userItemWithPromptId(3, 'run tests', 'session########1'),
+      llmItem(4),
+    ];
+    const api: Content[] = [
+      pEntry, // twin P's entry, still marked with the shared id
+      modelContent('r1'),
+      userContent('run tests'), // Q's own entry, re-pushed unmarked
+      modelContent('r2'),
+    ];
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+  });
+
+  it('refuses (-1) a same-text absorbed target instead of resolving onto the surviving twin (R26-1 same-text)', () => {
+    // Same state as the R26-1 pin above, but the absorbed turn and its
+    // re-minted twin share one prompt text. The surviving twin's entry is
+    // the unique post-prefix match and its text equals the absorbed
+    // target's text, so the text proof passes and the shortcut resolves
+    // the absorbed target onto the twin's boundary 3 — keeping the
+    // prompt+response the UI deleted — where the positional walk refuses
+    // loudly (-1).
+    const absorbedTurn = userItemWithPromptId(
+      3,
+      'run tests',
+      'session########1',
+    );
+    const twinTurn = userItemWithPromptId(5, 'run tests', 'session########1');
+    const ui: HistoryItem[] = [
+      userItem(1, 'run 1, prompt 1'),
+      llmItem(2),
+      absorbedTurn,
+      llmItem(4),
+      twinTurn,
+      llmItem(6),
+    ];
+    const survivingTwin = userContent('run tests');
+    markApiHistoryPrompt(survivingTwin, 'session########1');
+    const api: Content[] = [
+      startupEntry(),
+      userContent('<state_snapshot>summary\n\nResume the prior task...'),
+      modelContent('Got it. Thanks for the additional context!'),
+      survivingTwin,
+      modelContent('response 2'),
+    ];
+
+    expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+    // The same-text surviving twin demotes too: the absorbed turn claims
+    // its id with its text, so the proof is not unique and the desynced
+    // positional walk cannot land — a loud refusal, never a silent
+    // resolution, until per-entry provenance exists.
+    expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+  });
+});
+
 describe('isRealUserTurn', () => {
   it('returns true for normal user prompts', () => {
     expect(isRealUserTurn(userItem(1, 'hello world'))).toBe(true);
