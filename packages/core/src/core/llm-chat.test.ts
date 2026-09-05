@@ -18302,6 +18302,92 @@ describe('LlmChat', async () => {
       expect(continuationClosed).toBe(true);
     });
 
+    it('does not deduplicate delivered recovery text twice when abandoned', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([makeChunk([{ text: 'end\nend' }], 'MAX_TOKENS')]),
+        (async function* () {
+          yield makeChunk([{ text: 'end\nend\nend2' }]);
+          await new Promise<void>(() => undefined);
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'repetitive-recovery-abandonment',
+      );
+      let continuationStarted = false;
+      for await (const event of stream) {
+        if (event.type === StreamEventType.RETRY && event.isContinuation) {
+          continuationStarted = true;
+        } else if (
+          continuationStarted &&
+          event.type === StreamEventType.CHUNK
+        ) {
+          break;
+        }
+      }
+
+      expect(recordingChat.getLastModelMessageText()).toBe('end\nend\nend2');
+      expect(recordedText(recordAssistantTurn)).toBe('end\nend\nend2');
+    });
+
+    it('drops an abandoned recovery function call at the merge site', async () => {
+      const recordAssistantTurn = vi.fn();
+      const recordingChat = chatWithRecorder(recordAssistantTurn);
+      const streams = [
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        (async function* () {
+          yield makeChunk([{ text: ' world' }]);
+          yield makeChunk([
+            {
+              functionCall: {
+                id: 'call_abandoned_recovery',
+                name: 'read_file',
+                args: { path: '/tmp/never-read.txt' },
+              },
+            },
+          ]);
+          await new Promise<void>(() => undefined);
+        })(),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await recordingChat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'function-call-recovery-abandonment',
+      );
+      for await (const event of stream) {
+        if (
+          event.type === StreamEventType.CHUNK &&
+          event.value.candidates?.[0]?.content?.parts?.some(
+            (part) => part.functionCall !== undefined,
+          )
+        ) {
+          break;
+        }
+      }
+
+      const modelParts = recordingChat.getHistory().at(-1)?.parts ?? [];
+      expect(modelParts.some((part) => part.functionCall)).toBe(false);
+      expect(recordingChat.getLastModelMessageText()).toBe('Hello world');
+      expect(
+        recordAssistantTurn.mock.calls[0]![0].message.some(
+          (part: Part) => part.functionCall,
+        ),
+      ).toBe(false);
+    });
+
     it('streams recovery chunks before the continuation completes', async () => {
       const recordAssistantTurn = vi.fn();
       const recordingChat = chatWithRecorder(recordAssistantTurn);

@@ -1304,6 +1304,7 @@ function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
 function appendRecoveryContinuationParts(
   previousParts: Part[] | undefined,
   continuationParts: Part[] | undefined,
+  alreadyReplayStripped = false,
 ): Part[] {
   const mergedParts = [...(previousParts ?? [])];
   let nextParts = [...(continuationParts ?? [])];
@@ -1332,7 +1333,7 @@ function appendRecoveryContinuationParts(
     );
   }
 
-  if (previousTextIndex >= 0) {
+  if (previousTextIndex >= 0 && !alreadyReplayStripped) {
     const replay = {
       remaining: getRecoveryReplayLength(
         getPlainTextFromParts(mergedParts),
@@ -4506,11 +4507,16 @@ export class LlmChat {
           activeRecoveryReplayedPartMetadata = undefined;
         };
         abandonActiveRecoveryAttempt = () => {
+          if (!recoveryAttemptInFlight || !activeRecoveryAttemptIsCurrent()) {
+            rollbackActiveRecoveryAttempt?.();
+            return;
+          }
+          const visibleNonFunctionCallParts = activeRecoveryVisibleParts.filter(
+            (part) => part.functionCall === undefined,
+          );
           if (
-            !recoveryAttemptInFlight ||
-            (activeRecoveryVisibleParts.length === 0 &&
-              !activeRecoveryReplayedPartMetadata) ||
-            !activeRecoveryAttemptIsCurrent()
+            visibleNonFunctionCallParts.length === 0 &&
+            !activeRecoveryReplayedPartMetadata
           ) {
             rollbackActiveRecoveryAttempt?.();
             return;
@@ -4524,7 +4530,7 @@ export class LlmChat {
             return;
           }
           const normalizedVisibleParts = normalizeStreamedModelParts(
-            activeRecoveryVisibleParts,
+            visibleNonFunctionCallParts,
           );
           if (activeRecoveryReplayedPartMetadata && recoveryBase.parts) {
             const replayBoundaryIndex = findLastPlainTextPartIndex(
@@ -4547,6 +4553,7 @@ export class LlmChat {
             normalizedVisibleParts.thoughtContentParts.concat(
               normalizedVisibleParts.consolidatedHistoryParts,
             ),
+            true,
           );
           const previousDeferredRecord = self.deferredMaxTokensRecords.findLast(
             ({ modelContent }) => modelContent === recoveryBase,
@@ -4939,15 +4946,18 @@ export class LlmChat {
               ) {
                 return;
               }
+              const visibleNonFunctionCallParts = escalatedVisibleParts.filter(
+                (part) => part.functionCall === undefined,
+              );
               if (
-                escalatedVisibleParts.length === 0 ||
+                visibleNonFunctionCallParts.length === 0 ||
                 self.historyMutationVersion !== escalatedHistoryMutationVersion
               ) {
                 self.popPendingPartialAssistantTurn();
                 return;
               }
               const normalizedVisibleParts = normalizeStreamedModelParts(
-                escalatedVisibleParts,
+                visibleNonFunctionCallParts,
               );
               const modelContent: Content = {
                 role: 'model',
@@ -5098,9 +5108,6 @@ export class LlmChat {
               );
               if (exposedFunctionCall) {
                 self.popPendingPartialAssistantTurn();
-                escalatedVisibleParts = escalatedVisibleParts.filter(
-                  (part) => part.functionCall === undefined,
-                );
               }
               abandonEscalatedAttempt?.();
               const redisplayEvents = !escalatedAttemptCommitted
@@ -5498,10 +5505,6 @@ export class LlmChat {
                   activeRecoveryVisibleParts.length > 0 ||
                   activeRecoveryReplayedPartMetadata
                 ) {
-                  activeRecoveryVisibleParts =
-                    activeRecoveryVisibleParts.filter(
-                      (part) => part.functionCall === undefined,
-                    );
                   abandonActiveRecoveryAttempt?.();
                 } else {
                   rollbackActiveRecoveryAttempt();
