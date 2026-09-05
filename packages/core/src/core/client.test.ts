@@ -591,6 +591,7 @@ describe('Gemini Client (client.ts)', () => {
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
+      isTodoWriteEnabled: vi.fn().mockReturnValue(false),
       getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
       setStaticSystemPrefix: vi.fn(),
       getFullContext: vi.fn().mockReturnValue(false),
@@ -14565,6 +14566,7 @@ Other open files:
         undefined,
         'headless',
         undefined,
+        false,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -14597,6 +14599,7 @@ Other open files:
         undefined,
         'headless',
         concise,
+        false,
       );
     });
 
@@ -14629,6 +14632,7 @@ Other open files:
           undefined,
           mode,
           undefined,
+          false,
         );
       },
     );
