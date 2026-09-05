@@ -298,6 +298,40 @@ describe('shared-pool test timeout', () => {
     }
   });
 
+  it('registers every guarded config in exactly one off-pool arm', () => {
+    // OFF_POOL_DEFAULT and OFF_POOL_PINNED are hand-maintained: dropping a
+    // name from either removes its off-pool assertion and nothing else goes
+    // red — a ternary flattened to `testTimeout: 60_000` still passes the
+    // on-pool floor above. Pin the partition instead: every configModules
+    // entry must sit in exactly one arm and every arm entry must exist in
+    // the map, so a dropped or double-registered name fails here first.
+    const FLAT_CEILING_CONFIGS = [
+      // No gated ternary, hence no off-pool branch to sample: node-repl,
+      // sdk-typescript and scripts/tests carry flat literals, qwen-live's
+      // ceiling is unconditional.
+      'packages/node-repl',
+      'packages/qwen-live',
+      'packages/sdk-typescript',
+      'scripts/tests',
+    ];
+    // Pins 15s off the pool and is asserted in both branches by
+    // `bundle-guard timeout ceiling` below.
+    const ASSERTED_ELSEWHERE = ['packages/vscode-ide-companion'];
+    const arms = [
+      ...OFF_POOL_DEFAULT,
+      ...Object.keys(OFF_POOL_PINNED),
+      ...FLAT_CEILING_CONFIGS,
+      ...ASSERTED_ELSEWHERE,
+    ];
+    expect(new Set(arms).size, 'one off-pool arm per workspace').toBe(
+      arms.length,
+    );
+    expect(
+      [...arms].sort(),
+      'every configModules entry in exactly one off-pool arm',
+    ).toEqual(Object.keys(configModules).sort());
+  });
+
   it('covers every workspace that runs on the shared pool', () => {
     // configModules is hand-maintained, while `npm run test:ci --workspaces`
     // runs whatever the root glob resolves. Without this cross-check a

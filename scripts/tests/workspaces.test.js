@@ -81,12 +81,16 @@ describe('workspace helpers', () => {
     writeFile(
       root,
       'package.json',
-      '{"workspaces": ["integrations/*", "packages/*"]}\n',
+      '{"workspaces": ["integrations/*", "packages/*", ' +
+        '"packages/channels/nested-ci", "packages/channels/nested-no-ci"]}\n',
     );
-    // The with-ci workspace lives outside packages/ on purpose: every
-    // consumer derives its workspace set from the selector, so a filter
-    // mutation that drops a subset (say the integrations/* layout) would
-    // stay invisible to them. This exact-set pin is what catches it.
+    // Both repo layouts are witness-bearing: the flat integrations/* layout
+    // and the nested packages/channels/* layout. The nested members need
+    // explicit root-list entries because packages/* does not match nested
+    // directories — exactly why a filter mutation that drops the subtree
+    // (say `!path.startsWith('packages/channels/')`) would stay invisible
+    // to every consumer that derives its set from the selector. This
+    // exact-set pin is what catches it.
     writeFile(
       root,
       'integrations/with-ci/package.json',
@@ -97,9 +101,20 @@ describe('workspace helpers', () => {
       'packages/without-ci/package.json',
       '{"scripts": {"test": "vitest run"}}\n',
     );
+    writeFile(
+      root,
+      'packages/channels/nested-ci/package.json',
+      '{"scripts": {"test:ci": "vitest run"}}\n',
+    );
+    writeFile(
+      root,
+      'packages/channels/nested-no-ci/package.json',
+      '{"scripts": {"test": "vitest run"}}\n',
+    );
 
     expect(getTestCiWorkspacePackageJsonPaths(root)).toEqual([
       'integrations/with-ci/package.json',
+      'packages/channels/nested-ci/package.json',
     ]);
   });
 
