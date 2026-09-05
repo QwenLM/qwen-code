@@ -135,6 +135,12 @@ import type {
   PendingSessionLoad,
   SettledPrompt,
 } from './types.js';
+import { SESSION_TURN_NAVIGATION_FEATURE } from '../../constants/sessions.js';
+import {
+  createDaemonTurnNavigationStore,
+  type DaemonTurnNavigationSnapshot,
+  type DaemonTurnNavigationStore,
+} from './turn-navigation-store.js';
 
 export type {
   DaemonCommandInfo,
@@ -159,6 +165,7 @@ export type {
   DaemonWorkspaceEventSignals,
   SendPromptOptions,
 } from './types.js';
+export type { DaemonTurnNavigationSnapshot } from './turn-navigation-store.js';
 
 export interface DaemonTranscriptHistory {
   hasMore: boolean;
@@ -658,6 +665,9 @@ const DaemonActionsContext = createContext<DaemonSessionActions | undefined>(
 const DaemonTranscriptHistoryContext = createContext<
   DaemonTranscriptHistory | undefined
 >(undefined);
+const DaemonTurnNavigationContext = createContext<
+  DaemonTurnNavigationStore | undefined
+>(undefined);
 const DaemonPromptStatusContext = createContext<DaemonPromptStatus | undefined>(
   undefined,
 );
@@ -1025,6 +1035,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }),
     [maxBlocks, maxRetainedBytes, subagentTranscriptMode],
   );
+  const turnNavigationStore = useMemo(
+    () => createDaemonTurnNavigationStore(),
+    [],
+  );
   const eventStreamRef = useRef<
     | {
         sessionId: string;
@@ -1178,6 +1192,141 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
   const [workspaceEventSignals, setWorkspaceEventSignals] =
     useState<DaemonWorkspaceEventSignals>(INITIAL_WORKSPACE_EVENT_SIGNALS);
+
+  useEffect(() => {
+    let observed = store.getBlockChangeSummary?.();
+    const observe = () => {
+      const next = store.getBlockChangeSummary?.();
+      if (
+        observed &&
+        next &&
+        observed.source === next.source &&
+        observed.tailAppendBarrierRevision === next.tailAppendBarrierRevision
+      ) {
+        observed = next;
+        return;
+      }
+      observed = next;
+      turnNavigationStore.observeLiveBlocks(store.getSnapshot().blocks);
+    };
+    turnNavigationStore.observeLiveBlocks(store.getSnapshot().blocks);
+    return store.subscribe(observe);
+  }, [store, turnNavigationStore]);
+
+  const materializeNavigationTranscriptEvents = useCallback(
+    (
+      events: readonly DaemonEvent[],
+      nextBlockOrdinal: number,
+      excludedRecordIds: ReadonlySet<string>,
+    ) => {
+      const activeSession = sessionRef.current;
+      if (!activeSession) {
+        throw new Error('Session changed before transcript materialization');
+      }
+      const isolatedStore = createDaemonTranscriptStore({
+        nextOrdinal: nextBlockOrdinal,
+        maxBlocks: Number.MAX_SAFE_INTEGER,
+        maxRetainedBytes: Number.MAX_SAFE_INTEGER,
+        retainSubagentBlocks: subagentTranscriptModeRef.current === 'full',
+      });
+      const replayOpts = {
+        ...eventOptionsRef.current,
+        suppressOwnUserEcho: false,
+      };
+      const uiEvents: DaemonUiEvent[] = [];
+      const encounteredRecordIds = new Set<string>();
+      const appendFreshEvent = (event: DaemonUiEvent) => {
+        for (const recordId of event.sourceRecordIds ?? []) {
+          encounteredRecordIds.add(recordId);
+        }
+        if (
+          !event.sourceRecordIds?.some((recordId) =>
+            excludedRecordIds.has(recordId),
+          )
+        ) {
+          uiEvents.push(event);
+        }
+      };
+      for (const event of events) {
+        try {
+          const normalized = filterDaemonUiEventsForTranscript(
+            event,
+            normalizeAndFilterEvent(
+              event,
+              activeSession.clientId,
+              replayOpts,
+              setConnection,
+              { updateConnection: false, suppressLog: true },
+            ),
+            addNotice,
+            dismissNotice,
+            { hideHistoryTruncation: true, suppressSideEffects: true },
+          );
+          const projected =
+            subagentTranscriptModeRef.current === 'summary'
+              ? projectMainTranscriptEvents(normalized)
+              : normalized;
+          for (const uiEvent of projected) appendFreshEvent(uiEvent);
+          if (event.type === 'turn_complete') {
+            const stopReason =
+              (event.data as DaemonTurnCompleteData | undefined)?.stopReason ??
+              'end_turn';
+            appendFreshEvent(assistantDoneFromTurnEvent(event, stopReason));
+          } else if (event.type === 'turn_error') {
+            appendFreshEvent(assistantDoneFromTurnEvent(event, 'error'));
+          }
+        } catch (error) {
+          console.warn(
+            '[DaemonSessionProvider] Skipped malformed navigation history event',
+            error,
+          );
+        }
+      }
+      isolatedStore.dispatch(uiEvents);
+      const state = isolatedStore.getSnapshot();
+      return {
+        blocks: state.blocks,
+        nextBlockOrdinal: state.nextOrdinal,
+        encounteredRecordIds: [...encounteredRecordIds],
+      };
+    },
+    [addNotice, dismissNotice],
+  );
+
+  const turnNavigationSupported =
+    knownCapabilities?.features.includes(SESSION_TURN_NAVIGATION_FEATURE) ??
+    false;
+  useEffect(() => {
+    const activeSession = sessionRef.current;
+    const connectedSession =
+      connection.status === 'connected' &&
+      activeSession?.sessionId === connection.sessionId
+        ? activeSession
+        : undefined;
+    turnNavigationStore.configure({
+      sessionId: connection.sessionId,
+      supported: turnNavigationSupported,
+      ...(connectedSession
+        ? {
+            client: {
+              owner: connectedSession,
+              getTurnIndexPage: (options) =>
+                connectedSession.getTurnIndexPage(options),
+              getTranscriptPage: (options) =>
+                connectedSession.getTranscriptPage(options),
+              materializeTranscriptEvents:
+                materializeNavigationTranscriptEvents,
+            },
+          }
+        : {}),
+    });
+  }, [
+    connection.sessionId,
+    connection.status,
+    materializeNavigationTranscriptEvents,
+    turnNavigationStore,
+    turnNavigationSupported,
+  ]);
   const hasCurrentSessionActivePromptRef = useRef<() => boolean>(() => false);
   const mountedRef = useRef(false);
 
@@ -2951,6 +3100,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
             }
             try {
+              turnNavigationStore.handleSessionEvent(event.type);
               const followupSuggestion =
                 parseSidechannelFollowupSuggestion(event);
               if (followupSuggestion) {
@@ -2965,6 +3115,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 if (sessionRef.current !== activeSession) break;
               }
               if (isPendingPromptEvent(event)) {
+                if (
+                  event.type === 'pending_prompt_completed' &&
+                  isRecord(event.data) &&
+                  event.data['state'] === 'removed' &&
+                  typeof event.data['promptId'] === 'string'
+                ) {
+                  turnNavigationStore.recordPromptRemoved(
+                    event.data['promptId'],
+                  );
+                }
                 publishPendingPromptEvent(event);
                 if (sessionRef.current !== activeSession) break;
                 if (event.type === 'pending_prompt_started') {
@@ -3792,6 +3952,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     maxBlocks,
     maxRetainedBytes,
     store,
+    turnNavigationStore,
     restoreSessionId,
     restoreSessionContext,
     restoreMode,
@@ -4081,6 +4242,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           liveJournalRepairRef.current?.controller?.abort();
           liveJournalRepairRef.current = undefined;
         },
+        onPromptAdmitted: (owner, admission) => {
+          if (
+            sessionRef.current === owner &&
+            turnNavigationStore.getSnapshot().sessionId === owner.sessionId
+          ) {
+            turnNavigationStore.recordPromptAdmitted(admission);
+          }
+        },
+        onPromptRemoved: (owner, promptId) => {
+          if (
+            sessionRef.current === owner &&
+            turnNavigationStore.getSnapshot().sessionId === owner.sessionId
+          ) {
+            turnNavigationStore.recordPromptRemoved(promptId);
+          }
+        },
       }),
     [
       addNotice,
@@ -4089,6 +4266,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       resolvedToken,
       restartEventStreamOnPrompt,
       store,
+      turnNavigationStore,
     ],
   );
   repairReloadRef.current = actions.reloadSession;
@@ -4442,27 +4620,29 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   return (
     <DaemonStoreContext.Provider value={store}>
-      <DaemonConnectionContext.Provider value={connection}>
-        <DaemonPromptStatusContext.Provider value={promptStatus}>
-          <DaemonSessionNoticesContext.Provider value={noticesValue}>
-            <DaemonWorkspaceEventSignalsContext.Provider
-              value={workspaceEventSignals}
-            >
-              <DaemonActionsContext.Provider value={actions}>
-                <DaemonSessionOwnerGuardContext.Provider
-                  value={ownerGuardValue}
-                >
-                  <DaemonTranscriptHistoryContext.Provider
-                    value={transcriptHistoryValue}
+      <DaemonTurnNavigationContext.Provider value={turnNavigationStore}>
+        <DaemonConnectionContext.Provider value={connection}>
+          <DaemonPromptStatusContext.Provider value={promptStatus}>
+            <DaemonSessionNoticesContext.Provider value={noticesValue}>
+              <DaemonWorkspaceEventSignalsContext.Provider
+                value={workspaceEventSignals}
+              >
+                <DaemonActionsContext.Provider value={actions}>
+                  <DaemonSessionOwnerGuardContext.Provider
+                    value={ownerGuardValue}
                   >
-                    {children}
-                  </DaemonTranscriptHistoryContext.Provider>
-                </DaemonSessionOwnerGuardContext.Provider>
-              </DaemonActionsContext.Provider>
-            </DaemonWorkspaceEventSignalsContext.Provider>
-          </DaemonSessionNoticesContext.Provider>
-        </DaemonPromptStatusContext.Provider>
-      </DaemonConnectionContext.Provider>
+                    <DaemonTranscriptHistoryContext.Provider
+                      value={transcriptHistoryValue}
+                    >
+                      {children}
+                    </DaemonTranscriptHistoryContext.Provider>
+                  </DaemonSessionOwnerGuardContext.Provider>
+                </DaemonActionsContext.Provider>
+              </DaemonWorkspaceEventSignalsContext.Provider>
+            </DaemonSessionNoticesContext.Provider>
+          </DaemonPromptStatusContext.Provider>
+        </DaemonConnectionContext.Provider>
+      </DaemonTurnNavigationContext.Provider>
     </DaemonStoreContext.Provider>
   );
 }
@@ -4752,6 +4932,25 @@ export function useDaemonTranscriptHistory(): DaemonTranscriptHistory {
     );
   }
   return history;
+}
+
+export function useDaemonTurnNavigationStore(): DaemonTurnNavigationStore {
+  const store = useContext(DaemonTurnNavigationContext);
+  if (!store) {
+    throw new Error(
+      'useDaemonTurnNavigationStore must be used within DaemonSessionProvider',
+    );
+  }
+  return store;
+}
+
+export function useDaemonTurnNavigationState(): DaemonTurnNavigationSnapshot {
+  const store = useDaemonTurnNavigationStore();
+  return useSyncExternalStore(
+    store.subscribe,
+    store.getSnapshot,
+    store.getSnapshot,
+  );
 }
 
 export function useDaemonTranscriptState(): DaemonTranscriptState {

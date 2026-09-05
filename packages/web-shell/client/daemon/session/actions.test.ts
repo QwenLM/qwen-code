@@ -298,6 +298,32 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  it('reports exact prompt admission and successful removal identities', async () => {
+    const session = createMockSession('session-a');
+    session.submitPrompt.mockResolvedValueOnce({ promptId: 'prompt-1' });
+    session.removePendingPrompt.mockResolvedValueOnce({ removed: true });
+    const onPromptAdmitted = vi.fn();
+    const onPromptRemoved = vi.fn();
+    const { actions } = createActionsHarness({
+      session,
+      onPromptAdmitted,
+      onPromptRemoved,
+    });
+
+    await expect(actions.submitPrompt('exact label')).resolves.toEqual({
+      promptId: 'prompt-1',
+    });
+    await expect(actions.removePendingPrompt('prompt-1')).resolves.toEqual({
+      removed: true,
+    });
+
+    expect(onPromptAdmitted).toHaveBeenCalledWith(session, {
+      promptId: 'prompt-1',
+      label: 'exact label',
+    });
+    expect(onPromptRemoved).toHaveBeenCalledWith(session, 'prompt-1');
+  });
+
   it('does not report a stats error while the session is disconnected', async () => {
     const addNotice = vi.fn();
     const { actions } = createActionsHarness({ addNotice });
@@ -3258,8 +3284,12 @@ describe('createDaemonSessionActions', () => {
       return { promptId: 'prompt-1' };
     });
     session.removePendingPrompt.mockResolvedValueOnce({ removed: true });
+    const onPromptAdmitted = vi.fn();
+    const onPromptRemoved = vi.fn();
     const { actions } = createActionsHarness({
       session,
+      onPromptAdmitted,
+      onPromptRemoved,
       connection: {
         status: 'connected',
         workspaceCwd: '/workspace',
@@ -3280,6 +3310,11 @@ describe('createDaemonSessionActions', () => {
     ).resolves.toEqual({ promptId: 'prompt-1', removedAfterAbort: true });
 
     expect(session.removeAttachment).toHaveBeenCalledWith('image.png');
+    expect(onPromptAdmitted).toHaveBeenCalledWith(session, {
+      promptId: 'prompt-1',
+      label: 'look',
+    });
+    expect(onPromptRemoved).toHaveBeenCalledWith(session, 'prompt-1');
   });
 
   it('keeps uploaded attachments when the admitted prompt already started', async () => {
@@ -4077,6 +4112,8 @@ function createActionsHarness(
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
     manualSessionClearRef?: { current: boolean };
+    onPromptAdmitted?: ReturnType<typeof vi.fn>;
+    onPromptRemoved?: ReturnType<typeof vi.fn>;
     pendingSessionLoadRef?: { current: PendingSessionLoad | undefined };
     restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
@@ -4108,6 +4145,7 @@ function createActionsHarness(
     reset: vi.fn(),
     appendLocalUserMessage: vi.fn(),
     dispatch: vi.fn(),
+    getSnapshot: vi.fn(() => ({ blocks: [] })),
   };
   const actions = createDaemonSessionActions({
     store: store as never,
@@ -4144,6 +4182,8 @@ function createActionsHarness(
     restartEventStream: opts.restartEventStream ?? vi.fn(),
     addNotice: opts.addNotice ?? vi.fn(),
     clearLiveJournalRepair: opts.clearLiveJournalRepair,
+    onPromptAdmitted: opts.onPromptAdmitted,
+    onPromptRemoved: opts.onPromptRemoved,
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
     },
