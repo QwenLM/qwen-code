@@ -148,11 +148,7 @@ function boundedSize(
   return best;
 }
 
-async function prepareImage(
-  filePath: string,
-  signal: AbortSignal,
-): Promise<PreparedImage> {
-  signal.throwIfAborted();
+async function loadSharp(): Promise<SharpConstructor> {
   let sharp: SharpConstructor;
   try {
     sharp = (await import('sharp')).default;
@@ -162,6 +158,14 @@ async function prepareImage(
       'Image rendering is unavailable because the "sharp" image module could not be loaded.',
     );
   }
+  return sharp;
+}
+
+async function prepareImage(
+  filePath: string,
+  signal: AbortSignal,
+): Promise<PreparedImage> {
+  signal.throwIfAborted();
 
   let stats: Awaited<ReturnType<typeof fs.stat>>;
   try {
@@ -194,11 +198,24 @@ async function prepareImage(
     );
   }
 
-  const bytes = await fs.readFile(filePath, { signal });
+  return prepareImageBuffer(
+    await fs.readFile(filePath, { signal }),
+    filePath,
+    signal,
+  );
+}
+
+async function prepareImageBuffer(
+  bytes: Buffer,
+  label: string,
+  signal: AbortSignal,
+): Promise<PreparedImage> {
+  signal.throwIfAborted();
+  const sharp = await loadSharp();
   if (bytes.length > IMAGE_MAX_SOURCE_BYTES) {
     throw new ImageViewError(
       'source_too_large',
-      `Image file exceeds the 100 MB source limit: ${filePath}`,
+      `Image exceeds the 100 MB source limit: ${label}`,
     );
   }
 
@@ -212,7 +229,7 @@ async function prepareImage(
     signal.throwIfAborted();
     throw new ImageViewError(
       'decode_failed',
-      `Failed to decode image (file may be corrupt or not a static PNG, JPEG, or WebP): ${filePath}`,
+      `Failed to decode image (may be corrupt or not a static PNG, JPEG, or WebP): ${label}`,
     );
   }
   signal.throwIfAborted();
@@ -220,13 +237,13 @@ async function prepareImage(
   if (!SUPPORTED_IMAGE_FORMATS.has(metadata.format)) {
     throw new ImageViewError(
       'unsupported_image',
-      `Unsupported image. Expected a static PNG, JPEG, or WebP file: ${filePath}`,
+      `Unsupported image. Expected a static PNG, JPEG, or WebP image: ${label}`,
     );
   }
   if ((metadata.pages ?? 1) > 1) {
     throw new ImageViewError(
       'animated_image',
-      `Only static images are supported: ${filePath}`,
+      `Only static images are supported: ${label}`,
     );
   }
 
@@ -234,7 +251,7 @@ async function prepareImage(
 }
 
 async function renderImageView(
-  filePath: string,
+  label: string,
   prepared: PreparedImage,
   selection: { left: number; top: number; width: number; height: number },
   outputSize: ImageSize,
@@ -267,14 +284,14 @@ async function renderImageView(
     signal.throwIfAborted();
     throw new ImageViewError(
       'decode_failed',
-      `Failed to render image overview: ${filePath}`,
+      `Failed to render image overview: ${label}`,
     );
   }
   signal.throwIfAborted();
   if (output.length > IMAGE_MAX_OUTPUT_BYTES) {
     throw new ImageViewError(
       'output_too_large',
-      `Rendered image exceeds the 9 MB output limit: ${filePath}`,
+      `Rendered image exceeds the 9 MB output limit: ${label}`,
     );
   }
 
@@ -288,6 +305,32 @@ async function renderImageView(
     outputWidth: outputSize.width,
     outputHeight: outputSize.height,
   };
+}
+
+/**
+ * Bound an in-memory image (an MCP tool result, say) to the same visual budget
+ * `read_file` applies. Returns null when the image already fits, so small
+ * images keep their original bytes, format and alpha channel.
+ */
+export async function boundImageBuffer(
+  bytes: Buffer,
+  label: string,
+  signal: AbortSignal,
+): Promise<ImageView | null> {
+  const prepared = await prepareImageBuffer(bytes, label, signal);
+  const { width: sourceWidth, height: sourceHeight } = orientedSize(
+    prepared.metadata,
+  );
+  if (fitsVisualBudget({ width: sourceWidth, height: sourceHeight })) {
+    return null;
+  }
+  return renderImageView(
+    label,
+    prepared,
+    { left: 0, top: 0, width: sourceWidth, height: sourceHeight },
+    boundedSize(sourceWidth, sourceHeight, 1),
+    signal,
+  );
 }
 
 export async function renderImageOverview(
