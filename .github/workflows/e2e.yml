@@ -401,6 +401,9 @@ jobs:
     runs-on: 'macos-latest'
     needs:
       - 'build'
+    # GitHub's default job budget, stated: the shard retry's budget gate
+    # below subtracts from it the way the Linux leg's gate does from its 60.
+    timeout-minutes: 360
     # Skip on fork PRs (no secrets) — see e2e-test-linux above.
     if: |-
       ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -413,6 +416,11 @@ jobs:
           - '1/2'
           - '2/2'
     steps:
+      # Same epoch as e2e-test-linux: the retry gate below budgets against
+      # the whole job, not just the test step, so the record precedes setup.
+      - name: 'Record job start epoch'
+        run: 'echo "E2E_JOB_START_EPOCH=$(date +%s)" >> "${GITHUB_ENV}"'
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
@@ -454,7 +462,31 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
-        run: 'npx cross-env QWEN_E2E_RENDERER=ink VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --exclude "**/chat-transcript-document.test.ts" --shard="${{ matrix.shard }}"'
+        run: |-
+          run_shard() {
+            npx cross-env QWEN_E2E_RENDERER=ink VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --exclude "**/chat-transcript-document.test.ts" --shard="${{ matrix.shard }}"
+          }
+          # One bounded retry, for the transient class the sandbox:none leg
+          # retries above (#10572): the macOS shard dies under shared-host
+          # pressure with every test green and no vitest FAIL line — run
+          # 33982750226 failed shard 1/2 while shard 2/2 of the same run
+          # passed. A deterministic test failure fails both attempts and
+          # keeps the shard red.
+          run_shard || {
+            elapsed=$(( $(date +%s) - ${E2E_JOB_START_EPOCH:-0} ))
+            # Budget gate: a retry needs a full shard-time inside the job's
+            # 21600s budget. 21600s minus a 60-minute reserve — over one
+            # shard-time even on this slowest leg — leaves 18000s; past that
+            # the first attempt is hung, not unlucky, and GitHub would cancel
+            # the retry at the timeout line, degrading the failure to a
+            # timeout signature.
+            if (( elapsed > 18000 )); then
+              echo "::error::macOS shard failed on ${RUNNER_NAME:-this runner} after ${elapsed}s of the 21600s job budget — not enough left for a retry"
+              exit 1
+            fi
+            echo "::warning::macOS shard failed on ${RUNNER_NAME:-this runner} after ${elapsed}s; retrying once (transient shared-host pressure class)"
+            run_shard
+          }
 
   e2e-interactive-opentui:
     name: 'E2E Interactive - OpenTUI renderer (bun)'
