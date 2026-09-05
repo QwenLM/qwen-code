@@ -351,6 +351,17 @@ describe('ExtensionsManagerPage activation refresh', () => {
       expect(container.textContent).toContain('session refresh failed');
     });
 
+    // A non-activation action retires the banner as well.
+    await act(async () => {
+      findButton('Manage Extensions').click();
+    });
+    await act(async () => {
+      findButton('Refresh').click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain('session refresh failed');
+
     state.workspaceHandle.refreshExtensionRuntime.mockReturnValue(
       new Promise(() => {}),
     );
@@ -372,5 +383,142 @@ describe('ExtensionsManagerPage activation refresh', () => {
     });
     expect(state.workspaceHandle.setExtensionActivation).toHaveBeenCalledOnce();
     expect(state.client.waitForExtensionOperation).toHaveBeenCalledOnce();
+  });
+
+  it('skips the session refresh when the workspace is not trusted', async () => {
+    state.workspaceHandle.workspaceExtensions.mockResolvedValue({
+      v: 1,
+      workspaceId: 'primary',
+      workspaceCwd: '/work/primary',
+      trusted: false,
+      desiredGeneration: 1,
+      appliedGeneration: 1,
+      extensions: [
+        {
+          extensionId: 'a'.repeat(64),
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceActivation: null,
+          effectiveActivation: 'enabled',
+          activationSource: 'default',
+        },
+      ],
+    });
+    await renderPage();
+    await chooseActivation('user', 'Disabled');
+
+    // The success message renders only after the refresh call site, so a
+    // refresh that would happen could not arrive after this assertion.
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Extension "demo" disabled.');
+    });
+    expect(state.client.setExtensionDefaultActivation).toHaveBeenCalledWith(
+      'a'.repeat(64),
+      'disabled',
+    );
+    expect(
+      state.workspaceHandle.refreshExtensionRuntime,
+    ).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('session refresh failed');
+  });
+
+  it('confines the refresh failure banner to the extension that triggered it', async () => {
+    state.actions.loadExtensionsStatus.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/work/primary',
+      initialized: true,
+      extensions: [
+        {
+          kind: 'extension',
+          id: 'a'.repeat(64),
+          name: 'demo',
+          displayName: 'Demo',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/demo',
+          capabilities: {
+            mcpServerCount: 0,
+            skillCount: 0,
+            agentCount: 0,
+            hookCount: 0,
+            commandCount: 0,
+            contextFileCount: 0,
+            channelCount: 0,
+            hasSettings: false,
+          },
+        },
+        {
+          kind: 'extension',
+          id: 'b'.repeat(64),
+          name: 'other',
+          displayName: 'Other',
+          version: '2.0.0',
+          isActive: true,
+          path: '/extensions/other',
+          capabilities: {
+            mcpServerCount: 0,
+            skillCount: 0,
+            agentCount: 0,
+            hookCount: 0,
+            commandCount: 0,
+            contextFileCount: 0,
+            channelCount: 0,
+            hasSettings: false,
+          },
+        },
+      ],
+    });
+    state.workspaceHandle.workspaceExtensions.mockResolvedValue({
+      v: 1,
+      workspaceId: 'primary',
+      workspaceCwd: '/work/primary',
+      trusted: true,
+      desiredGeneration: 1,
+      appliedGeneration: 1,
+      extensions: [
+        {
+          extensionId: 'a'.repeat(64),
+          name: 'demo',
+          version: '1.0.0',
+          defaultActivation: 'enabled',
+          workspaceActivation: null,
+          effectiveActivation: 'enabled',
+          activationSource: 'default',
+        },
+        {
+          extensionId: 'b'.repeat(64),
+          name: 'other',
+          version: '2.0.0',
+          defaultActivation: 'enabled',
+          workspaceActivation: null,
+          effectiveActivation: 'enabled',
+          activationSource: 'default',
+        },
+      ],
+    });
+    state.workspaceHandle.refreshExtensionRuntime.mockRejectedValueOnce(
+      new Error('refresh unavailable'),
+    );
+    await renderPage();
+    await chooseActivation('workspace', 'Disabled');
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('session refresh failed');
+    });
+
+    await act(async () => {
+      findButton('Manage Extensions').click();
+    });
+    const otherCard = container.querySelector<HTMLElement>(
+      '[aria-label="Other"]',
+    );
+    expect(otherCard).not.toBeNull();
+    await act(async () => {
+      otherCard!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelectorAll('[role="combobox"]')).toHaveLength(2);
+    });
+    expect(container.textContent).not.toContain('session refresh failed');
   });
 });

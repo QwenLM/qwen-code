@@ -456,7 +456,11 @@ export function ExtensionsManagerPage({
   const [messageTone, setMessageTone] = useState<ManagementNoticeTone>('info');
   const [messageOwner, setMessageOwner] = useState<string | null>(null);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
-  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [workspaceTrusted, setWorkspaceTrusted] = useState(true);
+  const [refreshError, setRefreshError] = useState<{
+    name: string;
+    text: string;
+  } | null>(null);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [uninstallName, setUninstallName] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
@@ -526,6 +530,11 @@ export function ExtensionsManagerPage({
         : Promise.resolve(null);
       return Promise.all([actions.loadExtensionsStatus(), projection])
         .then(([status, activation]) => {
+          // Keep the last known trust when the projection fails: defaulting
+          // to trusted would re-arm a refresh the runtime must reject.
+          if (activation) {
+            setWorkspaceTrusted(activation.trusted);
+          }
           const activations = new Map(
             (activation?.extensions ?? []).map((entry) => [
               entry.extensionId,
@@ -908,6 +917,7 @@ export function ExtensionsManagerPage({
   }, [actions, clearInteraction, load, pendingMutation, showInteraction, t]);
 
   const refreshList = useCallback(() => {
+    setRefreshError(null);
     setMessageOwner(null);
     setMessageTone('info');
     setMessage(null);
@@ -917,6 +927,7 @@ export function ExtensionsManagerPage({
   const checkUpdates = useCallback(
     (name: string) => {
       setCheckingName(name);
+      setRefreshError(null);
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('info');
       setMessage(null);
@@ -962,6 +973,7 @@ export function ExtensionsManagerPage({
     )
       return;
     setInstalling(true);
+    setRefreshError(null);
     setMessageOwner(null);
     setMessageTone('progress');
     setMessage(null);
@@ -1022,6 +1034,7 @@ export function ExtensionsManagerPage({
         uninstallInFlightNameRef.current = name;
       }
       setBusyName(name);
+      setRefreshError(null);
       setMessageOwner(selectedName === name ? name : null);
       setMessageTone('progress');
       setMessage(options.startMessage ?? null);
@@ -1132,16 +1145,19 @@ export function ExtensionsManagerPage({
             ? t('extensions.manage.inherited', { name: extension.name })
             : mutationSuccessMessage(operation, extension.name, t),
         );
-        if (activationRequiresExplicitRefresh) {
+        // An untrusted runtime rejects this refresh; the reconciler is the
+        // only path that can serve it.
+        if (activationRequiresExplicitRefresh && workspaceTrusted) {
           void workspace.client
             .workspaceByCwd(workspace.workspaceCwd)
             .refreshExtensionRuntime()
             .catch((error: unknown) => {
-              setRefreshError(
-                t('extensions.manage.refreshFailed', {
+              setRefreshError({
+                name: extension.name,
+                text: t('extensions.manage.refreshFailed', {
                   error: error instanceof Error ? error.message : String(error),
                 }),
-              );
+              });
             });
         }
       } catch (error) {
@@ -1161,6 +1177,7 @@ export function ExtensionsManagerPage({
       t,
       workspace.client,
       workspace.workspaceCwd,
+      workspaceTrusted,
     ],
   );
 
@@ -1263,12 +1280,12 @@ export function ExtensionsManagerPage({
   const refreshNotice = refreshError ? (
     <ManagementNotice
       tone="error"
-      noticeKey={refreshError}
+      noticeKey={refreshError.text}
       closeLabel={t('common.close')}
       onDismiss={() => setRefreshError(null)}
       className="break-words"
     >
-      {refreshError}
+      {refreshError.text}
     </ManagementNotice>
   ) : null;
 
@@ -1393,7 +1410,7 @@ export function ExtensionsManagerPage({
             </ManagementNotice>
           ) : null}
 
-          {refreshNotice}
+          {refreshError?.name === selectedExtension.name ? refreshNotice : null}
 
           {activationUnavailable ? (
             <Alert variant="destructive">
